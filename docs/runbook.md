@@ -16,6 +16,14 @@ python3 -m pip install -r requirements.txt
 
 当前根目录 `requirements.txt` 包含后端运行、数据库 migration、测试和 PostgreSQL 连接所需依赖。`apps/api/pyproject.toml` 保留为后端包元数据；本地启动优先使用上面的 `requirements.txt` 安装命令。
 
+首次配置本地环境时复制环境变量模板：
+
+```bash
+cp .env.example .env
+```
+
+后端启动和 migration 会自动读取项目根目录 `.env`。真实密码只保存在本地 `.env`，不要提交到 Git。
+
 ## 2. 运行测试
 
 在项目根目录执行：
@@ -36,13 +44,15 @@ python3 -m pytest
 
 当前后端已经持久化 user、default workspace、message、AgentRun 和 ToolInvocation。
 
-默认本地开发库：
+当前本机后端数据库连接：
 
 ```text
-sqlite+pysqlite:///./storage/file_agent_dev.db
+postgresql+psycopg2://fileagent_user:<password>@212.64.14.158:5432/fileAgent
 ```
 
-如需使用 PostgreSQL + pgvector：
+当前已验证该 PostgreSQL 实例可连接，返回数据库 `fileAgent`、用户 `fileagent_user`、PostgreSQL `16.14`。
+
+如需使用项目自带 Docker PostgreSQL + pgvector：
 
 ```bash
 docker compose up -d postgres
@@ -57,7 +67,7 @@ python3 -m alembic -c apps/api/alembic.ini upgrade head
 python3 -m alembic -c apps/api/alembic.ini upgrade head
 ```
 
-当前开发阶段 `AUTO_CREATE_TABLES` 默认为 `true`，用于让本地原型服务直接启动。正式环境应设置为 `false` 并使用 Alembic migration。
+当前 `.env` 中 `AUTO_CREATE_TABLES=false`，应通过 Alembic migration 管理数据库结构。
 
 如果本地旧 SQLite 开发库缺少新字段，可以执行 migration；仍有 schema 冲突时可以删除 `storage/file_agent_dev.db` 后重新启动服务。
 

@@ -20,11 +20,14 @@ File Agent 不是传统网盘，也不是只会问答的知识库系统。用户
 
 ```bash
 python3 -m pip install -r requirements.txt
+cp .env.example .env
 python3 -m pytest
 python3 -m alembic -c apps/api/alembic.ini upgrade head
 PYTHONPATH=apps/api python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 cd apps/web && npm install && npm run dev
 ```
+
+当前后端会自动读取项目根目录 `.env`。本机 `.env` 已配置为 PostgreSQL：`212.64.14.158:5432/fileAgent`，真实密码不提交到 Git。
 
 消息接口需要先注册、登录并携带 `Authorization: Bearer <access_token>`。示例见 `docs/runbook.md`。
 
