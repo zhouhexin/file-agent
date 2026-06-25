@@ -508,6 +508,9 @@ chunk-build
 embedding-generate
 metadata-extract
 multi-label-classify
+read-document-insights
+read-original-file
+extract-document-text
 hybrid-search
 evidence-answer
 change-report

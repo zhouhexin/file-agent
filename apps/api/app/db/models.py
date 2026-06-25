@@ -115,6 +115,8 @@ class Document(Base):
 
     file_objects: Mapped[List["FileObject"]] = relationship(back_populates="document")
     insights: Mapped[List["DocumentInsight"]] = relationship(back_populates="document")
+    extraction_runs: Mapped[List["DocumentExtractionRun"]] = relationship(back_populates="document")
+    pages: Mapped[List["DocumentPage"]] = relationship(back_populates="document")
 
 
 class FileObject(Base):
@@ -148,6 +150,41 @@ class DocumentInsight(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
     document: Mapped[Document] = relationship(back_populates="insights")
+
+
+class DocumentExtractionRun(Base):
+    """文件解析 Tool 的一次运行记录。"""
+
+    __tablename__ = "document_extraction_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    document_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="RUNNING")
+    extractor: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    document: Mapped[Document] = relationship(back_populates="extraction_runs")
+    pages: Mapped[List["DocumentPage"]] = relationship(back_populates="extraction_run")
+
+
+class DocumentPage(Base):
+    """文件解析后的页、sheet 或文本片段。"""
+
+    __tablename__ = "document_pages"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    document_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False, index=True)
+    extraction_run_id: Mapped[str] = mapped_column(String(36), ForeignKey("document_extraction_runs.id"), nullable=False, index=True)
+    page_number: Mapped[Optional[int]] = mapped_column(nullable=True)
+    sheet_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    text_content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    document: Mapped[Document] = relationship(back_populates="pages")
+    extraction_run: Mapped[DocumentExtractionRun] = relationship(back_populates="pages")
 
 
 class AgentRun(Base):

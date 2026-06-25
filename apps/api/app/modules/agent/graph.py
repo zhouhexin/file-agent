@@ -68,7 +68,7 @@ def planning(state: AgentGraphState) -> Dict[str, Any]:
     """调用 Planner，并且只保存通过校验的声明式计划。"""
 
     llm_intent_service = state.get("llm_intent_service")
-    if getattr(llm_intent_service, "enabled", False):
+    if getattr(llm_intent_service, "enabled", False) and not state.get("prefer_explicit_planner", False):
         intent_plan = llm_intent_service.understand_user_request(
             message=state["message"],
             attachments=state.get("attachments", []),

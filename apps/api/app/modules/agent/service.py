@@ -74,6 +74,7 @@ class AgentRuntimeService:
             "final_response": None,
             "errors": [],
             "planner": planner or DeterministicPlanner(),
+            "prefer_explicit_planner": planner is not None,
             "registry": registry,
             "context_loader": AgentContextLoader(db),
             "llm_intent_service": self.llm_intent_service,

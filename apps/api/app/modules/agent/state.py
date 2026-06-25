@@ -35,6 +35,7 @@ class AgentGraphState(TypedDict, total=False):
     final_response: Optional[str]
     errors: List[str]
     planner: Any
+    prefer_explicit_planner: bool
     registry: Any
     context_loader: Any
     llm_intent_service: Any

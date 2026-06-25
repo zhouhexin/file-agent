@@ -392,6 +392,37 @@ create table document_insights (
 );
 ```
 
+### 4.8.3 document_extraction_runs 当前实现
+
+当前代码已实现最小文件解析持久化表，用于 `extract-document-text` Tool。后续接入 `document_versions` 后，可再演进到 4.11 的版本化页面结构。
+
+```sql
+create table document_extraction_runs (
+  id uuid primary key default gen_random_uuid(),
+  document_id uuid not null references documents(id),
+  status varchar(40) not null default 'RUNNING',
+  extractor varchar(80) not null default '',
+  error_message text null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+```
+
+### 4.8.4 document_pages 当前实现
+
+```sql
+create table document_pages (
+  id uuid primary key default gen_random_uuid(),
+  document_id uuid not null references documents(id),
+  extraction_run_id uuid not null references document_extraction_runs(id),
+  page_number integer null,
+  sheet_name varchar(255) null,
+  text_content text not null default '',
+  metadata_json jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+```
+
 ### 4.9 document_versions
 
 ```sql
@@ -835,25 +866,26 @@ admin / ops:
 11. documents
 12. document_versions
 13. artifacts
-14. document_pages
-15. document_chunks
-16. evidence_spans
-17. categories
-18. document_categories
-19. qa_answers
-20. answer_references
-21. operation_plans
-22. operation_confirmations
-23. change_sets
-24. change_items
-25. agent_runs/tool_invocations references to changeset and operation_plan
-26. feedback
-27. processing_jobs
-28. processing_events
-29. llm_settings
-30. user_preferences
-31. indexes
-32. updated_at triggers
+14. document_extraction_runs
+15. document_pages
+16. document_chunks
+17. evidence_spans
+18. categories
+19. document_categories
+20. qa_answers
+21. answer_references
+22. operation_plans
+23. operation_confirmations
+24. change_sets
+25. change_items
+26. agent_runs/tool_invocations references to changeset and operation_plan
+27. feedback
+28. processing_jobs
+29. processing_events
+30. llm_settings
+31. user_preferences
+32. indexes
+33. updated_at triggers
 ```
 
 ## 8. Deferred Tables

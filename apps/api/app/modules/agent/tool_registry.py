@@ -27,6 +27,8 @@ from app.modules.agent.tool_schemas import (
     SearchToolInput,
     ToolInputValidationError,
 )
+from app.modules.files.extraction_repository import FileExtractionRepository
+from app.modules.files.extractors import extract_document_text
 
 
 class UnknownToolError(ValueError):
@@ -276,6 +278,64 @@ def _lineage_handler(tool_input: BaseModel) -> Dict[str, Any]:
     return {"ok": True, "document_id": getattr(tool_input, "document_id"), "lineage": []}
 
 
+def _read_original_file_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """创建读取原始文件元信息的 Tool handler。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """返回当前用户文件的安全元信息，不返回本地路径和二进制内容。"""
+
+        if db is None:
+            return {"ok": False, "error": {"code": "DB_REQUIRED", "message": "读取原始文件需要数据库会话。"}}
+        return FileExtractionRepository(db, user_id).get_original_file_metadata(getattr(tool_input, "document_id"))
+
+    return handler
+
+
+def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """创建解析原始文件文本的 Tool handler。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """解析当前用户文件，并把页面文本写入数据库。"""
+
+        if db is None:
+            return {"ok": False, "error": {"code": "DB_REQUIRED", "message": "解析文件需要数据库会话。"}}
+        repository = FileExtractionRepository(db, user_id)
+        resolved = repository.resolve_original_file(getattr(tool_input, "document_id"))
+        if not resolved["ok"]:
+            return resolved
+
+        document = resolved["document"]
+        extraction = extract_document_text(
+            file_path=resolved["file_path"],
+            filename=document.original_filename,
+            content_type=document.content_type,
+        )
+        run = repository.create_extraction_run(document_id=document.id, extractor=extraction["extractor"])
+        if extraction["ok"]:
+            repository.complete_extraction_run(run=run, pages=extraction["pages"])
+        else:
+            repository.fail_extraction_run(run=run, error_message=extraction["error"]["message"])
+        return {
+            "ok": extraction["ok"],
+            "document_id": document.id,
+            "extraction_run_id": run.id,
+            "status": extraction["status"],
+            "extractor": extraction["extractor"],
+            "pages": [
+                {
+                    "page_number": page.get("page_number"),
+                    "sheet_name": page.get("sheet_name"),
+                    "text_preview": page.get("text", "")[:300],
+                    "char_count": len(page.get("text", "")),
+                }
+                for page in extraction["pages"]
+            ],
+            "error": extraction.get("error"),
+        }
+
+    return handler
+
+
 def _tool(
     name: str,
     description: str,
@@ -314,6 +374,8 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("metadata-extract", "Extract metadata candidates.", DocumentToolInput, True, False, ["documents.metadata"], _document_handler("metadata-extract")),
         _tool("multi-label-classify", "Generate multi-label classifications with evidence.", DocumentToolInput, True, False, ["document_categories"], _document_handler("multi-label-classify")),
         _tool("read-document-insights", "Read deterministic ingest insights for uploaded documents.", DocumentInsightsReadInput, False, False, [], _document_insights_handler(db, user_id)),
+        _tool("read-original-file", "Read safe metadata for an uploaded original file.", DocumentToolInput, False, False, [], _read_original_file_handler(db, user_id)),
+        _tool("extract-document-text", "Extract text from uploaded files and persist document pages.", DocumentToolInput, True, False, ["document_extraction_runs", "document_pages"], _extract_document_text_handler(db, user_id)),
         _tool("intent-summary", "Record LLM-understood user intent without side effects.", IntentSummaryInput, False, False, [], _intent_summary_handler),
         _tool("hybrid-search", "Run workspace hybrid retrieval.", SearchToolInput, False, False, [], _search_handler),
         _tool("evidence-answer", "Answer from retrieved evidence.", EvidenceAnswerInput, True, False, ["qa_answers", "answer_references"], _evidence_answer_handler),

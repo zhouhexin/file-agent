@@ -35,7 +35,7 @@ python3 -m pytest
 当前期望结果：
 
 ```text
-30 passed
+35 passed
 ```
 
 如果出现 `urllib3` 或 `LangChainPendingDeprecationWarning`，目前属于环境兼容警告，不影响现有测试结果。
@@ -95,6 +95,7 @@ http://127.0.0.1:8000
 
 message、AgentRun 和 ToolInvocation 会写入当前 `DATABASE_URL` 指向的数据库。
 上传文件会写入 `FILE_STORAGE_ROOT`，默认是 `./storage/uploads`。
+`extract-document-text` 会把解析结果写入 `document_extraction_runs` 和 `document_pages`。
 
 ## 4.1 LLM 配置
 
@@ -112,6 +113,8 @@ LLM_TIMEOUT_SECONDS=30
 ```
 
 当前客户端调用 OpenAI-compatible `/chat/completions` 接口，并要求模型返回符合 `UserIntentPlan` 的 JSON 对象。上传阶段的 deterministic ingest 不依赖 LLM；对话阶段启用 LLM 后，会先理解用户需求，再通过白名单 Tool 读取 `document_insights` 或执行后续受控工具。
+
+2026-06-25 已完成真实模型 smoke test：临时启用 `LLM_ENABLED=true` 后，`MiniMax-M3` 可完成“总结我刚才上传的文件”请求，AgentRun 返回 `COMPLETED`，ToolInvocation 为 `read-document-insights`，且 `graph_state_json.user_intent_plan` 已写入。
 
 ## 5. 启动前端服务
 
@@ -254,6 +257,24 @@ tool_invocations = read-document-insights
 graph_state_json.user_intent_plan = LLM 返回的结构化意图
 ```
 
+当前新增文件解析 Tool：
+
+```text
+read-original-file：读取当前用户上传原始文件的安全元信息，不返回本地路径或二进制内容
+extract-document-text：解析 txt/md/csv/xlsx/pdf/image，并将文本写入 document_pages
+```
+
+PDF、Excel 和图片 OCR 依赖：
+
+```text
+PyMuPDF
+openpyxl
+Pillow
+pytesseract
+```
+
+图片 OCR 还需要系统安装 Tesseract OCR；如果缺少依赖或 OCR 引擎不可用，Tool 会返回结构化错误，不会读取任意路径。
+
 查询 AgentRun：
 
 ```bash
@@ -280,8 +301,8 @@ curl -X POST http://127.0.0.1:8000/api/conversations/conv-1/messages \
 ## 7. 当前限制
 
 - 当前已接入 OpenAI-compatible LLM 意图理解；默认 `LLM_ENABLED=false` 时仍使用 `DeterministicPlanner`。
-- 当前已持久化 user、default workspace、message、AgentRun、ToolInvocation、Document 和 document_insights，但还没有接 ChangeSet 和 OperationPlan 表。
-- 当前 Tool handler 是结构化占位实现，不读取真实文件，不写真实文件，不做真实解析、分类或检索。
+- 当前已持久化 user、default workspace、message、AgentRun、ToolInvocation、Document、document_insights、document_extraction_runs 和 document_pages，但还没有接 ChangeSet 和 OperationPlan 表。
+- 当前已支持读取当前用户自己的原始文件元信息和解析文本内容；其他多数 Tool handler 仍是结构化占位实现。
 - 当前已有最小 JWT 鉴权，但没有 refresh token、复杂 RBAC、ACL 或 admin 权限体系。
 - 当前前端已有最小注册、登录、Chat、文件上传和附件删除流程，没有会话列表、admin 页面或正式视觉设计。
 

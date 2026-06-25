@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict
 
 import httpx
@@ -55,10 +56,30 @@ class OpenAICompatibleLLMClient:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMResponseError("LLM 响应缺少 choices[0].message.content。") from exc
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise LLMResponseError("LLM 响应不是合法 JSON。") from exc
+        parsed = _parse_json_object_from_content(content)
         if not isinstance(parsed, dict):
             raise LLMResponseError("LLM JSON 响应必须是对象。")
         return parsed
+
+
+def _parse_json_object_from_content(content: str) -> Dict[str, Any]:
+    """从模型文本中解析 JSON 对象，兼容 markdown 代码块和前后说明文本。"""
+
+    candidates = [content.strip()]
+    fenced_matches = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", content, flags=re.DOTALL | re.IGNORECASE)
+    candidates.extend(match.strip() for match in fenced_matches)
+    object_match = re.search(r"\{.*\}", content, flags=re.DOTALL)
+    if object_match:
+        candidates.append(object_match.group(0).strip())
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+        raise LLMResponseError("LLM JSON 响应必须是对象。")
+    raise LLMResponseError("LLM 响应不是合法 JSON。")
