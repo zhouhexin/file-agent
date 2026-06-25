@@ -35,7 +35,7 @@ python3 -m pytest
 当前期望结果：
 
 ```text
-20 passed
+24 passed
 ```
 
 如果出现 `urllib3` 或 `LangChainPendingDeprecationWarning`，目前属于环境兼容警告，不影响现有测试结果。
@@ -52,6 +52,8 @@ postgresql+psycopg2://fileagent_user:<password>@212.64.14.158:5432/fileAgent
 
 当前已验证该 PostgreSQL 实例可连接，返回数据库 `fileAgent`、用户 `fileagent_user`、PostgreSQL `16.14`。
 
+后端服务数据库必须使用 PostgreSQL。未配置 `DATABASE_URL`，或将 `DATABASE_URL` 配置为 SQLite，服务会直接启动失败。测试代码可以继续使用隔离的内存 SQLite，但运行中的 API 服务不得使用 SQLite。
+
 如需使用项目自带 Docker PostgreSQL + pgvector：
 
 ```bash
@@ -61,15 +63,13 @@ export AUTO_CREATE_TABLES=false
 python3 -m alembic -c apps/api/alembic.ini upgrade head
 ```
 
-本地 SQLite 也可以执行 migration：
+对当前 `.env` 指向的 PostgreSQL 执行 migration：
 
 ```bash
 python3 -m alembic -c apps/api/alembic.ini upgrade head
 ```
 
 当前 `.env` 中 `AUTO_CREATE_TABLES=false`，应通过 Alembic migration 管理数据库结构。
-
-如果本地旧 SQLite 开发库缺少新字段，可以执行 migration；仍有 schema 冲突时可以删除 `storage/file_agent_dev.db` 后重新启动服务。
 
 ## 4. 启动后端服务
 
@@ -78,6 +78,14 @@ python3 -m alembic -c apps/api/alembic.ini upgrade head
 ```bash
 PYTHONPATH=apps/api python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
+
+也可以在 `apps/api` 目录执行：
+
+```bash
+python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+配置层会从当前目录向上查找 `.env`，因此上述两种方式都会读取项目根目录 `.env` 并连接 PostgreSQL。
 
 服务地址：
 

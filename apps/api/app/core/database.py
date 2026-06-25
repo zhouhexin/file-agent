@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from collections.abc import Generator
-from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -16,13 +15,7 @@ from app.db.base import Base
 
 
 settings = get_settings()
-connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-if settings.database_url.startswith("sqlite") and ":///" in settings.database_url:
-    database_path = settings.database_url.split(":///", 1)[1]
-    if database_path != ":memory:":
-        # SQLite 文件库在首次连接前要求父目录存在；这里提前创建，避免请求阶段才失败。
-        Path(database_path).parent.mkdir(parents=True, exist_ok=True)
-engine = create_engine(settings.database_url, connect_args=connect_args)
+engine = create_engine(settings.database_url)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
@@ -41,7 +34,7 @@ def get_db() -> Generator[Session, None, None]:
 def init_database() -> None:
     """开发环境自动建表入口。
 
-    PostgreSQL 正式环境仍应使用 Alembic migration；这里用于保持当前本地服务可直接启动。
+    当前服务数据库必须是 PostgreSQL；正常启动应通过 Alembic migration 管理表结构。
     """
 
     if settings.auto_create_tables:
