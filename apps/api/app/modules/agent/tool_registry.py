@@ -11,14 +11,17 @@ from typing import Any, Callable, Dict, List, Type
 
 from pydantic import BaseModel, ValidationError
 
+from app.db.models import Document, DocumentInsight
 from app.modules.agent.state import ToolInvocationRecord
 from app.modules.agent.tool_schemas import (
     ChangeReportInput,
     ConfirmedFileActionInput,
+    DocumentInsightsReadInput,
     DocumentLineageReadInput,
     DocumentToolInput,
     EvidenceAnswerInput,
     FeedbackRecordInput,
+    IntentSummaryInput,
     JobStatusReadInput,
     OperationPlanCreateInput,
     SearchToolInput,
@@ -71,8 +74,12 @@ class ToolRegistry:
     Registry 是 Tool 名称、输入 schema、确认标记和副作用元数据的运行时强制边界。
     """
 
-    def __init__(self) -> None:
-        self._tools = _build_mvp_tools()
+    def __init__(self, *, db: Any = None, user_id: str | None = None) -> None:
+        """保存运行时上下文，并创建当前请求可用的 Tool 白名单。"""
+
+        self.db = db
+        self.user_id = user_id
+        self._tools = _build_mvp_tools(db=db, user_id=user_id)
 
     def list_tools(self) -> List[Dict[str, Any]]:
         """返回全部白名单 Tool，供管理和调试查看。"""
@@ -143,6 +150,74 @@ def _evidence_answer_handler(tool_input: BaseModel) -> Dict[str, Any]:
         "answer": "No evidence has been indexed yet.",
         "references": [],
         "question": getattr(tool_input, "question"),
+    }
+
+
+def _document_insights_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """创建读取 document_insights 的 Tool handler。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """按当前用户读取已持久化的文件基础洞察。"""
+
+        document_ids = list(getattr(tool_input, "document_ids"))
+        if db is None or user_id is None:
+            return {
+                "ok": True,
+                "documents": [
+                    {
+                        "document_id": document_id,
+                        "ingest_status": "UNKNOWN",
+                        "keywords": [],
+                        "labels": [],
+                        "summary": "",
+                    }
+                    for document_id in document_ids
+                ],
+            }
+
+        documents = (
+            db.query(Document)
+            .filter(Document.id.in_(document_ids), Document.user_id == user_id)
+            .all()
+            if document_ids
+            else []
+        )
+        insights = {
+            insight.document_id: insight
+            for insight in (
+                db.query(DocumentInsight)
+                .filter(DocumentInsight.document_id.in_([document.id for document in documents]))
+                .all()
+                if documents
+                else []
+            )
+        }
+        return {
+            "ok": True,
+            "documents": [
+                {
+                    "document_id": document.id,
+                    "filename": document.original_filename,
+                    "content_type": document.content_type,
+                    "ingest_status": document.ingest_status,
+                    "keywords": (insights.get(document.id).keywords_json if insights.get(document.id) else []),
+                    "labels": (insights.get(document.id).labels_json if insights.get(document.id) else []),
+                    "summary": (insights.get(document.id).summary if insights.get(document.id) else ""),
+                }
+                for document in documents
+            ],
+        }
+
+    return handler
+
+
+def _intent_summary_handler(tool_input: BaseModel) -> Dict[str, Any]:
+    """记录 LLM 已完成意图理解但不需要文件工具的结果。"""
+
+    return {
+        "ok": True,
+        "intent": getattr(tool_input, "intent"),
+        "user_goal": getattr(tool_input, "user_goal"),
     }
 
 
@@ -225,7 +300,7 @@ def _tool(
     )
 
 
-def _build_mvp_tools() -> Dict[str, ToolDefinition]:
+def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str, ToolDefinition]:
     """创建 agent.md 要求的完整 MVP Tool 目录。"""
 
     tools = [
@@ -238,6 +313,8 @@ def _build_mvp_tools() -> Dict[str, ToolDefinition]:
         _tool("embedding-generate", "Generate and store embeddings.", DocumentToolInput, True, False, ["document_chunks.embedding"], _document_handler("embedding-generate")),
         _tool("metadata-extract", "Extract metadata candidates.", DocumentToolInput, True, False, ["documents.metadata"], _document_handler("metadata-extract")),
         _tool("multi-label-classify", "Generate multi-label classifications with evidence.", DocumentToolInput, True, False, ["document_categories"], _document_handler("multi-label-classify")),
+        _tool("read-document-insights", "Read deterministic ingest insights for uploaded documents.", DocumentInsightsReadInput, False, False, [], _document_insights_handler(db, user_id)),
+        _tool("intent-summary", "Record LLM-understood user intent without side effects.", IntentSummaryInput, False, False, [], _intent_summary_handler),
         _tool("hybrid-search", "Run workspace hybrid retrieval.", SearchToolInput, False, False, [], _search_handler),
         _tool("evidence-answer", "Answer from retrieved evidence.", EvidenceAnswerInput, True, False, ["qa_answers", "answer_references"], _evidence_answer_handler),
         _tool("change-report", "Build per-file receipt from changes.", ChangeReportInput, True, False, ["change_sets"], _change_report_handler),

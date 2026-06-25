@@ -16,6 +16,7 @@ DEFAULT_JWT_SECRET_KEY = "file-agent-dev-secret"
 DEFAULT_JWT_ALGORITHM = "HS256"
 DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 DEFAULT_FILE_STORAGE_ROOT = "./storage/uploads"
+DEFAULT_LLM_TIMEOUT_SECONDS = 30
 
 
 class Settings(BaseModel):
@@ -27,6 +28,12 @@ class Settings(BaseModel):
     jwt_algorithm: str = DEFAULT_JWT_ALGORITHM
     access_token_expire_minutes: int = DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES
     file_storage_root: str = DEFAULT_FILE_STORAGE_ROOT
+    llm_enabled: bool = False
+    llm_provider: str = "openai_compatible"
+    llm_api_key: str = ""
+    llm_base_url: str = ""
+    llm_chat_model: str = ""
+    llm_timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS
 
 
 def find_dotenv_file() -> Path | None:
@@ -88,4 +95,10 @@ def get_settings() -> Settings:
             ),
         ),
         file_storage_root=os.getenv("FILE_STORAGE_ROOT", DEFAULT_FILE_STORAGE_ROOT),
+        llm_enabled=os.getenv("LLM_ENABLED", "false").lower() == "true",
+        llm_provider=os.getenv("LLM_PROVIDER", "openai_compatible"),
+        llm_api_key=os.getenv("LLM_API_KEY", ""),
+        llm_base_url=os.getenv("LLM_BASE_URL", ""),
+        llm_chat_model=os.getenv("LLM_CHAT_MODEL", ""),
+        llm_timeout_seconds=int(os.getenv("LLM_TIMEOUT_SECONDS", str(DEFAULT_LLM_TIMEOUT_SECONDS))),
     )

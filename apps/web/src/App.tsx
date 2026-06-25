@@ -505,9 +505,12 @@ function AttachmentList({
 }
 
 function AgentResult({ response }: { response: SendMessageResponse }) {
-  // Agent 结果沿用现有 AgentRun 和 Tool 调用摘要，后续再替换为自然语言回复。
+  // 优先展示后端生成的自然语言结果，同时保留 AgentRun 审计摘要。
   return (
     <div className="result-panel">
+      {response.agent_run.final_response ? (
+        <p className="agent-final-response">{response.agent_run.final_response}</p>
+      ) : null}
       <div className="result-grid">
         <Metric label="AgentRun" value={response.agent_run.status} />
         <Metric label="Intent" value={response.agent_run.intent ?? '-'} />

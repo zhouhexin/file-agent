@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 
 from langgraph.graph import END, StateGraph
 
+from app.modules.agent.planner import build_plan_from_user_intent
 from app.modules.agent.state import AgentGraphState
 
 
@@ -17,6 +18,7 @@ def build_agent_graph():
 
     graph = StateGraph(AgentGraphState)
     graph.add_node("chat_intake", chat_intake)
+    graph.add_node("collect_context", collect_context)
     graph.add_node("planning", planning)
     graph.add_node("tool_dispatch", tool_dispatch)
     graph.add_node("async_job_wait", async_job_wait)
@@ -24,7 +26,8 @@ def build_agent_graph():
     graph.add_node("response", response)
 
     graph.set_entry_point("chat_intake")
-    graph.add_edge("chat_intake", "planning")
+    graph.add_edge("chat_intake", "collect_context")
+    graph.add_edge("collect_context", "planning")
     graph.add_edge("planning", "tool_dispatch")
     graph.add_edge("tool_dispatch", "async_job_wait")
     graph.add_edge("async_job_wait", "evidence_or_change")
@@ -47,22 +50,52 @@ def chat_intake(state: AgentGraphState) -> Dict[str, Any]:
     }
 
 
+def collect_context(state: AgentGraphState) -> Dict[str, Any]:
+    """加载 LLM 理解用户需求所需的文件上下文。"""
+
+    context_loader = state.get("context_loader")
+    if context_loader is None:
+        return {"context_documents": []}
+    return {
+        "context_documents": context_loader.load_documents(
+            user_id=state["user_id"],
+            attachments=state.get("attachments", []),
+        )
+    }
+
+
 def planning(state: AgentGraphState) -> Dict[str, Any]:
     """调用 Planner，并且只保存通过校验的声明式计划。"""
 
-    planner = state["planner"]
-    plan = planner.plan(
-        conversation_id=state["conversation_id"],
-        user_id=state["user_id"],
-        message_id=state["message_id"],
-        message=state["message"],
-        attachments=state.get("attachments", []),
-    )
+    llm_intent_service = state.get("llm_intent_service")
+    if getattr(llm_intent_service, "enabled", False):
+        intent_plan = llm_intent_service.understand_user_request(
+            message=state["message"],
+            attachments=state.get("attachments", []),
+            context_documents=state.get("context_documents", []),
+        )
+        plan = build_plan_from_user_intent(
+            intent_plan=intent_plan,
+            message=state["message"],
+            attachments=state.get("attachments", []),
+        )
+        user_intent_plan = intent_plan.model_dump()
+    else:
+        planner = state["planner"]
+        plan = planner.plan(
+            conversation_id=state["conversation_id"],
+            user_id=state["user_id"],
+            message_id=state["message_id"],
+            message=state["message"],
+            attachments=state.get("attachments", []),
+        )
+        user_intent_plan = {}
     return {
         "intent": plan.intent,
         "slots": plan.slots,
         "selected_skills": plan.selected_skills,
         "tool_plan": plan.model_dump(),
+        "user_intent_plan": user_intent_plan,
         "status": "RUNNING_TOOL",
     }
 
@@ -115,7 +148,28 @@ def response(state: AgentGraphState) -> Dict[str, Any]:
     """生成面向用户的最终运行摘要。"""
 
     invocation_count = len(state.get("tool_invocations", []))
+    insight_documents = _insight_documents_from_results(state.get("tool_results", []))
+    if insight_documents:
+        filenames = [
+            item.get("filename") or item.get("document_id")
+            for item in insight_documents
+        ]
+        return {
+            "status": "COMPLETED",
+            "final_response": f"已读取 {len(insight_documents)} 个文件的基础洞察：{', '.join(filenames)}。",
+        }
     return {
         "status": "COMPLETED",
         "final_response": f"AgentRun completed with {invocation_count} tool invocation(s).",
     }
+
+
+def _insight_documents_from_results(tool_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """从 Tool 结果中提取 read-document-insights 返回的文件列表。"""
+
+    documents: List[Dict[str, Any]] = []
+    for result in tool_results:
+        result_documents = result.get("documents")
+        if isinstance(result_documents, list):
+            documents.extend([item for item in result_documents if isinstance(item, dict)])
+    return documents

@@ -21,6 +21,8 @@ class AgentGraphState(TypedDict, total=False):
     message_id: str
     message: str
     attachments: List[Dict[str, Any]]
+    context_documents: List[Dict[str, Any]]
+    user_intent_plan: Dict[str, Any]
     status: str
     intent: Optional[str]
     slots: Dict[str, Any]
@@ -34,6 +36,8 @@ class AgentGraphState(TypedDict, total=False):
     errors: List[str]
     planner: Any
     registry: Any
+    context_loader: Any
+    llm_intent_service: Any
 
 
 class ToolInvocationRecord(BaseModel):

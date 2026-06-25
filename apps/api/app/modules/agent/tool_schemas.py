@@ -42,6 +42,19 @@ class EvidenceAnswerInput(StrictToolInput):
     document_ids: List[str] = Field(default_factory=list)
 
 
+class DocumentInsightsReadInput(StrictToolInput):
+    """读取上传阶段 deterministic ingest 洞察的 Tool 输入。"""
+
+    document_ids: List[str] = Field(default_factory=list)
+
+
+class IntentSummaryInput(StrictToolInput):
+    """仅记录 LLM 已理解用户需求的低风险 Tool 输入。"""
+
+    intent: str = Field(min_length=1)
+    user_goal: str = Field(min_length=1)
+
+
 class ChangeReportInput(StrictToolInput):
     """生成 ChangeSet 回执的 Tool 输入。"""
 

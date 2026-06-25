@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.main import app
+from app.modules.llm.schemas import UserIntentPlan
 from app.modules.agent.planner import DeterministicPlanner
 from app.modules.agent.service import AgentRuntimeService
 from app.modules.agent.tool_registry import ToolRegistry, UnknownToolError
@@ -122,6 +123,45 @@ def test_message_starts_langgraph_run_and_records_tool_invocations():
         "change-report",
     ]
     assert result.final_response
+
+
+def test_llm_intent_reads_document_insights_instead_of_reingesting():
+    """LLM 理解到用户要看已上传文件信息时，应读取洞察而不是重复上传处理。"""
+
+    class FakeLLMIntentService:
+        """测试用 LLM 服务，避免单元测试访问真实模型。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """返回稳定的文件总结意图。"""
+
+            return UserIntentPlan(
+                intent="SUMMARIZE_DOCUMENTS",
+                user_goal=message,
+                needs_file_context=True,
+                referenced_document_ids=[attachments[0]["document_id"]],
+                required_capabilities=["read_document_insights"],
+                skip_completed_ingest=True,
+                tool_plan_hint=["read-document-insights"],
+                response_style="concise",
+            )
+
+    service = AgentRuntimeService(llm_intent_service=FakeLLMIntentService())
+
+    result = service.run_message(
+        conversation_id="conv-1",
+        user_id="user-1",
+        message_id="msg-1",
+        message="总结我刚才上传的文件",
+        attachments=[{"document_id": "doc-1"}],
+    )
+
+    assert result.status == "COMPLETED"
+    assert result.intent == "SUMMARIZE_DOCUMENTS"
+    assert result.selected_skills == ["llm-understanding", "document-insight-read"]
+    assert [item.tool_name for item in result.tool_invocations] == ["read-document-insights"]
+    assert "document-convert" not in [item.tool_name for item in result.tool_invocations]
 
 
 def test_graph_does_not_execute_direct_file_writes_from_planner_output():

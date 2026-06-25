@@ -10,18 +10,23 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
+from app.modules.agent.context import AgentContextLoader
 from app.modules.agent.graph import build_agent_graph
 from app.modules.agent.planner import DeterministicPlanner
 from app.modules.agent.repository import AgentRunRepository
 from app.modules.agent.state import AgentRunResult, ToolInvocationRecord
 from app.modules.agent.tool_registry import ToolRegistry
+from app.modules.llm.service import LLMIntentService
 
 
 class AgentRuntimeService:
     """协调 Planner、Tool Registry 和 LangGraph 执行。"""
 
-    def __init__(self, registry: Optional[ToolRegistry] = None) -> None:
-        self.registry = registry or ToolRegistry()
+    def __init__(self, registry: Optional[ToolRegistry] = None, llm_intent_service: Any = None) -> None:
+        """注入 Tool Registry 和 LLM 意图服务，便于测试替换外部模型。"""
+
+        self.registry = registry
+        self.llm_intent_service = llm_intent_service or LLMIntentService()
         self.graph = build_agent_graph()
 
     def run_message(
@@ -47,6 +52,7 @@ class AgentRuntimeService:
         )
         agent_run_id = run.id if run is not None else str(uuid4())
 
+        registry = self.registry or ToolRegistry(db=db, user_id=user_id)
         initial_state = {
             "agent_run_id": agent_run_id,
             "conversation_id": conversation_id,
@@ -54,6 +60,8 @@ class AgentRuntimeService:
             "message_id": message_id,
             "message": message,
             "attachments": attachments or [],
+            "context_documents": [],
+            "user_intent_plan": {},
             "status": "RECEIVED",
             "intent": None,
             "slots": {},
@@ -66,7 +74,9 @@ class AgentRuntimeService:
             "final_response": None,
             "errors": [],
             "planner": planner or DeterministicPlanner(),
-            "registry": self.registry,
+            "registry": registry,
+            "context_loader": AgentContextLoader(db),
+            "llm_intent_service": self.llm_intent_service,
         }
         try:
             final_state = self.graph.invoke(initial_state)

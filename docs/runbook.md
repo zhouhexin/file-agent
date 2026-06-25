@@ -35,7 +35,7 @@ python3 -m pytest
 当前期望结果：
 
 ```text
-28 passed
+30 passed
 ```
 
 如果出现 `urllib3` 或 `LangChainPendingDeprecationWarning`，目前属于环境兼容警告，不影响现有测试结果。
@@ -95,6 +95,23 @@ http://127.0.0.1:8000
 
 message、AgentRun 和 ToolInvocation 会写入当前 `DATABASE_URL` 指向的数据库。
 上传文件会写入 `FILE_STORAGE_ROOT`，默认是 `./storage/uploads`。
+
+## 4.1 LLM 配置
+
+默认 `LLM_ENABLED=false`，消息入口会继续使用确定性 Planner，便于本地开发和测试稳定运行。
+
+如需在对话阶段启用 LLM 理解用户需求，请在项目根目录 `.env` 中增加：
+
+```text
+LLM_ENABLED=true
+LLM_PROVIDER=openai_compatible
+LLM_API_KEY=<your-api-key>
+LLM_BASE_URL=<openai-compatible-base-url>
+LLM_CHAT_MODEL=<chat-model-name>
+LLM_TIMEOUT_SECONDS=30
+```
+
+当前客户端调用 OpenAI-compatible `/chat/completions` 接口，并要求模型返回符合 `UserIntentPlan` 的 JSON 对象。上传阶段的 deterministic ingest 不依赖 LLM；对话阶段启用 LLM 后，会先理解用户需求，再通过白名单 Tool 读取 `document_insights` 或执行后续受控工具。
 
 ## 5. 启动前端服务
 
@@ -228,6 +245,15 @@ agent_run.user_id = 当前登录用户 id
 tool_invocations = document-convert, metadata-extract, multi-label-classify, change-report
 ```
 
+如果 `LLM_ENABLED=true` 且用户需求是总结或查看已上传文件基础信息，当前期望行为：
+
+```text
+agent_run.intent = SUMMARIZE_DOCUMENTS 或模型识别出的结构化 intent
+selected_skills = llm-understanding, document-insight-read
+tool_invocations = read-document-insights
+graph_state_json.user_intent_plan = LLM 返回的结构化意图
+```
+
 查询 AgentRun：
 
 ```bash
@@ -253,11 +279,11 @@ curl -X POST http://127.0.0.1:8000/api/conversations/conv-1/messages \
 
 ## 7. 当前限制
 
-- 当前接口不接真实大模型，Planner 使用 `DeterministicPlanner`。
-- 当前已持久化 user、default workspace、message、AgentRun 和 ToolInvocation，但还没有接文件、ChangeSet 和 OperationPlan 表。
+- 当前已接入 OpenAI-compatible LLM 意图理解；默认 `LLM_ENABLED=false` 时仍使用 `DeterministicPlanner`。
+- 当前已持久化 user、default workspace、message、AgentRun、ToolInvocation、Document 和 document_insights，但还没有接 ChangeSet 和 OperationPlan 表。
 - 当前 Tool handler 是结构化占位实现，不读取真实文件，不写真实文件，不做真实解析、分类或检索。
 - 当前已有最小 JWT 鉴权，但没有 refresh token、复杂 RBAC、ACL 或 admin 权限体系。
-- 当前前端只有最小注册、登录和 Chat 验证页面，没有文件上传、会话列表、admin 页面或正式视觉设计。
+- 当前前端已有最小注册、登录、Chat、文件上传和附件删除流程，没有会话列表、admin 页面或正式视觉设计。
 
 ## 8. 维护规则
 

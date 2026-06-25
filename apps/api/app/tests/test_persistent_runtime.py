@@ -12,8 +12,12 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.database import get_db
 from app.db.base import Base
-from app.db.models import AgentRun, Message, ToolInvocation
+from app.db.models import AgentRun, Message, ToolInvocation, User
 from app.main import app
+from app.modules.agent.service import AgentRuntimeService
+from app.modules.conversations.schemas import MessageAttachment, SendMessageRequest
+from app.modules.conversations.service import ConversationMessageService
+from app.modules.llm.schemas import UserIntentPlan
 
 
 def _client_with_database() -> TestClient:
@@ -152,6 +156,57 @@ def test_agent_run_query_endpoints_return_persisted_records():
         "change-report",
     ]
     app.dependency_overrides.clear()
+
+
+def test_llm_message_reuses_persisted_document_insights():
+    """LLM 对话阶段应复用上传阶段已持久化的 document_insights。"""
+
+    class FakeLLMIntentService:
+        """测试用 LLM 服务，固定返回读取文件洞察的计划。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """返回依赖已上传文件洞察的用户意图。"""
+
+            return UserIntentPlan(
+                intent="SUMMARIZE_DOCUMENTS",
+                user_goal=message,
+                needs_file_context=True,
+                referenced_document_ids=[attachments[0]["document_id"]],
+                required_capabilities=["read_document_insights"],
+                skip_completed_ingest=True,
+                tool_plan_hint=["read-document-insights"],
+                response_style="concise",
+            )
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="llm-insight-user")
+    document_id = _upload_document(client, headers, filename="student.txt")
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(User.username == "llm-insight-user").one()
+        response = ConversationMessageService(
+            db=db,
+            agent_service=AgentRuntimeService(llm_intent_service=FakeLLMIntentService()),
+        ).send_user_message(
+            conversation_id="llm-conv",
+            user_id=user.id,
+            request=SendMessageRequest(
+                content="总结我刚才上传的文件",
+                attachments=[MessageAttachment(document_id=document_id)],
+            ),
+        )
+
+        assert response.agent_run.intent == "SUMMARIZE_DOCUMENTS"
+        assert [item.tool_name for item in response.agent_run.tool_invocations] == ["read-document-insights"]
+        assert response.agent_run.tool_results[0]["documents"][0]["document_id"] == document_id
+        assert response.agent_run.tool_results[0]["documents"][0]["ingest_status"] == "INGESTED"
+        assert db.query(ToolInvocation).one().tool_name == "read-document-insights"
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
 
 
 def test_alembic_files_exist_for_runtime_tables():

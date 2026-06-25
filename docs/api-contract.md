@@ -356,6 +356,8 @@ Behavior:
 save user message
 create agent_runs row
 start LangGraph run
+if LLM_ENABLED=true: call LLM to create structured UserIntentPlan
+if uploaded file insights already exist: reuse document_insights through read-document-insights
 persist tool_invocations
 return message_id and agent_run_id
 ```
@@ -390,6 +392,25 @@ Response:
     "operation_plan_id": null,
     "final_response": "AgentRun completed with 4 tool invocation(s).",
     "errors": []
+  }
+}
+```
+
+When LLM is enabled and the user asks for uploaded-file summary or basic file information, the same endpoint may return:
+
+```json
+{
+  "agent_run": {
+    "intent": "SUMMARIZE_DOCUMENTS",
+    "status": "COMPLETED",
+    "selected_skills": ["llm-understanding", "document-insight-read"],
+    "tool_invocations": [
+      {
+        "tool_name": "read-document-insights",
+        "status": "COMPLETED"
+      }
+    ],
+    "final_response": "已读取 1 个文件的基础洞察：student.txt。"
   }
 }
 ```

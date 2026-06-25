@@ -10,6 +10,8 @@ from typing import Any, Dict, List
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.modules.llm.schemas import UserIntentPlan
+
 
 FORBIDDEN_INPUT_KEYS = {"shell", "shell_command", "sql", "sql_write", "path", "file_path", "absolute_path"}
 
@@ -198,9 +200,84 @@ class DeterministicPlanner:
         )
 
 
+def build_plan_from_user_intent(
+    *,
+    intent_plan: UserIntentPlan,
+    message: str,
+    attachments: List[Dict[str, Any]],
+) -> PlannerOutput:
+    """把 LLM 结构化意图转换为受控 PlannerOutput。"""
+
+    document_ids = intent_plan.referenced_document_ids or _document_ids(attachments)
+    uses_document_insights = (
+        intent_plan.needs_file_context
+        or "read_document_insights" in intent_plan.required_capabilities
+        or "read-document-insights" in intent_plan.tool_plan_hint
+    )
+    if uses_document_insights:
+        return PlannerOutput(
+            intent=intent_plan.intent,
+            user_goal=intent_plan.user_goal,
+            slots={
+                "document_ids": document_ids,
+                "skip_completed_ingest": intent_plan.skip_completed_ingest,
+                "response_style": intent_plan.response_style,
+                "clarification_question": intent_plan.clarification_question,
+                "llm_intent_plan": intent_plan.model_dump(),
+            },
+            selected_skills=["llm-understanding", "document-insight-read"],
+            steps=[
+                {
+                    "step_id": "step-1",
+                    "skill": "document-insight-read",
+                    "tool_name": "read-document-insights",
+                    "input": {"document_ids": document_ids},
+                    "requires_confirmation": False,
+                    "risk_level": "low",
+                    "expected_outputs": ["document_insights"],
+                    "writes": [],
+                }
+            ],
+            evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+            confirmation_policy={"operation_plan_required": False},
+        )
+
+    return PlannerOutput(
+        intent=intent_plan.intent,
+        user_goal=intent_plan.user_goal,
+        slots={
+            "document_ids": document_ids,
+            "response_style": intent_plan.response_style,
+            "clarification_question": intent_plan.clarification_question,
+            "llm_intent_plan": intent_plan.model_dump(),
+        },
+        selected_skills=["llm-understanding"],
+        steps=[
+            {
+                "step_id": "step-1",
+                "skill": "llm-understanding",
+                "tool_name": "intent-summary",
+                "input": {"intent": intent_plan.intent, "user_goal": intent_plan.user_goal or message},
+                "requires_confirmation": False,
+                "risk_level": "low",
+                "expected_outputs": ["intent"],
+                "writes": [],
+            }
+        ],
+        evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+        confirmation_policy={"operation_plan_required": False},
+    )
+
+
 def _first_document_id(attachments: List[Dict[str, Any]]) -> str:
     """为 MVP 确定性计划解析第一个附件文档 id。"""
 
     if not attachments:
         return "document-memory"
     return str(attachments[0].get("document_id") or "document-memory")
+
+
+def _document_ids(attachments: List[Dict[str, Any]]) -> List[str]:
+    """从消息附件中提取 document_id 列表。"""
+
+    return [str(item["document_id"]) for item in attachments if item.get("document_id")]
