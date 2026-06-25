@@ -1,0 +1,11 @@
+# 后端本地开发依赖；使用当前 python3 环境安装：
+# python3 -m pip install -r requirements.txt
+fastapi>=0.128.0
+langgraph>=0.6.0
+pydantic>=2.13.0
+SQLAlchemy>=2.0,<2.1
+uvicorn>=0.39.0
+alembic>=1.13,<2.0
+httpx>=0.28.0
+pytest>=8.4.0
+psycopg2-binary>=2.9.0

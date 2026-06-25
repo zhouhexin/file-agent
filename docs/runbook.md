@@ -8,6 +8,14 @@
 
 当前已验证的运行方式是在项目根目录执行命令，避免进入 `apps/api` 后 shell 解析到不同的 Python 解释器。
 
+安装后端依赖：
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+当前根目录 `requirements.txt` 包含后端运行、数据库 migration、测试和 PostgreSQL 连接所需依赖。`apps/api/pyproject.toml` 保留为后端包元数据；本地启动优先使用上面的 `requirements.txt` 安装命令。
+
 ## 2. 运行测试
 
 在项目根目录执行：

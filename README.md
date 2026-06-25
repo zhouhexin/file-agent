@@ -19,6 +19,7 @@ File Agent 不是传统网盘，也不是只会问答的知识库系统。用户
 后端使用当前已配置好的 `python3` 环境，不强制创建新虚拟环境。完整运行说明见 `docs/runbook.md`。
 
 ```bash
+python3 -m pip install -r requirements.txt
 python3 -m pytest
 python3 -m alembic -c apps/api/alembic.ini upgrade head
 PYTHONPATH=apps/api python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
