@@ -11,6 +11,7 @@ File Agent 不是传统网盘，也不是只会问答的知识库系统。用户
 - `docs/superpowers/plans/2026-06-24-file-agent-mvp-implementation-plan.md`：MVP 开发计划。
 - `docs/database-schema.md`：数据库结构设计。
 - `docs/api-contract.md`：API 契约。
+- `docs/langgraph-runtime-issues.md`：LangGraph Runtime 当前问题与改造路线。
 - `docs/skills-catalog.md`：项目内 Agent Skill 清单。
 - `docs/runbook.md`：本地启动、验证和当前可用接口。
 
