@@ -13,6 +13,7 @@ from app.modules.conversations.schemas import (
     SendMessageRequest,
     SendMessageResponse,
 )
+from app.modules.files.repository import FileRepository
 
 
 class ConversationMessageService:
@@ -41,6 +42,12 @@ class ConversationMessageService:
             user_id=user_id,
             content=request.content,
             attachments=request.attachments,
+        )
+        FileRepository(self.db).lock_documents_for_message(
+            document_ids=[attachment.document_id for attachment in request.attachments],
+            user_id=user_id,
+            conversation_id=conversation_id,
+            message_id=message.id,
         )
         agent_run = self.agent_service.run_message(
             conversation_id=conversation_id,

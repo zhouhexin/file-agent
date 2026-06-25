@@ -80,6 +80,8 @@ FAILED
 SKIPPED
 
 Document Status:
+UPLOADED
+USED_IN_MESSAGE
 RECEIVED
 QUARANTINED
 SCANNING
@@ -344,6 +346,9 @@ create table documents (
   size_bytes bigint not null default 0,
   sha256 varchar(64) not null,
   status varchar(40) not null default 'UPLOADED',
+  locked_at timestamptz null,
+  locked_message_id uuid null,
+  locked_conversation_id uuid null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

@@ -22,6 +22,17 @@ def _register_and_login(client, username: str = "zhangsan") -> tuple[str, str]:
     return user_id, login_response.json()["access_token"]
 
 
+def _upload_document(client, token: str, filename: str = "message.txt") -> str:
+    """上传测试文件并返回 document_id。"""
+
+    response = client.post(
+        "/api/files/upload",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": (filename, b"message-file", "text/plain")},
+    )
+    return response.json()["document_id"]
+
+
 def test_post_message_requires_token():
     """消息入口必须要求登录，未带 token 返回 401。"""
 
@@ -44,13 +55,14 @@ def test_post_message_uses_authenticated_user_id():
 
     client, SessionLocal = client_with_database()
     user_id, token = _register_and_login(client)
+    document_id = _upload_document(client, token)
 
     response = client.post(
         "/api/conversations/conv-1/messages",
         headers={"Authorization": f"Bearer {token}"},
         json={
             "content": "帮我读取并分类这批文件",
-            "attachments": [{"document_id": "doc-1"}],
+            "attachments": [{"document_id": document_id}],
         },
     )
 
@@ -74,13 +86,15 @@ def test_user_cannot_write_to_another_users_conversation():
     client, _ = client_with_database()
     _, first_token = _register_and_login(client, "first")
     _, second_token = _register_and_login(client, "second")
+    first_document_id = _upload_document(client, first_token, "first.txt")
+    second_document_id = _upload_document(client, second_token, "second.txt")
 
     first_response = client.post(
         "/api/conversations/shared-conv/messages",
         headers={"Authorization": f"Bearer {first_token}"},
         json={
             "content": "帮我读取并分类这批文件",
-            "attachments": [{"document_id": "doc-1"}],
+            "attachments": [{"document_id": first_document_id}],
         },
     )
     assert first_response.status_code == 200
@@ -90,7 +104,7 @@ def test_user_cannot_write_to_another_users_conversation():
         headers={"Authorization": f"Bearer {second_token}"},
         json={
             "content": "我也要写入这个会话",
-            "attachments": [{"document_id": "doc-1"}],
+            "attachments": [{"document_id": second_document_id}],
         },
     )
 

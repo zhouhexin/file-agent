@@ -343,6 +343,7 @@ textarea:focus {
 
 .app-shell {
   min-height: 100vh;
+  background: #f4f6f8;
 }
 
 .topbar {
@@ -386,7 +387,17 @@ textarea:focus {
 
 .workspace {
   display: grid;
+  min-height: calc(100vh - 64px);
   padding: 28px;
+}
+
+.workspace.empty-mode {
+  align-items: center;
+}
+
+.workspace.conversation-mode {
+  align-items: stretch;
+  padding-bottom: 190px;
 }
 
 .chat-column {
@@ -394,14 +405,66 @@ textarea:focus {
   margin: 0 auto;
 }
 
-.section-heading {
+.empty-chat-heading {
   margin-bottom: 18px;
+  text-align: center;
 }
 
-.section-heading h2 {
+.empty-chat-heading h2 {
   margin: 0;
-  font-size: 22px;
+  color: #17233d;
+  font-size: 28px;
   letter-spacing: 0;
+}
+
+.empty-chat-heading p {
+  margin: 8px 0 0;
+  color: #667789;
+}
+
+.message-list {
+  display: grid;
+  gap: 20px;
+  padding: 8px 0 28px;
+}
+
+.chat-turn {
+  display: grid;
+  gap: 12px;
+}
+
+.message-bubble {
+  width: min(760px, 100%);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.message-bubble p {
+  margin: 0;
+  line-height: 1.7;
+}
+
+.user-message {
+  justify-self: end;
+  background: #2563eb;
+  color: #ffffff;
+}
+
+.user-message .uploaded-file {
+  border-color: rgb(255 255 255 / 0.18);
+  background: rgb(255 255 255 / 0.12);
+}
+
+.user-message .uploaded-file strong,
+.user-message .uploaded-file span {
+  color: #ffffff;
+}
+
+.agent-message {
+  justify-self: start;
+  border: 1px solid #d8dee6;
+  background: #ffffff;
+  color: #1f2933;
 }
 
 .composer {
@@ -409,6 +472,20 @@ textarea:focus {
   border-radius: 8px;
   background: #ffffff;
   padding: 16px;
+}
+
+.center-composer {
+  box-shadow: 0 18px 36px rgb(31 41 51 / 0.08);
+}
+
+.docked-composer {
+  position: fixed;
+  right: 50%;
+  bottom: 22px;
+  z-index: 10;
+  width: min(920px, calc(100vw - 40px));
+  transform: translateX(50%);
+  box-shadow: 0 18px 44px rgb(31 41 51 / 0.16);
 }
 
 .composer-actions {
@@ -458,6 +535,14 @@ textarea:focus {
   border-radius: 8px;
   background: #ffffff;
   padding: 8px 12px;
+}
+
+.attachment-preview {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  border-radius: 6px;
+  object-fit: cover;
 }
 
 .uploaded-file strong,
@@ -623,6 +708,23 @@ textarea:focus {
 
   .workspace {
     padding: 18px;
+  }
+
+  .workspace.conversation-mode {
+    padding-bottom: 210px;
+  }
+
+  .empty-chat-heading h2 {
+    font-size: 22px;
+  }
+
+  .docked-composer {
+    bottom: 12px;
+    width: calc(100vw - 24px);
+  }
+
+  .message-bubble {
+    width: 100%;
   }
 
   .result-grid {

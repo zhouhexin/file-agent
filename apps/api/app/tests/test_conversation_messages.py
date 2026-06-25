@@ -23,17 +23,30 @@ def _auth_header(client: TestClient, username: str = "message-user") -> dict[str
     return {"Authorization": f"Bearer {login_response.json()['access_token']}"}
 
 
+def _upload_document(client: TestClient, headers: dict[str, str]) -> str:
+    """上传测试文件并返回 document_id。"""
+
+    response = client.post(
+        "/api/files/upload",
+        headers=headers,
+        files={"file": ("message.txt", b"message-file", "text/plain")},
+    )
+    return response.json()["document_id"]
+
+
 def test_post_message_starts_agent_run():
     """发送用户消息后，接口必须返回 message 和持久化 AgentRun 结果。"""
 
     client, _ = client_with_database()
+    headers = _auth_header(client)
+    document_id = _upload_document(client, headers)
 
     response = client.post(
         "/api/conversations/conv-1/messages",
-        headers=_auth_header(client),
+        headers=headers,
         json={
             "content": "帮我读取并分类这批文件",
-            "attachments": [{"document_id": "doc-1"}],
+            "attachments": [{"document_id": document_id}],
         },
     )
 

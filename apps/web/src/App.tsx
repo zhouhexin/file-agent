@@ -11,13 +11,35 @@ import {
   Trash2,
   UserRound,
 } from 'lucide-react';
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from 'react';
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 
-import { ApiError, getCurrentUser, loginUser, registerUser, sendAgentMessage, uploadFile } from './api/client';
+import {
+  ApiError,
+  deleteUploadedFile,
+  getCurrentUser,
+  loginUser,
+  registerUser,
+  sendAgentMessage,
+  uploadFile,
+} from './api/client';
 import { clearToken, readToken, saveToken } from './auth/storage';
 import type { SendMessageResponse, UploadedFile, User } from './types';
 
 type AuthMode = 'login' | 'register';
+
+type ChatAttachment = UploadedFile & {
+  // 图片预览使用浏览器本地 object URL，发送后仍仅以 document_id 作为后端引用。
+  preview_url?: string;
+  deleting?: boolean;
+};
+
+type ChatTurn = {
+  id: string;
+  userText: string;
+  attachments: ChatAttachment[];
+  response?: SendMessageResponse;
+  status: 'sending' | 'completed' | 'failed';
+};
 
 export function App() {
   const [token, setToken] = useState<string | null>(() => readToken());
@@ -247,27 +269,58 @@ function ChatPage({
   onLogout: () => void;
 }) {
   const [message, setMessage] = useState('帮我读取并分类这批文件');
-  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
-  const [response, setResponse] = useState<SendMessageResponse | null>(null);
+  const [draftAttachments, setDraftAttachments] = useState<ChatAttachment[]>([]);
+  const [chatTurns, setChatTurns] = useState<ChatTurn[]>([]);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const previewUrls = useRef<Set<string>>(new Set());
+  const hasTurns = chatTurns.length > 0;
+
+  useEffect(() => {
+    // 页面卸载时统一释放仍在展示的图片预览 object URL。
+    return () => {
+      previewUrls.current.forEach((url) => {
+        URL.revokeObjectURL(url);
+      });
+    };
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError('');
     setSubmitting(true);
+    const currentMessage = message.trim();
+    const attachmentsForTurn = draftAttachments;
+    const turnId = crypto.randomUUID();
+
+    setChatTurns((current) => [
+      ...current,
+      {
+        id: turnId,
+        userText: currentMessage,
+        attachments: attachmentsForTurn,
+        status: 'sending',
+      },
+    ]);
+    setMessage('');
+    setDraftAttachments([]);
 
     try {
       // conversation id 先固定为浏览器调试用会话，后续接会话列表后再由用户选择。
       const result = await sendAgentMessage(
         token,
         'web-chat',
-        message,
-        uploadedFiles.map((file) => file.document_id),
+        currentMessage,
+        attachmentsForTurn.map((file) => file.document_id),
       );
-      setResponse(result);
+      setChatTurns((current) => current.map((turn) => (
+        turn.id === turnId ? { ...turn, response: result, status: 'completed' } : turn
+      )));
     } catch (err) {
+      setChatTurns((current) => current.map((turn) => (
+        turn.id === turnId ? { ...turn, status: 'failed' } : turn
+      )));
       setError(formatError(err));
     } finally {
       setSubmitting(false);
@@ -284,11 +337,19 @@ function ChatPage({
     setError('');
     setUploading(true);
     try {
-      const results: UploadedFile[] = [];
+      const results: ChatAttachment[] = [];
       for (const file of files) {
-        results.push(await uploadFile(token, file));
+        const uploadedFile = await uploadFile(token, file);
+        const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined;
+        if (previewUrl) {
+          previewUrls.current.add(previewUrl);
+        }
+        results.push({
+          ...uploadedFile,
+          preview_url: previewUrl,
+        });
       }
-      setUploadedFiles((current) => [...current, ...results]);
+      setDraftAttachments((current) => [...current, ...results]);
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -297,9 +358,29 @@ function ChatPage({
     }
   }
 
-  function removeUploadedFile(documentId: string) {
-    // 当前后端还没有删除文件接口，这里只移除本次消息附件引用。
-    setUploadedFiles((current) => current.filter((file) => file.document_id !== documentId));
+  async function removeDraftAttachment(documentId: string) {
+    // 发送前删除会同步删除后端文件；发送后的附件不走这个入口。
+    setError('');
+    setDraftAttachments((current) => current.map((file) => (
+      file.document_id === documentId ? { ...file, deleting: true } : file
+    )));
+
+    try {
+      await deleteUploadedFile(token, documentId);
+      setDraftAttachments((current) => {
+        const removedFile = current.find((file) => file.document_id === documentId);
+        if (removedFile?.preview_url) {
+          URL.revokeObjectURL(removedFile.preview_url);
+          previewUrls.current.delete(removedFile.preview_url);
+        }
+        return current.filter((file) => file.document_id !== documentId);
+      });
+    } catch (err) {
+      setDraftAttachments((current) => current.map((file) => (
+        file.document_id === documentId ? { ...file, deleting: false } : file
+      )));
+      setError(formatError(err));
+    }
   }
 
   return (
@@ -318,14 +399,32 @@ function ChatPage({
         </div>
       </header>
 
-      <section className="workspace">
+      <section className={hasTurns ? 'workspace conversation-mode' : 'workspace empty-mode'}>
         <div className="chat-column">
-          <div className="section-heading">
-            <h2>对话工作台</h2>
-            <p>会话：web-chat</p>
-          </div>
+          {!hasTurns ? (
+            <div className="empty-chat-heading">
+              <h2>今天想处理什么文件？</h2>
+              <p>上传图片或文件后，直接用自然语言描述你要完成的工作。</p>
+            </div>
+          ) : (
+            <div className="message-list">
+              {chatTurns.map((turn) => (
+                <article className="chat-turn" key={turn.id}>
+                  <div className="message-bubble user-message">
+                    <p>{turn.userText}</p>
+                    <AttachmentList attachments={turn.attachments} locked />
+                  </div>
+                  <div className="message-bubble agent-message">
+                    {turn.status === 'sending' ? <p>正在处理...</p> : null}
+                    {turn.status === 'failed' ? <p>处理失败，请重新发送。</p> : null}
+                    {turn.response ? <AgentResult response={turn.response} /> : null}
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
 
-          <form className="composer" onSubmit={submit}>
+          <form className={hasTurns ? 'composer docked-composer' : 'composer center-composer'} onSubmit={submit}>
             <textarea
               value={message}
               onChange={(event) => setMessage(event.target.value)}
@@ -336,7 +435,13 @@ function ChatPage({
               <label className="file-picker">
                 <Paperclip size={18} />
                 <span>{uploading ? '上传中...' : '选择文件'}</span>
-                <input disabled={uploading} multiple type="file" onChange={handleFileChange} />
+                <input
+                  accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.md,.csv"
+                  disabled={uploading}
+                  multiple
+                  type="file"
+                  onChange={handleFileChange}
+                />
               </label>
               <button className="primary-button send-button" disabled={submitting || uploading} type="submit">
                 <Send size={18} />
@@ -347,48 +452,77 @@ function ChatPage({
 
           {error ? <p className="form-message error">{error}</p> : null}
 
-          {uploadedFiles.length > 0 ? (
-            <div className="uploaded-files">
-              {uploadedFiles.map((file) => (
-                <div className="uploaded-file" key={file.document_id}>
-                  <div>
-                    <strong>{file.filename}</strong>
-                    <span>{formatFileSize(file.size_bytes)} · {file.status}</span>
-                  </div>
-                  <button
-                    className="icon-button"
-                    type="button"
-                    onClick={() => removeUploadedFile(file.document_id)}
-                    title="移除附件"
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : null}
-
-          {response ? (
-            <div className="result-panel">
-              <div className="result-grid">
-                <Metric label="AgentRun" value={response.agent_run.status} />
-                <Metric label="Intent" value={response.agent_run.intent ?? '-'} />
-                <Metric label="Tools" value={String(response.agent_run.tool_invocations.length)} />
-              </div>
-              <h3>Tool 调用</h3>
-              <ul className="tool-list">
-                {response.agent_run.tool_invocations.map((tool) => (
-                  <li key={tool.id}>
-                    <span>{tool.tool_name}</span>
-                    <strong>{tool.status}</strong>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
+          <AttachmentList
+            attachments={draftAttachments}
+            onRemove={removeDraftAttachment}
+          />
         </div>
       </section>
     </main>
+  );
+}
+
+function AttachmentList({
+  attachments,
+  locked = false,
+  onRemove,
+}: {
+  attachments: ChatAttachment[];
+  locked?: boolean;
+  onRemove?: (documentId: string) => void;
+}) {
+  // 附件列表同时用于待发送区和历史消息区；历史消息区不提供删除入口。
+  if (attachments.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="uploaded-files">
+      {attachments.map((file) => (
+        <div className="uploaded-file" key={file.document_id}>
+          {file.preview_url ? (
+            <img alt={file.filename} className="attachment-preview" src={file.preview_url} />
+          ) : null}
+          <div>
+            <strong>{file.filename}</strong>
+            <span>{formatFileSize(file.size_bytes)} · {locked ? '已进入对话' : file.status}</span>
+          </div>
+          {!locked && onRemove ? (
+            <button
+              className="icon-button"
+              disabled={file.deleting}
+              type="button"
+              onClick={() => onRemove(file.document_id)}
+              title="删除文件"
+            >
+              <Trash2 size={16} />
+            </button>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AgentResult({ response }: { response: SendMessageResponse }) {
+  // Agent 结果沿用现有 AgentRun 和 Tool 调用摘要，后续再替换为自然语言回复。
+  return (
+    <div className="result-panel">
+      <div className="result-grid">
+        <Metric label="AgentRun" value={response.agent_run.status} />
+        <Metric label="Intent" value={response.agent_run.intent ?? '-'} />
+        <Metric label="Tools" value={String(response.agent_run.tool_invocations.length)} />
+      </div>
+      <h3>Tool 调用</h3>
+      <ul className="tool-list">
+        {response.agent_run.tool_invocations.map((tool) => (
+          <li key={tool.id}>
+            <span>{tool.tool_name}</span>
+            <strong>{tool.status}</strong>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

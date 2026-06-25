@@ -14,3 +14,9 @@ class FileUploadResponse(BaseModel):
     size_bytes: int
     sha256: str
     status: str
+
+
+class FileDeleteResponse(BaseModel):
+    """文件删除成功后的响应。"""
+
+    deleted: bool

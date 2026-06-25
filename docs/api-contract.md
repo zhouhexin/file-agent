@@ -595,6 +595,7 @@ save original file to FILE_STORAGE_ROOT
 create documents row
 create file_objects row
 return document id for message attachments
+file remains deletable until it is sent in a conversation message
 ```
 
 Response:
@@ -610,7 +611,32 @@ Response:
 }
 ```
 
-### 7.3 Get Document
+### 7.3 Delete Uploaded Document
+
+```text
+DELETE /api/files/{document_id}
+```
+
+Behavior:
+
+```text
+only owner can delete
+only status=UPLOADED can be deleted
+delete file_objects row
+delete local storage file
+delete documents row
+return 409 if document already entered a message
+```
+
+Response:
+
+```json
+{
+  "deleted": true
+}
+```
+
+### 7.4 Get Document
 
 ```text
 GET /api/documents/{document_id}

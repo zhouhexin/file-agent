@@ -5,13 +5,13 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.models import Document, User
 from app.modules.files.repository import FileRepository
-from app.modules.files.schemas import FileUploadResponse
+from app.modules.files.schemas import FileDeleteResponse, FileUploadResponse
 
 
 class FileUploadService:
@@ -57,6 +57,26 @@ class FileUploadService:
             sha256=document.sha256,
             status=document.status,
         )
+
+    def delete(self, document_id: str, current_user: User) -> FileDeleteResponse:
+        """删除尚未进入对话的上传文件。"""
+
+        document = self.repository.get_document_for_user(document_id=document_id, user_id=current_user.id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        if document.status != "UPLOADED":
+            raise HTTPException(status_code=409, detail="Document already used in a message")
+
+        storage_root = Path(get_settings().file_storage_root)
+        file_objects = self.repository.list_file_objects(document_id=document.id)
+        for file_object in file_objects:
+            # 只删除本地存储文件；后续接对象存储时这里应抽成 StorageService。
+            if file_object.storage_backend == "local":
+                (storage_root / file_object.storage_path).unlink(missing_ok=True)
+
+        self.repository.delete_document_with_objects(document)
+        self.db.commit()
+        return FileDeleteResponse(deleted=True)
 
     def _write_local_file(self, *, document: Document, filename: str, content: bytes) -> str:
         """把原始文件写入本地存储目录，并返回相对存储路径。"""

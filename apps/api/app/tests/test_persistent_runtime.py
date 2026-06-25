@@ -54,6 +54,17 @@ def _auth_header(client: TestClient, username: str = "persist-user") -> dict[str
     return {"Authorization": f"Bearer {login_response.json()['access_token']}"}
 
 
+def _upload_document(client: TestClient, headers: dict[str, str], filename: str = "persist.txt") -> str:
+    """上传测试文件并返回 document_id。"""
+
+    response = client.post(
+        "/api/files/upload",
+        headers=headers,
+        files={"file": (filename, b"persist-file", "text/plain")},
+    )
+    return response.json()["document_id"]
+
+
 def test_database_tables_can_be_created():
     """核心运行时表必须能通过 ORM metadata 创建。"""
 
@@ -75,13 +86,15 @@ def test_post_message_persists_message_agent_run_and_tool_invocations():
     """发送消息后，message、agent_run 和 tool_invocation 必须全部入库。"""
 
     client = _client_with_database()
+    headers = _auth_header(client)
+    document_id = _upload_document(client, headers)
 
     response = client.post(
         "/api/conversations/conv-1/messages",
-        headers=_auth_header(client),
+        headers=headers,
         json={
             "content": "帮我读取并分类这批文件",
-            "attachments": [{"document_id": "doc-1"}],
+            "attachments": [{"document_id": document_id}],
         },
     )
 
@@ -109,13 +122,15 @@ def test_agent_run_query_endpoints_return_persisted_records():
     """AgentRun 查询接口必须返回同一次持久化运行和对应 Tool 调用。"""
 
     client = _client_with_database()
+    headers = _auth_header(client, username="persist-query-user")
+    document_id = _upload_document(client, headers, filename="persist-query.txt")
 
     create_response = client.post(
         "/api/conversations/conv-1/messages",
-        headers=_auth_header(client),
+        headers=headers,
         json={
             "content": "帮我读取并分类这批文件",
-            "attachments": [{"document_id": "doc-1"}],
+            "attachments": [{"document_id": document_id}],
         },
     )
     agent_run_id = create_response.json()["agent_run"]["agent_run_id"]

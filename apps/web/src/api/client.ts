@@ -78,6 +78,22 @@ export async function uploadFile(token: string, file: File): Promise<UploadedFil
   return data as UploadedFile;
 }
 
+export async function deleteUploadedFile(token: string, documentId: string): Promise<void> {
+  // 发送前删除会同时删除后端 Document、FileObject 和本地存储文件。
+  const response = await fetch(`${API_BASE_URL}/files/${documentId}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = data?.detail ?? data?.error?.message ?? '删除失败';
+    throw new ApiError(response.status, String(message));
+  }
+}
+
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   // 统一封装 fetch，确保所有受保护请求都通过同一处追加 Bearer token。
   const response = await fetch(`${API_BASE_URL}${path}`, {
