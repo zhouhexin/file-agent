@@ -30,30 +30,29 @@ textarea {
 
 .auth-shell {
   display: flex;
-  min-height: 100vh;
+  min-height: 100dvh;
   align-items: center;
   flex-direction: column;
   justify-content: center;
-  overflow: hidden;
-  min-height: 100vh;
-  padding: 72px 24px 34px;
+  overflow-y: auto;
+  padding: 34px 20px 22px;
   background:
     linear-gradient(135deg, rgb(239 246 255 / 0.96), rgb(247 251 255 / 0.98) 48%, rgb(236 247 255 / 0.96)),
     #eef6ff;
 }
 
 .auth-header {
-  margin-bottom: 54px;
+  margin-bottom: 24px;
   text-align: center;
 }
 
 .school-mark {
   display: grid;
-  width: 88px;
-  height: 88px;
-  margin: 0 auto 26px;
+  width: 58px;
+  height: 58px;
+  margin: 0 auto 14px;
   place-items: center;
-  border-radius: 24px;
+  border-radius: 16px;
   background: linear-gradient(135deg, #2348bf, #2d66f0);
   box-shadow: 0 18px 36px rgb(45 102 240 / 0.22);
   color: #ffffff;
@@ -62,22 +61,22 @@ textarea {
 .auth-header h1 {
   margin: 0;
   color: #17233d;
-  font-size: 32px;
+  font-size: 24px;
   font-weight: 800;
   letter-spacing: 0;
 }
 
 .auth-header p {
-  margin: 10px 0 0;
+  margin: 6px 0 0;
   color: #9aaac0;
-  font-size: 18px;
+  font-size: 14px;
   font-weight: 700;
 }
 
 .auth-panel {
-  width: min(760px, 100%);
+  width: min(560px, 100%);
   border: 1px solid rgb(213 224 244 / 0.9);
-  border-radius: 28px;
+  border-radius: 20px;
   background: #ffffff;
   box-shadow: 0 20px 54px rgb(44 76 128 / 0.14);
   overflow: hidden;
@@ -129,9 +128,9 @@ textarea {
   background: transparent;
   color: #9aaac0;
   cursor: pointer;
-  font-size: 24px;
+  font-size: 18px;
   font-weight: 800;
-  padding: 28px 12px 30px;
+  padding: 18px 12px 19px;
 }
 
 .segmented-control button.active {
@@ -157,13 +156,14 @@ textarea {
 }
 
 .auth-form {
-  padding: 48px 52px 34px;
+  gap: 12px;
+  padding: 28px 38px 24px;
 }
 
 .auth-hint {
-  margin: 0 0 12px;
+  margin: 0 0 8px;
   color: #90a3bf;
-  font-size: 20px;
+  font-size: 15px;
   font-weight: 800;
 }
 
@@ -185,21 +185,21 @@ textarea {
 }
 
 .auth-form label {
-  gap: 12px;
+  gap: 8px;
   color: #6d7f99;
-  font-size: 22px;
+  font-size: 16px;
   font-weight: 800;
 }
 
 .auth-form input {
-  min-height: 84px;
+  min-height: 56px;
   border: 2px solid #d8e2f5;
-  border-radius: 16px;
+  border-radius: 12px;
   background: #f6f8fd;
   color: #17233d;
-  font-size: 22px;
+  font-size: 16px;
   font-weight: 700;
-  padding: 0 30px;
+  padding: 0 20px;
 }
 
 .auth-form input::placeholder {
@@ -217,7 +217,7 @@ textarea {
   background: transparent;
   color: #2563eb;
   cursor: pointer;
-  font-size: 20px;
+  font-size: 15px;
   font-weight: 800;
   padding: 0;
 }
@@ -227,16 +227,16 @@ textarea {
 }
 
 .password-field input {
-  padding-right: 78px;
+  padding-right: 56px;
 }
 
 .password-toggle {
   position: absolute;
   top: 50%;
-  right: 24px;
+  right: 14px;
   display: grid;
-  width: 40px;
-  height: 40px;
+  width: 32px;
+  height: 32px;
   place-items: center;
   transform: translateY(-50%);
   border: 0;
@@ -271,12 +271,12 @@ textarea:focus {
 }
 
 .auth-submit {
-  min-height: 78px;
-  margin-top: 24px;
-  border-radius: 16px;
+  min-height: 56px;
+  margin-top: 14px;
+  border-radius: 12px;
   background: linear-gradient(135deg, #244bbf, #2f6bf2);
   box-shadow: 0 14px 26px rgb(45 102 240 / 0.24);
-  font-size: 24px;
+  font-size: 17px;
 }
 
 .primary-button:disabled {
@@ -303,21 +303,21 @@ textarea:focus {
 
 .security-note {
   display: flex;
-  min-height: 66px;
+  min-height: 48px;
   align-items: center;
-  gap: 14px;
-  margin: 0 52px 50px;
+  gap: 10px;
+  margin: 0 38px 30px;
   border: 2px solid #cfe2ff;
-  border-radius: 16px;
+  border-radius: 12px;
   background: #eef7ff;
   color: #3a74d9;
-  font-size: 20px;
+  font-size: 15px;
   font-weight: 800;
-  padding: 0 24px;
+  padding: 0 18px;
 }
 
 .auth-footer {
-  margin-top: 34px;
+  margin-top: 18px;
   color: #b0bfd2;
   text-align: center;
 }
@@ -325,19 +325,19 @@ textarea:focus {
 .auth-footer nav {
   display: flex;
   justify-content: center;
-  gap: 30px;
+  gap: 22px;
 }
 
 .auth-footer a {
   color: inherit;
-  font-size: 20px;
+  font-size: 15px;
   font-weight: 800;
   text-decoration: none;
 }
 
 .auth-footer p {
-  margin: 18px 0 0;
-  font-size: 18px;
+  margin: 10px 0 0;
+  font-size: 13px;
   font-weight: 700;
 }
 
@@ -476,50 +476,50 @@ textarea:focus {
 
 @media (max-width: 640px) {
   .auth-shell {
-    padding: 36px 14px 24px;
+    padding: 22px 14px 18px;
   }
 
   .auth-header {
-    margin-bottom: 28px;
+    margin-bottom: 18px;
   }
 
   .school-mark {
-    width: 68px;
-    height: 68px;
-    margin-bottom: 18px;
-    border-radius: 18px;
+    width: 52px;
+    height: 52px;
+    margin-bottom: 12px;
+    border-radius: 14px;
   }
 
   .auth-header h1 {
-    font-size: 26px;
+    font-size: 22px;
   }
 
   .auth-header p {
-    font-size: 15px;
+    font-size: 13px;
   }
 
   .auth-panel {
-    border-radius: 22px;
+    border-radius: 18px;
   }
 
   .segmented-control button {
-    font-size: 18px;
-    padding: 20px 8px 22px;
+    font-size: 16px;
+    padding: 16px 8px 17px;
   }
 
   .auth-form {
-    padding: 30px 20px 24px;
+    padding: 22px 18px 20px;
   }
 
   .auth-hint,
   .auth-form label {
-    font-size: 17px;
+    font-size: 15px;
   }
 
   .auth-form input {
-    min-height: 60px;
+    min-height: 52px;
     border-radius: 14px;
-    font-size: 17px;
+    font-size: 15px;
     padding: 0 18px;
   }
 
@@ -528,25 +528,25 @@ textarea:focus {
   }
 
   .auth-submit {
-    min-height: 58px;
-    font-size: 18px;
+    min-height: 52px;
+    font-size: 16px;
   }
 
   .security-note {
     min-height: auto;
-    margin: 0 20px 28px;
+    margin: 0 18px 20px;
     align-items: flex-start;
-    font-size: 15px;
-    padding: 14px 16px;
+    font-size: 13px;
+    padding: 12px 14px;
   }
 
   .auth-footer nav {
-    gap: 18px;
+    gap: 14px;
   }
 
   .auth-footer a,
   .auth-footer p {
-    font-size: 15px;
+    font-size: 13px;
   }
 
   .topbar {
