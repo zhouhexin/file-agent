@@ -68,6 +68,7 @@ def test_database_tables_can_be_created():
     assert Message.__tablename__ == "messages"
     assert AgentRun.__tablename__ == "agent_runs"
     assert ToolInvocation.__tablename__ == "tool_invocations"
+    assert ToolInvocation.__table__.c.changeset_id.type.length >= 100
 
 
 def test_post_message_persists_message_agent_run_and_tool_invocations():

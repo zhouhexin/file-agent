@@ -5,15 +5,17 @@ import {
   GraduationCap,
   LogOut,
   MessageSquare,
+  Paperclip,
   Send,
   ShieldCheck,
+  Trash2,
   UserRound,
 } from 'lucide-react';
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from 'react';
 
-import { ApiError, getCurrentUser, loginUser, registerUser, sendAgentMessage } from './api/client';
+import { ApiError, getCurrentUser, loginUser, registerUser, sendAgentMessage, uploadFile } from './api/client';
 import { clearToken, readToken, saveToken } from './auth/storage';
-import type { SendMessageResponse, User } from './types';
+import type { SendMessageResponse, UploadedFile, User } from './types';
 
 type AuthMode = 'login' | 'register';
 
@@ -82,6 +84,7 @@ export function App() {
 function AuthPage({ onLogin }: { onLogin: (token: string, user: User) => void }) {
   const [mode, setMode] = useState<AuthMode>('login');
   const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [passwordVisible, setPasswordVisible] = useState(false);
@@ -98,7 +101,7 @@ function AuthPage({ onLogin }: { onLogin: (token: string, user: User) => void })
     try {
       if (mode === 'register') {
         // 注册成功后不自动登录，避免用户混淆注册和登录两个动作。
-        await registerUser({ username, password, display_name: displayName });
+        await registerUser({ username, password, display_name: displayName, email: email || undefined });
         setInfo('注册成功，请登录。');
         setMode('login');
         return;
@@ -155,15 +158,27 @@ function AuthPage({ onLogin }: { onLogin: (token: string, user: User) => void })
             />
           </label>
           {mode === 'register' ? (
-            <label>
-              显示名称
-              <input
-                value={displayName}
-                onChange={(event) => setDisplayName(event.target.value)}
-                autoComplete="name"
-                placeholder="请输入姓名"
-              />
-            </label>
+            <>
+              <label>
+                邮箱
+                <input
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  autoComplete="email"
+                  placeholder="请输入邮箱"
+                  type="email"
+                />
+              </label>
+              <label>
+                显示名称
+                <input
+                  value={displayName}
+                  onChange={(event) => setDisplayName(event.target.value)}
+                  autoComplete="name"
+                  placeholder="请输入姓名"
+                />
+              </label>
+            </>
           ) : null}
           <label className="password-label">
             <span>
@@ -232,9 +247,11 @@ function ChatPage({
   onLogout: () => void;
 }) {
   const [message, setMessage] = useState('帮我读取并分类这批文件');
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [response, setResponse] = useState<SendMessageResponse | null>(null);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [uploading, setUploading] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -243,13 +260,46 @@ function ChatPage({
 
     try {
       // conversation id 先固定为浏览器调试用会话，后续接会话列表后再由用户选择。
-      const result = await sendAgentMessage(token, 'web-chat', message);
+      const result = await sendAgentMessage(
+        token,
+        'web-chat',
+        message,
+        uploadedFiles.map((file) => file.document_id),
+      );
       setResponse(result);
     } catch (err) {
       setError(formatError(err));
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+    // 选择文件后立即上传，发送消息时只引用后端返回的 document_id。
+    const files = Array.from(event.target.files ?? []);
+    if (files.length === 0) {
+      return;
+    }
+
+    setError('');
+    setUploading(true);
+    try {
+      const results: UploadedFile[] = [];
+      for (const file of files) {
+        results.push(await uploadFile(token, file));
+      }
+      setUploadedFiles((current) => [...current, ...results]);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setUploading(false);
+      event.target.value = '';
+    }
+  }
+
+  function removeUploadedFile(documentId: string) {
+    // 当前后端还没有删除文件接口，这里只移除本次消息附件引用。
+    setUploadedFiles((current) => current.filter((file) => file.document_id !== documentId));
   }
 
   return (
@@ -282,13 +332,41 @@ function ChatPage({
               rows={4}
               required
             />
-            <button className="primary-button send-button" disabled={submitting} type="submit">
-              <Send size={18} />
-              {submitting ? '发送中...' : '发送'}
-            </button>
+            <div className="composer-actions">
+              <label className="file-picker">
+                <Paperclip size={18} />
+                <span>{uploading ? '上传中...' : '选择文件'}</span>
+                <input disabled={uploading} multiple type="file" onChange={handleFileChange} />
+              </label>
+              <button className="primary-button send-button" disabled={submitting || uploading} type="submit">
+                <Send size={18} />
+                {submitting ? '发送中...' : '发送'}
+              </button>
+            </div>
           </form>
 
           {error ? <p className="form-message error">{error}</p> : null}
+
+          {uploadedFiles.length > 0 ? (
+            <div className="uploaded-files">
+              {uploadedFiles.map((file) => (
+                <div className="uploaded-file" key={file.document_id}>
+                  <div>
+                    <strong>{file.filename}</strong>
+                    <span>{formatFileSize(file.size_bytes)} · {file.status}</span>
+                  </div>
+                  <button
+                    className="icon-button"
+                    type="button"
+                    onClick={() => removeUploadedFile(file.document_id)}
+                    title="移除附件"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
 
           {response ? (
             <div className="result-panel">
@@ -312,6 +390,17 @@ function ChatPage({
       </section>
     </main>
   );
+}
+
+function formatFileSize(sizeBytes: number): string {
+  // 文件大小只用于界面展示，后端仍保存精确字节数。
+  if (sizeBytes < 1024) {
+    return `${sizeBytes} B`;
+  }
+  if (sizeBytes < 1024 * 1024) {
+    return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(sizeBytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

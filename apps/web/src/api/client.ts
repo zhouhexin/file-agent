@@ -1,4 +1,4 @@
-import type { SendMessageResponse, TokenResponse, User } from '../types';
+import type { SendMessageResponse, TokenResponse, UploadedFile, User } from '../types';
 
 // API 地址集中管理，后续部署时只需要调整 VITE_API_BASE_URL。
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000/api';
@@ -22,6 +22,7 @@ export async function registerUser(payload: {
   username: string;
   password: string;
   display_name: string;
+  email?: string;
 }): Promise<User> {
   // 注册只返回用户信息，不自动保存 token，避免用户误以为已登录。
   return request<User>('/auth/register', { body: payload });
@@ -44,15 +45,37 @@ export async function sendAgentMessage(
   token: string,
   conversationId: string,
   content: string,
+  documentIds: string[] = [],
 ): Promise<SendMessageResponse> {
-  // 当前还没有真实文件上传，先使用占位 document_id 验证前后端 AgentRun 链路。
+  // 消息附件只传 document_id，真实文件内容已经通过上传接口持久化。
   return request<SendMessageResponse>(`/conversations/${conversationId}/messages`, {
     token,
     body: {
       content,
-      attachments: [{ document_id: 'doc-1' }],
+      attachments: documentIds.map((documentId) => ({ document_id: documentId })),
     },
   });
+}
+
+export async function uploadFile(token: string, file: File): Promise<UploadedFile> {
+  // 文件上传必须使用 FormData，不能复用 JSON 请求封装。
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const response = await fetch(`${API_BASE_URL}/files/upload`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    body: formData,
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = data?.detail ?? data?.error?.message ?? '上传失败';
+    throw new ApiError(response.status, String(message));
+  }
+  return data as UploadedFile;
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {

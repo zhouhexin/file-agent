@@ -163,8 +163,8 @@ class ToolInvocation(Base):
     input_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     output_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
-    changeset_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
-    operation_plan_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    changeset_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    operation_plan_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 

@@ -37,6 +37,15 @@ export type ToolInvocation = {
   operation_plan_id: string | null;
 };
 
+export type UploadedFile = {
+  document_id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  sha256: string;
+  status: string;
+};
+
 export type SendMessageResponse = {
   message: {
     id: string;
