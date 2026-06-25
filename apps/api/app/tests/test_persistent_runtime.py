@@ -40,6 +40,20 @@ def _client_with_database() -> TestClient:
     return TestClient(app)
 
 
+def _auth_header(client: TestClient, username: str = "persist-user") -> dict[str, str]:
+    """注册并登录测试用户，返回 Authorization header。"""
+
+    client.post(
+        "/api/auth/register",
+        json={"username": username, "password": "password123", "display_name": username},
+    )
+    login_response = client.post(
+        "/api/auth/login",
+        json={"username": username, "password": "password123"},
+    )
+    return {"Authorization": f"Bearer {login_response.json()['access_token']}"}
+
+
 def test_database_tables_can_be_created():
     """核心运行时表必须能通过 ORM metadata 创建。"""
 
@@ -63,6 +77,7 @@ def test_post_message_persists_message_agent_run_and_tool_invocations():
 
     response = client.post(
         "/api/conversations/conv-1/messages",
+        headers=_auth_header(client),
         json={
             "content": "帮我读取并分类这批文件",
             "attachments": [{"document_id": "doc-1"}],
@@ -96,6 +111,7 @@ def test_agent_run_query_endpoints_return_persisted_records():
 
     create_response = client.post(
         "/api/conversations/conv-1/messages",
+        headers=_auth_header(client),
         json={
             "content": "帮我读取并分类这批文件",
             "attachments": [{"document_id": "doc-1"}],

@@ -36,6 +36,7 @@ class ConversationMessage(BaseModel):
 
     id: str
     conversation_id: str
+    user_id: str
     role: str
     content: str
     attachments: List[MessageAttachment]

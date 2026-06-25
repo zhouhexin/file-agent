@@ -16,6 +16,9 @@ class Settings(BaseModel):
 
     database_url: str = "sqlite+pysqlite:///./storage/file_agent_dev.db"
     auto_create_tables: bool = True
+    jwt_secret_key: str = "file-agent-dev-secret"
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60 * 24
 
 
 @lru_cache
@@ -25,4 +28,12 @@ def get_settings() -> Settings:
     return Settings(
         database_url=os.getenv("DATABASE_URL", Settings().database_url),
         auto_create_tables=os.getenv("AUTO_CREATE_TABLES", "true").lower() == "true",
+        jwt_secret_key=os.getenv("JWT_SECRET_KEY", Settings().jwt_secret_key),
+        jwt_algorithm=os.getenv("JWT_ALGORITHM", Settings().jwt_algorithm),
+        access_token_expire_minutes=int(
+            os.getenv(
+                "ACCESS_TOKEN_EXPIRE_MINUTES",
+                str(Settings().access_token_expire_minutes),
+            ),
+        ),
     )

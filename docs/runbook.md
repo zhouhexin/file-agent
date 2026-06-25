@@ -19,14 +19,14 @@ python3 -m pytest
 当前期望结果：
 
 ```text
-12 passed
+20 passed
 ```
 
 如果出现 `urllib3` 或 `LangChainPendingDeprecationWarning`，目前属于环境兼容警告，不影响现有测试结果。
 
 ## 3. 数据库
 
-当前后端已经持久化 message、AgentRun 和 ToolInvocation。
+当前后端已经持久化 user、default workspace、message、AgentRun 和 ToolInvocation。
 
 默认本地开发库：
 
@@ -50,6 +50,8 @@ python3 -m alembic -c apps/api/alembic.ini upgrade head
 ```
 
 当前开发阶段 `AUTO_CREATE_TABLES` 默认为 `true`，用于让本地原型服务直接启动。正式环境应设置为 `false` 并使用 Alembic migration。
+
+如果本地旧 SQLite 开发库缺少新字段，可以执行 migration；仍有 schema 冲突时可以删除 `storage/file_agent_dev.db` 后重新启动服务。
 
 ## 4. 启动后端服务
 
@@ -87,11 +89,35 @@ curl http://127.0.0.1:8000/api/health
 curl http://127.0.0.1:8000/api/agent/tools
 ```
 
+注册用户：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"zhangsan","password":"password123","display_name":"张三"}'
+```
+
+登录并获取 token：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"zhangsan","password":"password123"}'
+```
+
+查看当前用户：
+
+```bash
+curl http://127.0.0.1:8000/api/auth/me \
+  -H 'Authorization: Bearer <access_token>'
+```
+
 发送用户消息并启动一次持久化 LangGraph AgentRun：
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/conversations/conv-1/messages \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <access_token>' \
   -d '{"content":"帮我读取并分类这批文件","attachments":[{"document_id":"doc-1"}]}'
 ```
 
@@ -99,8 +125,10 @@ curl -X POST http://127.0.0.1:8000/api/conversations/conv-1/messages \
 
 ```text
 message.role = user
+message.user_id = 当前登录用户 id
 agent_run.status = COMPLETED
 agent_run.intent = CLASSIFY_FILES
+agent_run.user_id = 当前登录用户 id
 tool_invocations = document-convert, metadata-extract, multi-label-classify, change-report
 ```
 
@@ -121,6 +149,7 @@ curl http://127.0.0.1:8000/api/agent-runs/<agent_run_id>/tool-invocations
 ```bash
 curl -X POST http://127.0.0.1:8000/api/conversations/conv-1/messages \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <access_token>' \
   -d '{"content":"帮我读取文件","attachments":[{"filename":"bad.pdf"}]}'
 ```
 
@@ -129,9 +158,9 @@ curl -X POST http://127.0.0.1:8000/api/conversations/conv-1/messages \
 ## 6. 当前限制
 
 - 当前接口不接真实大模型，Planner 使用 `DeterministicPlanner`。
-- 当前已持久化 message、AgentRun 和 ToolInvocation，但还没有接完整用户、workspace、文件、ChangeSet 和 OperationPlan 表。
+- 当前已持久化 user、default workspace、message、AgentRun 和 ToolInvocation，但还没有接文件、ChangeSet 和 OperationPlan 表。
 - 当前 Tool handler 是结构化占位实现，不读取真实文件，不写真实文件，不做真实解析、分类或检索。
-- 当前没有鉴权，`user_id` 使用占位值 `user-memory`。
+- 当前已有最小 JWT 鉴权，但没有 refresh token、复杂 RBAC、ACL 或 admin 权限体系。
 
 ## 7. 维护规则
 

@@ -6,6 +6,7 @@ Service 通过仓库写入 message，避免 HTTP 路由或 AgentRuntimeService �
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
+from fastapi import HTTPException
 
 from app.db.models import Conversation, Message
 from app.modules.conversations.schemas import ConversationMessage, MessageAttachment
@@ -27,6 +28,8 @@ class ConversationRepository:
 
         conversation = self.db.get(Conversation, conversation_id)
         if conversation is not None:
+            if conversation.user_id != user_id:
+                raise HTTPException(status_code=403, detail="Conversation belongs to another user")
             return conversation
         conversation = Conversation(id=conversation_id, user_id=user_id, title="")
         self.db.add(conversation)
@@ -61,6 +64,7 @@ class ConversationRepository:
         return ConversationMessage(
             id=message.id,
             conversation_id=message.conversation_id,
+            user_id=message.user_id,
             role=message.role,
             content=message.content,
             attachments=[

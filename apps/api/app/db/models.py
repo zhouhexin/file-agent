@@ -37,6 +37,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     display_name: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     role: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
+    default_workspace_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 

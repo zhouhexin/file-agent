@@ -206,6 +206,13 @@ alter table users
   on delete set null;
 ```
 
+Implementation note:
+
+```text
+当前 SQLite 兼容 migration 先添加 default_workspace_id 字段，不单独 ALTER 添加外键约束；
+PostgreSQL 生产 migration 可以在后续收紧该约束。
+```
+
 Indexes:
 
 ```sql

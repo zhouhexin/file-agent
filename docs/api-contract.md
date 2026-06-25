@@ -112,7 +112,8 @@ Response:
   "id": "user-uuid",
   "username": "zhangsan",
   "display_name": "张三",
-  "role": "user"
+  "role": "user",
+  "default_workspace_id": "workspace-uuid"
 }
 ```
 
@@ -141,7 +142,8 @@ Response:
     "id": "user-uuid",
     "username": "zhangsan",
     "display_name": "张三",
-    "role": "user"
+    "role": "user",
+    "default_workspace_id": "workspace-uuid"
   }
 }
 ```
@@ -168,6 +170,12 @@ Response:
 
 ```text
 POST /api/auth/logout
+```
+
+Current MVP status:
+
+```text
+not implemented yet; client can drop token locally
 ```
 
 Response:
@@ -319,6 +327,12 @@ POST /api/conversations/{conversation_id}/messages
 
 This is the primary `/chat` entrypoint.
 
+Authentication:
+
+```http
+Authorization: Bearer <access_token>
+```
+
 Request:
 
 ```json
@@ -349,6 +363,7 @@ Response:
   "message": {
     "id": "message-uuid",
     "conversation_id": "conversation-uuid",
+    "user_id": "user-uuid",
     "role": "user",
     "content": "帮我读取并分类刚上传的文件。",
     "attachments": [

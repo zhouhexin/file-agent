@@ -24,6 +24,8 @@ python3 -m alembic -c apps/api/alembic.ini upgrade head
 PYTHONPATH=apps/api python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
+消息接口需要先注册、登录并携带 `Authorization: Bearer <access_token>`。示例见 `docs/runbook.md`。
+
 当前服务地址：
 
 ```text
