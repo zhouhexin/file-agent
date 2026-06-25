@@ -1,0 +1,16 @@
+# 本地 PostgreSQL + pgvector 服务；当前后端默认可用 SQLite 开发库，设置 DATABASE_URL 后可切到此服务。
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: file-agent-postgres
+    environment:
+      POSTGRES_DB: file_agent
+      POSTGRES_USER: file_agent
+      POSTGRES_PASSWORD: file_agent_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - file_agent_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  file_agent_postgres_data:
