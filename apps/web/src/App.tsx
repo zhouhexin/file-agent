@@ -1,4 +1,14 @@
-import { LogOut, MessageSquare, Send, UserRound } from 'lucide-react';
+import {
+  ArrowRight,
+  Eye,
+  EyeOff,
+  GraduationCap,
+  LogOut,
+  MessageSquare,
+  Send,
+  ShieldCheck,
+  UserRound,
+} from 'lucide-react';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 
 import { ApiError, getCurrentUser, loginUser, registerUser, sendAgentMessage } from './api/client';
@@ -74,6 +84,7 @@ function AuthPage({ onLogin }: { onLogin: (token: string, user: User) => void })
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
+  const [passwordVisible, setPasswordVisible] = useState(false);
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -103,41 +114,43 @@ function AuthPage({ onLogin }: { onLogin: (token: string, user: User) => void })
 
   return (
     <main className="auth-shell">
-      <section className="auth-panel">
-        <div className="brand-block">
-          <div className="brand-mark">
-            <MessageSquare size={24} />
-          </div>
-          <div>
-            <h1>File Agent</h1>
-            <p>面向学工文件工作的智能体入口</p>
-          </div>
+      <header className="auth-header">
+        <div className="school-mark">
+          <GraduationCap size={30} />
         </div>
+        <h1>西安理工大学</h1>
+        <p>文件智能体系统 · v1.0</p>
+      </header>
 
+      <section className="auth-panel">
         <div className="segmented-control" aria-label="认证模式">
           <button
             className={mode === 'login' ? 'active' : ''}
             type="button"
             onClick={() => setMode('login')}
           >
-            登录
+            账号登录
           </button>
           <button
             className={mode === 'register' ? 'active' : ''}
             type="button"
             onClick={() => setMode('register')}
           >
-            注册
+            申请注册
           </button>
         </div>
 
         <form className="auth-form" onSubmit={submit}>
+          <p className="auth-hint">
+            {mode === 'login' ? '请使用工号和密码登录' : '请填写账号信息提交注册'}
+          </p>
           <label>
-            用户名
+            工号
             <input
               value={username}
               onChange={(event) => setUsername(event.target.value)}
               autoComplete="username"
+              placeholder="例：2024010001"
               required
             />
           </label>
@@ -148,29 +161,63 @@ function AuthPage({ onLogin }: { onLogin: (token: string, user: User) => void })
                 value={displayName}
                 onChange={(event) => setDisplayName(event.target.value)}
                 autoComplete="name"
+                placeholder="请输入姓名"
               />
             </label>
           ) : null}
-          <label>
-            密码
-            <input
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-              minLength={mode === 'register' ? 6 : 1}
-              type="password"
-              required
-            />
+          <label className="password-label">
+            <span>
+              {mode === 'login' ? '登录密码' : '设置密码'}
+              {mode === 'login' ? (
+                <button className="text-button" type="button">
+                  忘记密码?
+                </button>
+              ) : null}
+            </span>
+            <div className="password-field">
+              <input
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+                minLength={mode === 'register' ? 6 : 1}
+                placeholder={mode === 'login' ? '输入系统密码' : '至少 6 位密码'}
+                type={passwordVisible ? 'text' : 'password'}
+                required
+              />
+              <button
+                className="password-toggle"
+                type="button"
+                onClick={() => setPasswordVisible((visible) => !visible)}
+                title={passwordVisible ? '隐藏密码' : '显示密码'}
+              >
+                {passwordVisible ? <EyeOff size={20} /> : <Eye size={20} />}
+              </button>
+            </div>
           </label>
 
           {error ? <p className="form-message error">{error}</p> : null}
           {info ? <p className="form-message success">{info}</p> : null}
 
-          <button className="primary-button" disabled={submitting} type="submit">
-            {submitting ? '处理中...' : mode === 'login' ? '登录' : '创建账号'}
+          <button className="primary-button auth-submit" disabled={submitting} type="submit">
+            {submitting ? '处理中...' : mode === 'login' ? '安全登录' : '提交注册'}
+            <ArrowRight size={20} />
           </button>
         </form>
+
+        <div className="security-note">
+          <ShieldCheck size={18} />
+          <span>连接已加密 · 请勿在公共设备保存密码</span>
+        </div>
       </section>
+
+      <footer className="auth-footer">
+        <nav aria-label="登录页辅助链接">
+          <a href="#help">使用帮助</a>
+          <a href="#support">技术支持</a>
+          <a href="#privacy">隐私政策</a>
+        </nav>
+        <p>© 2026</p>
+      </footer>
     </main>
   );
 }

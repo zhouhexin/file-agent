@@ -29,19 +29,58 @@ textarea {
 }
 
 .auth-shell {
-  display: grid;
+  display: flex;
   min-height: 100vh;
+  align-items: center;
+  flex-direction: column;
+  justify-content: center;
+  overflow: hidden;
+  min-height: 100vh;
+  padding: 72px 24px 34px;
+  background:
+    linear-gradient(135deg, rgb(239 246 255 / 0.96), rgb(247 251 255 / 0.98) 48%, rgb(236 247 255 / 0.96)),
+    #eef6ff;
+}
+
+.auth-header {
+  margin-bottom: 54px;
+  text-align: center;
+}
+
+.school-mark {
+  display: grid;
+  width: 88px;
+  height: 88px;
+  margin: 0 auto 26px;
   place-items: center;
-  padding: 24px;
+  border-radius: 24px;
+  background: linear-gradient(135deg, #2348bf, #2d66f0);
+  box-shadow: 0 18px 36px rgb(45 102 240 / 0.22);
+  color: #ffffff;
+}
+
+.auth-header h1 {
+  margin: 0;
+  color: #17233d;
+  font-size: 32px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.auth-header p {
+  margin: 10px 0 0;
+  color: #9aaac0;
+  font-size: 18px;
+  font-weight: 700;
 }
 
 .auth-panel {
-  width: min(420px, 100%);
-  border: 1px solid #d8dee6;
-  border-radius: 8px;
+  width: min(760px, 100%);
+  border: 1px solid rgb(213 224 244 / 0.9);
+  border-radius: 28px;
   background: #ffffff;
-  padding: 28px;
-  box-shadow: 0 12px 32px rgb(31 41 51 / 0.08);
+  box-shadow: 0 20px 54px rgb(44 76 128 / 0.14);
+  overflow: hidden;
 }
 
 .brand-block {
@@ -76,32 +115,56 @@ textarea {
 .segmented-control {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 4px;
-  margin-bottom: 20px;
-  border-radius: 8px;
-  background: #edf1f5;
-  padding: 4px;
+  gap: 0;
+  margin-bottom: 0;
+  border-bottom: 1px solid #e1e8f4;
+  background: #ffffff;
+  padding: 0;
 }
 
 .segmented-control button {
+  position: relative;
   border: 0;
-  border-radius: 6px;
+  border-radius: 0;
   background: transparent;
-  color: #52616f;
+  color: #9aaac0;
   cursor: pointer;
-  padding: 10px;
+  font-size: 24px;
+  font-weight: 800;
+  padding: 28px 12px 30px;
 }
 
 .segmented-control button.active {
-  background: #ffffff;
-  color: #0f766e;
-  box-shadow: 0 1px 3px rgb(31 41 51 / 0.12);
+  color: #2256d6;
+  box-shadow: none;
+}
+
+.segmented-control button.active::after {
+  position: absolute;
+  right: 32%;
+  bottom: 0;
+  left: 32%;
+  height: 4px;
+  border-radius: 999px 999px 0 0;
+  background: #2256d6;
+  content: "";
 }
 
 .auth-form,
 .composer {
   display: grid;
   gap: 14px;
+}
+
+.auth-form {
+  padding: 48px 52px 34px;
+}
+
+.auth-hint {
+  margin: 0 0 12px;
+  color: #90a3bf;
+  font-size: 20px;
+  font-weight: 800;
 }
 
 label {
@@ -121,14 +184,75 @@ textarea {
   padding: 11px 12px;
 }
 
+.auth-form label {
+  gap: 12px;
+  color: #6d7f99;
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.auth-form input {
+  min-height: 84px;
+  border: 2px solid #d8e2f5;
+  border-radius: 16px;
+  background: #f6f8fd;
+  color: #17233d;
+  font-size: 22px;
+  font-weight: 700;
+  padding: 0 30px;
+}
+
+.auth-form input::placeholder {
+  color: #98a2b6;
+}
+
+.password-label > span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.text-button {
+  border: 0;
+  background: transparent;
+  color: #2563eb;
+  cursor: pointer;
+  font-size: 20px;
+  font-weight: 800;
+  padding: 0;
+}
+
+.password-field {
+  position: relative;
+}
+
+.password-field input {
+  padding-right: 78px;
+}
+
+.password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 24px;
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  transform: translateY(-50%);
+  border: 0;
+  background: transparent;
+  color: #a7b3c8;
+  cursor: pointer;
+}
+
 textarea {
   resize: vertical;
 }
 
 input:focus,
 textarea:focus {
-  border-color: #0f766e;
-  outline: 3px solid rgb(15 118 110 / 0.14);
+  border-color: #2d66f0;
+  outline: 4px solid rgb(45 102 240 / 0.12);
 }
 
 .primary-button {
@@ -144,6 +268,15 @@ textarea:focus {
   cursor: pointer;
   font-weight: 700;
   padding: 0 16px;
+}
+
+.auth-submit {
+  min-height: 78px;
+  margin-top: 24px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #244bbf, #2f6bf2);
+  box-shadow: 0 14px 26px rgb(45 102 240 / 0.24);
+  font-size: 24px;
 }
 
 .primary-button:disabled {
@@ -166,6 +299,46 @@ textarea:focus {
 .form-message.success {
   background: #ecfdf3;
   color: #047857;
+}
+
+.security-note {
+  display: flex;
+  min-height: 66px;
+  align-items: center;
+  gap: 14px;
+  margin: 0 52px 50px;
+  border: 2px solid #cfe2ff;
+  border-radius: 16px;
+  background: #eef7ff;
+  color: #3a74d9;
+  font-size: 20px;
+  font-weight: 800;
+  padding: 0 24px;
+}
+
+.auth-footer {
+  margin-top: 34px;
+  color: #b0bfd2;
+  text-align: center;
+}
+
+.auth-footer nav {
+  display: flex;
+  justify-content: center;
+  gap: 30px;
+}
+
+.auth-footer a {
+  color: inherit;
+  font-size: 20px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.auth-footer p {
+  margin: 18px 0 0;
+  font-size: 18px;
+  font-weight: 700;
 }
 
 .app-shell {
@@ -302,6 +475,80 @@ textarea:focus {
 }
 
 @media (max-width: 640px) {
+  .auth-shell {
+    padding: 36px 14px 24px;
+  }
+
+  .auth-header {
+    margin-bottom: 28px;
+  }
+
+  .school-mark {
+    width: 68px;
+    height: 68px;
+    margin-bottom: 18px;
+    border-radius: 18px;
+  }
+
+  .auth-header h1 {
+    font-size: 26px;
+  }
+
+  .auth-header p {
+    font-size: 15px;
+  }
+
+  .auth-panel {
+    border-radius: 22px;
+  }
+
+  .segmented-control button {
+    font-size: 18px;
+    padding: 20px 8px 22px;
+  }
+
+  .auth-form {
+    padding: 30px 20px 24px;
+  }
+
+  .auth-hint,
+  .auth-form label {
+    font-size: 17px;
+  }
+
+  .auth-form input {
+    min-height: 60px;
+    border-radius: 14px;
+    font-size: 17px;
+    padding: 0 18px;
+  }
+
+  .text-button {
+    font-size: 15px;
+  }
+
+  .auth-submit {
+    min-height: 58px;
+    font-size: 18px;
+  }
+
+  .security-note {
+    min-height: auto;
+    margin: 0 20px 28px;
+    align-items: flex-start;
+    font-size: 15px;
+    padding: 14px 16px;
+  }
+
+  .auth-footer nav {
+    gap: 18px;
+  }
+
+  .auth-footer a,
+  .auth-footer p {
+    font-size: 15px;
+  }
+
   .topbar {
     align-items: flex-start;
     flex-direction: column;
