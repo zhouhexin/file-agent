@@ -94,6 +94,7 @@ http://127.0.0.1:8000
 ```
 
 message、AgentRun 和 ToolInvocation 会写入当前 `DATABASE_URL` 指向的数据库。
+上传文件会写入 `FILE_STORAGE_ROOT`，默认是 `./storage/uploads`。
 
 ## 5. 启动前端服务
 
@@ -168,7 +169,7 @@ curl http://127.0.0.1:8000/api/agent/tools
 ```bash
 curl -X POST http://127.0.0.1:8000/api/auth/register \
   -H 'Content-Type: application/json' \
-  -d '{"username":"zhangsan","password":"password123","display_name":"张三"}'
+  -d '{"username":"zhangsan","password":"password123","display_name":"张三","email":"zhangsan@example.com"}'
 ```
 
 登录并获取 token：
@@ -184,6 +185,14 @@ curl -X POST http://127.0.0.1:8000/api/auth/login \
 ```bash
 curl http://127.0.0.1:8000/api/auth/me \
   -H 'Authorization: Bearer <access_token>'
+```
+
+上传文件并获取 `document_id`：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/files/upload \
+  -H 'Authorization: Bearer <access_token>' \
+  -F 'file=@/path/to/file.pdf'
 ```
 
 发送用户消息并启动一次持久化 LangGraph AgentRun：

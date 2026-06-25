@@ -15,6 +15,7 @@ from pydantic import BaseModel
 DEFAULT_JWT_SECRET_KEY = "file-agent-dev-secret"
 DEFAULT_JWT_ALGORITHM = "HS256"
 DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
+DEFAULT_FILE_STORAGE_ROOT = "./storage/uploads"
 
 
 class Settings(BaseModel):
@@ -25,6 +26,7 @@ class Settings(BaseModel):
     jwt_secret_key: str = DEFAULT_JWT_SECRET_KEY
     jwt_algorithm: str = DEFAULT_JWT_ALGORITHM
     access_token_expire_minutes: int = DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES
+    file_storage_root: str = DEFAULT_FILE_STORAGE_ROOT
 
 
 def find_dotenv_file() -> Path | None:
@@ -85,4 +87,5 @@ def get_settings() -> Settings:
                 str(DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES),
             ),
         ),
+        file_storage_root=os.getenv("FILE_STORAGE_ROOT", DEFAULT_FILE_STORAGE_ROOT),
     )

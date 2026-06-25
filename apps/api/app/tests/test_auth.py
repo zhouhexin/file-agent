@@ -14,12 +14,18 @@ def test_register_creates_user_and_default_workspace():
 
     response = client.post(
         "/api/auth/register",
-        json={"username": "zhangsan", "password": "password123", "display_name": "张三"},
+        json={
+            "username": "zhangsan",
+            "password": "password123",
+            "display_name": "张三",
+            "email": "zhangsan@example.com",
+        },
     )
 
     assert response.status_code == 200
     data = response.json()
     assert data["username"] == "zhangsan"
+    assert data["email"] == "zhangsan@example.com"
     assert data["display_name"] == "张三"
     assert data["role"] == "user"
     assert data["default_workspace_id"]
@@ -28,6 +34,7 @@ def test_register_creates_user_and_default_workspace():
     try:
         user = db.query(User).filter(User.username == "zhangsan").one()
         workspace = db.get(Workspace, data["default_workspace_id"])
+        assert user.email == "zhangsan@example.com"
         assert user.default_workspace_id == workspace.id
         assert workspace.owner_id == user.id
         assert workspace.is_default is True

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import uuid4
 
-from sqlalchemy import DateTime, ForeignKey, JSON, String, Text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -34,6 +34,7 @@ class User(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    email: Mapped[Optional[str]] = mapped_column(String(255), unique=True, nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     display_name: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     role: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
@@ -90,6 +91,41 @@ class Message(Base):
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
     agent_runs: Mapped[List["AgentRun"]] = relationship(back_populates="message")
+
+
+class Document(Base):
+    """用户上传文件的业务文档记录。"""
+
+    __tablename__ = "documents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    workspace_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=True, index=True)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(120), nullable=False, default="application/octet-stream")
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="UPLOADED")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    file_objects: Mapped[List["FileObject"]] = relationship(back_populates="document")
+
+
+class FileObject(Base):
+    """文件对象表，记录原始文件在存储系统中的位置。"""
+
+    __tablename__ = "file_objects"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    document_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False, index=True)
+    storage_backend: Mapped[str] = mapped_column(String(40), nullable=False, default="local")
+    storage_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    document: Mapped[Document] = relationship(back_populates="file_objects")
 
 
 class AgentRun(Base):

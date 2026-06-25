@@ -31,6 +31,7 @@ class AuthService:
             username=request.username,
             password_hash=hash_password(request.password),
             display_name=request.display_name,
+            email=request.email,
         )
         self.repository.ensure_default_workspace(user)
         self.db.commit()
@@ -59,6 +60,7 @@ class AuthService:
         return UserResponse(
             id=user.id,
             username=user.username,
+            email=user.email,
             display_name=user.display_name,
             role=user.role,
             default_workspace_id=user.default_workspace_id,

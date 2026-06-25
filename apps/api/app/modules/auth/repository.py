@@ -25,11 +25,12 @@ class AuthRepository:
 
         return self.db.get(User, user_id)
 
-    def create_user(self, username: str, password_hash: str, display_name: str) -> User:
+    def create_user(self, username: str, password_hash: str, display_name: str, email: str | None = None) -> User:
         """创建普通用户。"""
 
         user = User(
             username=username,
+            email=email,
             password_hash=password_hash,
             display_name=display_name or username,
             role="user",

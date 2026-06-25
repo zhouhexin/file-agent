@@ -9,6 +9,7 @@ dependencies = [
   "pydantic>=2.13.0",
   "SQLAlchemy>=2.0,<2.1",
   "uvicorn>=0.39.0",
+  "python-multipart>=0.0.20",
 ]
 
 [project.optional-dependencies]

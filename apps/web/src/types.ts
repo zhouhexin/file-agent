@@ -3,6 +3,7 @@
 export type User = {
   id: string;
   username: string;
+  email: string | null;
   display_name: string;
   role: string;
   default_workspace_id: string | null;

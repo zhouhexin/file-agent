@@ -101,7 +101,8 @@ Request:
 {
   "username": "zhangsan",
   "password": "password123",
-  "display_name": "张三"
+  "display_name": "张三",
+  "email": "zhangsan@example.com"
 }
 ```
 
@@ -111,6 +112,7 @@ Response:
 {
   "id": "user-uuid",
   "username": "zhangsan",
+  "email": "zhangsan@example.com",
   "display_name": "张三",
   "role": "user",
   "default_workspace_id": "workspace-uuid"
@@ -141,6 +143,7 @@ Response:
   "user": {
     "id": "user-uuid",
     "username": "zhangsan",
+    "email": "zhangsan@example.com",
     "display_name": "张三",
     "role": "user",
     "default_workspace_id": "workspace-uuid"
@@ -160,6 +163,7 @@ Response:
 {
   "id": "user-uuid",
   "username": "zhangsan",
+  "email": "zhangsan@example.com",
   "display_name": "张三",
   "role": "user",
   "default_workspace_id": "workspace-uuid"
@@ -559,10 +563,10 @@ Response:
 }
 ```
 
-### 7.2 Upload Document To Conversation
+### 7.2 Upload Document
 
 ```text
-POST /api/conversations/{conversation_id}/documents/upload
+POST /api/files/upload
 ```
 
 Content-Type:
@@ -577,26 +581,20 @@ Form fields:
 file: required
 ```
 
-Supported MVP formats:
+Current MVP behavior:
 
 ```text
-pdf
-docx
-xlsx
-txt
-md
-csv
+accept any uploaded file
+format whitelist and virus scanning will be added in later ingest phase
 ```
 
 Behavior:
 
 ```text
-save original file through StorageService
+save original file to FILE_STORAGE_ROOT
 create documents row
-create document_versions row
-create processing_jobs row
-start background parsing
-return document, version, and job ids
+create file_objects row
+return document id for message attachments
 ```
 
 Response:
@@ -604,9 +602,11 @@ Response:
 ```json
 {
   "document_id": "document-uuid",
-  "version_id": "version-uuid",
-  "job_id": "job-uuid",
-  "status": "PROCESSING"
+  "filename": "国家励志奖学金申请表.pdf",
+  "content_type": "application/pdf",
+  "size_bytes": 102400,
+  "sha256": "hex-sha256",
+  "status": "UPLOADED"
 }
 ```
 

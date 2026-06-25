@@ -29,6 +29,7 @@ cd apps/web && npm install && npm run dev
 
 当前后端会自动读取项目根目录 `.env`。本机 `.env` 已配置为 PostgreSQL：`212.64.14.158:5432/fileAgent`，真实密码不提交到 Git。
 后端服务数据库必须使用 PostgreSQL；如果未配置 `DATABASE_URL`，或配置为 SQLite，服务会直接启动失败。
+上传文件默认保存到 `FILE_STORAGE_ROOT=./storage/uploads`。
 
 消息接口需要先注册、登录并携带 `Authorization: Bearer <access_token>`。示例见 `docs/runbook.md`。
 

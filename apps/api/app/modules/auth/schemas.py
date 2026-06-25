@@ -13,6 +13,7 @@ class RegisterRequest(BaseModel):
     username: str = Field(min_length=1, max_length=100)
     password: str = Field(min_length=6)
     display_name: str = ""
+    email: Optional[str] = None
 
 
 class LoginRequest(BaseModel):
@@ -27,6 +28,7 @@ class UserResponse(BaseModel):
 
     id: str
     username: str
+    email: Optional[str]
     display_name: str
     role: str
     default_workspace_id: Optional[str]

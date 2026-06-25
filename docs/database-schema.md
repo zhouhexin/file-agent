@@ -177,6 +177,7 @@ REJECTED
 create table users (
   id uuid primary key default gen_random_uuid(),
   username varchar(100) not null unique,
+  email varchar(255) null unique,
   password_hash varchar(255) not null,
   display_name varchar(100) not null default '',
   role varchar(20) not null default 'user',
@@ -326,21 +327,25 @@ create index tool_invocations_tool_name_idx on tool_invocations(tool_name);
 
 ### 4.8 documents
 
+Current implementation note:
+
+```text
+当前已落地最小上传闭环：documents + file_objects。
+更完整的 document_versions、processing_jobs、artifacts 会在后续解析链路中继续补齐。
+```
+
 ```sql
 create table documents (
   id uuid primary key default gen_random_uuid(),
-  workspace_id uuid not null references workspaces(id) on delete cascade,
-  conversation_id uuid null references conversations(id) on delete set null,
-  owner_id uuid not null references users(id) on delete cascade,
-  title varchar(300) not null,
-  original_filename varchar(500) not null,
-  file_ext varchar(20) not null default '',
-  mime_type varchar(200) not null default 'application/octet-stream',
+  user_id uuid not null references users(id),
+  workspace_id uuid null references workspaces(id),
+  original_filename varchar(255) not null,
+  content_type varchar(120) not null default 'application/octet-stream',
   size_bytes bigint not null default 0,
-  status varchar(30) not null default 'RECEIVED',
+  sha256 varchar(64) not null,
+  status varchar(40) not null default 'UPLOADED',
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  constraint documents_status_check check (status in ('RECEIVED', 'QUARANTINED', 'SCANNING', 'ROUTED', 'PROCESSING', 'READY', 'NEEDS_REVIEW', 'FAILED'))
+  updated_at timestamptz not null default now()
 );
 ```
 
@@ -348,9 +353,22 @@ Indexes:
 
 ```sql
 create index documents_workspace_idx on documents(workspace_id);
-create index documents_owner_idx on documents(owner_id);
-create index documents_conversation_idx on documents(conversation_id);
-create index documents_status_idx on documents(status);
+create index documents_owner_idx on documents(user_id);
+create index documents_sha256_idx on documents(sha256);
+```
+
+### 4.8.1 file_objects
+
+```sql
+create table file_objects (
+  id uuid primary key default gen_random_uuid(),
+  document_id uuid not null references documents(id),
+  storage_backend varchar(40) not null default 'local',
+  storage_path varchar(500) not null,
+  size_bytes bigint not null,
+  sha256 varchar(64) not null,
+  created_at timestamptz not null default now()
+);
 ```
 
 ### 4.9 document_versions

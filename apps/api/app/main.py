@@ -9,6 +9,7 @@ from app.core.database import init_database
 from app.modules.agent.router import agent_runs_router, router as agent_router
 from app.modules.auth.router import router as auth_router
 from app.modules.conversations.router import router as conversations_router
+from app.modules.files.router import router as files_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -38,6 +39,7 @@ app.include_router(agent_router)
 app.include_router(agent_runs_router)
 app.include_router(auth_router)
 app.include_router(conversations_router)
+app.include_router(files_router)
 
 
 @app.get("/api/health")
