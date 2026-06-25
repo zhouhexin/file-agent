@@ -67,9 +67,57 @@ PYTHONPATH=apps/api python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 http://127.0.0.1:8000
 ```
 
-当前没有前端服务。message、AgentRun 和 ToolInvocation 会写入当前 `DATABASE_URL` 指向的数据库。
+message、AgentRun 和 ToolInvocation 会写入当前 `DATABASE_URL` 指向的数据库。
 
-## 5. 当前可用接口
+## 5. 启动前端服务
+
+首次启动前安装依赖：
+
+```bash
+cd apps/web
+npm install
+```
+
+启动前端开发服务：
+
+```bash
+npm run dev
+```
+
+前端地址：
+
+```text
+http://127.0.0.1:5173
+```
+
+Vite 开发端口已固定为 `5173`，不会自动切换到其他端口。如果该端口被占用，请先停止占用进程；确实需要改端口时，必须同步更新 Vite 配置、`VITE_API_BASE_URL` 和后端 CORS 白名单。
+
+前端当前能力：
+
+```text
+注册用户
+登录用户
+保存 access_token 到 localStorage
+启动时调用 /api/auth/me 校验登录态
+进入 /chat
+发送一条消息到 AgentRun
+展示 AgentRun 状态、intent 和 Tool 调用列表
+退出登录
+```
+
+默认 API 地址：
+
+```text
+http://127.0.0.1:8000/api
+```
+
+如需改后端地址，可设置：
+
+```bash
+VITE_API_BASE_URL=http://127.0.0.1:8000/api npm run dev
+```
+
+## 6. 当前可用接口
 
 健康检查：
 
@@ -155,20 +203,22 @@ curl -X POST http://127.0.0.1:8000/api/conversations/conv-1/messages \
 
 当前期望返回 HTTP `422`，因为附件缺少 `document_id`。
 
-## 6. 当前限制
+## 7. 当前限制
 
 - 当前接口不接真实大模型，Planner 使用 `DeterministicPlanner`。
 - 当前已持久化 user、default workspace、message、AgentRun 和 ToolInvocation，但还没有接文件、ChangeSet 和 OperationPlan 表。
 - 当前 Tool handler 是结构化占位实现，不读取真实文件，不写真实文件，不做真实解析、分类或检索。
 - 当前已有最小 JWT 鉴权，但没有 refresh token、复杂 RBAC、ACL 或 admin 权限体系。
+- 当前前端只有最小注册、登录和 Chat 验证页面，没有文件上传、会话列表、admin 页面或正式视觉设计。
 
-## 7. 维护规则
+## 8. 维护规则
 
 以下任一内容发生变化时，必须同步更新本文和 `README.md`：
 
 - 启动命令。
 - 服务端口或 host。
 - Python 环境或依赖安装方式。
+- 前端依赖安装方式或启动命令。
 - 测试命令。
 - 新增或删除可直接调用的接口。
 - 当前限制被解除，例如接入数据库、真实文件解析、大模型 Planner 或鉴权。

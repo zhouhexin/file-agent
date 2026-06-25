@@ -22,6 +22,7 @@ File Agent 不是传统网盘，也不是只会问答的知识库系统。用户
 python3 -m pytest
 python3 -m alembic -c apps/api/alembic.ini upgrade head
 PYTHONPATH=apps/api python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+cd apps/web && npm install && npm run dev
 ```
 
 消息接口需要先注册、登录并携带 `Authorization: Bearer <access_token>`。示例见 `docs/runbook.md`。
@@ -29,8 +30,11 @@ PYTHONPATH=apps/api python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 当前服务地址：
 
 ```text
-http://127.0.0.1:8000
+后端：http://127.0.0.1:8000
+前端：http://127.0.0.1:5173
 ```
+
+前端开发端口固定为 `5173`，如果端口被占用，请先停止占用进程，或同步调整 Vite 端口、`VITE_API_BASE_URL` 和后端 CORS 白名单。
 
 ## MVP 目标
 

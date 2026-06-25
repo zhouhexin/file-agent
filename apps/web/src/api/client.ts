@@ -1,0 +1,75 @@
+import type { SendMessageResponse, TokenResponse, User } from '../types';
+
+// API 地址集中管理，后续部署时只需要调整 VITE_API_BASE_URL。
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000/api';
+
+type RequestOptions = {
+  token?: string | null;
+  body?: unknown;
+};
+
+export class ApiError extends Error {
+  // 保留 HTTP 状态码，页面可据此展示登录失效、重复用户名等不同提示。
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+export async function registerUser(payload: {
+  username: string;
+  password: string;
+  display_name: string;
+}): Promise<User> {
+  // 注册只返回用户信息，不自动保存 token，避免用户误以为已登录。
+  return request<User>('/auth/register', { body: payload });
+}
+
+export async function loginUser(payload: {
+  username: string;
+  password: string;
+}): Promise<TokenResponse> {
+  // 登录成功后由调用方决定如何保存 token。
+  return request<TokenResponse>('/auth/login', { body: payload });
+}
+
+export async function getCurrentUser(token: string): Promise<User> {
+  // 启动时用该接口校验本地 token 是否仍有效。
+  return request<User>('/auth/me', { token });
+}
+
+export async function sendAgentMessage(
+  token: string,
+  conversationId: string,
+  content: string,
+): Promise<SendMessageResponse> {
+  // 当前还没有真实文件上传，先使用占位 document_id 验证前后端 AgentRun 链路。
+  return request<SendMessageResponse>(`/conversations/${conversationId}/messages`, {
+    token,
+    body: {
+      content,
+      attachments: [{ document_id: 'doc-1' }],
+    },
+  });
+}
+
+async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  // 统一封装 fetch，确保所有受保护请求都通过同一处追加 Bearer token。
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: options.body ? 'POST' : 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = data?.detail ?? data?.error?.message ?? '请求失败';
+    throw new ApiError(response.status, String(message));
+  }
+  return data as T;
+}

@@ -30,6 +30,23 @@ def test_get_agent_tools_returns_mvp_catalog():
     assert "confirmed-file-action" in tool_names
 
 
+def test_local_web_origin_is_allowed_for_api_requests():
+    """本地前端开发服务必须可以通过浏览器预检访问后端 API。"""
+
+    client = TestClient(app)
+
+    response = client.options(
+        "/api/auth/login",
+        headers={
+            "Origin": "http://127.0.0.1:5173",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+
+
 def test_planner_returns_declarative_tool_plan():
     """确定性 Planner 返回 Skill 和 Tool 步骤，而不是直接动作。"""
 

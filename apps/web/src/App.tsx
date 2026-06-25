@@ -1,0 +1,292 @@
+import { LogOut, MessageSquare, Send, UserRound } from 'lucide-react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
+
+import { ApiError, getCurrentUser, loginUser, registerUser, sendAgentMessage } from './api/client';
+import { clearToken, readToken, saveToken } from './auth/storage';
+import type { SendMessageResponse, User } from './types';
+
+type AuthMode = 'login' | 'register';
+
+export function App() {
+  const [token, setToken] = useState<string | null>(() => readToken());
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
+  useEffect(() => {
+    // 应用启动时校验本地 token；失败则清除本地登录态，避免页面停留在假登录状态。
+    if (!token) {
+      setAuthChecked(true);
+      return;
+    }
+    getCurrentUser(token)
+      .then(setCurrentUser)
+      .catch(() => {
+        clearToken();
+        setToken(null);
+        setCurrentUser(null);
+      })
+      .finally(() => setAuthChecked(true));
+  }, [token]);
+
+  const route = useMemo(() => {
+    // 当前不用引入路由库，最小实现只根据登录态决定 /login 或 /chat 视图。
+    if (!authChecked) {
+      return 'loading';
+    }
+    return token && currentUser ? 'chat' : 'login';
+  }, [authChecked, currentUser, token]);
+
+  function handleLogin(nextToken: string, user: User) {
+    // 登录成功后保存 token，并进入受保护的 Chat 工作台。
+    saveToken(nextToken);
+    setToken(nextToken);
+    setCurrentUser(user);
+    window.history.replaceState(null, '', '/chat');
+  }
+
+  function handleLogout() {
+    // 当前后端没有 logout 接口，退出登录只清除本地 token。
+    clearToken();
+    setToken(null);
+    setCurrentUser(null);
+    window.history.replaceState(null, '', '/login');
+  }
+
+  if (route === 'loading') {
+    return <div className="screen-center">正在校验登录状态...</div>;
+  }
+
+  if (route === 'login') {
+    return <AuthPage onLogin={handleLogin} />;
+  }
+
+  return (
+    <ChatPage
+      token={token as string}
+      user={currentUser as User}
+      onLogout={handleLogout}
+    />
+  );
+}
+
+function AuthPage({ onLogin }: { onLogin: (token: string, user: User) => void }) {
+  const [mode, setMode] = useState<AuthMode>('login');
+  const [username, setUsername] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [info, setInfo] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError('');
+    setInfo('');
+    setSubmitting(true);
+
+    try {
+      if (mode === 'register') {
+        // 注册成功后不自动登录，避免用户混淆注册和登录两个动作。
+        await registerUser({ username, password, display_name: displayName });
+        setInfo('注册成功，请登录。');
+        setMode('login');
+        return;
+      }
+      const response = await loginUser({ username, password });
+      onLogin(response.access_token, response.user);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="auth-shell">
+      <section className="auth-panel">
+        <div className="brand-block">
+          <div className="brand-mark">
+            <MessageSquare size={24} />
+          </div>
+          <div>
+            <h1>File Agent</h1>
+            <p>面向学工文件工作的智能体入口</p>
+          </div>
+        </div>
+
+        <div className="segmented-control" aria-label="认证模式">
+          <button
+            className={mode === 'login' ? 'active' : ''}
+            type="button"
+            onClick={() => setMode('login')}
+          >
+            登录
+          </button>
+          <button
+            className={mode === 'register' ? 'active' : ''}
+            type="button"
+            onClick={() => setMode('register')}
+          >
+            注册
+          </button>
+        </div>
+
+        <form className="auth-form" onSubmit={submit}>
+          <label>
+            用户名
+            <input
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              autoComplete="username"
+              required
+            />
+          </label>
+          {mode === 'register' ? (
+            <label>
+              显示名称
+              <input
+                value={displayName}
+                onChange={(event) => setDisplayName(event.target.value)}
+                autoComplete="name"
+              />
+            </label>
+          ) : null}
+          <label>
+            密码
+            <input
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+              minLength={mode === 'register' ? 6 : 1}
+              type="password"
+              required
+            />
+          </label>
+
+          {error ? <p className="form-message error">{error}</p> : null}
+          {info ? <p className="form-message success">{info}</p> : null}
+
+          <button className="primary-button" disabled={submitting} type="submit">
+            {submitting ? '处理中...' : mode === 'login' ? '登录' : '创建账号'}
+          </button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function ChatPage({
+  token,
+  user,
+  onLogout,
+}: {
+  token: string;
+  user: User;
+  onLogout: () => void;
+}) {
+  const [message, setMessage] = useState('帮我读取并分类这批文件');
+  const [response, setResponse] = useState<SendMessageResponse | null>(null);
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError('');
+    setSubmitting(true);
+
+    try {
+      // conversation id 先固定为浏览器调试用会话，后续接会话列表后再由用户选择。
+      const result = await sendAgentMessage(token, 'web-chat', message);
+      setResponse(result);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="app-shell">
+      <header className="topbar">
+        <div className="topbar-title">
+          <MessageSquare size={22} />
+          <span>File Agent</span>
+        </div>
+        <div className="user-box">
+          <UserRound size={18} />
+          <span>{user.display_name || user.username}</span>
+          <button className="icon-button" type="button" onClick={onLogout} title="退出登录">
+            <LogOut size={18} />
+          </button>
+        </div>
+      </header>
+
+      <section className="workspace">
+        <div className="chat-column">
+          <div className="section-heading">
+            <h2>对话工作台</h2>
+            <p>会话：web-chat</p>
+          </div>
+
+          <form className="composer" onSubmit={submit}>
+            <textarea
+              value={message}
+              onChange={(event) => setMessage(event.target.value)}
+              rows={4}
+              required
+            />
+            <button className="primary-button send-button" disabled={submitting} type="submit">
+              <Send size={18} />
+              {submitting ? '发送中...' : '发送'}
+            </button>
+          </form>
+
+          {error ? <p className="form-message error">{error}</p> : null}
+
+          {response ? (
+            <div className="result-panel">
+              <div className="result-grid">
+                <Metric label="AgentRun" value={response.agent_run.status} />
+                <Metric label="Intent" value={response.agent_run.intent ?? '-'} />
+                <Metric label="Tools" value={String(response.agent_run.tool_invocations.length)} />
+              </div>
+              <h3>Tool 调用</h3>
+              <ul className="tool-list">
+                {response.agent_run.tool_invocations.map((tool) => (
+                  <li key={tool.id}>
+                    <span>{tool.tool_name}</span>
+                    <strong>{tool.status}</strong>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  // 小指标组件保持固定结构，避免结果区布局随内容变化跳动。
+  return (
+    <div className="metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function formatError(error: unknown): string {
+  // 将 API 错误收敛成用户可读文本，避免直接暴露异常对象。
+  if (error instanceof ApiError) {
+    if (error.status === 401) {
+      return '登录状态无效，请重新登录。';
+    }
+    if (error.status === 409) {
+      return '用户名已存在。';
+    }
+    return error.message;
+  }
+  return '请求失败，请稍后重试。';
+}
