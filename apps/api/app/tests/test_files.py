@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.core import config
-from app.db.models import Document, FileObject
+from app.db.models import Document, DocumentInsight, FileObject
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -41,6 +41,7 @@ def test_upload_file_creates_document_and_file_object(monkeypatch, tmp_path):
     assert data["content_type"] == "application/vnd.ms-excel"
     assert data["size_bytes"] == len(b"student-file-content")
     assert data["status"] == "UPLOADED"
+    assert data["ingest_status"] == "INGESTED"
 
     db = SessionLocal()
     try:
@@ -48,10 +49,49 @@ def test_upload_file_creates_document_and_file_object(monkeypatch, tmp_path):
         assert document is not None
         assert document.original_filename == "student.xlsx"
         assert document.size_bytes == len(b"student-file-content")
+        assert document.ingest_status == "INGESTED"
 
         file_object = db.query(FileObject).filter(FileObject.document_id == document.id).one()
         assert file_object.storage_backend == "local"
         assert (tmp_path / file_object.storage_path).read_bytes() == b"student-file-content"
+        insight = db.query(DocumentInsight).filter(DocumentInsight.document_id == document.id).one()
+        assert "student" in insight.keywords_json
+        assert insight.labels_json
+    finally:
+        db.close()
+        clear_overrides()
+        config.get_settings.cache_clear()
+
+
+def test_upload_duplicate_file_reuses_existing_document(monkeypatch, tmp_path):
+    """同一用户重复上传相同文件时，应复用已有 Document 和处理结果。"""
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
+    config.get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    auth_header = _auth_header(client, username="dedupe-owner")
+
+    first_response = client.post(
+        "/api/files/upload",
+        headers=auth_header,
+        files={"file": ("first.txt", b"same-content", "text/plain")},
+    )
+    second_response = client.post(
+        "/api/files/upload",
+        headers=auth_header,
+        files={"file": ("second.txt", b"same-content", "text/plain")},
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert second_response.json()["document_id"] == first_response.json()["document_id"]
+    assert second_response.json()["deduplicated"] is True
+
+    db = SessionLocal()
+    try:
+        assert db.query(Document).count() == 1
+        assert db.query(FileObject).count() == 1
+        assert db.query(DocumentInsight).count() == 1
     finally:
         db.close()
         clear_overrides()

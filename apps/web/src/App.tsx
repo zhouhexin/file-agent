@@ -485,7 +485,7 @@ function AttachmentList({
           ) : null}
           <div>
             <strong>{file.filename}</strong>
-            <span>{formatFileSize(file.size_bytes)} · {locked ? '已进入对话' : file.status}</span>
+            <span>{formatFileSize(file.size_bytes)} · {locked ? '已进入对话' : formatUploadStatus(file)}</span>
           </div>
           {!locked && onRemove ? (
             <button
@@ -535,6 +535,23 @@ function formatFileSize(sizeBytes: number): string {
     return `${(sizeBytes / 1024).toFixed(1)} KB`;
   }
   return `${(sizeBytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatUploadStatus(file: UploadedFile): string {
+  // 展示上传和 deterministic ingest 的合并状态，便于用户理解文件是否已完成基础处理。
+  if (file.deduplicated) {
+    return '已存在，复用处理结果';
+  }
+  if (file.ingest_status === 'INGESTED') {
+    return '已处理';
+  }
+  if (file.ingest_status === 'INGESTING') {
+    return '处理中';
+  }
+  if (file.ingest_status === 'FAILED') {
+    return '处理失败';
+  }
+  return file.status;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

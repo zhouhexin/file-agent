@@ -106,6 +106,7 @@ class Document(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="UPLOADED")
+    ingest_status: Mapped[str] = mapped_column(String(40), nullable=False, default="UPLOADED")
     locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     locked_message_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     locked_conversation_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
@@ -113,6 +114,7 @@ class Document(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
     file_objects: Mapped[List["FileObject"]] = relationship(back_populates="document")
+    insights: Mapped[List["DocumentInsight"]] = relationship(back_populates="document")
 
 
 class FileObject(Base):
@@ -129,6 +131,23 @@ class FileObject(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     document: Mapped[Document] = relationship(back_populates="file_objects")
+
+
+class DocumentInsight(Base):
+    """文件固定 ingest 产生的可复用基础洞察。"""
+
+    __tablename__ = "document_insights"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    document_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False, unique=True, index=True)
+    keywords_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    labels_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    extracted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    document: Mapped[Document] = relationship(back_populates="insights")
 
 
 class AgentRun(Base):

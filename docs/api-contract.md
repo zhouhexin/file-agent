@@ -607,7 +607,9 @@ Response:
   "content_type": "application/pdf",
   "size_bytes": 102400,
   "sha256": "hex-sha256",
-  "status": "UPLOADED"
+  "status": "UPLOADED",
+  "ingest_status": "INGESTED",
+  "deduplicated": false
 }
 ```
 

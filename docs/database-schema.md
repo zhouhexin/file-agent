@@ -346,6 +346,7 @@ create table documents (
   size_bytes bigint not null default 0,
   sha256 varchar(64) not null,
   status varchar(40) not null default 'UPLOADED',
+  ingest_status varchar(40) not null default 'UPLOADED',
   locked_at timestamptz null,
   locked_message_id uuid null,
   locked_conversation_id uuid null,
@@ -373,6 +374,21 @@ create table file_objects (
   size_bytes bigint not null,
   sha256 varchar(64) not null,
   created_at timestamptz not null default now()
+);
+```
+
+### 4.8.2 document_insights
+
+```sql
+create table document_insights (
+  id uuid primary key default gen_random_uuid(),
+  document_id uuid not null unique references documents(id),
+  keywords_json jsonb not null default '[]',
+  labels_json jsonb not null default '[]',
+  summary text not null default '',
+  extracted_at timestamptz not null default now(),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 );
 ```
 

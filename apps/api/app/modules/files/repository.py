@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.db.models import Document, FileObject, utcnow
+from app.db.models import Document, DocumentInsight, FileObject, utcnow
 
 
 class FileRepository:
@@ -75,9 +75,53 @@ class FileRepository:
 
         return self.db.query(FileObject).filter(FileObject.document_id == document_id).all()
 
+    def get_existing_document_by_hash(self, *, user_id: str, workspace_id: str | None, sha256: str) -> Document | None:
+        """按用户、工作区和 sha256 查找已有文件。"""
+
+        query = self.db.query(Document).filter(Document.user_id == user_id, Document.sha256 == sha256)
+        if workspace_id is None:
+            query = query.filter(Document.workspace_id.is_(None))
+        else:
+            query = query.filter(Document.workspace_id == workspace_id)
+        return query.order_by(Document.created_at.asc()).first()
+
+    def create_or_update_insight(
+        self,
+        *,
+        document_id: str,
+        keywords: list[str],
+        labels: list[str],
+        summary: str,
+    ) -> DocumentInsight:
+        """创建或更新 deterministic ingest 的基础洞察结果。"""
+
+        insight = (
+            self.db.query(DocumentInsight)
+            .filter(DocumentInsight.document_id == document_id)
+            .one_or_none()
+        )
+        if insight is None:
+            insight = DocumentInsight(
+                document_id=document_id,
+                keywords_json=keywords,
+                labels_json=labels,
+                summary=summary,
+                extracted_at=utcnow(),
+            )
+            self.db.add(insight)
+        else:
+            insight.keywords_json = keywords
+            insight.labels_json = labels
+            insight.summary = summary
+            insight.extracted_at = utcnow()
+        self.db.flush()
+        return insight
+
     def delete_document_with_objects(self, document: Document) -> None:
         """删除 Document 及其 FileObject 记录。"""
 
+        for insight in list(document.insights):
+            self.db.delete(insight)
         for file_object in self.list_file_objects(document.id):
             self.db.delete(file_object)
         self.db.delete(document)

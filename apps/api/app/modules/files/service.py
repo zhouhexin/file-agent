@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 from fastapi import HTTPException, UploadFile
@@ -30,6 +31,13 @@ class FileUploadService:
         filename = Path(file.filename or "uploaded-file").name
         content_type = file.content_type or "application/octet-stream"
         sha256 = hashlib.sha256(content).hexdigest()
+        existing_document = self.repository.get_existing_document_by_hash(
+            user_id=current_user.id,
+            workspace_id=current_user.default_workspace_id,
+            sha256=sha256,
+        )
+        if existing_document is not None:
+            return self._to_upload_response(existing_document, deduplicated=True)
 
         document = self.repository.create_document(
             user_id=current_user.id,
@@ -46,8 +54,13 @@ class FileUploadService:
             size_bytes=len(content),
             sha256=sha256,
         )
+        self._run_deterministic_ingest(document=document, content=content)
         self.db.commit()
         self.db.refresh(document)
+        return self._to_upload_response(document=document, deduplicated=False)
+
+    def _to_upload_response(self, document: Document, deduplicated: bool) -> FileUploadResponse:
+        """把 Document 转换为上传响应。"""
 
         return FileUploadResponse(
             document_id=document.id,
@@ -56,6 +69,8 @@ class FileUploadService:
             size_bytes=document.size_bytes,
             sha256=document.sha256,
             status=document.status,
+            ingest_status=document.ingest_status,
+            deduplicated=deduplicated,
         )
 
     def delete(self, document_id: str, current_user: User) -> FileDeleteResponse:
@@ -87,3 +102,52 @@ class FileUploadService:
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(content)
         return relative_path.as_posix()
+
+    def _run_deterministic_ingest(self, *, document: Document, content: bytes) -> None:
+        """上传后执行固定 ingest：分类并提取关键词信息。"""
+
+        document.ingest_status = "INGESTING"
+        text = content.decode("utf-8", errors="ignore")
+        keywords = self._extract_keywords(text=text, filename=document.original_filename)
+        labels = self._classify_document(filename=document.original_filename, content_type=document.content_type)
+        summary = f"文件 {document.original_filename} 已完成基础处理，识别标签 {', '.join(labels)}。"
+        self.repository.create_or_update_insight(
+            document_id=document.id,
+            keywords=keywords,
+            labels=labels,
+            summary=summary,
+        )
+        document.ingest_status = "INGESTED"
+        self.db.flush()
+
+    @staticmethod
+    def _extract_keywords(*, text: str, filename: str) -> list[str]:
+        """使用确定性规则提取文件名和文本中的关键词。"""
+
+        tokens = re.findall(r"[\w\u4e00-\u9fff]+", f"{filename} {text}".lower())
+        seen: set[str] = set()
+        keywords: list[str] = []
+        for token in tokens:
+            if len(token) < 2 or token in seen:
+                continue
+            seen.add(token)
+            keywords.append(token)
+            if len(keywords) >= 10:
+                break
+        return keywords
+
+    @staticmethod
+    def _classify_document(*, filename: str, content_type: str) -> list[str]:
+        """使用确定性规则生成基础文件分类标签。"""
+
+        lowered_name = filename.lower()
+        labels = ["uploaded-document"]
+        if content_type.startswith("image/"):
+            labels.append("image")
+        elif any(lowered_name.endswith(ext) for ext in [".xls", ".xlsx", ".csv"]):
+            labels.append("spreadsheet")
+        elif any(lowered_name.endswith(ext) for ext in [".pdf", ".doc", ".docx", ".txt", ".md"]):
+            labels.append("text-document")
+        else:
+            labels.append("other-file")
+        return labels

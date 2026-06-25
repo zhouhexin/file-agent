@@ -44,6 +44,8 @@ export type UploadedFile = {
   size_bytes: number;
   sha256: string;
   status: string;
+  ingest_status: string;
+  deduplicated: boolean;
 };
 
 export type SendMessageResponse = {

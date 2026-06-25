@@ -14,6 +14,8 @@ class FileUploadResponse(BaseModel):
     size_bytes: int
     sha256: str
     status: str
+    ingest_status: str
+    deduplicated: bool = False
 
 
 class FileDeleteResponse(BaseModel):
