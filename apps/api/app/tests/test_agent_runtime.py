@@ -166,6 +166,28 @@ def test_safe_snapshot_excludes_runtime_dependencies():
     assert snapshot["planner_mode"] == "llm"
 
 
+def test_runtime_context_builds_fresh_user_scoped_registry():
+    """每次 AgentRun 必须通过 factory 构造用户级 Registry，避免复用旧用户上下文。"""
+
+    calls: list[tuple[object, str]] = []
+
+    def registry_factory(db, user_id):
+        """记录 Registry 构造参数，并返回真实 Registry。"""
+
+        calls.append((db, user_id))
+        return ToolRegistry(db=db, user_id=user_id)
+
+    service = AgentRuntimeService(registry_factory=registry_factory)
+
+    context_a = service._build_runtime_context(db=None, user_id="user-a", planner=None)
+    context_b = service._build_runtime_context(db=None, user_id="user-b", planner=None)
+
+    assert context_a.registry is not context_b.registry
+    assert context_a.registry.user_id == "user-a"
+    assert context_b.registry.user_id == "user-b"
+    assert [item[1] for item in calls] == ["user-a", "user-b"]
+
+
 def test_llm_intent_reads_document_insights_instead_of_reingesting():
     """LLM 理解到用户要看已上传文件信息时，应读取洞察而不是重复上传处理。"""
 

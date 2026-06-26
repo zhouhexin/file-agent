@@ -308,6 +308,7 @@ LangGraph 实现规则：
   - `Persistent Stores`：数据库、对象存储、向量库、图数据库等长期事实存储，保存文件、解析结果、证据、分类、ChangeSet、OperationPlan 和审计记录。
 - `planner`、`registry`、`context_loader`、`llm_intent_service`、数据库 Session、LLM client、API key、HTTP client 等运行对象不得写入 `AgentGraphState`、checkpoint 或 `graph_state_json`。
 - LangGraph 节点需要运行依赖时，必须通过 `AgentRuntimeContext` 或等价的运行时上下文机制获取，不能把服务对象塞进 State。
+- 绑定用户、数据库会话或请求上下文的运行依赖必须通过 factory 在每次 AgentRun 中重新构造；尤其是 Tool Registry 不得作为长期单例复用，避免旧 `user_id` 或旧数据库会话泄漏到新请求。
 - 节点职责必须单一，例如 intake、planning、tool dispatch、async wait、evidence validation、response receipt。
 - Tool 调用必须集中经过 tool-dispatch 节点，不能让各节点绕过白名单直接执行副作用。
 - LangGraph checkpoint 可以第一版先用轻量实现，但接口要保留，后续可接数据库持久化和任务恢复。

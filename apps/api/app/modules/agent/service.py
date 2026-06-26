@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
@@ -23,10 +23,14 @@ from app.modules.llm.service import LLMIntentService
 class AgentRuntimeService:
     """协调 Planner、Tool Registry 和 LangGraph 执行。"""
 
-    def __init__(self, registry: Optional[ToolRegistry] = None, llm_intent_service: Any = None) -> None:
-        """注入 Tool Registry 和 LLM 意图服务，便于测试替换外部模型。"""
+    def __init__(
+        self,
+        registry_factory: Optional[Callable[[Session | None, str], ToolRegistry]] = None,
+        llm_intent_service: Any = None,
+    ) -> None:
+        """注入 Registry 工厂和 LLM 意图服务，避免复用绑定旧用户的 Registry。"""
 
-        self.registry = registry
+        self.registry_factory = registry_factory or _default_registry_factory
         self.llm_intent_service = llm_intent_service or LLMIntentService()
         self.graph = build_agent_graph()
 
@@ -113,7 +117,7 @@ class AgentRuntimeService:
 
         return AgentRuntimeContext(
             planner=planner or DeterministicPlanner(),
-            registry=self.registry or ToolRegistry(db=db, user_id=user_id),
+            registry=self.registry_factory(db, user_id),
             context_loader=AgentContextLoader(db),
             llm_intent_service=self.llm_intent_service,
         )
@@ -153,3 +157,9 @@ class AgentRuntimeService:
             "final_response": None,
             "errors": [],
         }
+
+
+def _default_registry_factory(db: Session | None, user_id: str) -> ToolRegistry:
+    """为每次 AgentRun 创建新的用户级 ToolRegistry。"""
+
+    return ToolRegistry(db=db, user_id=user_id)
