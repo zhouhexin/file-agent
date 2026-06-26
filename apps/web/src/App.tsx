@@ -403,7 +403,7 @@ function ChatPage({
         <div className="chat-column">
           {!hasTurns ? (
             <div className="empty-chat-heading">
-              <h2>今天想处理什么文件？</h2>
+              <h2>有什么我能帮你的吗？</h2>
               <p>上传图片或文件后，直接用自然语言描述你要完成的工作。</p>
             </div>
           ) : (
