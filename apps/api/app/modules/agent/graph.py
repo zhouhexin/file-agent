@@ -8,15 +8,17 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from langgraph.graph import END, StateGraph
+from langgraph.runtime import Runtime
 
 from app.modules.agent.planner import build_plan_from_user_intent
+from app.modules.agent.runtime import AgentRuntimeContext
 from app.modules.agent.state import AgentGraphState
 
 
 def build_agent_graph():
     """编译 MVP LangGraph 工作流。"""
 
-    graph = StateGraph(AgentGraphState)
+    graph = StateGraph(AgentGraphState, context_schema=AgentRuntimeContext)
     graph.add_node("chat_intake", chat_intake)
     graph.add_node("collect_context", collect_context)
     graph.add_node("planning", planning)
@@ -50,26 +52,22 @@ def chat_intake(state: AgentGraphState) -> Dict[str, Any]:
     }
 
 
-def collect_context(state: AgentGraphState) -> Dict[str, Any]:
+def collect_context(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
     """加载 LLM 理解用户需求所需的文件上下文。"""
 
-    context_loader = state.get("context_loader")
-    if context_loader is None:
-        return {"context_documents": []}
     return {
-        "context_documents": context_loader.load_documents(
+        "context_documents": runtime.context.context_loader.load_documents(
             user_id=state["user_id"],
             attachments=state.get("attachments", []),
         )
     }
 
 
-def planning(state: AgentGraphState) -> Dict[str, Any]:
+def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
     """调用 Planner，并且只保存通过校验的声明式计划。"""
 
-    llm_intent_service = state.get("llm_intent_service")
-    if getattr(llm_intent_service, "enabled", False) and not state.get("prefer_explicit_planner", False):
-        intent_plan = llm_intent_service.understand_user_request(
+    if state.get("planner_mode") == "llm":
+        intent_plan = runtime.context.llm_intent_service.understand_user_request(
             message=state["message"],
             attachments=state.get("attachments", []),
             context_documents=state.get("context_documents", []),
@@ -81,8 +79,7 @@ def planning(state: AgentGraphState) -> Dict[str, Any]:
         )
         user_intent_plan = intent_plan.model_dump()
     else:
-        planner = state["planner"]
-        plan = planner.plan(
+        plan = runtime.context.planner.plan(
             conversation_id=state["conversation_id"],
             user_id=state["user_id"],
             message_id=state["message_id"],
@@ -100,10 +97,10 @@ def planning(state: AgentGraphState) -> Dict[str, Any]:
     }
 
 
-def tool_dispatch(state: AgentGraphState) -> Dict[str, Any]:
+def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
     """通过白名单 Registry 执行不需要确认的 Tool 步骤。"""
 
-    registry = state["registry"]
+    registry = runtime.context.registry
     tool_results: List[Dict[str, Any]] = []
     tool_invocations: List[Dict[str, Any]] = []
     operation_plan_id = state.get("operation_plan_id")

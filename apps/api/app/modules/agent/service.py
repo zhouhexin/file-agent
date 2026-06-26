@@ -14,6 +14,7 @@ from app.modules.agent.context import AgentContextLoader
 from app.modules.agent.graph import build_agent_graph
 from app.modules.agent.planner import DeterministicPlanner
 from app.modules.agent.repository import AgentRunRepository
+from app.modules.agent.runtime import AgentRuntimeContext
 from app.modules.agent.state import AgentRunResult, ToolInvocationRecord
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.llm.service import LLMIntentService
@@ -52,35 +53,23 @@ class AgentRuntimeService:
         )
         agent_run_id = run.id if run is not None else str(uuid4())
 
-        registry = self.registry or ToolRegistry(db=db, user_id=user_id)
-        initial_state = {
-            "agent_run_id": agent_run_id,
-            "conversation_id": conversation_id,
-            "user_id": user_id,
-            "message_id": message_id,
-            "message": message,
-            "attachments": attachments or [],
-            "context_documents": [],
-            "user_intent_plan": {},
-            "status": "RECEIVED",
-            "intent": None,
-            "slots": {},
-            "selected_skills": [],
-            "tool_plan": {},
-            "tool_results": [],
-            "tool_invocations": [],
-            "changeset_id": None,
-            "operation_plan_id": None,
-            "final_response": None,
-            "errors": [],
-            "planner": planner or DeterministicPlanner(),
-            "prefer_explicit_planner": planner is not None,
-            "registry": registry,
-            "context_loader": AgentContextLoader(db),
-            "llm_intent_service": self.llm_intent_service,
-        }
+        planner_mode = "deterministic" if planner is not None or not self.llm_intent_service.enabled else "llm"
+        runtime_context = self._build_runtime_context(db=db, user_id=user_id, planner=planner)
+        initial_state = self._build_initial_state(
+            agent_run_id=agent_run_id,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            message_id=message_id,
+            message=message,
+            attachments=attachments or [],
+            planner_mode=planner_mode,
+        )
         try:
-            final_state = self.graph.invoke(initial_state)
+            final_state = self.graph.invoke(
+                initial_state,
+                config={"configurable": {"thread_id": agent_run_id}},
+                context=runtime_context,
+            )
         except Exception as exc:
             if repository is not None and run is not None:
                 repository.mark_failed(run, str(exc))
@@ -112,3 +101,55 @@ class AgentRuntimeService:
             final_response=final_state.get("final_response"),
             errors=final_state.get("errors", []),
         )
+
+    def _build_runtime_context(
+        self,
+        *,
+        db: Session | None,
+        user_id: str,
+        planner: Optional[DeterministicPlanner],
+    ) -> AgentRuntimeContext:
+        """为单次 AgentRun 构造运行时依赖，避免服务对象进入 State。"""
+
+        return AgentRuntimeContext(
+            planner=planner or DeterministicPlanner(),
+            registry=self.registry or ToolRegistry(db=db, user_id=user_id),
+            context_loader=AgentContextLoader(db),
+            llm_intent_service=self.llm_intent_service,
+        )
+
+    def _build_initial_state(
+        self,
+        *,
+        agent_run_id: str,
+        conversation_id: str,
+        user_id: str,
+        message_id: str,
+        message: str,
+        attachments: List[Dict[str, Any]],
+        planner_mode: str,
+    ) -> Dict[str, Any]:
+        """构造只包含可持久化业务状态的 LangGraph 初始 State。"""
+
+        return {
+            "agent_run_id": agent_run_id,
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "message_id": message_id,
+            "message": message,
+            "attachments": attachments,
+            "context_documents": [],
+            "user_intent_plan": {},
+            "planner_mode": planner_mode,
+            "status": "RECEIVED",
+            "intent": None,
+            "slots": {},
+            "selected_skills": [],
+            "tool_plan": {},
+            "tool_results": [],
+            "tool_invocations": [],
+            "changeset_id": None,
+            "operation_plan_id": None,
+            "final_response": None,
+            "errors": [],
+        }

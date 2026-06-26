@@ -23,6 +23,7 @@ class AgentGraphState(TypedDict, total=False):
     attachments: List[Dict[str, Any]]
     context_documents: List[Dict[str, Any]]
     user_intent_plan: Dict[str, Any]
+    planner_mode: str
     status: str
     intent: Optional[str]
     slots: Dict[str, Any]
@@ -34,11 +35,6 @@ class AgentGraphState(TypedDict, total=False):
     operation_plan_id: Optional[str]
     final_response: Optional[str]
     errors: List[str]
-    planner: Any
-    prefer_explicit_planner: bool
-    registry: Any
-    context_loader: Any
-    llm_intent_service: Any
 
 
 class ToolInvocationRecord(BaseModel):

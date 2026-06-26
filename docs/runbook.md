@@ -35,7 +35,7 @@ python3 -m pytest
 当前期望结果：
 
 ```text
-35 passed
+37 passed
 ```
 
 如果出现 `urllib3` 或 `LangChainPendingDeprecationWarning`，目前属于环境兼容警告，不影响现有测试结果。

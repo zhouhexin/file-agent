@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from app.main import app
 from app.modules.llm.schemas import UserIntentPlan
+from app.modules.agent.repository import _safe_graph_state_snapshot
 from app.modules.agent.planner import DeterministicPlanner
 from app.modules.agent.service import AgentRuntimeService
 from app.modules.agent.tool_registry import ToolRegistry, UnknownToolError
@@ -123,6 +124,46 @@ def test_message_starts_langgraph_run_and_records_tool_invocations():
         "change-report",
     ]
     assert result.final_response
+
+
+def test_initial_state_does_not_include_runtime_dependencies():
+    """AgentGraphState 只能保存业务状态，不能保存运行时服务对象。"""
+
+    service = AgentRuntimeService()
+
+    state = service._build_initial_state(
+        agent_run_id="run-1",
+        conversation_id="conv-1",
+        user_id="user-1",
+        message_id="msg-1",
+        message="帮我读取文件",
+        attachments=[{"document_id": "doc-1"}],
+        planner_mode="deterministic",
+    )
+
+    for key in ["planner", "registry", "context_loader", "llm_intent_service", "prefer_explicit_planner"]:
+        assert key not in state
+    assert state["planner_mode"] == "deterministic"
+
+
+def test_safe_snapshot_excludes_runtime_dependencies():
+    """AgentRun 快照不得包含 Planner、Registry、DB Session 或 LLM client 等运行对象。"""
+
+    snapshot = _safe_graph_state_snapshot(
+        {
+            "status": "RUNNING_TOOL",
+            "planner": object(),
+            "registry": object(),
+            "context_loader": object(),
+            "llm_intent_service": object(),
+            "planner_mode": "llm",
+            "tool_plan": {"steps": []},
+        }
+    )
+
+    for key in ["planner", "registry", "context_loader", "llm_intent_service"]:
+        assert key not in snapshot
+    assert snapshot["planner_mode"] == "llm"
 
 
 def test_llm_intent_reads_document_insights_instead_of_reingesting():

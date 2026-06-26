@@ -130,6 +130,7 @@ def _safe_graph_state_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         "agent_run_id": state.get("agent_run_id"),
         "conversation_id": state.get("conversation_id"),
         "message_id": state.get("message_id"),
+        "planner_mode": state.get("planner_mode"),
         "status": state.get("status"),
         "intent": state.get("intent"),
         "slots": state.get("slots", {}),

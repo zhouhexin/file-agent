@@ -13,19 +13,20 @@
 - 已新增 `collect_context`：对话阶段可以加载附件对应的文件上下文和 `document_insights`。
 - 已新增 `read-document-insights` Tool：用户要求总结或查看已上传文件基础信息时，可复用上传阶段 deterministic ingest 的结果。
 - AgentRun 快照已记录 `context_documents` 和 `user_intent_plan`，便于审计和排查模型规划结果。
+- 已新增 `AgentRuntimeContext`：`planner`、`registry`、`context_loader`、`llm_intent_service` 已从 `AgentGraphState` 移出，LangGraph 节点通过 `runtime.context` 获取运行依赖。
 
 ## P0 问题：下一阶段优先处理
 
-### 0. 运行依赖仍混入 AgentGraphState
+### 0. 运行依赖混入 AgentGraphState（已完成第一阶段修复）
 
-当前 `planner`、`registry`、`context_loader`、`llm_intent_service` 等运行依赖仍保存在 `AgentGraphState` 中。
+第一阶段已完成：`planner`、`registry`、`context_loader`、`llm_intent_service` 已从 `AgentGraphState` 中移出，并通过 `AgentRuntimeContext` 传入 LangGraph 节点。
 
-问题：
+仍需长期保持的约束：
 
 - 这些对象不是本次任务的业务事实，不能作为可持久化状态。
 - 它们可能包含数据库会话、模型客户端、配置、缓存或函数引用，不适合 checkpoint、恢复和审计快照。
-- 后续如果接入 LangGraph checkpoint、`interrupt()`、确认后恢复、异步任务或批量 map/reduce，会被运行对象序列化问题阻塞。
-- 当前 `graph_state_json` 需要额外过滤运行对象，长期容易遗漏并造成写库失败或敏感信息泄露。
+- 后续接入 LangGraph checkpoint、`interrupt()`、确认后恢复、异步任务或批量 map/reduce 时，仍必须保持 Runtime Context 与业务 State 分离。
+- `graph_state_json` 仍应使用白名单快照，不得直接持久化完整 State。
 
 改造目标：
 
@@ -40,7 +41,7 @@ Persistent Stores     数据库/对象存储/长期事实
 - `AgentGraphState` 只能保存用户输入、附件引用、上下文摘要、planner_mode、tool_plan、执行结果、错误、业务对象 ID 和最终回复。
 - `AgentRuntimeContext` 保存 Planner、Tool Registry、Context Loader、LLM Intent Service，以及后续的 Storage、Queue、DB Factory、Settings。
 - PostgreSQL、对象存储、向量库、图数据库保存长期业务事实；State 只保存引用 ID 或轻量摘要。
-- 后续应采用 LangGraph Runtime Context，即 `StateGraph(..., context_schema=AgentRuntimeContext)`，节点通过 `runtime.context` 获取依赖。
+- 已采用 LangGraph Runtime Context，即 `StateGraph(..., context_schema=AgentRuntimeContext)`，节点通过 `runtime.context` 获取依赖。
 - `planner`、`registry`、`context_loader`、`llm_intent_service`、`db session`、LLM client、API key 不得写入 State、checkpoint 或 `graph_state_json`。
 
 ### 1. LangGraph 仍是固定线性流程
@@ -247,14 +248,13 @@ change-report         -> ChangeSet / ChangeItem 聚合
 
 ## 建议的下一阶段开发顺序
 
-1. 先将运行依赖移出 `AgentGraphState`，新增 `AgentRuntimeContext`。
-2. 扩展 `AgentGraphState`：增加 `document_results`、步骤状态、结构化 errors。
-3. 新增 `validate_plan` 节点。
-4. 拆分 `tool_dispatch`，引入步骤级执行和结果记录。
-5. 增加条件边：成功、失败、需要确认、需要复核。
-6. 优先实现 `read-document-insights` 的多附件逐文件回执。
-7. 实现 OperationPlan 确认闭环。
-8. 再开始替换真实文件解析、OCR、分类和检索 Tool。
+1. 扩展 `AgentGraphState`：增加 `document_results`、步骤状态、结构化 errors。
+2. 新增 `validate_plan` 节点。
+3. 拆分 `tool_dispatch`，引入步骤级执行和结果记录。
+4. 增加条件边：成功、失败、需要确认、需要复核。
+5. 优先实现 `read-document-insights` 的多附件逐文件回执。
+6. 实现 OperationPlan 确认闭环。
+7. 再开始替换真实文件解析、OCR、分类和检索 Tool。
 
 ## 验收标准
 
