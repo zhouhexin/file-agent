@@ -227,6 +227,44 @@ def test_llm_intent_reads_document_insights_instead_of_reingesting():
     assert "document-convert" not in [item.tool_name for item in result.tool_invocations]
 
 
+def test_llm_intent_extracts_document_text():
+    """LLM 理解到用户要读取正文时，应调用 extract-document-text。"""
+
+    class FakeLLMIntentService:
+        """测试用 LLM 服务，固定返回文件正文解析意图。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """返回读取文件正文的用户意图。"""
+
+            return UserIntentPlan(
+                intent="EXTRACT_DOCUMENT_TEXT",
+                user_goal=message,
+                needs_file_context=True,
+                referenced_document_ids=[attachments[0]["document_id"]],
+                required_capabilities=["extract_document_text"],
+                skip_completed_ingest=True,
+                tool_plan_hint=["extract-document-text"],
+                response_style="concise",
+            )
+
+    service = AgentRuntimeService(llm_intent_service=FakeLLMIntentService())
+
+    result = service.run_message(
+        conversation_id="conv-1",
+        user_id="user-1",
+        message_id="msg-1",
+        message="读取这个文件内容",
+        attachments=[{"document_id": "doc-1"}],
+    )
+
+    assert result.status == "COMPLETED"
+    assert result.intent == "EXTRACT_DOCUMENT_TEXT"
+    assert result.selected_skills == ["llm-understanding", "document-text-extract"]
+    assert [item.tool_name for item in result.tool_invocations] == ["extract-document-text"]
+
+
 def test_graph_does_not_execute_direct_file_writes_from_planner_output():
     """不安全的直接文件系统指令必须在 Planner 校验阶段被拒绝。"""
 

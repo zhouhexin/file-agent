@@ -12,6 +12,7 @@
 - 已保留 deterministic planner：`LLM_ENABLED=false` 时继续走确定性 Planner，保证本地开发和测试稳定。
 - 已新增 `collect_context`：对话阶段可以加载附件对应的文件上下文和 `document_insights`。
 - 已新增 `read-document-insights` Tool：用户要求总结或查看已上传文件基础信息时，可复用上传阶段 deterministic ingest 的结果。
+- 已支持对话触发 `extract-document-text`：用户要求读取正文、解析 PDF/Excel 或 OCR 图片时，可由 LLM intent 映射到文件解析 Tool，并写入 `document_extraction_runs` / `document_pages`。
 - AgentRun 快照已记录 `context_documents` 和 `user_intent_plan`，便于审计和排查模型规划结果。
 - 已新增 `AgentRuntimeContext`：`planner`、`registry`、`context_loader`、`llm_intent_service` 已从 `AgentGraphState` 移出，LangGraph 节点通过 `runtime.context` 获取运行依赖。
 
@@ -201,6 +202,7 @@ per_document_result
 ## P2 问题：批量文件处理
 
 - deterministic planner 仍需要改为处理全部附件，而不是偏向第一个文件。
+- 当前对话触发 `extract-document-text` 仍按单文件或第一个附件执行，尚未解决多附件批量 Planner。
 - 批量任务需要 map/reduce 结构：
 
 ```text

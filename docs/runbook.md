@@ -35,7 +35,7 @@ python3 -m pytest
 当前期望结果：
 
 ```text
-38 passed
+40 passed
 ```
 
 如果出现 `urllib3` 或 `LangChainPendingDeprecationWarning`，目前属于环境兼容警告，不影响现有测试结果。
@@ -257,6 +257,17 @@ tool_invocations = read-document-insights
 graph_state_json.user_intent_plan = LLM 返回的结构化意图
 ```
 
+如果 `LLM_ENABLED=true` 且用户需求是读取正文、解析 PDF/Excel 内容或 OCR 图片，当前期望行为：
+
+```text
+agent_run.intent = EXTRACT_DOCUMENT_TEXT 或模型识别出的结构化 intent
+selected_skills = llm-understanding, document-text-extract
+tool_invocations = extract-document-text
+document_extraction_runs 写入 1 条解析运行
+document_pages 写入解析文本
+final_response = 已解析 N 个文件，提取 M 页/Sheet，共 C 个字符。
+```
+
 当前新增文件解析 Tool：
 
 ```text
@@ -274,6 +285,8 @@ pytesseract
 ```
 
 图片 OCR 还需要系统安装 Tesseract OCR；如果缺少依赖或 OCR 引擎不可用，Tool 会返回结构化错误，不会读取任意路径。
+
+当前对话触发解析仍按单文件或当前附件列表中的第一个文件执行；多附件批量 Planner、逐文件部分失败汇总和 map/reduce 后续单独实现。
 
 查询 AgentRun：
 

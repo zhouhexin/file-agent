@@ -145,6 +145,13 @@ def response(state: AgentGraphState) -> Dict[str, Any]:
     """生成面向用户的最终运行摘要。"""
 
     invocation_count = len(state.get("tool_invocations", []))
+    extraction_results = _extraction_results_from_results(state.get("tool_results", []))
+    if extraction_results:
+        return {
+            "status": "COMPLETED",
+            "final_response": _build_extraction_response(extraction_results),
+        }
+
     insight_documents = _insight_documents_from_results(state.get("tool_results", []))
     if insight_documents:
         filenames = [
@@ -159,6 +166,40 @@ def response(state: AgentGraphState) -> Dict[str, Any]:
         "status": "COMPLETED",
         "final_response": f"AgentRun completed with {invocation_count} tool invocation(s).",
     }
+
+
+def _extraction_results_from_results(tool_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """从 Tool 结果中提取 extract-document-text 返回的解析结果。"""
+
+    return [
+        result
+        for result in tool_results
+        if result.get("extraction_run_id") and result.get("status") in {"COMPLETED", "FAILED"}
+    ]
+
+
+def _build_extraction_response(extraction_results: List[Dict[str, Any]]) -> str:
+    """生成文件解析 Tool 的用户回执。"""
+
+    failed_messages = [
+        (result.get("error") or {}).get("message") or "未知错误"
+        for result in extraction_results
+        if result.get("status") == "FAILED"
+    ]
+    completed_results = [result for result in extraction_results if result.get("status") == "COMPLETED"]
+    if not completed_results and failed_messages:
+        return f"文件解析失败：{failed_messages[0]}。"
+
+    page_count = sum(len(result.get("pages", [])) for result in completed_results)
+    char_count = sum(
+        int(page.get("char_count", 0))
+        for result in completed_results
+        for page in result.get("pages", [])
+    )
+    response_text = f"已解析 {len(completed_results)} 个文件，提取 {page_count} 页/Sheet，共 {char_count} 个字符。"
+    if failed_messages:
+        response_text += f" 另有 {len(failed_messages)} 个文件解析失败：{failed_messages[0]}。"
+    return response_text
 
 
 def _insight_documents_from_results(tool_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

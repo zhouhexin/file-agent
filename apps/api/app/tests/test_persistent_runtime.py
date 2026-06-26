@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.database import get_db
 from app.db.base import Base
-from app.db.models import AgentRun, Message, ToolInvocation, User
+from app.db.models import AgentRun, DocumentExtractionRun, DocumentPage, Message, ToolInvocation, User
 from app.main import app
 from app.modules.agent.service import AgentRuntimeService
 from app.modules.conversations.schemas import MessageAttachment, SendMessageRequest
@@ -204,6 +204,60 @@ def test_llm_message_reuses_persisted_document_insights():
         assert response.agent_run.tool_results[0]["documents"][0]["document_id"] == document_id
         assert response.agent_run.tool_results[0]["documents"][0]["ingest_status"] == "INGESTED"
         assert db.query(ToolInvocation).one().tool_name == "read-document-insights"
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_llm_message_extracts_document_text_and_persists_pages():
+    """对话触发 extract-document-text 时，必须解析文件并写入 document_pages。"""
+
+    class FakeLLMIntentService:
+        """测试用 LLM 服务，固定返回读取文件正文的计划。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """返回依赖原始文件正文解析的用户意图。"""
+
+            return UserIntentPlan(
+                intent="EXTRACT_DOCUMENT_TEXT",
+                user_goal=message,
+                needs_file_context=True,
+                referenced_document_ids=[attachments[0]["document_id"]],
+                required_capabilities=["extract_document_text"],
+                skip_completed_ingest=True,
+                tool_plan_hint=["extract-document-text"],
+                response_style="concise",
+            )
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="llm-extract-user")
+    document_id = _upload_document(client, headers, filename="extract.txt")
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(User.username == "llm-extract-user").one()
+        response = ConversationMessageService(
+            db=db,
+            agent_service=AgentRuntimeService(llm_intent_service=FakeLLMIntentService()),
+        ).send_user_message(
+            conversation_id="extract-conv",
+            user_id=user.id,
+            request=SendMessageRequest(
+                content="读取这个文件内容",
+                attachments=[MessageAttachment(document_id=document_id)],
+            ),
+        )
+
+        assert response.agent_run.intent == "EXTRACT_DOCUMENT_TEXT"
+        assert [item.tool_name for item in response.agent_run.tool_invocations] == ["extract-document-text"]
+        assert response.agent_run.tool_results[0]["status"] == "COMPLETED"
+        assert "已解析" in (response.agent_run.final_response or "")
+        assert db.query(DocumentExtractionRun).count() == 1
+        page = db.query(DocumentPage).one()
+        assert page.document_id == document_id
+        assert "persist-file" in page.text_content
     finally:
         db.close()
         app.dependency_overrides.clear()

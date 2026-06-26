@@ -14,6 +14,17 @@ from app.modules.llm.schemas import UserIntentPlan
 
 
 FORBIDDEN_INPUT_KEYS = {"shell", "shell_command", "sql", "sql_write", "path", "file_path", "absolute_path"}
+TEXT_EXTRACTION_HINTS = {
+    "extract_document_text",
+    "extract-document-text",
+    "read_file_content",
+    "read-file-content",
+    "parse_document",
+    "parse-document",
+    "ocr_image",
+    "ocr-image",
+}
+DOCUMENT_INSIGHT_HINTS = {"read_document_insights", "read-document-insights"}
 
 
 class PlannerStep(BaseModel):
@@ -209,10 +220,38 @@ def build_plan_from_user_intent(
     """把 LLM 结构化意图转换为受控 PlannerOutput。"""
 
     document_ids = intent_plan.referenced_document_ids or _document_ids(attachments)
+    requested_capabilities = set(intent_plan.required_capabilities).union(intent_plan.tool_plan_hint)
+    if requested_capabilities.intersection(TEXT_EXTRACTION_HINTS):
+        document_id = document_ids[0] if document_ids else _first_document_id(attachments)
+        return PlannerOutput(
+            intent=intent_plan.intent,
+            user_goal=intent_plan.user_goal,
+            slots={
+                "document_ids": [document_id],
+                "response_style": intent_plan.response_style,
+                "clarification_question": intent_plan.clarification_question,
+                "llm_intent_plan": intent_plan.model_dump(),
+            },
+            selected_skills=["llm-understanding", "document-text-extract"],
+            steps=[
+                {
+                    "step_id": "step-1",
+                    "skill": "document-text-extract",
+                    "tool_name": "extract-document-text",
+                    "input": {"document_id": document_id},
+                    "requires_confirmation": False,
+                    "risk_level": "low",
+                    "expected_outputs": ["document_pages", "extraction_run"],
+                    "writes": ["document_extraction_runs", "document_pages"],
+                }
+            ],
+            evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+            confirmation_policy={"operation_plan_required": False},
+        )
+
     uses_document_insights = (
         intent_plan.needs_file_context
-        or "read_document_insights" in intent_plan.required_capabilities
-        or "read-document-insights" in intent_plan.tool_plan_hint
+        or bool(requested_capabilities.intersection(DOCUMENT_INSIGHT_HINTS))
     )
     if uses_document_insights:
         return PlannerOutput(

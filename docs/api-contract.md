@@ -415,6 +415,25 @@ When LLM is enabled and the user asks for uploaded-file summary or basic file in
 }
 ```
 
+When LLM is enabled and the user asks to read original content, parse PDF/Excel, or OCR an image, the same endpoint may return:
+
+```json
+{
+  "agent_run": {
+    "intent": "EXTRACT_DOCUMENT_TEXT",
+    "status": "COMPLETED",
+    "selected_skills": ["llm-understanding", "document-text-extract"],
+    "tool_invocations": [
+      {
+        "tool_name": "extract-document-text",
+        "status": "COMPLETED"
+      }
+    ],
+    "final_response": "已解析 1 个文件，提取 1 页/Sheet，共 1200 个字符。"
+  }
+}
+```
+
 Errors:
 
 ```text
