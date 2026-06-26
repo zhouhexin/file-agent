@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from io import BytesIO
+
 from fastapi.testclient import TestClient
 
 from app.core import config
@@ -31,6 +33,37 @@ def _upload_text(client: TestClient, headers: dict[str, str], filename: str = "n
         "/api/files/upload",
         headers=headers,
         files={"file": (filename, "学生姓名：张三\n奖学金：一等奖\n".encode("utf-8"), "text/plain")},
+    )
+    assert response.status_code == 200
+    return response.json()["document_id"]
+
+
+def _docx_bytes() -> bytes:
+    """构造包含中文正文的 docx 测试文件。"""
+
+    from docx import Document as DocxDocument
+
+    document = DocxDocument()
+    document.add_paragraph("学生姓名：王五")
+    document.add_paragraph("奖学金：三等奖")
+    buffer = BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def _upload_docx(client: TestClient, headers: dict[str, str]) -> str:
+    """上传一个 docx 文件并返回 document_id。"""
+
+    response = client.post(
+        "/api/files/upload",
+        headers=headers,
+        files={
+            "file": (
+                "student.docx",
+                _docx_bytes(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
     )
     assert response.status_code == 200
     return response.json()["document_id"]
@@ -122,6 +155,36 @@ def test_extract_document_text_persists_text_pages(monkeypatch, tmp_path):
         page = db.query(DocumentPage).one()
         assert page.document_id == document_id
         assert "张三" in page.text_content
+    finally:
+        db.close()
+        clear_overrides()
+        config.get_settings.cache_clear()
+
+
+def test_extract_document_text_persists_docx_pages(monkeypatch, tmp_path):
+    """extract-document-text 应解析 docx 正文并持久化 DocumentPage。"""
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
+    config.get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    headers = _auth_header(client, "docx-extractor")
+    document_id = _upload_docx(client, headers)
+
+    db = SessionLocal()
+    try:
+        user_id = client.get("/api/auth/me", headers=headers).json()["id"]
+        result = ToolRegistry(db=db, user_id=user_id).invoke(
+            "extract-document-text",
+            {"document_id": document_id},
+        )
+
+        assert result.output_json["ok"] is True
+        assert result.output_json["status"] == "COMPLETED"
+        assert result.output_json["extractor"] == "docx"
+        page = db.query(DocumentPage).one()
+        assert page.document_id == document_id
+        assert "王五" in page.text_content
+        assert "三等奖" in page.text_content
     finally:
         db.close()
         clear_overrides()

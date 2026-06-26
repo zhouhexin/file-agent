@@ -35,7 +35,7 @@ python3 -m pytest
 当前期望结果：
 
 ```text
-40 passed
+41 passed
 ```
 
 如果出现 `urllib3` 或 `LangChainPendingDeprecationWarning`，目前属于环境兼容警告，不影响现有测试结果。
@@ -272,14 +272,15 @@ final_response = 已解析 N 个文件，提取 M 页/Sheet，共 C 个字符。
 
 ```text
 read-original-file：读取当前用户上传原始文件的安全元信息，不返回本地路径或二进制内容
-extract-document-text：解析 txt/md/csv/xlsx/pdf/image，并将文本写入 document_pages
+extract-document-text：解析 txt/md/csv/xlsx/docx/pdf/image，并将文本写入 document_pages
 ```
 
-PDF、Excel 和图片 OCR 依赖：
+PDF、Excel、docx 和图片 OCR 依赖：
 
 ```text
 PyMuPDF
 openpyxl
+python-docx
 Pillow
 pytesseract
 ```

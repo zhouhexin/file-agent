@@ -20,6 +20,8 @@ def extract_document_text(*, file_path: Path, filename: str, content_type: str) 
         return _completed("csv", [{"page_number": 1, "sheet_name": None, "text": text, "metadata": {}}])
     if suffix in {".xlsx", ".xls"}:
         return _extract_excel_text(file_path)
+    if suffix == ".docx" or content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        return _extract_docx_text(file_path)
     if suffix == ".pdf" or content_type == "application/pdf":
         return _extract_pdf_text(file_path)
     if content_type.startswith("image/") or suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"}:
@@ -61,6 +63,34 @@ def _extract_excel_text(file_path: Path) -> Dict[str, Any]:
         )
     workbook.close()
     return _completed("excel", pages)
+
+
+def _extract_docx_text(file_path: Path) -> Dict[str, Any]:
+    """使用 python-docx 读取 docx 段落和表格文本。"""
+
+    try:
+        from docx import Document as DocxDocument
+    except ImportError:
+        return _failed("docx", "DOCX_EXTRACTOR_NOT_AVAILABLE", "缺少 python-docx，无法解析 docx 文件。")
+
+    document = DocxDocument(file_path)
+    lines = [paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()]
+    for table in document.tables:
+        for row in table.rows:
+            values = [cell.text.strip() for cell in row.cells]
+            if any(values):
+                lines.append("\t".join(values))
+    return _completed(
+        "docx",
+        [
+            {
+                "page_number": 1,
+                "sheet_name": None,
+                "text": "\n".join(lines),
+                "metadata": {"paragraph_count": len(document.paragraphs), "table_count": len(document.tables)},
+            }
+        ],
+    )
 
 
 def _extract_pdf_text(file_path: Path) -> Dict[str, Any]:
