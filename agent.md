@@ -302,6 +302,12 @@ Tool 调用记录至少保存：
 LangGraph 实现规则：
 
 - 图状态必须使用明确 schema，不允许把任意 LLM 输出直接透传给 Tool。
+- Agent Runtime 必须明确区分三层数据边界：
+  - `AgentGraphState`：可持久化业务状态，只保存本次任务的输入、附件引用、上下文摘要、planner_mode、tool_plan、执行结果、错误、业务对象 ID 和最终回复。
+  - `AgentRuntimeContext`：运行时依赖，只保存 Planner、Tool Registry、Context Loader、LLM Intent Service，以及后续 Storage、Queue、DB Factory、Settings 等服务对象。
+  - `Persistent Stores`：数据库、对象存储、向量库、图数据库等长期事实存储，保存文件、解析结果、证据、分类、ChangeSet、OperationPlan 和审计记录。
+- `planner`、`registry`、`context_loader`、`llm_intent_service`、数据库 Session、LLM client、API key、HTTP client 等运行对象不得写入 `AgentGraphState`、checkpoint 或 `graph_state_json`。
+- LangGraph 节点需要运行依赖时，必须通过 `AgentRuntimeContext` 或等价的运行时上下文机制获取，不能把服务对象塞进 State。
 - 节点职责必须单一，例如 intake、planning、tool dispatch、async wait、evidence validation、response receipt。
 - Tool 调用必须集中经过 tool-dispatch 节点，不能让各节点绕过白名单直接执行副作用。
 - LangGraph checkpoint 可以第一版先用轻量实现，但接口要保留，后续可接数据库持久化和任务恢复。
