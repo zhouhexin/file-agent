@@ -102,7 +102,7 @@ def test_post_message_persists_message_agent_run_and_tool_invocations():
         "/api/conversations/conv-1/messages",
         headers=headers,
         json={
-            "content": "帮我读取并分类这批文件",
+            "content": "帮我分类这批文件",
             "attachments": [{"document_id": document_id}],
         },
     )
@@ -138,7 +138,7 @@ def test_agent_run_query_endpoints_return_persisted_records():
         "/api/conversations/conv-1/messages",
         headers=headers,
         json={
-            "content": "帮我读取并分类这批文件",
+            "content": "帮我分类这批文件",
             "attachments": [{"document_id": document_id}],
         },
     )
@@ -375,6 +375,75 @@ def test_llm_message_extracts_multiple_documents_and_builds_document_results():
         assert staff_confidences == sorted(staff_confidences, reverse=True)
         assert document_results[1]["categories"][0]["name"] == "学院/行政管理/年度计划、总结"
         assert document_results[2]["categories"][0]["name"] == "其他"
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_deterministic_message_extracts_and_classifies_multiple_documents():
+    """LLM 关闭时，“读取并分类”组合意图也必须解析全部附件并输出分类建议。"""
+
+    class DisabledLLMIntentService:
+        """测试用关闭态 LLM 服务，强制消息入口走确定性 Planner。"""
+
+        enabled = False
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="deterministic-read-classify-user")
+    staff_document_id = _upload_document(
+        client,
+        headers,
+        filename="det-staff.txt",
+        content="本文件涉及学校教师职称和干部工作材料。".encode(),
+    )
+    plan_document_id = _upload_document(
+        client,
+        headers,
+        filename="det-plan.txt",
+        content="本文件是学院年度计划、总结材料。".encode(),
+    )
+    unknown_document_id = _upload_document(
+        client,
+        headers,
+        filename="det-unknown.txt",
+        content="这是一段无法判断归类的普通文本。".encode(),
+    )
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(User.username == "deterministic-read-classify-user").one()
+        response = ConversationMessageService(
+            db=db,
+            agent_service=AgentRuntimeService(llm_intent_service=DisabledLLMIntentService()),
+        ).send_user_message(
+            conversation_id="deterministic-read-classify-conv",
+            user_id=user.id,
+            request=SendMessageRequest(
+                content="帮我读取并分类这批文件",
+                attachments=[
+                    MessageAttachment(document_id=staff_document_id),
+                    MessageAttachment(document_id=plan_document_id),
+                    MessageAttachment(document_id=unknown_document_id),
+                ],
+            ),
+        )
+
+        assert response.agent_run.intent == "EXTRACT_DOCUMENT_TEXT"
+        assert [item.tool_name for item in response.agent_run.tool_invocations] == [
+            "extract-document-text",
+            "extract-document-text",
+            "extract-document-text",
+        ]
+        assert db.query(DocumentExtractionRun).count() == 3
+        assert db.query(DocumentPage).count() == 3
+        document_results = db.query(AgentRun).one().graph_state_json["document_results"]
+        assert len(document_results) == 3
+        assert "学校/人事师资/职称" in [
+            category["name"] for category in document_results[0]["categories"]
+        ]
+        assert document_results[1]["categories"][0]["name"] == "学院/行政管理/年度计划、总结"
+        assert document_results[2]["categories"][0]["name"] == "其他"
+        assert "置信度" in (response.agent_run.final_response or "")
     finally:
         db.close()
         app.dependency_overrides.clear()

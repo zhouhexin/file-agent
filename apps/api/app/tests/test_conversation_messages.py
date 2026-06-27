@@ -45,7 +45,7 @@ def test_post_message_starts_agent_run():
         "/api/conversations/conv-1/messages",
         headers=headers,
         json={
-            "content": "帮我读取并分类这批文件",
+            "content": "帮我分类这批文件",
             "attachments": [{"document_id": document_id}],
         },
     )

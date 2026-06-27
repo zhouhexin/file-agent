@@ -163,7 +163,10 @@ class DeterministicPlanner:
             return PlannerOutput(
                 intent="EXTRACT_DOCUMENT_TEXT",
                 user_goal=message,
-                slots={"document_ids": document_ids, "requested_outputs": ["text", "classification", "receipt"]},
+                slots={
+                    "document_ids": document_ids,
+                    "requested_outputs": _requested_outputs_for_message(message=message, lowered=lowered),
+                },
                 selected_skills=["chat-intake", "document-text-extract", "document-classification", "change-report"],
                 steps=[
                     _extract_document_text_step(document_id=item, index=index)
@@ -338,14 +341,30 @@ def _extract_document_text_step(*, document_id: str, index: int) -> Dict[str, An
 
 
 def _should_extract_text(*, message: str, lowered: str) -> bool:
-    """判断确定性模式下用户是否明确要求读取正文，而不是只看上传洞察。"""
+    """判断确定性模式下用户是否明确要求读取正文；读取优先于分类组合词。"""
 
     extraction_keywords = ["读取", "解析", "正文", "内容", "OCR"]
     english_keywords = ["read", "extract", "parse", "ocr"]
-    classification_keywords = ["分类", "归类", "整理"]
-    if any(keyword in message for keyword in classification_keywords):
-        return False
     return any(keyword in message for keyword in extraction_keywords) or any(
+        keyword in lowered for keyword in english_keywords
+    )
+
+
+def _requested_outputs_for_message(*, message: str, lowered: str) -> List[str]:
+    """根据确定性关键词记录用户期望输出，供审计和后续回执策略使用。"""
+
+    outputs = ["text", "receipt"]
+    if _has_classification_intent(message=message, lowered=lowered):
+        outputs.insert(1, "classification")
+    return outputs
+
+
+def _has_classification_intent(*, message: str, lowered: str) -> bool:
+    """判断用户是否明确要求分类、归类或整理。"""
+
+    classification_keywords = ["分类", "归类", "整理"]
+    english_keywords = ["classify", "categorize"]
+    return any(keyword in message for keyword in classification_keywords) or any(
         keyword in lowered for keyword in english_keywords
     )
 

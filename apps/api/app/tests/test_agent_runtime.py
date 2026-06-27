@@ -60,7 +60,7 @@ def test_planner_returns_declarative_tool_plan():
         conversation_id="conv-1",
         user_id="user-1",
         message_id="msg-1",
-        message="帮我读取并分类这批文件",
+        message="帮我分类这批文件",
         attachments=[{"document_id": "doc-1"}],
     )
 
@@ -107,7 +107,7 @@ def test_message_starts_langgraph_run_and_records_tool_invocations():
         conversation_id="conv-1",
         user_id="user-1",
         message_id="msg-1",
-        message="帮我读取并分类这批文件",
+        message="帮我分类这批文件",
         attachments=[{"document_id": "doc-1"}],
     )
 
@@ -126,6 +126,29 @@ def test_message_starts_langgraph_run_and_records_tool_invocations():
         "change-report",
     ]
     assert result.final_response
+
+
+def test_deterministic_planner_extracts_text_for_read_and_classify_attachments():
+    """读取并分类组合意图必须优先走正文解析，再由 document_results 生成分类回执。"""
+
+    service = AgentRuntimeService()
+
+    result = service.run_message(
+        conversation_id="conv-1",
+        user_id="user-1",
+        message_id="msg-1",
+        message="帮我读取并分类这批文件",
+        attachments=[{"document_id": "doc-1"}, {"document_id": "doc-2"}],
+        planner=DeterministicPlanner(),
+    )
+
+    assert result.intent == "EXTRACT_DOCUMENT_TEXT"
+    assert result.tool_plan["slots"]["document_ids"] == ["doc-1", "doc-2"]
+    assert result.tool_plan["slots"]["requested_outputs"] == ["text", "classification", "receipt"]
+    assert [step["tool_name"] for step in result.tool_plan["steps"]] == [
+        "extract-document-text",
+        "extract-document-text",
+    ]
 
 
 def test_deterministic_planner_extracts_text_for_all_read_attachments():

@@ -35,7 +35,7 @@ python3 -m pytest
 当前期望结果：
 
 ```text
-55 passed
+57 passed
 ```
 
 如果出现 `urllib3` 或 `LangChainPendingDeprecationWarning`，目前属于环境兼容警告，不影响现有测试结果。
@@ -262,6 +262,7 @@ graph_state_json.user_intent_plan = LLM 返回的结构化意图
 ```text
 LLM_ENABLED=true 时：agent_run.intent = EXTRACT_DOCUMENT_TEXT 或模型识别出的结构化 intent
 deterministic 模式下用户明确说“读取/解析/正文/内容/OCR”时：agent_run.intent = EXTRACT_DOCUMENT_TEXT
+“读取并分类 / 解析并归类”等组合意图优先按正文读取处理，分类作为 document_results 的输出要求
 LLM 模式 selected_skills = llm-understanding, document-text-extract
 deterministic 模式 selected_skills = chat-intake, document-text-extract, document-classification, change-report
 tool_invocations = 每个附件各 1 次 extract-document-text
