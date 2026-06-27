@@ -530,7 +530,62 @@ create table categories (
 );
 ```
 
-### 4.15 document_categories
+### 4.15 document_classification_runs
+
+```sql
+create table document_classification_runs (
+  id uuid primary key default gen_random_uuid(),
+  document_id uuid not null references documents(id) on delete cascade,
+  agent_run_id uuid not null references agent_runs(id) on delete cascade,
+  taxonomy_key varchar(100) not null default 'school_file_classification',
+  taxonomy_version varchar(50) not null default '2026-06',
+  classifier_version varchar(100) not null default 'taxonomy-rule-v1',
+  source varchar(30) not null default 'rule',
+  status varchar(30) not null default 'COMPLETED',
+  error_message text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+```
+
+### 4.16 document_category_suggestions
+
+```sql
+create table document_category_suggestions (
+  id uuid primary key default gen_random_uuid(),
+  classification_run_id uuid not null references document_classification_runs(id) on delete cascade,
+  document_id uuid not null references documents(id) on delete cascade,
+  category_name varchar(500) not null,
+  category_path_json jsonb not null default '[]'::jsonb,
+  taxonomy_key varchar(100) not null default 'school_file_classification',
+  taxonomy_version varchar(50) not null default '2026-06',
+  confidence double precision not null default 0,
+  status varchar(30) not null default 'SUGGESTED',
+  evidence_json jsonb not null default '[]'::jsonb,
+  source varchar(30) not null default 'rule',
+  rank integer not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+```
+
+### 4.17 document_category_feedback
+
+```sql
+create table document_category_feedback (
+  id uuid primary key default gen_random_uuid(),
+  suggestion_id uuid not null references document_category_suggestions(id) on delete cascade,
+  document_id uuid not null references documents(id) on delete cascade,
+  user_id uuid not null references users(id) on delete cascade,
+  action varchar(30) not null,
+  comment text not null default '',
+  created_at timestamptz not null default now()
+);
+```
+
+`document_classification_runs` 和 `document_category_suggestions` 保存 AgentRun 生成的可追踪建议，不等同于用户确认后的正式分类。`document_category_feedback` 预留用户接受、拒绝和修正记录。正式分类关系仍写入 `document_categories`。
+
+### 4.18 document_categories
 
 ```sql
 create table document_categories (
@@ -549,7 +604,7 @@ create table document_categories (
 );
 ```
 
-### 4.16 qa_answers
+### 4.19 qa_answers
 
 ```sql
 create table qa_answers (
@@ -564,7 +619,7 @@ create table qa_answers (
 );
 ```
 
-### 4.17 answer_references
+### 4.20 answer_references
 
 ```sql
 create table answer_references (
@@ -578,7 +633,7 @@ create table answer_references (
 );
 ```
 
-### 4.18 operation_plans
+### 4.21 operation_plans
 
 ```sql
 create table operation_plans (
@@ -600,7 +655,7 @@ create table operation_plans (
 );
 ```
 
-### 4.19 operation_confirmations
+### 4.22 operation_confirmations
 
 ```sql
 create table operation_confirmations (
@@ -612,7 +667,7 @@ create table operation_confirmations (
 );
 ```
 
-### 4.20 change_sets
+### 4.23 change_sets
 
 ```sql
 create table change_sets (
@@ -651,7 +706,7 @@ alter table tool_invocations
   on delete set null;
 ```
 
-### 4.21 change_items
+### 4.24 change_items
 
 ```sql
 create table change_items (
@@ -694,7 +749,7 @@ MEMORY_REMOVED
 SKILL_CANDIDATE_CREATED
 ```
 
-### 4.22 feedback
+### 4.25 feedback
 
 ```sql
 create table feedback (
@@ -716,7 +771,7 @@ create table feedback (
 );
 ```
 
-### 4.23 processing_jobs
+### 4.26 processing_jobs
 
 ```sql
 create table processing_jobs (
@@ -738,7 +793,7 @@ create table processing_jobs (
 );
 ```
 
-### 4.24 processing_events
+### 4.27 processing_events
 
 ```sql
 create table processing_events (
@@ -752,7 +807,7 @@ create table processing_events (
 );
 ```
 
-### 4.25 llm_settings
+### 4.28 llm_settings
 
 ```sql
 create table llm_settings (
@@ -772,7 +827,7 @@ create table llm_settings (
 );
 ```
 
-### 4.26 user_preferences
+### 4.29 user_preferences
 
 ```sql
 create table user_preferences (
@@ -812,6 +867,8 @@ workspaces
 conversations
 agent_runs
 documents
+document_classification_runs
+document_category_suggestions
 document_categories
 operation_plans
 processing_jobs
@@ -871,21 +928,24 @@ admin / ops:
 16. document_chunks
 17. evidence_spans
 18. categories
-19. document_categories
-20. qa_answers
-21. answer_references
-22. operation_plans
-23. operation_confirmations
-24. change_sets
-25. change_items
-26. agent_runs/tool_invocations references to changeset and operation_plan
-27. feedback
-28. processing_jobs
-29. processing_events
-30. llm_settings
-31. user_preferences
-32. indexes
-33. updated_at triggers
+19. document_classification_runs
+20. document_category_suggestions
+21. document_category_feedback
+22. document_categories
+23. qa_answers
+24. answer_references
+25. operation_plans
+26. operation_confirmations
+27. change_sets
+28. change_items
+29. agent_runs/tool_invocations references to changeset and operation_plan
+30. feedback
+31. processing_jobs
+32. processing_events
+33. llm_settings
+34. user_preferences
+35. indexes
+36. updated_at triggers
 ```
 
 ## 8. Deferred Tables

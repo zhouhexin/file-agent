@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, JSON, String, Text
+from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -185,6 +185,103 @@ class DocumentPage(Base):
 
     document: Mapped[Document] = relationship(back_populates="pages")
     extraction_run: Mapped[DocumentExtractionRun] = relationship(back_populates="pages")
+
+
+class DocumentClassificationRun(Base):
+    """一次文件分类建议生成运行。
+
+    当前保存规则分类结果的来源和版本，后续 ChangeSet、重处理和用户确认会引用该运行。
+    """
+
+    __tablename__ = "document_classification_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    document_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    agent_run_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    taxonomy_key: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    taxonomy_version: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    classifier_version: Mapped[str] = mapped_column(String(80), nullable=False, default="taxonomy-rule-v1")
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="rule")
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="COMPLETED")
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class DocumentCategorySuggestion(Base):
+    """文件分类建议表。
+
+    建议结果是 SUGGESTED 状态，不等同于用户确认后的正式 document_categories。
+    """
+
+    __tablename__ = "document_category_suggestions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    classification_run_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("document_classification_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    document_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    category_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    category_path_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    taxonomy_key: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    taxonomy_version: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="SUGGESTED")
+    evidence_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="rule")
+    rank: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class DocumentCategoryFeedback(Base):
+    """用户对分类建议的反馈记录。
+
+    本阶段只建立持久化边界，前端确认/拒绝入口后续再接入。
+    """
+
+    __tablename__ = "document_category_feedback"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    suggestion_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("document_category_suggestions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    document_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    comment: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class AgentRun(Base):

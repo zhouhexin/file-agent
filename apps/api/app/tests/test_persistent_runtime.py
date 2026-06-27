@@ -12,9 +12,20 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.database import get_db
 from app.db.base import Base
-from app.db.models import AgentRun, DocumentExtractionRun, DocumentPage, Message, ToolInvocation, User
+from app.db.models import (
+    AgentRun,
+    DocumentCategoryFeedback,
+    DocumentCategorySuggestion,
+    DocumentClassificationRun,
+    DocumentExtractionRun,
+    DocumentPage,
+    Message,
+    ToolInvocation,
+    User,
+)
 from app.main import app
 from app.modules.agent.service import AgentRuntimeService
+from app.modules.classification.service import persist_document_results_classifications
 from app.modules.conversations.schemas import MessageAttachment, SendMessageRequest
 from app.modules.conversations.service import ConversationMessageService
 from app.modules.llm.schemas import UserIntentPlan
@@ -88,6 +99,9 @@ def test_database_tables_can_be_created():
     assert Message.__tablename__ == "messages"
     assert AgentRun.__tablename__ == "agent_runs"
     assert ToolInvocation.__tablename__ == "tool_invocations"
+    assert DocumentClassificationRun.__tablename__ == "document_classification_runs"
+    assert DocumentCategorySuggestion.__tablename__ == "document_category_suggestions"
+    assert DocumentCategoryFeedback.__tablename__ == "document_category_feedback"
     assert ToolInvocation.__table__.c.changeset_id.type.length >= 100
 
 
@@ -275,6 +289,20 @@ def test_llm_message_extracts_document_text_and_persists_pages():
         assert document_results[0]["extraction_status"] == "COMPLETED"
         assert document_results[0]["categories"][0]["name"] == "学校/人事师资/职称"
         assert document_results[0]["categories"][0]["taxonomy_key"] == "school_file_classification"
+        classification_run = db.query(DocumentClassificationRun).one()
+        assert classification_run.agent_run_id == stored_run.id
+        assert classification_run.document_id == document_id
+        assert classification_run.status == "COMPLETED"
+        suggestion_names = [item.category_name for item in db.query(DocumentCategorySuggestion).all()]
+        assert "学校/人事师资/职称" in suggestion_names
+        suggestion = (
+            db.query(DocumentCategorySuggestion)
+            .filter(DocumentCategorySuggestion.category_name == "学校/人事师资/职称")
+            .one()
+        )
+        assert suggestion.status == "SUGGESTED"
+        assert suggestion.source == "rule"
+        assert suggestion.evidence_json == ["职称"]
     finally:
         db.close()
         app.dependency_overrides.clear()
@@ -375,6 +403,87 @@ def test_llm_message_extracts_multiple_documents_and_builds_document_results():
         assert staff_confidences == sorted(staff_confidences, reverse=True)
         assert document_results[1]["categories"][0]["name"] == "学院/行政管理/年度计划、总结"
         assert document_results[2]["categories"][0]["name"] == "其他"
+        assert db.query(DocumentClassificationRun).count() == 3
+        suggestion_names = [
+            item.category_name
+            for item in db.query(DocumentCategorySuggestion)
+            .order_by(DocumentCategorySuggestion.document_id.asc(), DocumentCategorySuggestion.rank.asc())
+            .all()
+        ]
+        assert "学校/人事师资/职称" in suggestion_names
+        assert "学院/行政管理/年度计划、总结" in suggestion_names
+        assert "其他" in suggestion_names
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_classification_persistence_replaces_existing_suggestions_for_same_agent_run():
+    """同一个 AgentRun 重写分类建议时，应删除旧建议再写入新建议，保证幂等。"""
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="classification-idempotent-user")
+    document_id = _upload_document(client, headers, filename="idempotent.txt")
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(User.username == "classification-idempotent-user").one()
+        agent_run = AgentRun(conversation_id="conv-idempotent", message_id="msg-idempotent", user_id=user.id)
+        db.add(agent_run)
+        db.flush()
+
+        persist_document_results_classifications(
+            db=db,
+            agent_run_id=agent_run.id,
+            document_results=[
+                {
+                    "document_id": document_id,
+                    "categories": [
+                        {
+                            "name": "学校/人事师资/职称",
+                            "category_path": ["学校", "人事师资", "职称"],
+                            "confidence": 0.72,
+                            "status": "SUGGESTED",
+                            "evidence": ["职称"],
+                            "taxonomy_key": "school_file_classification",
+                            "taxonomy_version": "2026-06",
+                        }
+                    ],
+                }
+            ],
+        )
+        persist_document_results_classifications(
+            db=db,
+            agent_run_id=agent_run.id,
+            document_results=[
+                {
+                    "document_id": document_id,
+                    "categories": [
+                        {
+                            "name": "学校/人事师资/职称",
+                            "category_path": ["学校", "人事师资", "职称"],
+                            "confidence": 0.72,
+                            "status": "SUGGESTED",
+                            "evidence": ["职称"],
+                            "taxonomy_key": "school_file_classification",
+                            "taxonomy_version": "2026-06",
+                        },
+                        {
+                            "name": "学校/党委相关/干部工作",
+                            "category_path": ["学校", "党委相关", "干部工作"],
+                            "confidence": 0.7,
+                            "status": "SUGGESTED",
+                            "evidence": ["干部工作"],
+                            "taxonomy_key": "school_file_classification",
+                            "taxonomy_version": "2026-06",
+                        },
+                    ],
+                }
+            ],
+        )
+
+        assert db.query(DocumentClassificationRun).count() == 1
+        assert db.query(DocumentCategorySuggestion).count() == 2
     finally:
         db.close()
         app.dependency_overrides.clear()
@@ -456,3 +565,7 @@ def test_alembic_files_exist_for_runtime_tables():
     assert Path("apps/api/alembic/env.py").exists()
     versions = list(Path("apps/api/alembic/versions").glob("*_create_runtime_tables.py"))
     assert len(versions) == 1
+    classification_versions = list(
+        Path("apps/api/alembic/versions").glob("*_create_classification_suggestion_tables.py")
+    )
+    assert len(classification_versions) == 1

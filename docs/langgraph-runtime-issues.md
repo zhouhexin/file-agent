@@ -17,7 +17,7 @@
 - 已预置学校文件归类 JSON 配置：分类目录来自 `apps/api/app/modules/classification/taxonomies/school_file_classification.json`，当前不入库，分类建议带 `taxonomy_key` 和 `taxonomy_version`。
 - 已支持多附件正文解析的顺序执行：LLM intent 引用多个 `document_id` 时，Planner 会为每个文件生成独立 `extract-document-text` 步骤；单步 Tool 异常会记录为文件级失败结果，后续文件继续处理。
 - deterministic planner 已支持“读取/解析/正文/内容/OCR”类请求的多附件正文解析步骤；“读取并分类/解析并归类”组合意图也会优先进入正文解析路径，不再只取第一个附件。
-- 逐文件回执已支持展示多个分类建议、置信度和证据；分类建议仍暂存于 `document_results`，尚未写入正式分类关系表。
+- 逐文件回执已支持展示多个分类建议、置信度和证据；分类建议已写入 `document_classification_runs` 和 `document_category_suggestions`，尚未写入用户确认后的正式 `document_categories`。
 - AgentRun 快照已记录 `context_documents` 和 `user_intent_plan`，便于审计和排查模型规划结果。
 - 已新增 `AgentRuntimeContext`：`planner`、`registry`、`context_loader`、`llm_intent_service` 已从 `AgentGraphState` 移出，LangGraph 节点通过 `runtime.context` 获取运行依赖。
 
@@ -111,7 +111,7 @@ resume_token
 - 还没有覆盖所有 Tool 和所有 deterministic ingest 步骤。
 - 还没有步骤级状态、实体、年份、关键词、ChangeItem 和证据跨度。
 - 仅支持顺序执行的部分成功回执，还没有并发、进度事件、步骤级重试和恢复。
-- 分类建议暂存于 AgentRun 快照，尚未落入正式 `document_categories` 表。
+- 分类建议已落入 `document_classification_runs` 和 `document_category_suggestions`，但还没有用户确认、反馈 API 和正式 `document_categories` 写入流程。
 
 建议新增：
 

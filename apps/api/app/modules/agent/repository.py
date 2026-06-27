@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import AgentRun, ToolInvocation, utcnow
 from app.modules.agent.state import AgentRunResult, ToolInvocationRecord
+from app.modules.classification.service import persist_document_results_classifications
 
 
 class AgentRunRepository:
@@ -45,6 +46,11 @@ class AgentRunRepository:
         run.final_response = state.get("final_response")
         run.error_message = "; ".join(state.get("errors", [])) or None
         run.updated_at = utcnow()
+        persist_document_results_classifications(
+            db=self.db,
+            agent_run_id=run.id,
+            document_results=state.get("document_results", []),
+        )
         self.db.flush()
         return run
 

@@ -35,7 +35,7 @@ python3 -m pytest
 当前期望结果：
 
 ```text
-57 passed
+58 passed
 ```
 
 如果出现 `urllib3` 或 `LangChainPendingDeprecationWarning`，目前属于环境兼容警告，不影响现有测试结果。
@@ -269,6 +269,7 @@ tool_invocations = 每个附件各 1 次 extract-document-text
 document_extraction_runs 为每个成功解析的附件写入 1 条解析运行
 document_pages 写入每个成功解析附件的文本
 graph_state_json.document_results 写入逐文件解析状态、字符数、分类建议、证据、错误
+document_classification_runs / document_category_suggestions 写入本次 AgentRun 的结构化分类建议
 final_response = 已处理 N 个文件，并逐文件返回解析状态、多个分类建议、置信度和证据。
 ```
 
@@ -278,7 +279,7 @@ final_response = 已处理 N 个文件，并逐文件返回解析状态、多个
 apps/api/app/modules/classification/taxonomies/school_file_classification.json
 ```
 
-该配置由 `文件归类(1).xlsx` 的 `Sheet2` 转换而来，当前包含“学校”和“学院”两个一级域。分类 matcher 会按配置名称命中多个分类，过滤被长词包含的短词误命中，最多保留前 5 个分类建议。分类目录本身不入库；分类建议只保存在本次 AgentRun 的 `graph_state_json.document_results` 和用户回执中。后续接入正式分类 Skill 后，再补充长期 `document_categories` 表、证据跨度和版本治理。
+该配置由 `文件归类(1).xlsx` 的 `Sheet2` 转换而来，当前包含“学校”和“学院”两个一级域。分类 matcher 会按配置名称命中多个分类，过滤被长词包含的短词误命中，最多保留前 5 个分类建议。分类目录本身不入库；分类建议会同时保存在本次 AgentRun 的 `graph_state_json.document_results`、用户回执、`document_classification_runs` 和 `document_category_suggestions` 中。`document_category_feedback` 已预留用户反馈表，暂未开放接口；用户确认后的正式分类关系后续再写入 `document_categories`。
 
 如需从 Excel 重新生成分类 JSON，可执行：
 
@@ -336,7 +337,7 @@ curl -X POST http://127.0.0.1:8000/api/conversations/conv-1/messages \
 ## 7. 当前限制
 
 - 当前已接入 OpenAI-compatible LLM 意图理解；默认 `LLM_ENABLED=false` 时仍使用 `DeterministicPlanner`。
-- 当前已持久化 user、default workspace、message、AgentRun、ToolInvocation、Document、document_insights、document_extraction_runs 和 document_pages，但还没有接 ChangeSet 和 OperationPlan 表。
+- 当前已持久化 user、default workspace、message、AgentRun、ToolInvocation、Document、document_insights、document_extraction_runs、document_pages、document_classification_runs、document_category_suggestions 和 document_category_feedback，但还没有接 ChangeSet 和 OperationPlan 表。
 - 当前已支持读取当前用户自己的原始文件元信息和解析文本内容；其他多数 Tool handler 仍是结构化占位实现。
 - 当前已有最小 JWT 鉴权，但没有 refresh token、复杂 RBAC、ACL 或 admin 权限体系。
 - 当前前端已有最小注册、登录、Chat、文件上传和附件删除流程，没有会话列表、admin 页面或正式视觉设计。

@@ -359,6 +359,7 @@ start LangGraph run
 if LLM_ENABLED=true: call LLM to create structured UserIntentPlan
 if uploaded file insights already exist: reuse document_insights through read-document-insights
 if original text extraction is required: run extract-document-text and persist document_results in agent_runs.graph_state_json
+if classification suggestions are produced: persist structured suggestions in document_classification_runs and document_category_suggestions
 persist tool_invocations
 return message_id and agent_run_id
 ```
@@ -441,7 +442,7 @@ Current `extract-document-text` supports `txt/md/csv/xlsx/docx/pdf/image`.
 }
 ```
 
-The per-file structured result is persisted in `agent_runs.graph_state_json.document_results`:
+The per-file structured result is persisted in `agent_runs.graph_state_json.document_results` for run snapshot and receipt generation. Category suggestions are also persisted in `document_classification_runs` and `document_category_suggestions`; they remain suggestions and are not official `document_categories` until user confirmation:
 
 ```json
 [
