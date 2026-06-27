@@ -16,6 +16,8 @@
 - 已新增 `document_results` 的第一阶段实现：对话触发正文解析后，会在 AgentRun 快照中记录逐文件解析状态、字符数、分类建议、证据和错误，并用于生成逐文件回执。
 - 已预置学校文件归类 JSON 配置：分类目录来自 `apps/api/app/modules/classification/taxonomies/school_file_classification.json`，当前不入库，分类建议带 `taxonomy_key` 和 `taxonomy_version`。
 - 已支持多附件正文解析的顺序执行：LLM intent 引用多个 `document_id` 时，Planner 会为每个文件生成独立 `extract-document-text` 步骤；单步 Tool 异常会记录为文件级失败结果，后续文件继续处理。
+- deterministic planner 已支持“读取/解析/正文/内容/OCR”类请求的多附件正文解析步骤，不再只取第一个附件。
+- 逐文件回执已支持展示多个分类建议、置信度和证据；分类建议仍暂存于 `document_results`，尚未写入正式分类关系表。
 - AgentRun 快照已记录 `context_documents` 和 `user_intent_plan`，便于审计和排查模型规划结果。
 - 已新增 `AgentRuntimeContext`：`planner`、`registry`、`context_loader`、`llm_intent_service` 已从 `AgentGraphState` 移出，LangGraph 节点通过 `runtime.context` 获取运行依赖。
 
@@ -205,7 +207,7 @@ per_document_result
 
 ## P2 问题：批量文件处理
 
-- deterministic planner 仍需要改为处理全部附件，而不是偏向第一个文件。
+- deterministic planner 的正文读取路径已支持全部附件；旧的 deterministic 分类占位流程仍未替换成完整真实分类链路。
 - 当前对话触发 `extract-document-text` 已支持多附件顺序执行，但还没有 map/reduce 和并发控制。
 - 批量任务需要 map/reduce 结构：
 

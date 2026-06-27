@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from app.main import app
 from app.modules.llm.schemas import UserIntentPlan
+from app.modules.agent.graph import _build_document_results_response
 from app.modules.agent.repository import _safe_graph_state_snapshot
 from app.modules.agent.planner import DeterministicPlanner
 from app.modules.agent.service import AgentRuntimeService
@@ -125,6 +126,29 @@ def test_message_starts_langgraph_run_and_records_tool_invocations():
         "change-report",
     ]
     assert result.final_response
+
+
+def test_deterministic_planner_extracts_text_for_all_read_attachments():
+    """确定性 Planner 对“读取这批文件”必须为全部附件生成真实正文解析步骤。"""
+
+    service = AgentRuntimeService()
+
+    result = service.run_message(
+        conversation_id="conv-1",
+        user_id="user-1",
+        message_id="msg-1",
+        message="读取这批文件",
+        attachments=[{"document_id": "doc-1"}, {"document_id": "doc-2"}],
+        planner=DeterministicPlanner(),
+    )
+
+    assert result.intent == "EXTRACT_DOCUMENT_TEXT"
+    assert result.tool_plan["slots"]["document_ids"] == ["doc-1", "doc-2"]
+    assert [step["tool_name"] for step in result.tool_plan["steps"]] == [
+        "extract-document-text",
+        "extract-document-text",
+    ]
+    assert [step["input"]["document_id"] for step in result.tool_plan["steps"]] == ["doc-1", "doc-2"]
 
 
 def test_initial_state_does_not_include_runtime_dependencies():
@@ -373,6 +397,37 @@ def test_tool_dispatch_records_step_failure_and_continues_batch():
     assert [item["status"] for item in result.tool_results] == ["FAILED", "COMPLETED"]
     assert "模拟解析失败" in (result.final_response or "")
     assert "学校/人事师资/职称" in (result.final_response or "")
+
+
+def test_document_results_response_lists_multiple_categories_with_confidence():
+    """逐文件回执必须展示一个文件的多个分类、置信度和证据。"""
+
+    response = _build_document_results_response(
+        [
+            {
+                "filename": "multi.txt",
+                "extraction_status": "COMPLETED",
+                "page_count": 1,
+                "char_count": 30,
+                "categories": [
+                    {
+                        "name": "学校/人事师资/职称",
+                        "confidence": 0.8,
+                        "evidence": ["职称"],
+                    },
+                    {
+                        "name": "学校/党委相关/干部工作",
+                        "confidence": 0.78,
+                        "evidence": ["干部工作"],
+                    },
+                ],
+            }
+        ]
+    )
+
+    assert "分类建议：" in response
+    assert "学校/人事师资/职称，置信度 0.80，依据：职称" in response
+    assert "学校/党委相关/干部工作，置信度 0.78，依据：干部工作" in response
 
 
 def test_graph_does_not_execute_direct_file_writes_from_planner_output():

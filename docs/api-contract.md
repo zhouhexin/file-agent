@@ -436,7 +436,7 @@ Current `extract-document-text` supports `txt/md/csv/xlsx/docx/pdf/image`.
         "status": "FAILED"
       }
     ],
-    "final_response": "已处理 2 个文件：\n1. student.txt：解析成功，提取 1 页/Sheet，共 1200 个字符；分类建议：学校/人事师资/职称（依据：职称）。\n2. broken.pdf：解析失败，原因：不支持的文件类型。"
+    "final_response": "已处理 2 个文件：\n1. student.txt：解析成功，提取 1 页/Sheet，共 1200 个字符；分类建议：学校/人事师资/职称，置信度 0.72，依据：职称；学校/党委相关/干部工作，置信度 0.70，依据：干部工作。\n2. broken.pdf：解析失败，原因：不支持的文件类型。"
   }
 }
 ```
@@ -459,6 +459,15 @@ The per-file structured result is persisted in `agent_runs.graph_state_json.docu
         "confidence": 0.72,
         "status": "SUGGESTED",
         "evidence": ["职称"],
+        "taxonomy_key": "school_file_classification",
+        "taxonomy_version": "2026-06"
+      },
+      {
+        "name": "学校/党委相关/干部工作",
+        "category_path": ["学校", "党委相关", "干部工作"],
+        "confidence": 0.7,
+        "status": "SUGGESTED",
+        "evidence": ["干部工作"],
         "taxonomy_key": "school_file_classification",
         "taxonomy_version": "2026-06"
       }

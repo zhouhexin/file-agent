@@ -35,7 +35,7 @@ python3 -m pytest
 当前期望结果：
 
 ```text
-52 passed
+55 passed
 ```
 
 如果出现 `urllib3` 或 `LangChainPendingDeprecationWarning`，目前属于环境兼容警告，不影响现有测试结果。
@@ -257,16 +257,18 @@ tool_invocations = read-document-insights
 graph_state_json.user_intent_plan = LLM 返回的结构化意图
 ```
 
-如果 `LLM_ENABLED=true` 且用户需求是读取正文、解析 PDF/Excel 内容或 OCR 图片，当前期望行为：
+如果用户需求是读取正文、解析 PDF/Excel 内容或 OCR 图片，当前期望行为：
 
 ```text
-agent_run.intent = EXTRACT_DOCUMENT_TEXT 或模型识别出的结构化 intent
-selected_skills = llm-understanding, document-text-extract
+LLM_ENABLED=true 时：agent_run.intent = EXTRACT_DOCUMENT_TEXT 或模型识别出的结构化 intent
+deterministic 模式下用户明确说“读取/解析/正文/内容/OCR”时：agent_run.intent = EXTRACT_DOCUMENT_TEXT
+LLM 模式 selected_skills = llm-understanding, document-text-extract
+deterministic 模式 selected_skills = chat-intake, document-text-extract, document-classification, change-report
 tool_invocations = 每个附件各 1 次 extract-document-text
 document_extraction_runs 为每个成功解析的附件写入 1 条解析运行
 document_pages 写入每个成功解析附件的文本
 graph_state_json.document_results 写入逐文件解析状态、字符数、分类建议、证据、错误
-final_response = 已处理 N 个文件，并逐文件返回解析状态和分类建议。
+final_response = 已处理 N 个文件，并逐文件返回解析状态、多个分类建议、置信度和证据。
 ```
 
 当前对话阶段的基础分类使用项目内 JSON 分类配置：
@@ -275,7 +277,7 @@ final_response = 已处理 N 个文件，并逐文件返回解析状态和分类
 apps/api/app/modules/classification/taxonomies/school_file_classification.json
 ```
 
-该配置由 `文件归类(1).xlsx` 的 `Sheet2` 转换而来，当前包含“学校”和“学院”两个一级域。分类目录本身不入库；分类建议只保存在本次 AgentRun 的 `graph_state_json.document_results` 和用户回执中。后续接入正式分类 Skill 后，再补充长期 `document_categories` 表、证据跨度和版本治理。
+该配置由 `文件归类(1).xlsx` 的 `Sheet2` 转换而来，当前包含“学校”和“学院”两个一级域。分类 matcher 会按配置名称命中多个分类，过滤被长词包含的短词误命中，最多保留前 5 个分类建议。分类目录本身不入库；分类建议只保存在本次 AgentRun 的 `graph_state_json.document_results` 和用户回执中。后续接入正式分类 Skill 后，再补充长期 `document_categories` 表、证据跨度和版本治理。
 
 如需从 Excel 重新生成分类 JSON，可执行：
 

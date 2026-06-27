@@ -103,7 +103,8 @@ class DeterministicPlanner:
     ) -> PlannerOutput:
         """根据用户消息和附件上下文生成声明式计划。"""
 
-        document_id = _first_document_id(attachments)
+        document_ids = _document_ids(attachments) or [_first_document_id(attachments)]
+        document_id = document_ids[0]
         if self.force_unsafe_step:
             return PlannerOutput(
                 intent="UNSAFE_DIRECT_WRITE",
@@ -158,11 +159,24 @@ class DeterministicPlanner:
                 evidence_policy={"require_page_or_cell": True, "allow_no_evidence_answer": True},
                 confirmation_policy={"operation_plan_required": False},
             )
+        if _should_extract_text(message=message, lowered=lowered):
+            return PlannerOutput(
+                intent="EXTRACT_DOCUMENT_TEXT",
+                user_goal=message,
+                slots={"document_ids": document_ids, "requested_outputs": ["text", "classification", "receipt"]},
+                selected_skills=["chat-intake", "document-text-extract", "document-classification", "change-report"],
+                steps=[
+                    _extract_document_text_step(document_id=item, index=index)
+                    for index, item in enumerate(document_ids, start=1)
+                ],
+                evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+                confirmation_policy={"operation_plan_required": False},
+            )
 
         return PlannerOutput(
             intent="CLASSIFY_FILES",
             user_goal=message,
-            slots={"document_ids": [document_id], "requested_outputs": ["classification", "receipt"]},
+            slots={"document_ids": document_ids, "requested_outputs": ["classification", "receipt"]},
             selected_skills=["chat-intake", "file-ingest", "document-classification", "change-report"],
             steps=[
                 {
@@ -321,6 +335,19 @@ def _extract_document_text_step(*, document_id: str, index: int) -> Dict[str, An
         "expected_outputs": ["document_pages", "extraction_run"],
         "writes": ["document_extraction_runs", "document_pages"],
     }
+
+
+def _should_extract_text(*, message: str, lowered: str) -> bool:
+    """判断确定性模式下用户是否明确要求读取正文，而不是只看上传洞察。"""
+
+    extraction_keywords = ["读取", "解析", "正文", "内容", "OCR"]
+    english_keywords = ["read", "extract", "parse", "ocr"]
+    classification_keywords = ["分类", "归类", "整理"]
+    if any(keyword in message for keyword in classification_keywords):
+        return False
+    return any(keyword in message for keyword in extraction_keywords) or any(
+        keyword in lowered for keyword in english_keywords
+    )
 
 
 def _document_ids(attachments: List[Dict[str, Any]]) -> List[str]:

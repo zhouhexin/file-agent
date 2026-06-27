@@ -39,13 +39,13 @@ def match_document_text(text: str, taxonomy: Taxonomy) -> list[dict[str, Any]]:
     """用分类名称匹配正文，返回带 taxonomy 元数据的分类建议。"""
 
     normalized_text = text or ""
-    matches: list[dict[str, Any]] = []
+    raw_matches: list[dict[str, Any]] = []
     for category in flatten_category_paths(taxonomy):
         if len(category.path) == 1:
             continue
         if category.name not in normalized_text:
             continue
-        matches.append(
+        raw_matches.append(
             {
                 "name": "/".join(category.path),
                 "category_path": category.path,
@@ -58,6 +58,7 @@ def match_document_text(text: str, taxonomy: Taxonomy) -> list[dict[str, Any]]:
             }
         )
 
+    matches = _dedupe_and_remove_shorter_embedded_matches(raw_matches)
     if not matches:
         return [_other_category(taxonomy)]
 
@@ -65,6 +66,27 @@ def match_document_text(text: str, taxonomy: Taxonomy) -> list[dict[str, Any]]:
     for item in matches:
         item.pop("_order", None)
     return matches[:5]
+
+
+def _dedupe_and_remove_shorter_embedded_matches(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """去除重复路径，并过滤被更长分类名包含的短词误命中。"""
+
+    longest_evidence = [
+        str((item.get("evidence") or [""])[0])
+        for item in matches
+    ]
+    filtered: list[dict[str, Any]] = []
+    seen_paths: set[tuple[str, ...]] = set()
+    for item in matches:
+        path = tuple(str(value) for value in item.get("category_path", []))
+        evidence = str((item.get("evidence") or [""])[0])
+        if path in seen_paths:
+            continue
+        if any(evidence != other and evidence in other for other in longest_evidence):
+            continue
+        seen_paths.add(path)
+        filtered.append(item)
+    return filtered
 
 
 def _confidence_for_category(category: FlattenedCategory, text: str) -> float:

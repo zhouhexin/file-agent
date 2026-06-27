@@ -304,11 +304,26 @@ def _build_document_results_response(document_results: List[Dict[str, Any]]) -> 
             continue
 
         categories = result.get("categories") or []
-        primary_category = categories[0] if categories else {"name": "其他", "evidence": []}
-        evidence = primary_category.get("evidence") or []
-        evidence_text = f"（依据：{'、'.join(evidence)}）" if evidence else "（暂无明确关键词依据）"
         lines.append(
             f"{index}. {filename}：解析成功，提取 {result.get('page_count', 0)} 页/Sheet，"
-            f"共 {result.get('char_count', 0)} 个字符；分类建议：{primary_category.get('name')}{evidence_text}。"
+            f"共 {result.get('char_count', 0)} 个字符；分类建议：{_format_category_receipt(categories)}。"
         )
     return "\n".join(lines)
+
+
+def _format_category_receipt(categories: List[Dict[str, Any]]) -> str:
+    """把多个分类建议格式化为带置信度和证据的回执片段。"""
+
+    if not categories:
+        return "其他（暂无明确关键词依据）"
+    formatted_items: list[str] = []
+    for category in categories[:5]:
+        evidence = category.get("evidence") or []
+        name = category.get("name") or "其他"
+        if name == "其他" and not evidence:
+            formatted_items.append("其他（暂无明确关键词依据）")
+            continue
+        evidence_text = f"依据：{'、'.join(evidence)}" if evidence else "暂无明确关键词依据"
+        confidence = float(category.get("confidence", 0))
+        formatted_items.append(f"{name}，置信度 {confidence:.2f}，{evidence_text}")
+    return "；".join(formatted_items)

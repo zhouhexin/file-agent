@@ -308,13 +308,19 @@ def test_llm_message_extracts_multiple_documents_and_builds_document_results():
         client,
         headers,
         filename="staff.txt",
-        content="本文件涉及教师职称申报材料。".encode(),
+        content="本文件涉及学校教师职称、干部工作和会议纪要材料。".encode(),
     )
     plan_document_id = _upload_document(
         client,
         headers,
         filename="plan.txt",
         content="本文件是学院年度计划、总结材料。".encode(),
+    )
+    unknown_document_id = _upload_document(
+        client,
+        headers,
+        filename="unknown.txt",
+        content="这是一段无法判断归类的普通文本。".encode(),
     )
 
     db = next(app.dependency_overrides[get_db]())
@@ -331,6 +337,7 @@ def test_llm_message_extracts_multiple_documents_and_builds_document_results():
                 attachments=[
                     MessageAttachment(document_id=staff_document_id),
                     MessageAttachment(document_id=plan_document_id),
+                    MessageAttachment(document_id=unknown_document_id),
                 ],
             ),
         )
@@ -339,22 +346,35 @@ def test_llm_message_extracts_multiple_documents_and_builds_document_results():
         assert [item.tool_name for item in response.agent_run.tool_invocations] == [
             "extract-document-text",
             "extract-document-text",
+            "extract-document-text",
         ]
-        assert db.query(DocumentExtractionRun).count() == 2
-        assert db.query(DocumentPage).count() == 2
+        assert db.query(DocumentExtractionRun).count() == 3
+        assert db.query(DocumentPage).count() == 3
         final_response = response.agent_run.final_response or ""
         assert "staff.txt" in final_response
         assert "plan.txt" in final_response
+        assert "unknown.txt" in final_response
         assert "学校/人事师资/职称" in final_response
+        assert "学校/党委相关/干部工作" in final_response
+        assert "置信度" in final_response
         assert "学院/行政管理/年度计划、总结" in final_response
+        assert "其他（暂无明确关键词依据）" in final_response
 
         stored_run = db.query(AgentRun).one()
         document_results = stored_run.graph_state_json["document_results"]
-        assert [item["document_id"] for item in document_results] == [staff_document_id, plan_document_id]
-        assert [item["categories"][0]["name"] for item in document_results] == [
-            "学校/人事师资/职称",
-            "学院/行政管理/年度计划、总结",
+        assert [item["document_id"] for item in document_results] == [
+            staff_document_id,
+            plan_document_id,
+            unknown_document_id,
         ]
+        staff_category_names = [category["name"] for category in document_results[0]["categories"]]
+        staff_confidences = [category["confidence"] for category in document_results[0]["categories"]]
+        assert "学校/党委相关/干部工作" in staff_category_names
+        assert "学校/行政综合管理类/会议纪要" in staff_category_names
+        assert "学校/人事师资/职称" in staff_category_names
+        assert staff_confidences == sorted(staff_confidences, reverse=True)
+        assert document_results[1]["categories"][0]["name"] == "学院/行政管理/年度计划、总结"
+        assert document_results[2]["categories"][0]["name"] == "其他"
     finally:
         db.close()
         app.dependency_overrides.clear()
