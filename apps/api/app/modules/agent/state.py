@@ -31,6 +31,7 @@ class AgentGraphState(TypedDict, total=False):
     tool_plan: Dict[str, Any]
     tool_results: List[Dict[str, Any]]
     tool_invocations: List[Dict[str, Any]]
+    document_results: List[Dict[str, Any]]
     changeset_id: Optional[str]
     operation_plan_id: Optional[str]
     final_response: Optional[str]

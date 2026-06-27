@@ -13,6 +13,7 @@
 - 已新增 `collect_context`：对话阶段可以加载附件对应的文件上下文和 `document_insights`。
 - 已新增 `read-document-insights` Tool：用户要求总结或查看已上传文件基础信息时，可复用上传阶段 deterministic ingest 的结果。
 - 已支持对话触发 `extract-document-text`：用户要求读取正文、解析 PDF/Excel 或 OCR 图片时，可由 LLM intent 映射到文件解析 Tool，并写入 `document_extraction_runs` / `document_pages`。
+- 已新增 `document_results` 的第一阶段实现：对话触发正文解析后，会在 AgentRun 快照中记录逐文件解析状态、字符数、分类建议、证据和错误，并用于生成逐文件回执。
 - AgentRun 快照已记录 `context_documents` 和 `user_intent_plan`，便于审计和排查模型规划结果。
 - 已新增 `AgentRuntimeContext`：`planner`、`registry`、`context_loader`、`llm_intent_service` 已从 `AgentGraphState` 移出，LangGraph 节点通过 `runtime.context` 获取运行依赖。
 
@@ -99,13 +100,14 @@ resume_token
 
 ### 3. State 缺少文件级结果容器
 
-当前没有统一的 `document_results`。
+当前已有第一阶段 `document_results`，但只覆盖对话触发 `extract-document-text` 后的解析结果和轻量分类建议。
 
 问题：
 
-- 无法清晰表达多个文件分别处理到了哪一步。
-- 无法输出逐文件分类、关键词、证据、错误、警告。
+- 还没有覆盖所有 Tool 和所有 deterministic ingest 步骤。
+- 还没有步骤级状态、实体、年份、关键词、ChangeItem 和证据跨度。
 - 无法支持“12 个文件部分成功、部分失败”的回执。
+- 分类建议暂存于 AgentRun 快照，尚未落入正式 `document_categories` 表。
 
 建议新增：
 

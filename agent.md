@@ -306,6 +306,7 @@ LangGraph 实现规则：
   - `AgentGraphState`：可持久化业务状态，只保存本次任务的输入、附件引用、上下文摘要、planner_mode、tool_plan、执行结果、错误、业务对象 ID 和最终回复。
   - `AgentRuntimeContext`：运行时依赖，只保存 Planner、Tool Registry、Context Loader、LLM Intent Service，以及后续 Storage、Queue、DB Factory、Settings 等服务对象。
   - `Persistent Stores`：数据库、对象存储、向量库、图数据库等长期事实存储，保存文件、解析结果、证据、分类、ChangeSet、OperationPlan 和审计记录。
+- `document_results` 属于 `AgentGraphState` 中的逐文件运行结果容器，只能保存本次 AgentRun 的轻量摘要、状态、分类建议、证据摘要、警告和错误；正式长期事实仍应进入 `Persistent Stores`，不能用 State 快照替代 `document_pages`、`document_categories`、ChangeSet 或 Evidence 表。
 - `planner`、`registry`、`context_loader`、`llm_intent_service`、数据库 Session、LLM client、API key、HTTP client 等运行对象不得写入 `AgentGraphState`、checkpoint 或 `graph_state_json`。
 - LangGraph 节点需要运行依赖时，必须通过 `AgentRuntimeContext` 或等价的运行时上下文机制获取，不能把服务对象塞进 State。
 - 绑定用户、数据库会话或请求上下文的运行依赖必须通过 factory 在每次 AgentRun 中重新构造；尤其是 Tool Registry 不得作为长期单例复用，避免旧 `user_id` 或旧数据库会话泄漏到新请求。

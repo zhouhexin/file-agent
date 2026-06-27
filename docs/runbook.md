@@ -35,7 +35,7 @@ python3 -m pytest
 当前期望结果：
 
 ```text
-41 passed
+44 passed
 ```
 
 如果出现 `urllib3` 或 `LangChainPendingDeprecationWarning`，目前属于环境兼容警告，不影响现有测试结果。
@@ -265,8 +265,11 @@ selected_skills = llm-understanding, document-text-extract
 tool_invocations = extract-document-text
 document_extraction_runs 写入 1 条解析运行
 document_pages 写入解析文本
-final_response = 已解析 N 个文件，提取 M 页/Sheet，共 C 个字符。
+graph_state_json.document_results 写入逐文件解析状态、字符数、分类建议、证据、错误
+final_response = 已处理 N 个文件，并逐文件返回解析状态和分类建议。
 ```
+
+当前对话阶段的基础分类不会写入独立 `document_categories` 表；分类建议只保存在本次 AgentRun 的 `graph_state_json.document_results` 和用户回执中。后续接入正式分类 Skill 后，再补充长期分类表、证据跨度和版本治理。
 
 当前新增文件解析 Tool：
 

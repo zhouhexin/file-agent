@@ -138,6 +138,7 @@ def _safe_graph_state_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         "context_documents": state.get("context_documents", []),
         "user_intent_plan": state.get("user_intent_plan", {}),
         "tool_results": state.get("tool_results", []),
+        "document_results": state.get("document_results", []),
         "changeset_id": state.get("changeset_id"),
         "operation_plan_id": state.get("operation_plan_id"),
         "final_response": state.get("final_response"),

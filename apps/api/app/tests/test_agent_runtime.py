@@ -144,6 +144,7 @@ def test_initial_state_does_not_include_runtime_dependencies():
     for key in ["planner", "registry", "context_loader", "llm_intent_service", "prefer_explicit_planner"]:
         assert key not in state
     assert state["planner_mode"] == "deterministic"
+    assert state["document_results"] == []
 
 
 def test_safe_snapshot_excludes_runtime_dependencies():
@@ -158,12 +159,14 @@ def test_safe_snapshot_excludes_runtime_dependencies():
             "llm_intent_service": object(),
             "planner_mode": "llm",
             "tool_plan": {"steps": []},
+            "document_results": [{"document_id": "doc-1", "categories": []}],
         }
     )
 
     for key in ["planner", "registry", "context_loader", "llm_intent_service"]:
         assert key not in snapshot
     assert snapshot["planner_mode"] == "llm"
+    assert snapshot["document_results"] == [{"document_id": "doc-1", "categories": []}]
 
 
 def test_runtime_context_builds_fresh_user_scoped_registry():

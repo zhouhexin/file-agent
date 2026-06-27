@@ -358,6 +358,7 @@ create agent_runs row
 start LangGraph run
 if LLM_ENABLED=true: call LLM to create structured UserIntentPlan
 if uploaded file insights already exist: reuse document_insights through read-document-insights
+if original text extraction is required: run extract-document-text and persist document_results in agent_runs.graph_state_json
 persist tool_invocations
 return message_id and agent_run_id
 ```
@@ -431,9 +432,34 @@ Current `extract-document-text` supports `txt/md/csv/xlsx/docx/pdf/image`.
         "status": "COMPLETED"
       }
     ],
-    "final_response": "已解析 1 个文件，提取 1 页/Sheet，共 1200 个字符。"
+    "final_response": "已处理 1 个文件：\n1. student.txt：解析成功，提取 1 页/Sheet，共 1200 个字符；分类建议：奖学金（依据：奖学金、一等奖）。"
   }
 }
+```
+
+The per-file structured result is persisted in `agent_runs.graph_state_json.document_results`:
+
+```json
+[
+  {
+    "document_id": "document-uuid",
+    "filename": "student.txt",
+    "extraction_status": "COMPLETED",
+    "extractor": "plain-text",
+    "page_count": 1,
+    "char_count": 1200,
+    "categories": [
+      {
+        "name": "奖学金",
+        "confidence": 0.85,
+        "status": "SUGGESTED",
+        "evidence": ["奖学金", "一等奖"]
+      }
+    ],
+    "warnings": [],
+    "errors": []
+  }
+]
 ```
 
 Errors:

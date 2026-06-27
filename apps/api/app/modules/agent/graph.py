@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 from langgraph.graph import END, StateGraph
 from langgraph.runtime import Runtime
 
+from app.modules.agent.document_classifier import classify_document_text
 from app.modules.agent.planner import build_plan_from_user_intent
 from app.modules.agent.runtime import AgentRuntimeContext
 from app.modules.agent.state import AgentGraphState
@@ -135,9 +136,14 @@ def async_job_wait(state: AgentGraphState) -> Dict[str, Any]:
 def evidence_or_change(state: AgentGraphState) -> Dict[str, Any]:
     """为响应节点收集 evidence、ChangeSet 和 OperationPlan 标识。"""
 
+    document_results = _document_results_from_extraction_results(
+        tool_results=state.get("tool_results", []),
+        context_documents=state.get("context_documents", []),
+    )
     return {
         "changeset_id": state.get("changeset_id"),
         "operation_plan_id": state.get("operation_plan_id"),
+        "document_results": document_results,
     }
 
 
@@ -145,6 +151,13 @@ def response(state: AgentGraphState) -> Dict[str, Any]:
     """生成面向用户的最终运行摘要。"""
 
     invocation_count = len(state.get("tool_invocations", []))
+    document_results = state.get("document_results", [])
+    if document_results:
+        return {
+            "status": "COMPLETED",
+            "final_response": _build_document_results_response(document_results),
+        }
+
     extraction_results = _extraction_results_from_results(state.get("tool_results", []))
     if extraction_results:
         return {
@@ -211,3 +224,62 @@ def _insight_documents_from_results(tool_results: List[Dict[str, Any]]) -> List[
         if isinstance(result_documents, list):
             documents.extend([item for item in result_documents if isinstance(item, dict)])
     return documents
+
+
+def _document_results_from_extraction_results(
+    *,
+    tool_results: List[Dict[str, Any]],
+    context_documents: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """把正文解析 Tool 输出聚合成逐文件业务结果。"""
+
+    document_lookup = {
+        str(document.get("document_id")): document
+        for document in context_documents
+        if document.get("document_id")
+    }
+    document_results: List[Dict[str, Any]] = []
+    for result in _extraction_results_from_results(tool_results):
+        document_id = str(result.get("document_id") or "")
+        document_context = document_lookup.get(document_id, {})
+        pages = [page for page in result.get("pages", []) if isinstance(page, dict)]
+        char_count = sum(int(page.get("char_count", 0) or 0) for page in pages)
+        text_preview = "\n".join(str(page.get("text_preview") or "") for page in pages)
+        error = result.get("error") if isinstance(result.get("error"), dict) else None
+        document_results.append(
+            {
+                "document_id": document_id,
+                "filename": document_context.get("filename") or document_id,
+                "extraction_status": result.get("status"),
+                "extractor": result.get("extractor"),
+                "page_count": len(pages),
+                "char_count": char_count,
+                "categories": classify_document_text(text_preview) if result.get("status") == "COMPLETED" else [],
+                "warnings": [],
+                "errors": [error] if error else [],
+            }
+        )
+    return document_results
+
+
+def _build_document_results_response(document_results: List[Dict[str, Any]]) -> str:
+    """根据 document_results 生成逐文件处理回执。"""
+
+    lines = [f"已处理 {len(document_results)} 个文件："]
+    for index, result in enumerate(document_results, start=1):
+        filename = result.get("filename") or result.get("document_id") or "未知文件"
+        if result.get("extraction_status") == "FAILED":
+            error = (result.get("errors") or [{}])[0]
+            message = error.get("message") if isinstance(error, dict) else "未知错误"
+            lines.append(f"{index}. {filename}：解析失败，原因：{message}。")
+            continue
+
+        categories = result.get("categories") or []
+        primary_category = categories[0] if categories else {"name": "其他", "evidence": []}
+        evidence = primary_category.get("evidence") or []
+        evidence_text = f"（依据：{'、'.join(evidence)}）" if evidence else "（暂无明确关键词依据）"
+        lines.append(
+            f"{index}. {filename}：解析成功，提取 {result.get('page_count', 0)} 页/Sheet，"
+            f"共 {result.get('char_count', 0)} 个字符；分类建议：{primary_category.get('name')}{evidence_text}。"
+        )
+    return "\n".join(lines)
