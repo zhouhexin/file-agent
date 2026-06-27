@@ -15,6 +15,7 @@
 - 已支持对话触发 `extract-document-text`：用户要求读取正文、解析 PDF/Excel 或 OCR 图片时，可由 LLM intent 映射到文件解析 Tool，并写入 `document_extraction_runs` / `document_pages`。
 - 已新增 `document_results` 的第一阶段实现：对话触发正文解析后，会在 AgentRun 快照中记录逐文件解析状态、字符数、分类建议、证据和错误，并用于生成逐文件回执。
 - 已预置学校文件归类 JSON 配置：分类目录来自 `apps/api/app/modules/classification/taxonomies/school_file_classification.json`，当前不入库，分类建议带 `taxonomy_key` 和 `taxonomy_version`。
+- 已支持多附件正文解析的顺序执行：LLM intent 引用多个 `document_id` 时，Planner 会为每个文件生成独立 `extract-document-text` 步骤；单步 Tool 异常会记录为文件级失败结果，后续文件继续处理。
 - AgentRun 快照已记录 `context_documents` 和 `user_intent_plan`，便于审计和排查模型规划结果。
 - 已新增 `AgentRuntimeContext`：`planner`、`registry`、`context_loader`、`llm_intent_service` 已从 `AgentGraphState` 移出，LangGraph 节点通过 `runtime.context` 获取运行依赖。
 
@@ -101,13 +102,13 @@ resume_token
 
 ### 3. State 缺少文件级结果容器
 
-当前已有第一阶段 `document_results`，但只覆盖对话触发 `extract-document-text` 后的解析结果和轻量分类建议。
+当前已有第一阶段 `document_results`，覆盖对话触发 `extract-document-text` 后的单文件和多附件解析结果、轻量分类建议、文件级错误。
 
 问题：
 
 - 还没有覆盖所有 Tool 和所有 deterministic ingest 步骤。
 - 还没有步骤级状态、实体、年份、关键词、ChangeItem 和证据跨度。
-- 无法支持“12 个文件部分成功、部分失败”的回执。
+- 仅支持顺序执行的部分成功回执，还没有并发、进度事件、步骤级重试和恢复。
 - 分类建议暂存于 AgentRun 快照，尚未落入正式 `document_categories` 表。
 
 建议新增：
@@ -205,7 +206,7 @@ per_document_result
 ## P2 问题：批量文件处理
 
 - deterministic planner 仍需要改为处理全部附件，而不是偏向第一个文件。
-- 当前对话触发 `extract-document-text` 仍按单文件或第一个附件执行，尚未解决多附件批量 Planner。
+- 当前对话触发 `extract-document-text` 已支持多附件顺序执行，但还没有 map/reduce 和并发控制。
 - 批量任务需要 map/reduce 结构：
 
 ```text
@@ -217,7 +218,7 @@ batch_prepare
 ```
 
 - 单文件应有独立状态、错误、重试次数和结果。
-- 批量处理应支持部分成功、部分失败。
+- 批量处理已支持基础部分成功、部分失败回执，但还没有步骤级状态、重试次数和进度事件。
 - 未来需要并发限制和进度反馈。
 
 ## P3 问题：真实 Tool 能力

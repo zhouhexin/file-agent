@@ -430,9 +430,13 @@ Current `extract-document-text` supports `txt/md/csv/xlsx/docx/pdf/image`.
       {
         "tool_name": "extract-document-text",
         "status": "COMPLETED"
+      },
+      {
+        "tool_name": "extract-document-text",
+        "status": "FAILED"
       }
     ],
-    "final_response": "已处理 1 个文件：\n1. student.txt：解析成功，提取 1 页/Sheet，共 1200 个字符；分类建议：学校/人事师资/职称（依据：职称）。"
+    "final_response": "已处理 2 个文件：\n1. student.txt：解析成功，提取 1 页/Sheet，共 1200 个字符；分类建议：学校/人事师资/职称（依据：职称）。\n2. broken.pdf：解析失败，原因：不支持的文件类型。"
   }
 }
 ```
@@ -461,6 +465,22 @@ The per-file structured result is persisted in `agent_runs.graph_state_json.docu
     ],
     "warnings": [],
     "errors": []
+  },
+  {
+    "document_id": "document-uuid-2",
+    "filename": "broken.pdf",
+    "extraction_status": "FAILED",
+    "extractor": "extract-document-text",
+    "page_count": 0,
+    "char_count": 0,
+    "categories": [],
+    "warnings": [],
+    "errors": [
+      {
+        "code": "TOOL_EXECUTION_FAILED",
+        "message": "不支持的文件类型"
+      }
+    ]
   }
 ]
 ```

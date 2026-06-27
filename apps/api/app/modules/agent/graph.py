@@ -13,7 +13,7 @@ from langgraph.runtime import Runtime
 from app.modules.agent.document_classifier import classify_document_text
 from app.modules.agent.planner import build_plan_from_user_intent
 from app.modules.agent.runtime import AgentRuntimeContext
-from app.modules.agent.state import AgentGraphState
+from app.modules.agent.state import AgentGraphState, ToolInvocationRecord
 
 
 def build_agent_graph():
@@ -111,7 +111,12 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
         if step["requires_confirmation"]:
             operation_plan_id = operation_plan_id or "operation-plan-pending"
             continue
-        invocation = registry.invoke(step["tool_name"], step["input"])
+        try:
+            invocation = registry.invoke(step["tool_name"], step["input"])
+        except Exception as exc:
+            if step["tool_name"] != "extract-document-text":
+                raise
+            invocation = _failed_tool_invocation(step=step, error=exc)
         invocation_json = invocation.model_dump()
         tool_invocations.append(invocation_json)
         tool_results.append(invocation.output_json)
@@ -125,6 +130,30 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
         "operation_plan_id": operation_plan_id,
         "status": "SUMMARIZING",
     }
+
+
+def _failed_tool_invocation(*, step: Dict[str, Any], error: Exception) -> ToolInvocationRecord:
+    """把单个 Tool 异常转成结构化失败记录，避免批量任务被一个文件阻断。"""
+
+    tool_input = step.get("input", {})
+    document_id = str(tool_input.get("document_id") or "")
+    return ToolInvocationRecord(
+        tool_name=step.get("tool_name", "unknown-tool"),
+        input_json=tool_input,
+        output_json={
+            "ok": False,
+            "document_id": document_id,
+            "extraction_run_id": f"failed-{step.get('step_id', 'unknown')}",
+            "status": "FAILED",
+            "extractor": step.get("tool_name", "unknown-tool"),
+            "pages": [],
+            "error": {
+                "code": "TOOL_EXECUTION_FAILED",
+                "message": str(error),
+            },
+        },
+        status="FAILED",
+    )
 
 
 def async_job_wait(state: AgentGraphState) -> Dict[str, Any]:

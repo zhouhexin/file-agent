@@ -222,28 +222,20 @@ def build_plan_from_user_intent(
     document_ids = intent_plan.referenced_document_ids or _document_ids(attachments)
     requested_capabilities = set(intent_plan.required_capabilities).union(intent_plan.tool_plan_hint)
     if requested_capabilities.intersection(TEXT_EXTRACTION_HINTS):
-        document_id = document_ids[0] if document_ids else _first_document_id(attachments)
+        extraction_document_ids = document_ids or [_first_document_id(attachments)]
         return PlannerOutput(
             intent=intent_plan.intent,
             user_goal=intent_plan.user_goal,
             slots={
-                "document_ids": [document_id],
+                "document_ids": extraction_document_ids,
                 "response_style": intent_plan.response_style,
                 "clarification_question": intent_plan.clarification_question,
                 "llm_intent_plan": intent_plan.model_dump(),
             },
             selected_skills=["llm-understanding", "document-text-extract"],
             steps=[
-                {
-                    "step_id": "step-1",
-                    "skill": "document-text-extract",
-                    "tool_name": "extract-document-text",
-                    "input": {"document_id": document_id},
-                    "requires_confirmation": False,
-                    "risk_level": "low",
-                    "expected_outputs": ["document_pages", "extraction_run"],
-                    "writes": ["document_extraction_runs", "document_pages"],
-                }
+                _extract_document_text_step(document_id=document_id, index=index)
+                for index, document_id in enumerate(extraction_document_ids, start=1)
             ],
             evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
             confirmation_policy={"operation_plan_required": False},
@@ -314,6 +306,21 @@ def _first_document_id(attachments: List[Dict[str, Any]]) -> str:
     if not attachments:
         return "document-memory"
     return str(attachments[0].get("document_id") or "document-memory")
+
+
+def _extract_document_text_step(*, document_id: str, index: int) -> Dict[str, Any]:
+    """为一个文件生成正文解析 Tool 步骤，支持多附件批量计划。"""
+
+    return {
+        "step_id": f"step-extract-{index}",
+        "skill": "document-text-extract",
+        "tool_name": "extract-document-text",
+        "input": {"document_id": document_id},
+        "requires_confirmation": False,
+        "risk_level": "low",
+        "expected_outputs": ["document_pages", "extraction_run"],
+        "writes": ["document_extraction_runs", "document_pages"],
+    }
 
 
 def _document_ids(attachments: List[Dict[str, Any]]) -> List[str]:

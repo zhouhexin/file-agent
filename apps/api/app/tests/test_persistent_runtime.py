@@ -280,6 +280,86 @@ def test_llm_message_extracts_document_text_and_persists_pages():
         app.dependency_overrides.clear()
 
 
+def test_llm_message_extracts_multiple_documents_and_builds_document_results():
+    """多附件对话必须逐文件解析、分类并持久化 document_results。"""
+
+    class FakeLLMIntentService:
+        """测试用 LLM 服务，固定返回多文件正文解析计划。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """返回全部附件，保护批量文件链路。"""
+
+            return UserIntentPlan(
+                intent="EXTRACT_DOCUMENT_TEXT",
+                user_goal=message,
+                needs_file_context=True,
+                referenced_document_ids=[item["document_id"] for item in attachments],
+                required_capabilities=["extract_document_text"],
+                skip_completed_ingest=True,
+                tool_plan_hint=["extract-document-text"],
+                response_style="concise",
+            )
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="llm-batch-extract-user")
+    staff_document_id = _upload_document(
+        client,
+        headers,
+        filename="staff.txt",
+        content="本文件涉及教师职称申报材料。".encode(),
+    )
+    plan_document_id = _upload_document(
+        client,
+        headers,
+        filename="plan.txt",
+        content="本文件是学院年度计划、总结材料。".encode(),
+    )
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(User.username == "llm-batch-extract-user").one()
+        response = ConversationMessageService(
+            db=db,
+            agent_service=AgentRuntimeService(llm_intent_service=FakeLLMIntentService()),
+        ).send_user_message(
+            conversation_id="batch-extract-conv",
+            user_id=user.id,
+            request=SendMessageRequest(
+                content="读取并分类这批文件",
+                attachments=[
+                    MessageAttachment(document_id=staff_document_id),
+                    MessageAttachment(document_id=plan_document_id),
+                ],
+            ),
+        )
+
+        assert response.agent_run.intent == "EXTRACT_DOCUMENT_TEXT"
+        assert [item.tool_name for item in response.agent_run.tool_invocations] == [
+            "extract-document-text",
+            "extract-document-text",
+        ]
+        assert db.query(DocumentExtractionRun).count() == 2
+        assert db.query(DocumentPage).count() == 2
+        final_response = response.agent_run.final_response or ""
+        assert "staff.txt" in final_response
+        assert "plan.txt" in final_response
+        assert "学校/人事师资/职称" in final_response
+        assert "学院/行政管理/年度计划、总结" in final_response
+
+        stored_run = db.query(AgentRun).one()
+        document_results = stored_run.graph_state_json["document_results"]
+        assert [item["document_id"] for item in document_results] == [staff_document_id, plan_document_id]
+        assert [item["categories"][0]["name"] for item in document_results] == [
+            "学校/人事师资/职称",
+            "学院/行政管理/年度计划、总结",
+        ]
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
 def test_alembic_files_exist_for_runtime_tables():
     """迁移配置必须存在，避免 ORM 表只停留在测试内存里。"""
 

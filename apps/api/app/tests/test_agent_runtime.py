@@ -13,6 +13,7 @@ from app.modules.llm.schemas import UserIntentPlan
 from app.modules.agent.repository import _safe_graph_state_snapshot
 from app.modules.agent.planner import DeterministicPlanner
 from app.modules.agent.service import AgentRuntimeService
+from app.modules.agent.state import ToolInvocationRecord
 from app.modules.agent.tool_registry import ToolRegistry, UnknownToolError
 from app.modules.agent.tool_schemas import ToolInputValidationError
 
@@ -266,6 +267,112 @@ def test_llm_intent_extracts_document_text():
     assert result.intent == "EXTRACT_DOCUMENT_TEXT"
     assert result.selected_skills == ["llm-understanding", "document-text-extract"]
     assert [item.tool_name for item in result.tool_invocations] == ["extract-document-text"]
+
+
+def test_llm_intent_extracts_text_for_all_referenced_documents():
+    """LLM 解析出多个附件时，Planner 必须为每个文件生成独立解析步骤。"""
+
+    class FakeLLMIntentService:
+        """测试用 LLM 服务，固定返回多文件正文解析意图。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """返回所有附件对应的 document_id，验证 Planner 不再只取第一个。"""
+
+            return UserIntentPlan(
+                intent="EXTRACT_DOCUMENT_TEXT",
+                user_goal=message,
+                needs_file_context=True,
+                referenced_document_ids=[item["document_id"] for item in attachments],
+                required_capabilities=["extract_document_text"],
+                skip_completed_ingest=True,
+                tool_plan_hint=["extract-document-text"],
+                response_style="concise",
+            )
+
+    service = AgentRuntimeService(llm_intent_service=FakeLLMIntentService())
+
+    result = service.run_message(
+        conversation_id="conv-1",
+        user_id="user-1",
+        message_id="msg-1",
+        message="读取并分类这批文件",
+        attachments=[{"document_id": "doc-1"}, {"document_id": "doc-2"}],
+    )
+
+    assert result.status == "COMPLETED"
+    assert result.tool_plan["slots"]["document_ids"] == ["doc-1", "doc-2"]
+    assert [step["input"]["document_id"] for step in result.tool_plan["steps"]] == ["doc-1", "doc-2"]
+    assert [item.tool_name for item in result.tool_invocations] == ["extract-document-text", "extract-document-text"]
+
+
+def test_tool_dispatch_records_step_failure_and_continues_batch():
+    """批量 Tool 执行中单个文件失败时，必须继续处理后续文件并生成失败回执。"""
+
+    class FakeRegistry:
+        """测试用 Registry，第一个文件抛异常，第二个文件成功。"""
+
+        user_id = "user-1"
+
+        def invoke(self, tool_name, input_json):
+            """按 document_id 模拟单步失败和后续成功。"""
+
+            document_id = input_json["document_id"]
+            if document_id == "doc-bad":
+                raise ValueError("模拟解析失败")
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "document_id": document_id,
+                    "extraction_run_id": "run-good",
+                    "status": "COMPLETED",
+                    "extractor": "plain-text",
+                    "pages": [{"page_number": 1, "text_preview": "教师职称材料", "char_count": 6}],
+                    "error": None,
+                },
+                status="COMPLETED",
+            )
+
+    class FakeLLMIntentService:
+        """测试用 LLM 服务，固定返回两个文件解析意图。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """返回全部附件，触发批量 Tool dispatch。"""
+
+            return UserIntentPlan(
+                intent="EXTRACT_DOCUMENT_TEXT",
+                user_goal=message,
+                needs_file_context=True,
+                referenced_document_ids=[item["document_id"] for item in attachments],
+                required_capabilities=["extract_document_text"],
+                skip_completed_ingest=True,
+                tool_plan_hint=["extract-document-text"],
+                response_style="concise",
+            )
+
+    service = AgentRuntimeService(
+        registry_factory=lambda db, user_id: FakeRegistry(),
+        llm_intent_service=FakeLLMIntentService(),
+    )
+
+    result = service.run_message(
+        conversation_id="conv-1",
+        user_id="user-1",
+        message_id="msg-1",
+        message="读取并分类这批文件",
+        attachments=[{"document_id": "doc-bad"}, {"document_id": "doc-good"}],
+    )
+
+    assert result.status == "COMPLETED"
+    assert [item.status for item in result.tool_invocations] == ["FAILED", "COMPLETED"]
+    assert [item["status"] for item in result.tool_results] == ["FAILED", "COMPLETED"]
+    assert "模拟解析失败" in (result.final_response or "")
+    assert "学校/人事师资/职称" in (result.final_response or "")
 
 
 def test_graph_does_not_execute_direct_file_writes_from_planner_output():

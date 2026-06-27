@@ -35,7 +35,7 @@ python3 -m pytest
 当前期望结果：
 
 ```text
-49 passed
+52 passed
 ```
 
 如果出现 `urllib3` 或 `LangChainPendingDeprecationWarning`，目前属于环境兼容警告，不影响现有测试结果。
@@ -262,9 +262,9 @@ graph_state_json.user_intent_plan = LLM 返回的结构化意图
 ```text
 agent_run.intent = EXTRACT_DOCUMENT_TEXT 或模型识别出的结构化 intent
 selected_skills = llm-understanding, document-text-extract
-tool_invocations = extract-document-text
-document_extraction_runs 写入 1 条解析运行
-document_pages 写入解析文本
+tool_invocations = 每个附件各 1 次 extract-document-text
+document_extraction_runs 为每个成功解析的附件写入 1 条解析运行
+document_pages 写入每个成功解析附件的文本
 graph_state_json.document_results 写入逐文件解析状态、字符数、分类建议、证据、错误
 final_response = 已处理 N 个文件，并逐文件返回解析状态和分类建议。
 ```
@@ -305,7 +305,7 @@ pytesseract
 
 图片 OCR 还需要系统安装 Tesseract OCR；如果缺少依赖或 OCR 引擎不可用，Tool 会返回结构化错误，不会读取任意路径。
 
-当前对话触发解析仍按单文件或当前附件列表中的第一个文件执行；多附件批量 Planner、逐文件部分失败汇总和 map/reduce 后续单独实现。
+当前对话触发解析已支持多个附件顺序执行。单个文件 Tool 异常会记录为该文件的失败 `document_results.errors`，后续文件继续处理；并发执行、LangGraph map/reduce、步骤级重试和恢复后续单独实现。
 
 查询 AgentRun：
 
