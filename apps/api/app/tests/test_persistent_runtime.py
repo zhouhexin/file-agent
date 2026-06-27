@@ -242,7 +242,7 @@ def test_llm_message_extracts_document_text_and_persists_pages():
         client,
         headers,
         filename="extract.txt",
-        content="学生张三获得一等奖学金，综合成绩优秀。".encode(),
+        content="本文件涉及教师职称申报材料。".encode(),
     )
 
     db = next(app.dependency_overrides[get_db]())
@@ -264,16 +264,17 @@ def test_llm_message_extracts_document_text_and_persists_pages():
         assert [item.tool_name for item in response.agent_run.tool_invocations] == ["extract-document-text"]
         assert response.agent_run.tool_results[0]["status"] == "COMPLETED"
         assert "extract.txt" in (response.agent_run.final_response or "")
-        assert "奖学金" in (response.agent_run.final_response or "")
+        assert "学校/人事师资/职称" in (response.agent_run.final_response or "")
         assert db.query(DocumentExtractionRun).count() == 1
         page = db.query(DocumentPage).one()
         assert page.document_id == document_id
-        assert "一等奖学金" in page.text_content
+        assert "职称申报" in page.text_content
         stored_run = db.query(AgentRun).one()
         document_results = stored_run.graph_state_json["document_results"]
         assert document_results[0]["document_id"] == document_id
         assert document_results[0]["extraction_status"] == "COMPLETED"
-        assert document_results[0]["categories"][0]["name"] == "奖学金"
+        assert document_results[0]["categories"][0]["name"] == "学校/人事师资/职称"
+        assert document_results[0]["categories"][0]["taxonomy_key"] == "school_file_classification"
     finally:
         db.close()
         app.dependency_overrides.clear()

@@ -552,6 +552,8 @@ FAILED
 
 一个文件可以同时有多个分类，不能只保留最高分。
 
+当前阶段分类目录可以先来自项目内配置文件，例如 `apps/api/app/modules/classification/taxonomies/school_file_classification.json`。配置文件是分类目录的 source of truth；本次 AgentRun 的分类建议写入 `document_results`，未来用户确认后的正式文件分类关系再写入 `document_categories`。在没有后台分类管理、版本启停和审计需求前，不得为了预置静态分类目录提前强制落库。
+
 分类维度至少区分：
 
 - 业务分类。

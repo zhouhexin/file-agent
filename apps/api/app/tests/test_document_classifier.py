@@ -3,23 +3,24 @@
 from app.modules.agent.document_classifier import classify_document_text
 
 
-def test_classifier_returns_scholarship_category_with_evidence():
-    """包含奖学金关键词的正文应返回奖学金分类和命中依据。"""
+def test_classifier_returns_taxonomy_category_path_with_evidence():
+    """文件基础分类器应使用预置分类体系返回完整分类路径。"""
 
-    categories = classify_document_text("学生张三获得一等奖学金，综合成绩优秀。")
+    categories = classify_document_text("本文件涉及教师职称申报材料。")
 
-    assert categories[0]["name"] == "奖学金"
-    assert "奖学金" in categories[0]["evidence"]
-    assert categories[0]["confidence"] > 0.6
+    assert categories[0]["name"] == "学校/人事师资/职称"
+    assert categories[0]["category_path"] == ["学校", "人事师资", "职称"]
+    assert categories[0]["taxonomy_key"] == "school_file_classification"
+    assert "职称" in categories[0]["evidence"]
 
 
-def test_classifier_returns_activity_category_with_evidence():
-    """包含志愿服务或社团活动关键词的正文应返回学生活动分类。"""
+def test_classifier_returns_college_category_path_with_evidence():
+    """命中学院分类时应保留学院一级域，避免与学校分类混淆。"""
 
-    categories = classify_document_text("该学生参加志愿服务和社团活动，表现良好。")
+    categories = classify_document_text("本文件是学院年度计划、总结材料。")
 
-    assert categories[0]["name"] == "学生活动"
-    assert "志愿" in categories[0]["evidence"]
+    assert categories[0]["name"] == "学院/行政管理/年度计划、总结"
+    assert "年度计划、总结" in categories[0]["evidence"]
 
 
 def test_classifier_returns_other_when_no_keywords_match():
@@ -30,8 +31,11 @@ def test_classifier_returns_other_when_no_keywords_match():
     assert categories == [
         {
             "name": "其他",
+            "category_path": ["其他"],
             "confidence": 0.2,
             "status": "SUGGESTED",
             "evidence": [],
+            "taxonomy_key": "school_file_classification",
+            "taxonomy_version": "2026-06",
         }
     ]

@@ -432,7 +432,7 @@ Current `extract-document-text` supports `txt/md/csv/xlsx/docx/pdf/image`.
         "status": "COMPLETED"
       }
     ],
-    "final_response": "已处理 1 个文件：\n1. student.txt：解析成功，提取 1 页/Sheet，共 1200 个字符；分类建议：奖学金（依据：奖学金、一等奖）。"
+    "final_response": "已处理 1 个文件：\n1. student.txt：解析成功，提取 1 页/Sheet，共 1200 个字符；分类建议：学校/人事师资/职称（依据：职称）。"
   }
 }
 ```
@@ -450,10 +450,13 @@ The per-file structured result is persisted in `agent_runs.graph_state_json.docu
     "char_count": 1200,
     "categories": [
       {
-        "name": "奖学金",
-        "confidence": 0.85,
+        "name": "学校/人事师资/职称",
+        "category_path": ["学校", "人事师资", "职称"],
+        "confidence": 0.72,
         "status": "SUGGESTED",
-        "evidence": ["奖学金", "一等奖"]
+        "evidence": ["职称"],
+        "taxonomy_key": "school_file_classification",
+        "taxonomy_version": "2026-06"
       }
     ],
     "warnings": [],
