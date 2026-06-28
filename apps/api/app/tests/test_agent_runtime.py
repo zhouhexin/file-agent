@@ -52,7 +52,7 @@ def test_local_web_origin_is_allowed_for_api_requests():
 
 
 def test_planner_returns_declarative_tool_plan():
-    """确定性 Planner 返回 Skill 和 Tool 步骤，而不是直接动作。"""
+    """只分类请求必须进入真实正文解析链路，而不是旧占位分类链路。"""
 
     planner = DeterministicPlanner()
 
@@ -67,16 +67,11 @@ def test_planner_returns_declarative_tool_plan():
     assert plan.intent == "CLASSIFY_FILES"
     assert plan.selected_skills == [
         "chat-intake",
-        "file-ingest",
+        "document-text-extract",
         "document-classification",
         "change-report",
     ]
-    assert [step.tool_name for step in plan.steps] == [
-        "document-convert",
-        "metadata-extract",
-        "multi-label-classify",
-        "change-report",
-    ]
+    assert [step.tool_name for step in plan.steps] == ["extract-document-text"]
     assert all(not step.requires_confirmation for step in plan.steps)
 
 
@@ -99,7 +94,7 @@ def test_invalid_tool_input_is_rejected():
 
 
 def test_message_starts_langgraph_run_and_records_tool_invocations():
-    """一条消息可以完成一次内存态 LangGraph 运行，并记录 Tool 调用。"""
+    """只分类消息也必须走真实正文解析 Tool，避免占位分类结果外露。"""
 
     service = AgentRuntimeService()
 
@@ -115,16 +110,11 @@ def test_message_starts_langgraph_run_and_records_tool_invocations():
     assert result.intent == "CLASSIFY_FILES"
     assert result.selected_skills == [
         "chat-intake",
-        "file-ingest",
+        "document-text-extract",
         "document-classification",
         "change-report",
     ]
-    assert [item.tool_name for item in result.tool_invocations] == [
-        "document-convert",
-        "metadata-extract",
-        "multi-label-classify",
-        "change-report",
-    ]
+    assert [item.tool_name for item in result.tool_invocations] == ["extract-document-text"]
     assert result.final_response
 
 

@@ -35,7 +35,7 @@ python3 -m pytest
 当前期望结果：
 
 ```text
-63 passed
+64 passed
 ```
 
 如果出现 `urllib3` 或 `LangChainPendingDeprecationWarning`，目前属于环境兼容警告，不影响现有测试结果。
@@ -245,7 +245,8 @@ message.user_id = 当前登录用户 id
 agent_run.status = COMPLETED
 agent_run.intent = CLASSIFY_FILES
 agent_run.user_id = 当前登录用户 id
-tool_invocations = document-convert, metadata-extract, multi-label-classify, change-report
+tool_invocations = 每个附件各 1 次 extract-document-text
+分类依据 = document_pages 中的完整正文，不使用 300 字 text_preview
 ```
 
 如果 `LLM_ENABLED=true` 且用户需求是总结或查看已上传文件基础信息，当前期望行为：

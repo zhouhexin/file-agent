@@ -179,6 +179,23 @@ class DeterministicPlanner:
                 evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
                 confirmation_policy={"operation_plan_required": False},
             )
+        if _has_classification_intent(message=message, lowered=lowered):
+            return PlannerOutput(
+                intent="CLASSIFY_FILES",
+                user_goal=message,
+                slots={"document_ids": document_ids, "requested_outputs": ["classification", "receipt"]},
+                selected_skills=["chat-intake", "document-text-extract", "document-classification", "change-report"],
+                steps=[
+                    _extract_document_text_step(
+                        document_id=item,
+                        index=index,
+                        force_reprocess=_should_force_reprocess(message=message, lowered=lowered),
+                    )
+                    for index, item in enumerate(document_ids, start=1)
+                ],
+                evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+                confirmation_policy={"operation_plan_required": False},
+            )
 
         return PlannerOutput(
             intent="CLASSIFY_FILES",

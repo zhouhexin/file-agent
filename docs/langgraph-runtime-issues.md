@@ -16,7 +16,8 @@
 - 已新增 `document_results` 的第一阶段实现：对话触发正文解析后，会在 AgentRun 快照中记录逐文件解析状态、字符数、分类建议、证据和错误，并用于生成逐文件回执。
 - 已预置学校文件归类 JSON 配置：分类目录来自 `apps/api/app/modules/classification/taxonomies/school_file_classification.json`，当前不入库，分类建议带 `taxonomy_key` 和 `taxonomy_version`。
 - 已支持多附件正文解析的顺序执行：LLM intent 引用多个 `document_id` 时，Planner 会为每个文件生成独立 `extract-document-text` 步骤；单步 Tool 异常会记录为文件级失败结果，后续文件继续处理。
-- deterministic planner 已支持“读取/解析/正文/内容/OCR”类请求的多附件正文解析步骤；“读取并分类/解析并归类”组合意图也会优先进入正文解析路径，不再只取第一个附件。
+- deterministic planner 已支持“读取/解析/正文/内容/OCR”类请求的多附件正文解析步骤；“读取并分类/解析并归类/只分类”意图也会优先进入正文解析路径，不再只取第一个附件或进入旧占位分类链路。
+- 分类建议已改为基于 `document_pages.text_content` 的完整正文生成，不再使用 Tool 返回的 300 字 `text_preview` 作为分类依据。
 - 逐文件回执已支持展示多个分类建议、置信度和证据；分类建议已写入 `document_classification_runs` 和 `document_category_suggestions`，尚未写入用户确认后的正式 `document_categories`。
 - 已新增真实 ChangeSet 第一阶段：读取/读取并分类链路会写入 `change_sets` 和 `change_items`，覆盖 `TEXT_EXTRACTED`、`DOCUMENT_PAGES_CREATED`、`CATEGORY_SUGGESTED` 和 `DOCUMENT_PROCESSING_FAILED`。
 - 已新增解析复用第一阶段：同一文件已有成功解析页时默认复用，不重复写 `document_extraction_runs` / `document_pages`；用户明确要求重新解析时才强制重处理，并在 ChangeSet 中区分复用和新生成。

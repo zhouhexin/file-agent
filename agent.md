@@ -450,6 +450,8 @@ change_items
 
 当前阶段读取、解析和读取并分类链路必须生成真实 ChangeSet。`TEXT_EXTRACTED`、`DOCUMENT_PAGES_CREATED`、`CATEGORY_SUGGESTED` 和 `DOCUMENT_PROCESSING_FAILED` 写入 `change_items`；默认复用既有成功解析结果时必须写入 `TEXT_REUSED`、`DOCUMENT_PAGES_REUSED` 和 `CATEGORY_SUGGESTION_REUSED`。其中 `CATEGORY_SUGGESTED` 和 `CATEGORY_SUGGESTION_REUSED` 都只代表分类建议，不代表正式写入 `document_categories`。
 
+用户只说“分类/归类/整理”且带附件时，也必须走 `extract-document-text -> document_pages -> document-classification -> ChangeSet` 真实链路，不得回落到 `document-convert -> metadata-extract -> multi-label-classify -> change-report` 占位链路。分类依据必须来自 `document_pages.text_content` 的完整正文，不能用短 `text_preview` 代替。
+
 `change_type` 至少覆盖：
 
 ```text

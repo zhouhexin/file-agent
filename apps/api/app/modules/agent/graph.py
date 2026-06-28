@@ -162,12 +162,20 @@ def async_job_wait(state: AgentGraphState) -> Dict[str, Any]:
     return {"status": "SUMMARIZING"}
 
 
-def evidence_or_change(state: AgentGraphState) -> Dict[str, Any]:
+def evidence_or_change(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
     """为响应节点收集 evidence、ChangeSet 和 OperationPlan 标识。"""
 
+    extraction_run_ids = [
+        str(result.get("extraction_run_id"))
+        for result in state.get("tool_results", [])
+        if result.get("extraction_run_id")
+    ]
     document_results = _document_results_from_extraction_results(
         tool_results=state.get("tool_results", []),
         context_documents=state.get("context_documents", []),
+        extraction_texts=runtime.context.context_loader.load_extraction_texts(
+            extraction_run_ids=extraction_run_ids,
+        ),
     )
     return {
         "changeset_id": state.get("changeset_id"),
@@ -259,9 +267,11 @@ def _document_results_from_extraction_results(
     *,
     tool_results: List[Dict[str, Any]],
     context_documents: List[Dict[str, Any]],
+    extraction_texts: Dict[str, str] | None = None,
 ) -> List[Dict[str, Any]]:
     """把正文解析 Tool 输出聚合成逐文件业务结果。"""
 
+    extraction_texts = extraction_texts or {}
     document_lookup = {
         str(document.get("document_id")): document
         for document in context_documents
@@ -274,6 +284,7 @@ def _document_results_from_extraction_results(
         pages = [page for page in result.get("pages", []) if isinstance(page, dict)]
         char_count = sum(int(page.get("char_count", 0) or 0) for page in pages)
         text_preview = "\n".join(str(page.get("text_preview") or "") for page in pages)
+        classification_text = extraction_texts.get(str(result.get("extraction_run_id") or "")) or text_preview
         error = result.get("error") if isinstance(result.get("error"), dict) else None
         document_results.append(
             {
@@ -285,7 +296,11 @@ def _document_results_from_extraction_results(
                 "char_count": char_count,
                 "text_reused": bool(result.get("reused")),
                 "classification_reused": bool(result.get("reused")),
-                "categories": classify_document_text(text_preview) if result.get("status") == "COMPLETED" else [],
+                "categories": (
+                    classify_document_text(classification_text)
+                    if result.get("status") == "COMPLETED"
+                    else []
+                ),
                 "warnings": [],
                 "errors": [error] if error else [],
             }

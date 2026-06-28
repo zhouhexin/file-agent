@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from app.db.models import Document, DocumentInsight
+from app.db.models import Document, DocumentInsight, DocumentPage
 
 
 class AgentContextLoader:
@@ -52,3 +52,23 @@ class AgentContextLoader:
             }
             for document in documents
         ]
+
+    def load_extraction_texts(self, *, extraction_run_ids: List[str]) -> Dict[str, str]:
+        """按解析运行读取已持久化的完整页面正文，用作分类依据。"""
+
+        if self.db is None or not extraction_run_ids:
+            return {}
+        pages = (
+            self.db.query(DocumentPage)
+            .filter(DocumentPage.extraction_run_id.in_(extraction_run_ids))
+            .order_by(
+                DocumentPage.extraction_run_id.asc(),
+                DocumentPage.page_number.asc().nullslast(),
+                DocumentPage.created_at.asc(),
+            )
+            .all()
+        )
+        texts: Dict[str, list[str]] = {}
+        for page in pages:
+            texts.setdefault(page.extraction_run_id, []).append(page.text_content)
+        return {run_id: "\n".join(parts) for run_id, parts in texts.items()}

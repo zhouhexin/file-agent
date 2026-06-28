@@ -131,16 +131,19 @@ def test_post_message_persists_message_agent_run_and_tool_invocations():
     agent_run_id = data["agent_run"]["agent_run_id"]
     assert data["message"]["conversation_id"] == "conv-1"
     assert data["agent_run"]["status"] == "COMPLETED"
-    assert len(data["agent_run"]["tool_invocations"]) == 4
+    assert [item["tool_name"] for item in data["agent_run"]["tool_invocations"]] == ["extract-document-text"]
 
     db = next(app.dependency_overrides[get_db]())
     try:
         assert db.query(Message).count() == 1
         assert db.query(AgentRun).count() == 1
-        assert db.query(ToolInvocation).count() == 4
+        assert db.query(ToolInvocation).count() == 1
         stored_run = db.get(AgentRun, agent_run_id)
         assert stored_run is not None
         assert stored_run.plan_json["intent"] == "CLASSIFY_FILES"
+        assert db.query(DocumentExtractionRun).count() == 1
+        assert db.query(DocumentCategorySuggestion).count() >= 1
+        assert db.query(ChangeItem).filter(ChangeItem.change_type == "CATEGORY_SUGGESTED").count() >= 1
     finally:
         db.close()
         app.dependency_overrides.clear()
@@ -173,12 +176,7 @@ def test_agent_run_query_endpoints_return_persisted_records():
     assert [
         item["tool_name"]
         for item in invocations_response.json()["tool_invocations"]
-    ] == [
-        "document-convert",
-        "metadata-extract",
-        "multi-label-classify",
-        "change-report",
-    ]
+    ] == ["extract-document-text"]
     app.dependency_overrides.clear()
 
 
@@ -324,6 +322,39 @@ def test_llm_message_extracts_document_text_and_persists_pages():
         assert category_item.target_document_id == document_id
         assert category_item.after_value_json["category_name"] == "学校/人事师资/职称"
         assert category_item.evidence_json["evidence"] == ["职称"]
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_classification_uses_full_document_pages_not_short_preview():
+    """分类必须使用持久化完整正文，关键词在 300 字之后也要命中。"""
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="full-text-classify-user")
+    long_prefix = "普通内容" * 80
+    document_id = _upload_document(
+        client,
+        headers,
+        filename="full-text-classify.txt",
+        content=f"{long_prefix}。本文件最后才出现教师职称申报材料。".encode(),
+    )
+
+    response = client.post(
+        "/api/conversations/full-text-classify-conv/messages",
+        headers=headers,
+        json={
+            "content": "帮我分类这批文件",
+            "attachments": [{"document_id": document_id}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert "学校/人事师资/职称" in (response.json()["agent_run"]["final_response"] or "")
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        suggestion_names = [item.category_name for item in db.query(DocumentCategorySuggestion).all()]
+        assert "学校/人事师资/职称" in suggestion_names
     finally:
         db.close()
         app.dependency_overrides.clear()

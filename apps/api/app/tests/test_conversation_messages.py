@@ -58,15 +58,12 @@ def test_post_message_starts_agent_run():
     assert data["agent_run"]["intent"] == "CLASSIFY_FILES"
     assert data["agent_run"]["selected_skills"] == [
         "chat-intake",
-        "file-ingest",
+        "document-text-extract",
         "document-classification",
         "change-report",
     ]
     assert [item["tool_name"] for item in data["agent_run"]["tool_invocations"]] == [
-        "document-convert",
-        "metadata-extract",
-        "multi-label-classify",
-        "change-report",
+        "extract-document-text",
     ]
     clear_overrides()
 

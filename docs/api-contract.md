@@ -443,7 +443,7 @@ Current `extract-document-text` supports `txt/md/csv/xlsx/docx/pdf/image`.
 }
 ```
 
-The per-file structured result is persisted in `agent_runs.graph_state_json.document_results` for run snapshot and receipt generation. Category suggestions are also persisted in `document_classification_runs` and `document_category_suggestions`; they remain suggestions and are not official `document_categories` until user confirmation. The same run creates a real `change_sets` row and `change_items` rows for `TEXT_EXTRACTED`, `DOCUMENT_PAGES_CREATED`, `CATEGORY_SUGGESTED`, and `DOCUMENT_PROCESSING_FAILED`. When an existing successful extraction is reused, ChangeSet records `TEXT_REUSED`, `DOCUMENT_PAGES_REUSED`, and `CATEGORY_SUGGESTION_REUSED`; users can force a new extraction by saying “重新解析 / 重新读取 / 重新处理 / 重跑”.
+The per-file structured result is persisted in `agent_runs.graph_state_json.document_results` for run snapshot and receipt generation. Category suggestions are calculated from full `document_pages.text_content`, not the 300-character `text_preview`. Category suggestions are also persisted in `document_classification_runs` and `document_category_suggestions`; they remain suggestions and are not official `document_categories` until user confirmation. The same run creates a real `change_sets` row and `change_items` rows for `TEXT_EXTRACTED`, `DOCUMENT_PAGES_CREATED`, `CATEGORY_SUGGESTED`, and `DOCUMENT_PROCESSING_FAILED`. When an existing successful extraction is reused, ChangeSet records `TEXT_REUSED`, `DOCUMENT_PAGES_REUSED`, and `CATEGORY_SUGGESTION_REUSED`; users can force a new extraction by saying “重新解析 / 重新读取 / 重新处理 / 重跑”.
 
 ```json
 [
@@ -522,18 +522,18 @@ Response:
   "message_id": "message-uuid",
   "intent": "CLASSIFY_FILES",
   "status": "COMPLETED",
-  "selected_skills": ["chat-intake", "file-ingest", "document-classification", "change-report"],
+  "selected_skills": ["chat-intake", "document-text-extract", "document-classification", "change-report"],
   "tool_plan": {
     "intent": "CLASSIFY_FILES",
     "user_goal": "读取并分类刚上传的文件",
     "steps": [
       {
-        "step_id": "step-1",
-        "skill": "file-ingest",
-        "tool_name": "document-convert",
+        "step_id": "step-extract-1",
+        "skill": "document-text-extract",
+        "tool_name": "extract-document-text",
         "requires_confirmation": false,
         "risk_level": "low",
-        "expected_outputs": ["pages", "metadata", "artifacts"]
+        "expected_outputs": ["document_pages", "extraction_run"]
       }
     ]
   },
