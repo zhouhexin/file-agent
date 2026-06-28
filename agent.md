@@ -448,6 +448,8 @@ change_items
 - created_at
 ```
 
+当前阶段读取、解析和读取并分类链路必须生成真实 ChangeSet。`TEXT_EXTRACTED`、`DOCUMENT_PAGES_CREATED`、`CATEGORY_SUGGESTED` 和 `DOCUMENT_PROCESSING_FAILED` 写入 `change_items`；其中 `CATEGORY_SUGGESTED` 只代表分类建议，不代表正式写入 `document_categories`。
+
 `change_type` 至少覆盖：
 
 ```text

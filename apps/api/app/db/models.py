@@ -298,6 +298,7 @@ class AgentRun(Base):
     selected_skills_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     plan_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     graph_state_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    changeset_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("change_sets.id"), nullable=True, index=True)
     final_response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
@@ -325,3 +326,43 @@ class ToolInvocation(Base):
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     agent_run: Mapped[AgentRun] = relationship(back_populates="tool_invocations")
+
+
+class ChangeSet(Base):
+    """一次 AgentRun 产生的结构化变更集。
+
+    ChangeSet 是文件智能体的审计结果，不是普通日志；它记录本次运行真实产生的解析、
+    分类建议和失败结果。
+    """
+
+    __tablename__ = "change_sets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=True, index=True)
+    conversation_id: Mapped[str] = mapped_column(String(36), ForeignKey("conversations.id"), nullable=False, index=True)
+    agent_run_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent_runs.id"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="COMPLETED")
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class ChangeItem(Base):
+    """ChangeSet 中的一条文件级变更明细。"""
+
+    __tablename__ = "change_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    changeset_id: Mapped[str] = mapped_column(String(36), ForeignKey("change_sets.id", ondelete="CASCADE"), nullable=False, index=True)
+    target_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    target_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    target_document_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("documents.id"), nullable=True, index=True)
+    change_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    before_value_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    after_value_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    source: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    evidence_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    execution_status: Mapped[str] = mapped_column(String(40), nullable=False, default="COMPLETED")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

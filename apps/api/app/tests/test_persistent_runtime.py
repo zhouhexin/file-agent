@@ -14,6 +14,8 @@ from app.core.database import get_db
 from app.db.base import Base
 from app.db.models import (
     AgentRun,
+    ChangeItem,
+    ChangeSet,
     DocumentCategoryFeedback,
     DocumentCategorySuggestion,
     DocumentClassificationRun,
@@ -74,13 +76,14 @@ def _upload_document(
     headers: dict[str, str],
     filename: str = "persist.txt",
     content: bytes = b"persist-file",
+    content_type: str = "text/plain",
 ) -> str:
     """上传测试文件并返回 document_id。"""
 
     response = client.post(
         "/api/files/upload",
         headers=headers,
-        files={"file": (filename, content, "text/plain")},
+        files={"file": (filename, content, content_type)},
     )
     return response.json()["document_id"]
 
@@ -99,6 +102,8 @@ def test_database_tables_can_be_created():
     assert Message.__tablename__ == "messages"
     assert AgentRun.__tablename__ == "agent_runs"
     assert ToolInvocation.__tablename__ == "tool_invocations"
+    assert ChangeSet.__tablename__ == "change_sets"
+    assert ChangeItem.__tablename__ == "change_items"
     assert DocumentClassificationRun.__tablename__ == "document_classification_runs"
     assert DocumentCategorySuggestion.__tablename__ == "document_category_suggestions"
     assert DocumentCategoryFeedback.__tablename__ == "document_category_feedback"
@@ -303,6 +308,22 @@ def test_llm_message_extracts_document_text_and_persists_pages():
         assert suggestion.status == "SUGGESTED"
         assert suggestion.source == "rule"
         assert suggestion.evidence_json == ["职称"]
+        assert response.agent_run.changeset_id
+        assert stored_run.changeset_id == response.agent_run.changeset_id
+        changeset = db.query(ChangeSet).one()
+        assert changeset.agent_run_id == stored_run.id
+        assert changeset.summary == f"已处理 1 个文件，生成 {db.query(ChangeItem).count()} 项变更记录。"
+        change_types = [item.change_type for item in db.query(ChangeItem).order_by(ChangeItem.created_at.asc()).all()]
+        assert change_types[:2] == ["TEXT_EXTRACTED", "DOCUMENT_PAGES_CREATED"]
+        assert change_types.count("CATEGORY_SUGGESTED") >= 1
+        category_item = next(
+            item
+            for item in db.query(ChangeItem).filter(ChangeItem.change_type == "CATEGORY_SUGGESTED").all()
+            if item.after_value_json["category_name"] == "学校/人事师资/职称"
+        )
+        assert category_item.target_document_id == document_id
+        assert category_item.after_value_json["category_name"] == "学校/人事师资/职称"
+        assert category_item.evidence_json["evidence"] == ["职称"]
     finally:
         db.close()
         app.dependency_overrides.clear()
@@ -413,6 +434,148 @@ def test_llm_message_extracts_multiple_documents_and_builds_document_results():
         assert "学校/人事师资/职称" in suggestion_names
         assert "学院/行政管理/年度计划、总结" in suggestion_names
         assert "其他" in suggestion_names
+        assert response.agent_run.changeset_id
+        assert db.query(ChangeSet).count() == 1
+        assert db.query(ChangeItem).filter(ChangeItem.change_type == "TEXT_EXTRACTED").count() == 3
+        assert db.query(ChangeItem).filter(ChangeItem.change_type == "DOCUMENT_PAGES_CREATED").count() == 3
+        assert db.query(ChangeItem).filter(ChangeItem.change_type == "CATEGORY_SUGGESTED").count() >= 3
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_get_changeset_returns_items_for_owner():
+    """当前用户可以查询自己 AgentRun 生成的 ChangeSet 明细。"""
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="changeset-owner-user")
+    document_id = _upload_document(
+        client,
+        headers,
+        filename="changeset.txt",
+        content="本文件涉及教师职称申报材料。".encode(),
+    )
+
+    response = client.post(
+        "/api/conversations/changeset-conv/messages",
+        headers=headers,
+        json={
+            "content": "帮我读取并分类这个文件",
+            "attachments": [{"document_id": document_id}],
+        },
+    )
+
+    assert response.status_code == 200
+    changeset_id = response.json()["agent_run"]["changeset_id"]
+    detail_response = client.get(f"/api/changesets/{changeset_id}", headers=headers)
+
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["id"] == changeset_id
+    assert detail["status"] == "COMPLETED"
+    assert detail["summary"] == f"已处理 1 个文件，生成 {len(detail['items'])} 项变更记录。"
+    assert [item["change_type"] for item in detail["items"][:2]] == [
+        "TEXT_EXTRACTED",
+        "DOCUMENT_PAGES_CREATED",
+    ]
+    assert [item["change_type"] for item in detail["items"]].count("CATEGORY_SUGGESTED") >= 1
+    assert detail["items"][2]["target_document_id"] == document_id
+
+
+def test_get_changeset_rejects_other_user():
+    """用户不能越权读取其他用户的 ChangeSet。"""
+
+    client = _client_with_database()
+    owner_headers = _auth_header(client, username="changeset-private-owner")
+    other_headers = _auth_header(client, username="changeset-private-other")
+    document_id = _upload_document(
+        client,
+        owner_headers,
+        filename="private-changeset.txt",
+        content="本文件涉及教师职称申报材料。".encode(),
+    )
+    response = client.post(
+        "/api/conversations/private-changeset-conv/messages",
+        headers=owner_headers,
+        json={
+            "content": "帮我读取并分类这个文件",
+            "attachments": [{"document_id": document_id}],
+        },
+    )
+    changeset_id = response.json()["agent_run"]["changeset_id"]
+
+    detail_response = client.get(f"/api/changesets/{changeset_id}", headers=other_headers)
+
+    assert detail_response.status_code == 404
+
+
+def test_changeset_records_success_and_failed_documents_in_one_run():
+    """批量解析部分失败时，ChangeSet 必须同时记录成功文件和失败文件。"""
+
+    class FakeLLMIntentService:
+        """测试用 LLM 服务，固定返回全部附件正文解析计划。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """返回全部附件，保护部分失败的批量链路。"""
+
+            return UserIntentPlan(
+                intent="EXTRACT_DOCUMENT_TEXT",
+                user_goal=message,
+                needs_file_context=True,
+                referenced_document_ids=[item["document_id"] for item in attachments],
+                required_capabilities=["extract_document_text"],
+                skip_completed_ingest=True,
+                tool_plan_hint=["extract-document-text"],
+                response_style="concise",
+            )
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="changeset-partial-failure-user")
+    good_document_id = _upload_document(
+        client,
+        headers,
+        filename="partial-good.txt",
+        content="本文件涉及教师职称申报材料。".encode(),
+    )
+    bad_document_id = _upload_document(
+        client,
+        headers,
+        filename="partial-bad.bin",
+        content=b"\x00\x01",
+        content_type="application/octet-stream",
+    )
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(User.username == "changeset-partial-failure-user").one()
+        response = ConversationMessageService(
+            db=db,
+            agent_service=AgentRuntimeService(llm_intent_service=FakeLLMIntentService()),
+        ).send_user_message(
+            conversation_id="changeset-partial-failure-conv",
+            user_id=user.id,
+            request=SendMessageRequest(
+                content="帮我读取并分类这批文件",
+                attachments=[
+                    MessageAttachment(document_id=good_document_id),
+                    MessageAttachment(document_id=bad_document_id),
+                ],
+            ),
+        )
+
+        assert response.agent_run.changeset_id
+        failed_item = (
+            db.query(ChangeItem)
+            .filter(ChangeItem.change_type == "DOCUMENT_PROCESSING_FAILED")
+            .one()
+        )
+        assert failed_item.target_document_id == bad_document_id
+        assert failed_item.execution_status == "FAILED"
+        assert "暂不支持解析该文件类型" in failed_item.after_value_json["errors"][0]["message"]
+        assert db.query(ChangeItem).filter(ChangeItem.change_type == "TEXT_EXTRACTED").count() == 1
+        assert db.query(ChangeItem).filter(ChangeItem.change_type == "CATEGORY_SUGGESTED").count() >= 1
     finally:
         db.close()
         app.dependency_overrides.clear()
@@ -553,6 +716,9 @@ def test_deterministic_message_extracts_and_classifies_multiple_documents():
         assert document_results[1]["categories"][0]["name"] == "学院/行政管理/年度计划、总结"
         assert document_results[2]["categories"][0]["name"] == "其他"
         assert "置信度" in (response.agent_run.final_response or "")
+        assert response.agent_run.changeset_id
+        assert db.query(ChangeItem).filter(ChangeItem.change_type == "TEXT_EXTRACTED").count() == 3
+        assert db.query(ChangeItem).filter(ChangeItem.change_type == "CATEGORY_SUGGESTED").count() >= 3
     finally:
         db.close()
         app.dependency_overrides.clear()
@@ -569,3 +735,5 @@ def test_alembic_files_exist_for_runtime_tables():
         Path("apps/api/alembic/versions").glob("*_create_classification_suggestion_tables.py")
     )
     assert len(classification_versions) == 1
+    changeset_versions = list(Path("apps/api/alembic/versions").glob("*_create_changeset_tables.py"))
+    assert len(changeset_versions) == 1

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import AgentRun, ToolInvocation, utcnow
 from app.modules.agent.state import AgentRunResult, ToolInvocationRecord
+from app.modules.changesets.service import persist_changeset_from_document_results
 from app.modules.classification.service import persist_document_results_classifications
 
 
@@ -38,6 +39,15 @@ class AgentRunRepository:
     def update_run_from_state(self, run: AgentRun, state: dict[str, Any]) -> AgentRun:
         """用 LangGraph 最终状态更新 AgentRun 审计字段。"""
 
+        document_results = state.get("document_results", [])
+        changeset = persist_changeset_from_document_results(
+            db=self.db,
+            run=run,
+            document_results=document_results,
+        )
+        if changeset is not None:
+            state["changeset_id"] = changeset.id
+
         run.intent = state.get("intent")
         run.status = state.get("status", run.status)
         run.selected_skills_json = state.get("selected_skills", [])
@@ -49,7 +59,7 @@ class AgentRunRepository:
         persist_document_results_classifications(
             db=self.db,
             agent_run_id=run.id,
-            document_results=state.get("document_results", []),
+            document_results=document_results,
         )
         self.db.flush()
         return run
@@ -122,7 +132,7 @@ class AgentRunRepository:
             tool_plan=run.plan_json,
             tool_results=[item.output_json for item in invocation_models],
             tool_invocations=invocation_models,
-            changeset_id=_last_non_empty([item.changeset_id for item in invocation_models]),
+            changeset_id=run.changeset_id or _last_non_empty([item.changeset_id for item in invocation_models]),
             operation_plan_id=_last_non_empty([item.operation_plan_id for item in invocation_models]),
             final_response=run.final_response,
             errors=[run.error_message] if run.error_message else [],

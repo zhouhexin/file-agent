@@ -437,12 +437,13 @@ Current `extract-document-text` supports `txt/md/csv/xlsx/docx/pdf/image`.
         "status": "FAILED"
       }
     ],
+    "changeset_id": "changeset-uuid",
     "final_response": "已处理 2 个文件：\n1. student.txt：解析成功，提取 1 页/Sheet，共 1200 个字符；分类建议：学校/人事师资/职称，置信度 0.72，依据：职称；学校/党委相关/干部工作，置信度 0.70，依据：干部工作。\n2. broken.pdf：解析失败，原因：不支持的文件类型。"
   }
 }
 ```
 
-The per-file structured result is persisted in `agent_runs.graph_state_json.document_results` for run snapshot and receipt generation. Category suggestions are also persisted in `document_classification_runs` and `document_category_suggestions`; they remain suggestions and are not official `document_categories` until user confirmation:
+The per-file structured result is persisted in `agent_runs.graph_state_json.document_results` for run snapshot and receipt generation. Category suggestions are also persisted in `document_classification_runs` and `document_category_suggestions`; they remain suggestions and are not official `document_categories` until user confirmation. The same run creates a real `change_sets` row and `change_items` rows for `TEXT_EXTRACTED`, `DOCUMENT_PAGES_CREATED`, `CATEGORY_SUGGESTED`, and `DOCUMENT_PROCESSING_FAILED`:
 
 ```json
 [
@@ -985,36 +986,35 @@ Response:
   "id": "changeset-uuid",
   "conversation_id": "conversation-uuid",
   "agent_run_id": "agent-run-uuid",
-  "operation_type": "DOCUMENT_INGEST",
+  "user_id": "user-uuid",
   "status": "COMPLETED",
-  "summary": {
-    "total": 3,
-    "success": 2,
-    "failed": 0,
-    "needs_review": 1,
-    "original_files_changed": false
-  },
+  "summary": "已处理 1 个文件，生成 3 项变更记录。",
+  "created_at": "2026-06-28T08:00:00Z",
+  "updated_at": "2026-06-28T08:00:00Z",
   "items": [
     {
       "id": "change-item-uuid",
-      "target_type": "DOCUMENT",
-      "target_id": "document-uuid",
-      "change_type": "CATEGORY_ADDED",
-      "before": null,
-      "after": {
-        "category": "奖助学金与资助",
-        "confidence": 0.92,
-        "status": "AUTO_APPLIED"
+      "target_type": "document",
+      "target_id": null,
+      "target_document_id": "document-uuid",
+      "change_type": "CATEGORY_SUGGESTED",
+      "before_value_json": {},
+      "after_value_json": {
+        "category_name": "学校/人事师资/职称",
+        "confidence": 0.72,
+        "status": "SUGGESTED"
       },
-      "evidence": {
-        "page_no": 1,
-        "quote": "国家励志奖学金申请表"
+      "source": "rule",
+      "confidence": 0.72,
+      "evidence_json": {
+        "evidence": ["职称"],
+        "taxonomy_key": "school_file_classification",
+        "taxonomy_version": "2026-06"
       },
-      "execution_status": "COMPLETED"
+      "execution_status": "COMPLETED",
+      "created_at": "2026-06-28T08:00:00Z"
     }
-  ],
-  "created_at": "2026-06-24T08:00:00Z",
-  "completed_at": "2026-06-24T08:02:00Z"
+  ]
 }
 ```
 
