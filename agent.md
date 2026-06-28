@@ -448,7 +448,7 @@ change_items
 - created_at
 ```
 
-当前阶段读取、解析和读取并分类链路必须生成真实 ChangeSet。`TEXT_EXTRACTED`、`DOCUMENT_PAGES_CREATED`、`CATEGORY_SUGGESTED` 和 `DOCUMENT_PROCESSING_FAILED` 写入 `change_items`；其中 `CATEGORY_SUGGESTED` 只代表分类建议，不代表正式写入 `document_categories`。
+当前阶段读取、解析和读取并分类链路必须生成真实 ChangeSet。`TEXT_EXTRACTED`、`DOCUMENT_PAGES_CREATED`、`CATEGORY_SUGGESTED` 和 `DOCUMENT_PROCESSING_FAILED` 写入 `change_items`；默认复用既有成功解析结果时必须写入 `TEXT_REUSED`、`DOCUMENT_PAGES_REUSED` 和 `CATEGORY_SUGGESTION_REUSED`。其中 `CATEGORY_SUGGESTED` 和 `CATEGORY_SUGGESTION_REUSED` 都只代表分类建议，不代表正式写入 `document_categories`。
 
 `change_type` 至少覆盖：
 

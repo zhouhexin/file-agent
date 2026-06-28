@@ -19,6 +19,7 @@
 - deterministic planner 已支持“读取/解析/正文/内容/OCR”类请求的多附件正文解析步骤；“读取并分类/解析并归类”组合意图也会优先进入正文解析路径，不再只取第一个附件。
 - 逐文件回执已支持展示多个分类建议、置信度和证据；分类建议已写入 `document_classification_runs` 和 `document_category_suggestions`，尚未写入用户确认后的正式 `document_categories`。
 - 已新增真实 ChangeSet 第一阶段：读取/读取并分类链路会写入 `change_sets` 和 `change_items`，覆盖 `TEXT_EXTRACTED`、`DOCUMENT_PAGES_CREATED`、`CATEGORY_SUGGESTED` 和 `DOCUMENT_PROCESSING_FAILED`。
+- 已新增解析复用第一阶段：同一文件已有成功解析页时默认复用，不重复写 `document_extraction_runs` / `document_pages`；用户明确要求重新解析时才强制重处理，并在 ChangeSet 中区分复用和新生成。
 - AgentRun 快照已记录 `context_documents` 和 `user_intent_plan`，便于审计和排查模型规划结果。
 - 已新增 `AgentRuntimeContext`：`planner`、`registry`、`context_loader`、`llm_intent_service` 已从 `AgentGraphState` 移出，LangGraph 节点通过 `runtime.context` 获取运行依赖。
 

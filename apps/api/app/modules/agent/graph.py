@@ -283,6 +283,8 @@ def _document_results_from_extraction_results(
                 "extractor": result.get("extractor"),
                 "page_count": len(pages),
                 "char_count": char_count,
+                "text_reused": bool(result.get("reused")),
+                "classification_reused": bool(result.get("reused")),
                 "categories": classify_document_text(text_preview) if result.get("status") == "COMPLETED" else [],
                 "warnings": [],
                 "errors": [error] if error else [],

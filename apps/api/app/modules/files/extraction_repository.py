@@ -76,6 +76,27 @@ class FileExtractionRepository:
         self.db.flush()
         return run
 
+    def get_latest_successful_extraction(self, *, document_id: str) -> Dict[str, Any] | None:
+        """读取同一文件最近一次成功解析结果，用于避免重复解析和重复写页。"""
+
+        run = (
+            self.db.query(DocumentExtractionRun)
+            .filter(DocumentExtractionRun.document_id == document_id, DocumentExtractionRun.status == "COMPLETED")
+            .order_by(DocumentExtractionRun.updated_at.desc())
+            .first()
+        )
+        if run is None:
+            return None
+        pages = (
+            self.db.query(DocumentPage)
+            .filter(DocumentPage.extraction_run_id == run.id)
+            .order_by(DocumentPage.page_number.asc().nullslast(), DocumentPage.created_at.asc())
+            .all()
+        )
+        if not pages:
+            return None
+        return {"run": run, "pages": pages}
+
     def complete_extraction_run(
         self,
         *,

@@ -305,6 +305,29 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
             return resolved
 
         document = resolved["document"]
+        force_reprocess = bool(getattr(tool_input, "force_reprocess", False))
+        reusable = None if force_reprocess else repository.get_latest_successful_extraction(document_id=document.id)
+        if reusable is not None:
+            run = reusable["run"]
+            return {
+                "ok": True,
+                "document_id": document.id,
+                "extraction_run_id": run.id,
+                "status": "COMPLETED",
+                "extractor": run.extractor,
+                "reused": True,
+                "pages": [
+                    {
+                        "page_number": page.page_number,
+                        "sheet_name": page.sheet_name,
+                        "text_preview": page.text_content[:300],
+                        "char_count": len(page.text_content),
+                    }
+                    for page in reusable["pages"]
+                ],
+                "error": None,
+            }
+
         extraction = extract_document_text(
             file_path=resolved["file_path"],
             filename=document.original_filename,
@@ -321,6 +344,7 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
             "extraction_run_id": run.id,
             "status": extraction["status"],
             "extractor": extraction["extractor"],
+            "reused": False,
             "pages": [
                 {
                     "page_number": page.get("page_number"),

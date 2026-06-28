@@ -443,7 +443,7 @@ Current `extract-document-text` supports `txt/md/csv/xlsx/docx/pdf/image`.
 }
 ```
 
-The per-file structured result is persisted in `agent_runs.graph_state_json.document_results` for run snapshot and receipt generation. Category suggestions are also persisted in `document_classification_runs` and `document_category_suggestions`; they remain suggestions and are not official `document_categories` until user confirmation. The same run creates a real `change_sets` row and `change_items` rows for `TEXT_EXTRACTED`, `DOCUMENT_PAGES_CREATED`, `CATEGORY_SUGGESTED`, and `DOCUMENT_PROCESSING_FAILED`:
+The per-file structured result is persisted in `agent_runs.graph_state_json.document_results` for run snapshot and receipt generation. Category suggestions are also persisted in `document_classification_runs` and `document_category_suggestions`; they remain suggestions and are not official `document_categories` until user confirmation. The same run creates a real `change_sets` row and `change_items` rows for `TEXT_EXTRACTED`, `DOCUMENT_PAGES_CREATED`, `CATEGORY_SUGGESTED`, and `DOCUMENT_PROCESSING_FAILED`. When an existing successful extraction is reused, ChangeSet records `TEXT_REUSED`, `DOCUMENT_PAGES_REUSED`, and `CATEGORY_SUGGESTION_REUSED`; users can force a new extraction by saying “重新解析 / 重新读取 / 重新处理 / 重跑”.
 
 ```json
 [

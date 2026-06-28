@@ -153,6 +153,8 @@ class FileRepository:
             raise HTTPException(status_code=404, detail="Document not found")
 
         for document in documents:
+            if document.status == "USED_IN_MESSAGE":
+                continue
             if document.status != "UPLOADED":
                 from fastapi import HTTPException
 

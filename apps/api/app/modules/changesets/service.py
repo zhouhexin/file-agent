@@ -65,12 +65,16 @@ def _append_items_for_result(
         )
         return
 
+    text_change_type = "TEXT_REUSED" if result.get("text_reused") else "TEXT_EXTRACTED"
+    pages_change_type = "DOCUMENT_PAGES_REUSED" if result.get("text_reused") else "DOCUMENT_PAGES_CREATED"
+    category_change_type = "CATEGORY_SUGGESTION_REUSED" if result.get("classification_reused") else "CATEGORY_SUGGESTED"
+
     if int(result.get("char_count") or 0) > 0:
         repository.create_item(
             changeset_id=changeset_id,
             target_type="document",
             target_document_id=document_id,
-            change_type="TEXT_EXTRACTED",
+            change_type=text_change_type,
             after_value={
                 "filename": result.get("filename") or "",
                 "char_count": int(result.get("char_count") or 0),
@@ -84,7 +88,7 @@ def _append_items_for_result(
             changeset_id=changeset_id,
             target_type="document_pages",
             target_document_id=document_id,
-            change_type="DOCUMENT_PAGES_CREATED",
+            change_type=pages_change_type,
             after_value={
                 "filename": result.get("filename") or "",
                 "page_count": int(result.get("page_count") or 0),
@@ -97,7 +101,7 @@ def _append_items_for_result(
             changeset_id=changeset_id,
             target_type="document",
             target_document_id=document_id,
-            change_type="CATEGORY_SUGGESTED",
+            change_type=category_change_type,
             after_value={
                 "category_name": str(category.get("name") or "其他"),
                 "category_path": list(category.get("category_path") or []),

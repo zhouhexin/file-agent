@@ -169,7 +169,11 @@ class DeterministicPlanner:
                 },
                 selected_skills=["chat-intake", "document-text-extract", "document-classification", "change-report"],
                 steps=[
-                    _extract_document_text_step(document_id=item, index=index)
+                    _extract_document_text_step(
+                        document_id=item,
+                        index=index,
+                        force_reprocess=_should_force_reprocess(message=message, lowered=lowered),
+                    )
                     for index, item in enumerate(document_ids, start=1)
                 ],
                 evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
@@ -251,7 +255,11 @@ def build_plan_from_user_intent(
             },
             selected_skills=["llm-understanding", "document-text-extract"],
             steps=[
-                _extract_document_text_step(document_id=document_id, index=index)
+                _extract_document_text_step(
+                    document_id=document_id,
+                    index=index,
+                    force_reprocess=_should_force_reprocess(message=message, lowered=message.lower()),
+                )
                 for index, document_id in enumerate(extraction_document_ids, start=1)
             ],
             evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
@@ -325,14 +333,14 @@ def _first_document_id(attachments: List[Dict[str, Any]]) -> str:
     return str(attachments[0].get("document_id") or "document-memory")
 
 
-def _extract_document_text_step(*, document_id: str, index: int) -> Dict[str, Any]:
+def _extract_document_text_step(*, document_id: str, index: int, force_reprocess: bool = False) -> Dict[str, Any]:
     """为一个文件生成正文解析 Tool 步骤，支持多附件批量计划。"""
 
     return {
         "step_id": f"step-extract-{index}",
         "skill": "document-text-extract",
         "tool_name": "extract-document-text",
-        "input": {"document_id": document_id},
+        "input": {"document_id": document_id, "force_reprocess": force_reprocess},
         "requires_confirmation": False,
         "risk_level": "low",
         "expected_outputs": ["document_pages", "extraction_run"],
@@ -346,6 +354,16 @@ def _should_extract_text(*, message: str, lowered: str) -> bool:
     extraction_keywords = ["读取", "解析", "正文", "内容", "OCR"]
     english_keywords = ["read", "extract", "parse", "ocr"]
     return any(keyword in message for keyword in extraction_keywords) or any(
+        keyword in lowered for keyword in english_keywords
+    )
+
+
+def _should_force_reprocess(*, message: str, lowered: str) -> bool:
+    """判断用户是否明确要求跳过缓存重新处理。"""
+
+    chinese_keywords = ["重新解析", "重新读取", "重新处理", "重跑", "强制重新"]
+    english_keywords = ["reprocess", "rerun", "force reprocess", "parse again"]
+    return any(keyword in message for keyword in chinese_keywords) or any(
         keyword in lowered for keyword in english_keywords
     )
 

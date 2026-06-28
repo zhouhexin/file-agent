@@ -581,6 +581,147 @@ def test_changeset_records_success_and_failed_documents_in_one_run():
         app.dependency_overrides.clear()
 
 
+def test_extract_document_text_reuses_existing_successful_pages_by_default():
+    """同一文件重复读取时应复用成功解析结果，避免重复写 document_pages。"""
+
+    class FakeLLMIntentService:
+        """测试用 LLM 服务，固定返回单文件正文解析计划。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """返回读取正文意图，默认不要求重处理。"""
+
+            return UserIntentPlan(
+                intent="EXTRACT_DOCUMENT_TEXT",
+                user_goal=message,
+                needs_file_context=True,
+                referenced_document_ids=[attachments[0]["document_id"]],
+                required_capabilities=["extract_document_text"],
+                skip_completed_ingest=True,
+                tool_plan_hint=["extract-document-text"],
+                response_style="concise",
+            )
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="reuse-extraction-user")
+    document_id = _upload_document(
+        client,
+        headers,
+        filename="reuse.txt",
+        content="本文件涉及教师职称申报材料。".encode(),
+    )
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(User.username == "reuse-extraction-user").one()
+        service = ConversationMessageService(
+            db=db,
+            agent_service=AgentRuntimeService(llm_intent_service=FakeLLMIntentService()),
+        )
+        first_response = service.send_user_message(
+            conversation_id="reuse-extraction-conv",
+            user_id=user.id,
+            request=SendMessageRequest(
+                content="读取这个文件内容",
+                attachments=[MessageAttachment(document_id=document_id)],
+            ),
+        )
+        second_response = service.send_user_message(
+            conversation_id="reuse-extraction-conv",
+            user_id=user.id,
+            request=SendMessageRequest(
+                content="再读取这个文件内容",
+                attachments=[MessageAttachment(document_id=document_id)],
+            ),
+        )
+
+        assert first_response.agent_run.tool_results[0]["reused"] is False
+        assert second_response.agent_run.tool_results[0]["reused"] is True
+        assert db.query(DocumentExtractionRun).count() == 1
+        assert db.query(DocumentPage).count() == 1
+        second_changeset_id = second_response.agent_run.changeset_id
+        reused_types = [
+            item.change_type
+            for item in db.query(ChangeItem).filter(ChangeItem.changeset_id == second_changeset_id).all()
+        ]
+        assert "TEXT_REUSED" in reused_types
+        assert "DOCUMENT_PAGES_REUSED" in reused_types
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_extract_document_text_can_force_reprocess_when_user_requests_again():
+    """用户明确要求重新解析时，应跳过复用并创建新的解析运行。"""
+
+    class FakeLLMIntentService:
+        """测试用 LLM 服务，把用户原文放入计划，便于识别重新解析。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """返回读取正文意图，消息中的重新解析由 Planner 转成 force_reprocess。"""
+
+            return UserIntentPlan(
+                intent="EXTRACT_DOCUMENT_TEXT",
+                user_goal=message,
+                needs_file_context=True,
+                referenced_document_ids=[attachments[0]["document_id"]],
+                required_capabilities=["extract_document_text"],
+                skip_completed_ingest=True,
+                tool_plan_hint=["extract-document-text"],
+                response_style="concise",
+            )
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="force-reprocess-user")
+    document_id = _upload_document(
+        client,
+        headers,
+        filename="force-reprocess.txt",
+        content="本文件涉及教师职称申报材料。".encode(),
+    )
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(User.username == "force-reprocess-user").one()
+        service = ConversationMessageService(
+            db=db,
+            agent_service=AgentRuntimeService(llm_intent_service=FakeLLMIntentService()),
+        )
+        service.send_user_message(
+            conversation_id="force-reprocess-conv",
+            user_id=user.id,
+            request=SendMessageRequest(
+                content="读取这个文件内容",
+                attachments=[MessageAttachment(document_id=document_id)],
+            ),
+        )
+        second_response = service.send_user_message(
+            conversation_id="force-reprocess-conv",
+            user_id=user.id,
+            request=SendMessageRequest(
+                content="重新解析这个文件内容",
+                attachments=[MessageAttachment(document_id=document_id)],
+            ),
+        )
+
+        assert second_response.agent_run.tool_results[0]["reused"] is False
+        assert db.query(DocumentExtractionRun).count() == 2
+        assert db.query(DocumentPage).count() == 2
+        second_changeset_id = second_response.agent_run.changeset_id
+        change_types = [
+            item.change_type
+            for item in db.query(ChangeItem).filter(ChangeItem.changeset_id == second_changeset_id).all()
+        ]
+        assert "TEXT_EXTRACTED" in change_types
+        assert "TEXT_REUSED" not in change_types
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
 def test_classification_persistence_replaces_existing_suggestions_for_same_agent_run():
     """同一个 AgentRun 重写分类建议时，应删除旧建议再写入新建议，保证幂等。"""
 

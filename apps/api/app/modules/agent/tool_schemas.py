@@ -26,6 +26,7 @@ class DocumentToolInput(StrictToolInput):
     """单文档 Tool 的输入。"""
 
     document_id: str = Field(min_length=1)
+    force_reprocess: bool = False
 
 
 class SearchToolInput(StrictToolInput):
