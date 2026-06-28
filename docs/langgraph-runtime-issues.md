@@ -21,6 +21,7 @@
 - 逐文件回执已支持展示多个分类建议、置信度和证据；分类建议已写入 `document_classification_runs` 和 `document_category_suggestions`，尚未写入用户确认后的正式 `document_categories`。
 - 已新增真实 ChangeSet 第一阶段：读取/读取并分类链路会写入 `change_sets` 和 `change_items`，覆盖 `TEXT_EXTRACTED`、`DOCUMENT_PAGES_CREATED`、`CATEGORY_SUGGESTED` 和 `DOCUMENT_PROCESSING_FAILED`。
 - 已新增解析复用第一阶段：同一文件已有成功解析页时默认复用，不重复写 `document_extraction_runs` / `document_pages`；用户明确要求重新解析时才强制重处理，并在 ChangeSet 中区分复用和新生成。
+- 已修正 ToolInvocation 审计状态：Tool 输出 `ok=false` 或 `status=FAILED` 时，调用记录状态写为 `FAILED`。
 - AgentRun 快照已记录 `context_documents` 和 `user_intent_plan`，便于审计和排查模型规划结果。
 - 已新增 `AgentRuntimeContext`：`planner`、`registry`、`context_loader`、`llm_intent_service` 已从 `AgentGraphState` 移出，LangGraph 节点通过 `runtime.context` 获取运行依赖。
 

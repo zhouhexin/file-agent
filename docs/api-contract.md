@@ -364,6 +364,8 @@ persist tool_invocations
 return message_id and agent_run_id
 ```
 
+`tool_invocations.status` follows the structured Tool business result: `ok=false` or `status=FAILED` is persisted as `FAILED`.
+
 Response:
 
 ```json

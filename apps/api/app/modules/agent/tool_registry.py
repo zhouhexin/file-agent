@@ -110,10 +110,18 @@ class ToolRegistry:
             tool_name=name,
             input_json=tool_input.model_dump(),
             output_json=output,
-            status="COMPLETED",
+            status=_tool_invocation_status(output),
             changeset_id=output.get("changeset_id"),
             operation_plan_id=output.get("operation_plan_id"),
         )
+
+
+def _tool_invocation_status(output: Dict[str, Any]) -> str:
+    """根据 Tool 业务输出确定审计状态，避免失败结果被记录为完成。"""
+
+    if output.get("ok") is False or output.get("status") == "FAILED":
+        return "FAILED"
+    return "COMPLETED"
 
 
 def _document_handler(tool_name: str) -> ToolHandler:

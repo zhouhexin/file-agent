@@ -597,6 +597,12 @@ def test_changeset_records_success_and_failed_documents_in_one_run():
         )
 
         assert response.agent_run.changeset_id
+        invocation_statuses = {
+            item.input_json["document_id"]: item.status
+            for item in db.query(ToolInvocation).all()
+        }
+        assert invocation_statuses[good_document_id] == "COMPLETED"
+        assert invocation_statuses[bad_document_id] == "FAILED"
         failed_item = (
             db.query(ChangeItem)
             .filter(ChangeItem.change_type == "DOCUMENT_PROCESSING_FAILED")

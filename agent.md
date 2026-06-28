@@ -393,6 +393,7 @@ Tool 输出规则：
 - 有副作用的 Tool 必须写 `tool_invocations`。
 - 造成分析结果、派生件或潜在文件变更的 Tool 必须写 ChangeSet / ChangeItem。
 - 高风险 Tool 只能由已确认的 OperationPlan 驱动。
+- Tool 业务输出 `ok=false` 或 `status=FAILED` 时，`tool_invocations.status` 必须记录为 `FAILED`，不能为了表示 handler 正常返回结构化结果而误记为 `COMPLETED`。
 - Tool 返回给 LLM 的内容必须是结构化摘要，不得泄漏密钥、本地绝对路径或未授权文件内容。
 
 ## 8. 数据库规则
