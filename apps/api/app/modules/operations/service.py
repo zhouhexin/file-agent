@@ -1,0 +1,108 @@
+"""OperationPlan 业务服务。"""
+
+from __future__ import annotations
+
+from fastapi import HTTPException
+from sqlalchemy.orm import Session
+
+from app.db.models import Conversation, OperationPlan, User
+from app.modules.conversations.repository import ConversationRepository
+from app.modules.operations.repository import OperationPlanRepository
+from app.modules.operations.schemas import (
+    OperationConfirmRequest,
+    OperationConfirmResponse,
+    OperationPlanCreateRequest,
+    OperationPlanItem,
+    OperationPlanResponse,
+)
+
+
+class OperationPlanService:
+    """处理高风险操作计划的创建、查询和确认。"""
+
+    def __init__(self, db: Session) -> None:
+        """注入数据库会话。"""
+
+        self.db = db
+        self.repository = OperationPlanRepository(db)
+
+    def create_plan(self, *, request: OperationPlanCreateRequest, current_user: User) -> OperationPlanResponse:
+        """创建等待确认的 OperationPlan，不执行真实文件动作。"""
+
+        if not current_user.default_workspace_id:
+            raise HTTPException(status_code=400, detail="Default workspace is required")
+        conversation = ConversationRepository(self.db).ensure_conversation(
+            conversation_id=request.conversation_id,
+            user_id=current_user.id,
+        )
+        _ensure_conversation_workspace(conversation=conversation, workspace_id=current_user.default_workspace_id)
+        plan = self.repository.create_plan(
+            workspace_id=current_user.default_workspace_id,
+            conversation_id=request.conversation_id,
+            user_id=current_user.id,
+            operation_type=request.operation_type,
+            risk_level=request.risk_level,
+            reason=request.reason,
+            plan_json={"items": [item.model_dump() for item in request.items]},
+        )
+        self.db.commit()
+        self.db.refresh(plan)
+        return self.to_response(plan)
+
+    def get_plan(self, *, plan_id: str, current_user: User) -> OperationPlanResponse:
+        """查询当前用户自己的 OperationPlan。"""
+
+        plan = self.repository.get_owned_plan(plan_id=plan_id, user_id=current_user.id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail="OperationPlan not found")
+        return self.to_response(plan)
+
+    def confirm_plan(
+        self,
+        *,
+        plan_id: str,
+        request: OperationConfirmRequest,
+        current_user: User,
+    ) -> OperationConfirmResponse:
+        """确认 OperationPlan，当前阶段只记录确认并推进状态。"""
+
+        plan = self.repository.get_owned_plan(plan_id=plan_id, user_id=current_user.id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail="OperationPlan not found")
+        if plan.status not in {"PLANNED", "WAITING_CONFIRMATION"}:
+            raise HTTPException(status_code=409, detail="OperationPlan is not waiting for confirmation")
+        self.repository.confirm_plan(
+            plan=plan,
+            user_id=current_user.id,
+            confirmation_text=request.confirmation,
+        )
+        self.db.commit()
+        self.db.refresh(plan)
+        return OperationConfirmResponse(id=plan.id, status=plan.status, changeset_id=None)
+
+    @staticmethod
+    def to_response(plan: OperationPlan) -> OperationPlanResponse:
+        """把 ORM OperationPlan 转换为 API 响应。"""
+
+        return OperationPlanResponse(
+            id=plan.id,
+            conversation_id=plan.conversation_id,
+            user_id=plan.user_id,
+            operation_type=plan.operation_type,
+            status=plan.status,
+            requires_confirmation=True,
+            risk_level=plan.risk_level,
+            reason=plan.reason,
+            items=[OperationPlanItem.model_validate(item) for item in plan.plan_json.get("items", [])],
+            created_at=plan.created_at,
+            updated_at=plan.updated_at,
+            confirmed_at=plan.confirmed_at,
+            executed_at=plan.executed_at,
+        )
+
+
+def _ensure_conversation_workspace(*, conversation: Conversation, workspace_id: str) -> None:
+    """把自动创建的会话绑定到默认工作区。"""
+
+    if conversation.workspace_id is None:
+        conversation.workspace_id = workspace_id

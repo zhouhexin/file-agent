@@ -673,6 +673,8 @@ OperationPlan 必须展示：
 - 当前是否已执行。
 - 用户确认方式。
 
+当前阶段 OperationPlan 先实现最小确认闭环：API 可以创建、查询和确认计划，确认后记录 `operation_confirmations` 并把计划状态推进到 `EXECUTED`；不得在该阶段执行真实改名、移动、删除或覆盖，也不得伪造文件变更 ChangeSet。
+
 ## 13. Skills 与 Rules
 
 `skills/` 目录用于表达可复用的智能体能力。MVP 可以先作为文档和模块边界，后续再演进成自动评测和发布系统。

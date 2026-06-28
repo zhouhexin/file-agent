@@ -35,7 +35,7 @@ python3 -m pytest
 当前期望结果：
 
 ```text
-64 passed
+69 passed
 ```
 
 如果出现 `urllib3` 或 `LangChainPendingDeprecationWarning`，目前属于环境兼容警告，不影响现有测试结果。
@@ -340,7 +340,8 @@ curl -X POST http://127.0.0.1:8000/api/conversations/conv-1/messages \
 ## 7. 当前限制
 
 - 当前已接入 OpenAI-compatible LLM 意图理解；默认 `LLM_ENABLED=false` 时仍使用 `DeterministicPlanner`。
-- 当前已持久化 user、default workspace、message、AgentRun、ToolInvocation、Document、document_insights、document_extraction_runs、document_pages、document_classification_runs、document_category_suggestions、document_category_feedback、change_sets 和 change_items，但还没有接 OperationPlan 表。
+- 当前已持久化 user、default workspace、message、AgentRun、ToolInvocation、Document、document_insights、document_extraction_runs、document_pages、document_classification_runs、document_category_suggestions、document_category_feedback、change_sets、change_items、operation_plans 和 operation_confirmations。
+- OperationPlan 当前是最小确认闭环：创建计划、查询计划、确认计划和记录确认文本；确认后暂不执行真实文件改名、移动或删除，也暂不生成确认执行 ChangeSet。
 - 当前已支持读取当前用户自己的原始文件元信息和解析文本内容；其他多数 Tool handler 仍是结构化占位实现。
 - 当前已有最小 JWT 鉴权，但没有 refresh token、复杂 RBAC、ACL 或 admin 权限体系。
 - 当前前端已有最小注册、登录、Chat、文件上传和附件删除流程，没有会话列表、admin 页面或正式视觉设计。

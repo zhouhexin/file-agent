@@ -1054,7 +1054,7 @@ Response:
 ```json
 {
   "id": "operation-plan-uuid",
-  "status": "PLANNED",
+  "status": "WAITING_CONFIRMATION",
   "operation_type": "RENAME_FILES",
   "requires_confirmation": true,
   "risk_level": "medium",
@@ -1098,9 +1098,9 @@ Behavior:
 ```text
 validate owner
 validate plan status is PLANNED or WAITING_CONFIRMATION
-execute through confirmed-file-action Tool
-create ChangeSet
-update plan status
+record confirmation text
+update plan status to EXECUTED
+do not execute real file actions in the current minimal phase
 ```
 
 Response:
@@ -1109,7 +1109,7 @@ Response:
 {
   "id": "operation-plan-uuid",
   "status": "EXECUTED",
-  "changeset_id": "changeset-uuid"
+  "changeset_id": null
 }
 ```
 

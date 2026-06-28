@@ -142,7 +142,7 @@ resume_token
 
 问题：
 
-- 没有真正创建 `OperationPlan`。
+- 已新增 OperationPlan 最小闭环 API：可以创建、查询、确认 `operation_plans`，并写入 `operation_confirmations`；确认后暂不执行真实文件动作。
 - 没有检查用户是否已经确认。
 - 没有按 `step_id` 保存执行结果。
 - 任意 Tool 异常可能中断整次运行。
