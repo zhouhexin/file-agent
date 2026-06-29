@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import subprocess
 from io import BytesIO
 
 from fastapi.testclient import TestClient
 
 from app.core import config
 from app.db.models import DocumentExtractionRun, DocumentPage
+from app.modules.files.extractors import extract_document_text
 from app.modules.agent.tool_registry import ToolRegistry
 from app.tests.helpers import clear_overrides, client_with_database
 
@@ -189,3 +191,34 @@ def test_extract_document_text_persists_docx_pages(monkeypatch, tmp_path):
         db.close()
         clear_overrides()
         config.get_settings.cache_clear()
+
+
+def test_extract_document_text_supports_doc_with_textutil(monkeypatch, tmp_path):
+    """extract-document-text 应通过系统转换器读取旧版 doc 正文。"""
+
+    doc_path = tmp_path / "promise.doc"
+    doc_path.write_bytes(b"legacy-doc")
+
+    def fake_which(name: str) -> str | None:
+        """测试中只模拟 textutil 可用，避免依赖本机 Office 工具。"""
+
+        return "/usr/bin/textutil" if name == "textutil" else None
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[bytes]:
+        """模拟 textutil 将 doc 转成纯文本输出。"""
+
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="电子发票承诺书\n经办人：李四".encode("utf-8"), stderr=b"")
+
+    monkeypatch.setattr("app.modules.files.extractors.shutil.which", fake_which)
+    monkeypatch.setattr("app.modules.files.extractors.subprocess.run", fake_run)
+
+    result = extract_document_text(
+        file_path=doc_path,
+        filename="电子发票承诺书.doc",
+        content_type="application/msword",
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "COMPLETED"
+    assert result["extractor"] == "doc-textutil"
+    assert "电子发票承诺书" in result["pages"][0]["text"]

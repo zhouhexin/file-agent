@@ -452,7 +452,7 @@ When LLM is enabled and the user asks for uploaded-file summary or basic file in
 
 When LLM is enabled and the user asks to read original content, parse PDF/Excel, or OCR an image, the same endpoint may return:
 
-Current `extract-document-text` supports `txt/md/csv/xlsx/docx/pdf/image`.
+Current `extract-document-text` supports `txt/md/csv/xlsx/doc/docx/pdf/image`.
 
 ```json
 {

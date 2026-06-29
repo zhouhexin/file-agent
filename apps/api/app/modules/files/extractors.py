@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import csv
+import shutil
+import subprocess
+import tempfile
 from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, List
@@ -20,6 +23,8 @@ def extract_document_text(*, file_path: Path, filename: str, content_type: str) 
         return _completed("csv", [{"page_number": 1, "sheet_name": None, "text": text, "metadata": {}}])
     if suffix in {".xlsx", ".xls"}:
         return _extract_excel_text(file_path)
+    if suffix == ".doc" or content_type == "application/msword":
+        return _extract_doc_text(file_path)
     if suffix == ".docx" or content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         return _extract_docx_text(file_path)
     if suffix == ".pdf" or content_type == "application/pdf":
@@ -91,6 +96,92 @@ def _extract_docx_text(file_path: Path) -> Dict[str, Any]:
             }
         ],
     )
+
+
+def _extract_doc_text(file_path: Path) -> Dict[str, Any]:
+    """读取旧版 Word doc 文件，优先使用系统转换工具抽取正文。"""
+
+    textutil_result = _extract_doc_text_with_textutil(file_path)
+    if textutil_result is not None:
+        return textutil_result
+
+    libreoffice_result = _extract_doc_text_with_libreoffice(file_path)
+    if libreoffice_result is not None:
+        return libreoffice_result
+
+    return _failed(
+        "doc",
+        "DOC_CONVERTER_NOT_AVAILABLE",
+        "缺少可用的 doc 转换工具，无法解析旧版 Word 文件。请在服务器安装 LibreOffice，或将文件另存为 docx 后重新上传。",
+    )
+
+
+def _extract_doc_text_with_textutil(file_path: Path) -> Dict[str, Any] | None:
+    """在 macOS 环境下通过 textutil 将 doc 转成纯文本。"""
+
+    if not shutil.which("textutil"):
+        return None
+
+    try:
+        result = subprocess.run(
+            ["textutil", "-convert", "txt", "-stdout", str(file_path)],
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return _failed("doc-textutil", "DOC_TEXTUTIL_FAILED", f"textutil 解析 doc 失败：{exc}")
+
+    if result.returncode != 0:
+        error_message = result.stderr.decode("utf-8", errors="ignore").strip()
+        return _failed("doc-textutil", "DOC_TEXTUTIL_FAILED", f"textutil 解析 doc 失败：{error_message or '未知错误'}")
+
+    text = result.stdout.decode("utf-8", errors="ignore")
+    return _completed(
+        "doc-textutil",
+        [{"page_number": 1, "sheet_name": None, "text": text, "metadata": {"converter": "textutil"}}],
+    )
+
+
+def _extract_doc_text_with_libreoffice(file_path: Path) -> Dict[str, Any] | None:
+    """在服务器环境下通过 LibreOffice 将 doc 转成 txt 后读取。"""
+
+    converter = shutil.which("soffice") or shutil.which("libreoffice")
+    if not converter:
+        return None
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        try:
+            result = subprocess.run(
+                [
+                    converter,
+                    "--headless",
+                    "--convert-to",
+                    "txt",
+                    "--outdir",
+                    temp_dir,
+                    str(file_path),
+                ],
+                capture_output=True,
+                check=False,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return _failed("doc-libreoffice", "DOC_LIBREOFFICE_FAILED", f"LibreOffice 解析 doc 失败：{exc}")
+
+        if result.returncode != 0:
+            error_message = result.stderr.decode("utf-8", errors="ignore").strip()
+            return _failed("doc-libreoffice", "DOC_LIBREOFFICE_FAILED", f"LibreOffice 解析 doc 失败：{error_message or '未知错误'}")
+
+        text_files = sorted(Path(temp_dir).glob("*.txt"))
+        if not text_files:
+            return _failed("doc-libreoffice", "DOC_LIBREOFFICE_OUTPUT_MISSING", "LibreOffice 未生成 doc 文本结果。")
+
+        text = text_files[0].read_text(encoding="utf-8", errors="ignore")
+        return _completed(
+            "doc-libreoffice",
+            [{"page_number": 1, "sheet_name": None, "text": text, "metadata": {"converter": "libreoffice"}}],
+        )
 
 
 def _extract_pdf_text(file_path: Path) -> Dict[str, Any]:

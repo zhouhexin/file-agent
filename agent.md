@@ -122,7 +122,7 @@ MVP 推荐实现：
 - 数据库：PostgreSQL + pgvector。
 - 文件存储：第一版本地 `storage/`，通过 StorageService 抽象。
 - 异步任务：第一版 FastAPI BackgroundTasks，后续 Redis + Celery/RQ。
-- 文档解析：`python-docx`、`openpyxl`、`pdfplumber` 或 `PyMuPDF`，TXT/MD/CSV 直接读取。
+- 文档解析：`python-docx`、`openpyxl`、`pdfplumber` 或 `PyMuPDF`，TXT/MD/CSV 直接读取；旧版 `.doc` 通过 macOS `textutil` 或服务器 LibreOffice 转换后抽取正文。
 - 大模型与 embedding：OpenAI 兼容接口，默认外部联网和外部检索关闭。
 - Python 包管理：使用用户当前已经配置好的 Python 环境；可以用 `pyproject.toml` 记录依赖和工具配置，但不得强制切换到 `uv`、Poetry、Conda 或新建虚拟环境，除非用户后续明确要求。
 - 测试：pytest；LLM 和 embedding 测试必须使用 deterministic fake。
@@ -154,7 +154,7 @@ MVP 必须体现“智能体”而不只是“问答”：
 - 最小 Skill 边界：chat-intake、file-ingest、document-classification、file-search、evidence-answer、change-report、operation-plan、confirmed-file-action、feedback-and-memory。
 - 本地 StorageService，保存原件和派生件。
 - 文件上传、列表、下载。
-- PDF、DOCX、XLSX、TXT、MD、CSV 的基础解析。
+- PDF、DOC、DOCX、XLSX、TXT、MD、CSV 的基础解析。
 - 文档版本、处理任务状态和处理事件。
 - chunk 切分、evidence span、embedding 入库。
 - PostgreSQL 全文检索 + pgvector 语义检索 + 混合重排。
@@ -885,7 +885,7 @@ MVP 只有在以下全部满足时才算完成：
 
 - 普通 user 可以登录并打开 `/chat`。
 - `/chat` 是任务型 Agent 工作台，不是单纯 QA 页面。
-- 普通 user 可以发送文件工作指令并上传 PDF、DOCX、XLSX、TXT、MD、CSV。
+- 普通 user 可以发送文件工作指令并上传 PDF、DOC、DOCX、XLSX、TXT、MD、CSV。
 - 系统创建 AgentRun 并记录状态。
 - Agent 通过白名单 Tool 执行文件处理。
 - 系统可以保存原件、版本和派生件。

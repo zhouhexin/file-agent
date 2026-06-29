@@ -323,10 +323,10 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python scripts/conver
 
 ```text
 read-original-file：读取当前用户上传原始文件的安全元信息，不返回本地路径或二进制内容
-extract-document-text：解析 txt/md/csv/xlsx/docx/pdf/image，并将文本写入 document_pages
+extract-document-text：解析 txt/md/csv/xlsx/doc/docx/pdf/image，并将文本写入 document_pages
 ```
 
-PDF、Excel、docx 和图片 OCR 依赖：
+PDF、Excel、doc/docx 和图片 OCR 依赖：
 
 ```text
 PyMuPDF
@@ -334,9 +334,10 @@ openpyxl
 python-docx
 Pillow
 pytesseract
+textutil 或 LibreOffice
 ```
 
-图片 OCR 还需要系统安装 Tesseract OCR；如果缺少依赖或 OCR 引擎不可用，Tool 会返回结构化错误，不会读取任意路径。
+图片 OCR 还需要系统安装 Tesseract OCR；旧版 `.doc` 在 macOS 可使用系统 `textutil`，服务器环境建议安装 LibreOffice。如果缺少依赖或 OCR/转换引擎不可用，Tool 会返回结构化错误，不会读取任意路径。
 
 当前对话触发解析已支持多个附件顺序执行。单个文件 Tool 异常会记录为该文件的失败 `document_results.errors`，后续文件继续处理；并发执行、LangGraph map/reduce、步骤级重试和恢复后续单独实现。
 
