@@ -4,14 +4,14 @@
 
 ## 1. Python 环境
 
-后端使用用户当前已经配置好的 `python3` 环境，不强制创建新虚拟环境，不强制切换到 `uv`、Poetry、Conda 或其他包管理方式。
+后端使用用户当前已经配置好的 `/opt/homebrew/anaconda3/envs/py311/bin/python` 环境，不强制创建新虚拟环境，不强制切换到 `uv`、Poetry 或其他包管理方式。
 
 当前已验证的运行方式是在项目根目录执行命令，避免进入 `apps/api` 后 shell 解析到不同的 Python 解释器。
 
 安装后端依赖：
 
 ```bash
-python3 -m pip install -r requirements.txt
+/opt/homebrew/anaconda3/envs/py311/bin/python -m pip install -r requirements.txt
 ```
 
 当前根目录 `requirements.txt` 包含后端运行、数据库 migration、测试和 PostgreSQL 连接所需依赖。`apps/api/pyproject.toml` 保留为后端包元数据；本地启动优先使用上面的 `requirements.txt` 安装命令。
@@ -29,7 +29,7 @@ cp .env.example .env
 在项目根目录执行：
 
 ```bash
-python3 -m pytest
+/opt/homebrew/anaconda3/envs/py311/bin/python -m pytest
 ```
 
 当前期望结果：
@@ -60,13 +60,13 @@ postgresql+psycopg2://fileagent_user:<password>@212.64.14.158:5432/fileAgent
 docker compose up -d postgres
 export DATABASE_URL='postgresql+psycopg2://file_agent:file_agent_dev@127.0.0.1:5432/file_agent'
 export AUTO_CREATE_TABLES=false
-python3 -m alembic -c apps/api/alembic.ini upgrade head
+/opt/homebrew/anaconda3/envs/py311/bin/python -m alembic -c apps/api/alembic.ini upgrade head
 ```
 
 对当前 `.env` 指向的 PostgreSQL 执行 migration：
 
 ```bash
-python3 -m alembic -c apps/api/alembic.ini upgrade head
+/opt/homebrew/anaconda3/envs/py311/bin/python -m alembic -c apps/api/alembic.ini upgrade head
 ```
 
 当前 `.env` 中 `AUTO_CREATE_TABLES=false`，应通过 Alembic migration 管理数据库结构。
@@ -76,16 +76,19 @@ python3 -m alembic -c apps/api/alembic.ini upgrade head
 在项目根目录执行：
 
 ```bash
-PYTHONPATH=apps/api python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 也可以在 `apps/api` 目录执行：
 
 ```bash
-python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+/opt/homebrew/anaconda3/envs/py311/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 配置层会从当前目录向上查找 `.env`，因此上述两种方式都会读取项目根目录 `.env` 并连接 PostgreSQL。
+
+从项目根目录启动后端时必须设置 `PYTHONPATH=apps/api`，否则 Python 只能在根目录查找 `app` 包。
+如果在项目根目录执行 `python -m uvicorn app.main:app --host 127.0.0.1 --port 8000` 且没有设置 `PYTHONPATH=apps/api`，会报 `ModuleNotFoundError: No module named 'app'`。
 
 服务地址：
 

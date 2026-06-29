@@ -17,19 +17,21 @@ File Agent 不是传统网盘，也不是只会问答的知识库系统。用户
 
 ## 本地运行
 
-后端使用当前已配置好的 `python3` 环境，不强制创建新虚拟环境。完整运行说明见 `docs/runbook.md`。
+后端使用当前已配置好的 `/opt/homebrew/anaconda3/envs/py311/bin/python` 环境，不强制创建新虚拟环境。完整运行说明见 `docs/runbook.md`。
 
 ```bash
-python3 -m pip install -r requirements.txt
+/opt/homebrew/anaconda3/envs/py311/bin/python -m pip install -r requirements.txt
 cp .env.example .env
-python3 -m pytest
-python3 -m alembic -c apps/api/alembic.ini upgrade head
-PYTHONPATH=apps/api python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+/opt/homebrew/anaconda3/envs/py311/bin/python -m pytest
+/opt/homebrew/anaconda3/envs/py311/bin/python -m alembic -c apps/api/alembic.ini upgrade head
+PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 cd apps/web && npm install && npm run dev
 ```
 
 当前后端会自动读取项目根目录 `.env`。本机 `.env` 已配置为 PostgreSQL：`212.64.14.158:5432/fileAgent`，真实密码不提交到 Git。
 后端服务数据库必须使用 PostgreSQL；如果未配置 `DATABASE_URL`，或配置为 SQLite，服务会直接启动失败。
+从项目根目录启动后端时必须设置 `PYTHONPATH=apps/api`，否则 Python 无法找到 `apps/api/app` 包。
+如果在项目根目录直接执行 `python -m uvicorn app.main:app ...` 且没有设置 `PYTHONPATH=apps/api`，会报 `ModuleNotFoundError: No module named 'app'`。
 上传文件默认保存到 `FILE_STORAGE_ROOT=./storage/uploads`。
 默认不启用真实 LLM 调用；如需让对话阶段使用大模型理解用户需求，请在 `.env` 中配置 `LLM_ENABLED=true`、`LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_CHAT_MODEL`。当前 LLM 客户端使用 OpenAI-compatible Chat Completions 接口。
 
