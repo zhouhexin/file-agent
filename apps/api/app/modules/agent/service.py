@@ -19,6 +19,7 @@ from app.modules.agent.runtime import AgentRuntimeContext
 from app.modules.agent.state import AgentRunResult, ToolInvocationRecord
 from app.modules.agent.tool_registry import ToolRegistry
 from app.core.logging import log_context, log_event
+from app.modules.classification.classifier_service import DocumentClassificationService
 from app.modules.llm.service import LLMIntentService
 
 
@@ -150,6 +151,7 @@ class AgentRuntimeService:
             registry=self.registry_factory(db, user_id),
             context_loader=AgentContextLoader(db),
             llm_intent_service=self.llm_intent_service,
+            classification_service=DocumentClassificationService(db=db),
         )
 
     def _build_initial_state(

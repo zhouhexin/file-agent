@@ -573,6 +573,8 @@ FAILED
 
 分类匹配器的职责是候选召回，不是最终语义裁决。`recall_category_candidates` 必须基于文件名、标题、全文、别名、正向信号和负向信号生成 Top N 候选，并返回 `category_id`、`category_path`、`rule_score`、`matched_signals`、`negative_signals` 和 `candidate_reason`。`match_document_text` 仅作为 rule-only 兼容入口，把候选转换为 `SUGGESTED` 分类建议；后续 LLM 或人工复核只能在候选集合内判定，不得编造分类路径。
 
+全文分类必须通过 `DocumentClassificationService` 执行。Graph 只传 `document_id`、`extraction_run_id`、文件名和必要 fallback 摘要，不得在 `AgentGraphState` 保存全文，也不得由 Graph 直接读取 `DocumentPage` 或直接调用底层 matcher。`DocumentClassificationService` 属于 `AgentRuntimeContext` 的运行时依赖，负责从 `document_pages.text_content` 读取完整正文并返回结构化分类建议。
+
 本次 AgentRun 的逐文件分类摘要继续写入 `document_results`，用于生成回执和保存运行快照。结构化分类建议必须同步写入 `document_classification_runs` 和 `document_category_suggestions`，状态为 `SUGGESTED`，并记录 `taxonomy_key`、`taxonomy_version`、`confidence`、`source`、`rank` 和证据摘要。`document_category_feedback` 用于后续保存用户接受、拒绝或修正意见。
 
 当前阶段的分类建议可以作为 `SUGGESTED` 结果展示在逐文件回执中；每个文件允许展示多个分类、置信度和证据，但这些建议不等同于用户确认后的正式分类关系。未来用户确认后的正式文件分类关系再写入 `document_categories`。

@@ -20,6 +20,13 @@ class PlannerProtocol(Protocol):
         """根据消息上下文生成声明式 ToolPlan。"""
 
 
+class ClassificationServiceProtocol(Protocol):
+    """分类服务的最小接口，支持测试 fake 和真实服务互换。"""
+
+    def classify(self, **kwargs: Any) -> dict[str, Any]:
+        """根据 document_id 和 extraction_run_id 返回分类结果。"""
+
+
 @dataclass(slots=True)
 class AgentRuntimeContext:
     """一次 AgentRun 所需的运行依赖。
@@ -31,3 +38,4 @@ class AgentRuntimeContext:
     registry: ToolRegistry
     context_loader: AgentContextLoader
     llm_intent_service: LLMIntentService
+    classification_service: ClassificationServiceProtocol

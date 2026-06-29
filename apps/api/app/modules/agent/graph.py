@@ -12,7 +12,6 @@ from langgraph.graph import END, StateGraph
 from langgraph.runtime import Runtime
 
 from app.core.logging import log_context, log_event
-from app.modules.agent.document_classifier import classify_document_text
 from app.modules.agent.planner import build_plan_from_user_intent
 from app.modules.agent.runtime import AgentRuntimeContext
 from app.modules.agent.state import AgentGraphState, ToolInvocationRecord
@@ -227,17 +226,10 @@ def async_job_wait(state: AgentGraphState) -> Dict[str, Any]:
 def evidence_or_change(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
     """为响应节点收集 evidence、ChangeSet 和 OperationPlan 标识。"""
 
-    extraction_run_ids = [
-        str(result.get("extraction_run_id"))
-        for result in state.get("tool_results", [])
-        if result.get("extraction_run_id")
-    ]
     document_results = _document_results_from_extraction_results(
         tool_results=state.get("tool_results", []),
         context_documents=state.get("context_documents", []),
-        extraction_texts=runtime.context.context_loader.load_extraction_texts(
-            extraction_run_ids=extraction_run_ids,
-        ),
+        classification_service=runtime.context.classification_service,
     )
     return {
         "changeset_id": state.get("changeset_id"),
@@ -329,11 +321,10 @@ def _document_results_from_extraction_results(
     *,
     tool_results: List[Dict[str, Any]],
     context_documents: List[Dict[str, Any]],
-    extraction_texts: Dict[str, str] | None = None,
+    classification_service,
 ) -> List[Dict[str, Any]]:
     """把正文解析 Tool 输出聚合成逐文件业务结果。"""
 
-    extraction_texts = extraction_texts or {}
     document_lookup = {
         str(document.get("document_id")): document
         for document in context_documents
@@ -346,10 +337,14 @@ def _document_results_from_extraction_results(
         pages = [page for page in result.get("pages", []) if isinstance(page, dict)]
         char_count = sum(int(page.get("char_count", 0) or 0) for page in pages)
         text_preview = "\n".join(str(page.get("text_preview") or "") for page in pages)
-        classification_text = extraction_texts.get(str(result.get("extraction_run_id") or "")) or text_preview
         error = result.get("error") if isinstance(result.get("error"), dict) else None
         categories = (
-            _classify_with_logging(document_id=document_id, text=classification_text)
+            classification_service.classify(
+                document_id=document_id,
+                extraction_run_id=str(result.get("extraction_run_id") or ""),
+                filename=str(document_context.get("filename") or ""),
+                fallback_text=text_preview,
+            ).get("categories", [])
             if result.get("status") == "COMPLETED"
             else []
         )
@@ -369,34 +364,6 @@ def _document_results_from_extraction_results(
             }
         )
     return document_results
-
-
-def _classify_with_logging(*, document_id: str, text: str) -> List[Dict[str, Any]]:
-    """执行文档分类并记录分类成功或失败日志。"""
-
-    start = time.perf_counter()
-    try:
-        categories = classify_document_text(text)
-    except Exception as exc:
-        log_event(
-            "classification.failed",
-            level="ERROR",
-            document_id=document_id or None,
-            status="FAILED",
-            duration_ms=int((time.perf_counter() - start) * 1000),
-            error_code=exc.__class__.__name__,
-            message=str(exc),
-        )
-        raise
-    log_event(
-        "classification.completed",
-        document_id=document_id or None,
-        status="COMPLETED",
-        duration_ms=int((time.perf_counter() - start) * 1000),
-        message="文档分类完成",
-        category_count=len(categories),
-    )
-    return categories
 
 
 def _build_document_results_response(document_results: List[Dict[str, Any]]) -> str:

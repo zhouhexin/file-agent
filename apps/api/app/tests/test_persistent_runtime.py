@@ -27,7 +27,9 @@ from app.db.models import (
 )
 from app.main import app
 from app.modules.agent.service import AgentRuntimeService
+from app.modules.classification.classifier_service import DocumentClassificationService
 from app.modules.classification.service import persist_document_results_classifications
+from app.modules.agent.context import AgentContextLoader
 from app.modules.conversations.schemas import MessageAttachment, SendMessageRequest
 from app.modules.conversations.service import ConversationMessageService
 from app.modules.llm.schemas import UserIntentPlan
@@ -360,6 +362,90 @@ def test_classification_uses_full_document_pages_not_short_preview():
     finally:
         db.close()
         app.dependency_overrides.clear()
+
+
+def test_document_classification_service_reads_full_document_pages():
+    """分类服务必须按 extraction_run_id 读取 document_pages 全文。"""
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="classification-service-user")
+    document_id = _upload_document(
+        client,
+        headers,
+        filename="service-full-text.txt",
+        content="上传原文不会被本测试直接读取。".encode(),
+    )
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        run = DocumentExtractionRun(document_id=document_id, status="COMPLETED", extractor="plain-text")
+        db.add(run)
+        db.flush()
+        db.add(
+            DocumentPage(
+                document_id=document_id,
+                extraction_run_id=run.id,
+                page_number=1,
+                text_content="普通开头。" * 80,
+                metadata_json={},
+            )
+        )
+        db.add(
+            DocumentPage(
+                document_id=document_id,
+                extraction_run_id=run.id,
+                page_number=2,
+                text_content="最后一页才出现教师职称申报材料。",
+                metadata_json={},
+            )
+        )
+        db.flush()
+
+        result = DocumentClassificationService(db=db).classify(
+            document_id=document_id,
+            extraction_run_id=run.id,
+            filename="service-full-text.txt",
+        )
+
+        assert result["status"] == "COMPLETED"
+        assert result["document_id"] == document_id
+        assert result["extraction_run_id"] == run.id
+        assert result["categories"][0]["name"] == "学校/人事师资/职称"
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_graph_uses_classification_service_not_context_loader_texts(monkeypatch):
+    """Graph 分类阶段必须调用分类服务，不能再从 ContextLoader 读取全文。"""
+
+    def fail_load_extraction_texts(self, *, extraction_run_ids):
+        """如果 Graph 仍调用旧全文加载入口，本测试必须失败。"""
+
+        raise AssertionError("Graph 不应再调用 AgentContextLoader.load_extraction_texts")
+
+    monkeypatch.setattr(AgentContextLoader, "load_extraction_texts", fail_load_extraction_texts)
+    client = _client_with_database()
+    headers = _auth_header(client, username="classification-service-graph-user")
+    long_prefix = "普通内容" * 80
+    document_id = _upload_document(
+        client,
+        headers,
+        filename="service-graph.txt",
+        content=f"{long_prefix}。本文件最后才出现教师职称申报材料。".encode(),
+    )
+
+    response = client.post(
+        "/api/conversations/classification-service-graph-conv/messages",
+        headers=headers,
+        json={
+            "content": "帮我分类这个文件",
+            "attachments": [{"document_id": document_id}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert "学校/人事师资/职称" in (response.json()["agent_run"]["final_response"] or "")
+    app.dependency_overrides.clear()
 
 
 def test_llm_message_extracts_multiple_documents_and_builds_document_results():
