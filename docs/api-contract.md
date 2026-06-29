@@ -495,7 +495,7 @@ The per-file structured result is persisted in `agent_runs.graph_state_json.docu
         "status": "SUGGESTED",
         "evidence": ["职称"],
         "taxonomy_key": "school_file_classification",
-        "taxonomy_version": "2026-06"
+        "taxonomy_version": "2026-06-v2"
       },
       {
         "name": "学校/党委相关/干部工作",
@@ -504,7 +504,7 @@ The per-file structured result is persisted in `agent_runs.graph_state_json.docu
         "status": "SUGGESTED",
         "evidence": ["干部工作"],
         "taxonomy_key": "school_file_classification",
-        "taxonomy_version": "2026-06"
+        "taxonomy_version": "2026-06-v2"
       }
     ],
     "warnings": [],
@@ -1066,7 +1066,7 @@ Response:
       "evidence_json": {
         "evidence": ["职称"],
         "taxonomy_key": "school_file_classification",
-        "taxonomy_version": "2026-06"
+        "taxonomy_version": "2026-06-v2"
       },
       "execution_status": "COMPLETED",
       "created_at": "2026-06-28T08:00:00Z"

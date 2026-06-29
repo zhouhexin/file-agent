@@ -569,6 +569,8 @@ FAILED
 
 当前阶段分类目录可以先来自项目内配置文件，例如 `apps/api/app/modules/classification/taxonomies/school_file_classification.json`。配置文件是分类目录的 source of truth；不得为了预置静态分类目录提前强制落库，除非已经有后台分类管理、版本启停和审计需求。
 
+分类目录必须采用 taxonomy v2 结构：分类节点保留 `name` / `children` 向后兼容，同时新增稳定 `id`、`description`、`aliases`、`positive_signals`、`negative_signals` 和 `examples`。`id` 用作后续候选召回、反馈和正式分类关系的稳定标识，不得使用显示名称作为长期外键；修改分类定义时必须递增 `taxonomy_version`。
+
 本次 AgentRun 的逐文件分类摘要继续写入 `document_results`，用于生成回执和保存运行快照。结构化分类建议必须同步写入 `document_classification_runs` 和 `document_category_suggestions`，状态为 `SUGGESTED`，并记录 `taxonomy_key`、`taxonomy_version`、`confidence`、`source`、`rank` 和证据摘要。`document_category_feedback` 用于后续保存用户接受、拒绝或修正意见。
 
 当前阶段的分类建议可以作为 `SUGGESTED` 结果展示在逐文件回执中；每个文件允许展示多个分类、置信度和证据，但这些建议不等同于用户确认后的正式分类关系。未来用户确认后的正式文件分类关系再写入 `document_categories`。

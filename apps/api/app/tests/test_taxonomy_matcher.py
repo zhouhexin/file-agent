@@ -14,7 +14,7 @@ def test_matcher_returns_specific_school_category_path():
     assert matches[0]["name"] == "学校/人事师资/职称"
     assert matches[0]["category_path"] == ["学校", "人事师资", "职称"]
     assert matches[0]["taxonomy_key"] == "school_file_classification"
-    assert matches[0]["taxonomy_version"] == "2026-06"
+    assert matches[0]["taxonomy_version"] == "2026-06-v2"
     assert "职称" in matches[0]["evidence"]
 
 
@@ -61,6 +61,6 @@ def test_matcher_returns_other_when_no_taxonomy_keywords_match():
             "status": "SUGGESTED",
             "evidence": [],
             "taxonomy_key": "school_file_classification",
-            "taxonomy_version": "2026-06",
+            "taxonomy_version": "2026-06-v2",
         }
     ]

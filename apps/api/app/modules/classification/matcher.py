@@ -15,6 +15,12 @@ class FlattenedCategory:
     path: list[str]
     name: str
     order: int
+    category_id: str | None = None
+    description: str = ""
+    aliases: list[str] | None = None
+    positive_signals: list[str] | None = None
+    negative_signals: list[str] | None = None
+    examples: list[str] | None = None
 
 
 def flatten_category_paths(taxonomy: Taxonomy) -> list[FlattenedCategory]:
@@ -26,7 +32,19 @@ def flatten_category_paths(taxonomy: Taxonomy) -> list[FlattenedCategory]:
         """递归遍历分类树，并记录节点顺序用于稳定排序。"""
 
         path = [*parent_path, node.name]
-        flattened.append(FlattenedCategory(path=path, name=node.name, order=len(flattened)))
+        flattened.append(
+            FlattenedCategory(
+                path=path,
+                name=node.name,
+                order=len(flattened),
+                category_id=node.id,
+                description=node.description,
+                aliases=list(node.aliases),
+                positive_signals=list(node.positive_signals),
+                negative_signals=list(node.negative_signals),
+                examples=list(node.examples),
+            )
+        )
         for child in node.children:
             walk(child, path)
 

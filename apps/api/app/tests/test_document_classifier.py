@@ -36,6 +36,6 @@ def test_classifier_returns_other_when_no_keywords_match():
             "status": "SUGGESTED",
             "evidence": [],
             "taxonomy_key": "school_file_classification",
-            "taxonomy_version": "2026-06",
+                "taxonomy_version": "2026-06-v2",
         }
     ]
