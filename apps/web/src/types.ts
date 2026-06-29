@@ -48,6 +48,24 @@ export type UploadedFile = {
   deduplicated: boolean;
 };
 
+export type ConversationHistoryMessage = {
+  id: string;
+  conversation_id: string;
+  user_id: string;
+  role: string;
+  content: string;
+  attachments: UploadedFile[];
+  agent_run: AgentRun | null;
+};
+
+export type ConversationDetailResponse = {
+  id: string;
+  user_id: string;
+  title: string;
+  status: string;
+  messages: ConversationHistoryMessage[];
+};
+
 export type SendMessageResponse = {
   message: {
     id: string;

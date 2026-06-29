@@ -110,3 +110,30 @@ def test_user_cannot_write_to_another_users_conversation():
 
     assert second_response.status_code == 403
     clear_overrides()
+
+
+def test_user_cannot_read_another_users_conversation():
+    """用户不能通过会话详情接口读取另一个用户的历史记录。"""
+
+    client, _ = client_with_database()
+    _, first_token = _register_and_login(client, "history-first")
+    _, second_token = _register_and_login(client, "history-second")
+    first_document_id = _upload_document(client, first_token, "first-history.txt")
+
+    create_response = client.post(
+        "/api/conversations/private-conv/messages",
+        headers={"Authorization": f"Bearer {first_token}"},
+        json={
+            "content": "帮我读取并分类这批文件",
+            "attachments": [{"document_id": first_document_id}],
+        },
+    )
+    assert create_response.status_code == 200
+
+    response = client.get(
+        "/api/conversations/private-conv",
+        headers={"Authorization": f"Bearer {second_token}"},
+    )
+
+    assert response.status_code == 403
+    clear_overrides()

@@ -289,20 +289,51 @@ Response:
 GET /api/conversations/{conversation_id}
 ```
 
+Status: implemented for authenticated user-owned conversations. The current response is optimized for frontend refresh recovery.
+
 Response:
 
 ```json
 {
   "id": "conversation-uuid",
+  "user_id": "user-uuid",
   "title": "资助材料整理",
   "status": "active",
   "messages": [
     {
       "id": "message-uuid",
+      "conversation_id": "conversation-uuid",
+      "user_id": "user-uuid",
       "role": "user",
       "content": "帮我读取并分类这批文件。",
-      "agent_run_id": "agent-run-uuid",
-      "created_at": "2026-06-24T08:01:00Z"
+      "attachments": [
+        {
+          "document_id": "document-uuid",
+          "filename": "材料.pdf",
+          "content_type": "application/pdf",
+          "size_bytes": 1024,
+          "sha256": "sha256",
+          "status": "USED_IN_MESSAGE",
+          "ingest_status": "INGESTED",
+          "deduplicated": false
+        }
+      ],
+      "agent_run": {
+        "agent_run_id": "agent-run-uuid",
+        "conversation_id": "conversation-uuid",
+        "user_id": "user-uuid",
+        "message_id": "message-uuid",
+        "intent": "CLASSIFY_FILES",
+        "status": "COMPLETED",
+        "selected_skills": ["document-text-extract", "document-classification"],
+        "tool_plan": {},
+        "tool_results": [],
+        "tool_invocations": [],
+        "changeset_id": null,
+        "operation_plan_id": null,
+        "final_response": "已处理 1 个文件：...",
+        "errors": []
+      }
     }
   ]
 }

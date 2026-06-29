@@ -11,10 +11,24 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.db.models import User
 from app.modules.auth.dependencies import get_current_user
-from app.modules.conversations.schemas import SendMessageRequest, SendMessageResponse
+from app.modules.conversations.schemas import ConversationDetailResponse, SendMessageRequest, SendMessageResponse
 from app.modules.conversations.service import ConversationMessageService
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
+
+
+@router.get("/{conversation_id}", response_model=ConversationDetailResponse)
+def get_conversation_detail(
+    conversation_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ConversationDetailResponse:
+    """读取当前用户会话详情，用于页面刷新后恢复聊天记录。"""
+
+    return ConversationMessageService(db=db).get_conversation_detail(
+        conversation_id=conversation_id,
+        user_id=current_user.id,
+    )
 
 
 @router.post("/{conversation_id}/messages", response_model=SendMessageResponse)

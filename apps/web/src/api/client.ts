@@ -1,4 +1,4 @@
-import type { SendMessageResponse, TokenResponse, UploadedFile, User } from '../types';
+import type { ConversationDetailResponse, SendMessageResponse, TokenResponse, UploadedFile, User } from '../types';
 
 // API 地址集中管理，后续部署时只需要调整 VITE_API_BASE_URL。
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000/api';
@@ -55,6 +55,11 @@ export async function sendAgentMessage(
       attachments: documentIds.map((documentId) => ({ document_id: documentId })),
     },
   });
+}
+
+export async function getConversationDetail(token: string, conversationId: string): Promise<ConversationDetailResponse> {
+  // 页面刷新后通过会话详情接口恢复历史消息、附件和对应 AgentRun。
+  return request<ConversationDetailResponse>(`/conversations/${conversationId}`, { token });
 }
 
 export async function uploadFile(token: string, file: File): Promise<UploadedFile> {

@@ -68,6 +68,39 @@ def test_post_message_starts_agent_run():
     clear_overrides()
 
 
+def test_get_conversation_returns_messages_with_agent_runs_and_attachments():
+    """读取会话详情时必须返回刷新页面所需的消息、附件和 AgentRun 结果。"""
+
+    client, _ = client_with_database()
+    headers = _auth_header(client, "history-user")
+    document_id = _upload_document(client, headers)
+
+    post_response = client.post(
+        "/api/conversations/web-chat/messages",
+        headers=headers,
+        json={
+            "content": "帮我读取并分类这批文件",
+            "attachments": [{"document_id": document_id}],
+        },
+    )
+    assert post_response.status_code == 200
+
+    response = client.get("/api/conversations/web-chat", headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == "web-chat"
+    assert len(data["messages"]) == 1
+    history_message = data["messages"][0]
+    assert history_message["content"] == "帮我读取并分类这批文件"
+    assert history_message["attachments"][0]["document_id"] == document_id
+    assert history_message["attachments"][0]["filename"] == "message.txt"
+    assert history_message["agent_run"]["status"] == "COMPLETED"
+    assert history_message["agent_run"]["final_response"]
+    assert history_message["agent_run"]["tool_invocations"][0]["tool_name"] == "extract-document-text"
+    clear_overrides()
+
+
 def test_post_message_rejects_invalid_attachment():
     """附件引用缺少 document_id 时必须由请求 schema 拒绝。"""
 

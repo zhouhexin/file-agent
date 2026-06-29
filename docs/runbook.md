@@ -240,6 +240,13 @@ curl -X POST http://127.0.0.1:8000/api/conversations/conv-1/messages \
   -d '{"content":"帮我读取并分类这批文件","attachments":[{"document_id":"doc-1"}]}'
 ```
 
+读取会话详情，用于前端刷新后恢复历史消息、附件和 AgentRun 回复：
+
+```bash
+curl -X GET http://127.0.0.1:8000/api/conversations/conv-1 \
+  -H 'Authorization: Bearer <access_token>'
+```
+
 当前期望行为：
 
 ```text

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.modules.agent.service import AgentRuntimeService
 from app.modules.conversations.repository import ConversationRepository
 from app.modules.conversations.schemas import (
+    ConversationDetailResponse,
     SendMessageRequest,
     SendMessageResponse,
 )
@@ -63,3 +64,8 @@ class ConversationMessageService:
         self.db.commit()
         self.db.refresh(message)
         return SendMessageResponse(message=self.repository.to_schema(message), agent_run=agent_run)
+
+    def get_conversation_detail(self, conversation_id: str, user_id: str) -> ConversationDetailResponse:
+        """读取会话详情，供前端刷新后恢复历史聊天记录。"""
+
+        return self.repository.get_detail(conversation_id=conversation_id, user_id=user_id)

@@ -42,6 +42,41 @@ class ConversationMessage(BaseModel):
     attachments: List[MessageAttachment]
 
 
+class ConversationAttachmentSummary(BaseModel):
+    """历史消息附件摘要，用于前端刷新后恢复附件展示。"""
+
+    document_id: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    sha256: str
+    status: str
+    ingest_status: str
+    deduplicated: bool = False
+
+
+class ConversationHistoryMessage(BaseModel):
+    """会话详情中的历史消息，包含可选 AgentRun。"""
+
+    id: str
+    conversation_id: str
+    user_id: str
+    role: str
+    content: str
+    attachments: List[ConversationAttachmentSummary]
+    agent_run: AgentRunResult | None = None
+
+
+class ConversationDetailResponse(BaseModel):
+    """会话详情响应，用于前端刷新后恢复聊天记录。"""
+
+    id: str
+    user_id: str
+    title: str
+    status: str
+    messages: List[ConversationHistoryMessage]
+
+
 class SendMessageResponse(BaseModel):
     """发送消息后的响应，包括 message 和本次 AgentRun 结果。"""
 

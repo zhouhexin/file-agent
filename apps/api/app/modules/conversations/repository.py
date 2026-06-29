@@ -8,8 +8,15 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
 
-from app.db.models import Conversation, Message
-from app.modules.conversations.schemas import ConversationMessage, MessageAttachment
+from app.db.models import AgentRun, Conversation, Document, Message
+from app.modules.agent.repository import AgentRunRepository
+from app.modules.conversations.schemas import (
+    ConversationAttachmentSummary,
+    ConversationDetailResponse,
+    ConversationHistoryMessage,
+    ConversationMessage,
+    MessageAttachment,
+)
 
 
 class ConversationRepository:
@@ -56,6 +63,117 @@ class ConversationRepository:
         self.db.add(message)
         self.db.flush()
         return message
+
+    def get_conversation_for_user(self, conversation_id: str, user_id: str) -> Conversation:
+        """读取当前用户自己的会话，不存在或越权时返回明确错误。"""
+
+        conversation = self.db.get(Conversation, conversation_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        if conversation.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Conversation belongs to another user")
+        return conversation
+
+    def get_detail(self, conversation_id: str, user_id: str) -> ConversationDetailResponse:
+        """组装会话详情，包含消息、附件摘要和每条消息对应的 AgentRun。"""
+
+        conversation = self.get_conversation_for_user(conversation_id=conversation_id, user_id=user_id)
+        messages = (
+            self.db.query(Message)
+            .filter(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.asc(), Message.id.asc())
+            .all()
+        )
+        document_map = self._load_document_map(messages=messages, user_id=user_id)
+        agent_run_map = self._load_agent_run_map(messages=messages)
+        agent_repository = AgentRunRepository(self.db)
+        return ConversationDetailResponse(
+            id=conversation.id,
+            user_id=conversation.user_id,
+            title=conversation.title,
+            status=conversation.status,
+            messages=[
+                ConversationHistoryMessage(
+                    id=message.id,
+                    conversation_id=message.conversation_id,
+                    user_id=message.user_id,
+                    role=message.role,
+                    content=message.content,
+                    attachments=[
+                        self._attachment_to_summary(item=item, document_map=document_map)
+                        for item in message.attachments_json
+                    ],
+                    agent_run=(
+                        agent_repository.to_result(agent_run_map[message.id])
+                        if message.id in agent_run_map
+                        else None
+                    ),
+                )
+                for message in messages
+            ],
+        )
+
+    def _load_document_map(self, *, messages: list[Message], user_id: str) -> dict[str, Document]:
+        """批量加载历史消息引用的文档，避免逐条消息查询。"""
+
+        document_ids = {
+            item.get("document_id")
+            for message in messages
+            for item in message.attachments_json
+            if isinstance(item, dict) and item.get("document_id")
+        }
+        if not document_ids:
+            return {}
+        documents = (
+            self.db.query(Document)
+            .filter(Document.id.in_(document_ids), Document.user_id == user_id)
+            .all()
+        )
+        return {document.id: document for document in documents}
+
+    def _load_agent_run_map(self, *, messages: list[Message]) -> dict[str, AgentRun]:
+        """按 message_id 取最新 AgentRun，供历史会话恢复助手回复。"""
+
+        message_ids = [message.id for message in messages]
+        if not message_ids:
+            return {}
+        runs = (
+            self.db.query(AgentRun)
+            .filter(AgentRun.message_id.in_(message_ids))
+            .order_by(AgentRun.created_at.asc(), AgentRun.id.asc())
+            .all()
+        )
+        return {run.message_id: run for run in runs}
+
+    @staticmethod
+    def _attachment_to_summary(
+        *,
+        item: dict,
+        document_map: dict[str, Document],
+    ) -> ConversationAttachmentSummary:
+        """把消息中的 document_id 引用扩展为前端可展示的附件摘要。"""
+
+        document_id = item.get("document_id", "")
+        document = document_map.get(document_id)
+        if document is None:
+            return ConversationAttachmentSummary(
+                document_id=document_id,
+                filename=document_id or "未知文件",
+                content_type="application/octet-stream",
+                size_bytes=0,
+                sha256="",
+                status="MISSING",
+                ingest_status="FAILED",
+            )
+        return ConversationAttachmentSummary(
+            document_id=document.id,
+            filename=document.original_filename,
+            content_type=document.content_type,
+            size_bytes=document.size_bytes,
+            sha256=document.sha256,
+            status=document.status,
+            ingest_status=document.ingest_status,
+        )
 
     @staticmethod
     def to_schema(message: Message) -> ConversationMessage:

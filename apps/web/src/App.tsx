@@ -16,6 +16,7 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 're
 import {
   ApiError,
   deleteUploadedFile,
+  getConversationDetail,
   getCurrentUser,
   loginUser,
   registerUser,
@@ -26,6 +27,7 @@ import { clearToken, readToken, saveToken } from './auth/storage';
 import type { SendMessageResponse, UploadedFile, User } from './types';
 
 type AuthMode = 'login' | 'register';
+const WEB_CONVERSATION_ID = 'web-chat';
 
 type ChatAttachment = UploadedFile & {
   // 图片预览使用浏览器本地 object URL，发送后仍仅以 document_id 作为后端引用。
@@ -274,6 +276,7 @@ function ChatPage({
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const previewUrls = useRef<Set<string>>(new Set());
   const hasTurns = chatTurns.length > 0;
 
@@ -285,6 +288,54 @@ function ChatPage({
       });
     };
   }, []);
+
+  useEffect(() => {
+    // 工作台启动时恢复固定调试会话的历史记录；404 表示该用户还没有历史会话。
+    let cancelled = false;
+    setHistoryLoading(true);
+    getConversationDetail(token, WEB_CONVERSATION_ID)
+      .then((conversation) => {
+        if (cancelled) {
+          return;
+        }
+        setChatTurns(conversation.messages.map((historyMessage) => ({
+          id: historyMessage.id,
+          userText: historyMessage.content,
+          attachments: historyMessage.attachments,
+          response: historyMessage.agent_run
+            ? {
+                message: {
+                  id: historyMessage.id,
+                  conversation_id: historyMessage.conversation_id,
+                  user_id: historyMessage.user_id,
+                  role: historyMessage.role,
+                  content: historyMessage.content,
+                  attachments: historyMessage.attachments.map((file) => ({ document_id: file.document_id })),
+                },
+                agent_run: historyMessage.agent_run,
+              }
+            : undefined,
+          status: 'completed',
+        })));
+      })
+      .catch((err) => {
+        if (cancelled) {
+          return;
+        }
+        if (err instanceof ApiError && err.status === 404) {
+          return;
+        }
+        setError(formatError(err));
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setHistoryLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -307,10 +358,9 @@ function ChatPage({
     setDraftAttachments([]);
 
     try {
-      // conversation id 先固定为浏览器调试用会话，后续接会话列表后再由用户选择。
       const result = await sendAgentMessage(
         token,
-        'web-chat',
+        WEB_CONVERSATION_ID,
         currentMessage,
         attachmentsForTurn.map((file) => file.document_id),
       );
@@ -443,9 +493,9 @@ function ChatPage({
                   onChange={handleFileChange}
                 />
               </label>
-              <button className="primary-button send-button" disabled={submitting || uploading} type="submit">
+              <button className="primary-button send-button" disabled={submitting || uploading || historyLoading} type="submit">
                 <Send size={18} />
-                {submitting ? '发送中...' : '发送'}
+                {submitting ? '发送中...' : historyLoading ? '加载中...' : '发送'}
               </button>
             </div>
           </form>
