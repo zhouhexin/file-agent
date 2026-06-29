@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -34,3 +35,15 @@ def delete_file(
     """删除尚未进入对话的上传文件。"""
 
     return FileUploadService(db).delete(document_id=document_id, current_user=current_user)
+
+
+@router.get("/{document_id}/content", response_class=FileResponse)
+def get_file_content(
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> FileResponse:
+    """返回原始附件内容，供前端点击预览或下载。"""
+
+    _ = current_user
+    return FileUploadService(db).get_content_response(document_id=document_id)

@@ -98,6 +98,55 @@ def test_upload_duplicate_file_reuses_existing_document(monkeypatch, tmp_path):
         config.get_settings.cache_clear()
 
 
+def test_get_file_content_returns_original_file(monkeypatch, tmp_path):
+    """点击附件时应能通过 document_id 读取原始文件内容。"""
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
+    config.get_settings.cache_clear()
+    client, _ = client_with_database()
+    auth_header = _auth_header(client, username="content-owner")
+
+    upload_response = client.post(
+        "/api/files/upload",
+        headers=auth_header,
+        files={"file": ("preview.txt", b"preview-content", "text/plain")},
+    )
+    document_id = upload_response.json()["document_id"]
+
+    response = client.get(f"/api/files/{document_id}/content", headers=auth_header)
+
+    assert response.status_code == 200
+    assert response.content == b"preview-content"
+    assert response.headers["content-type"].startswith("text/plain")
+    assert "preview.txt" in response.headers["content-disposition"]
+    clear_overrides()
+    config.get_settings.cache_clear()
+
+
+def test_get_file_content_does_not_require_document_owner(monkeypatch, tmp_path):
+    """文件内容读取只要求登录和 document_id 存在，不校验 Document.user_id。"""
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
+    config.get_settings.cache_clear()
+    client, _ = client_with_database()
+    owner_header = _auth_header(client, username="content-owner-a")
+    viewer_header = _auth_header(client, username="content-viewer-b")
+
+    upload_response = client.post(
+        "/api/files/upload",
+        headers=owner_header,
+        files={"file": ("shared.txt", b"shared-content", "text/plain")},
+    )
+    document_id = upload_response.json()["document_id"]
+
+    response = client.get(f"/api/files/{document_id}/content", headers=viewer_header)
+
+    assert response.status_code == 200
+    assert response.content == b"shared-content"
+    clear_overrides()
+    config.get_settings.cache_clear()
+
+
 def test_delete_uploaded_file_removes_database_rows_and_local_file(monkeypatch, tmp_path):
     """发送消息前删除上传文件时，必须同时删除数据库记录和本地文件。"""
 

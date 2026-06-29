@@ -16,6 +16,7 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 're
 import {
   ApiError,
   deleteUploadedFile,
+  fetchUploadedFileBlob,
   getConversationDetail,
   getCurrentUser,
   loginUser,
@@ -433,6 +434,32 @@ function ChatPage({
     }
   }
 
+  async function openAttachment(file: ChatAttachment) {
+    // 附件内容通过鉴权接口取回 Blob，再交给浏览器预览或下载。
+    setError('');
+    try {
+      const blob = await fetchUploadedFileBlob(token, file.document_id);
+      const objectUrl = URL.createObjectURL(blob);
+      previewUrls.current.add(objectUrl);
+      if (canPreviewInBrowser(file)) {
+        window.open(objectUrl, '_blank', 'noopener,noreferrer');
+      } else {
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = file.filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      }
+      window.setTimeout(() => {
+        URL.revokeObjectURL(objectUrl);
+        previewUrls.current.delete(objectUrl);
+      }, 60_000);
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -462,7 +489,7 @@ function ChatPage({
                 <article className="chat-turn" key={turn.id}>
                   <div className="message-bubble user-message">
                     <p>{turn.userText}</p>
-                    <AttachmentList attachments={turn.attachments} locked />
+                    <AttachmentList attachments={turn.attachments} locked onOpen={openAttachment} />
                   </div>
                   <div className="message-bubble agent-message">
                     {turn.status === 'sending' ? <p>正在处理...</p> : null}
@@ -504,6 +531,7 @@ function ChatPage({
 
           <AttachmentList
             attachments={draftAttachments}
+            onOpen={openAttachment}
             onRemove={removeDraftAttachment}
           />
         </div>
@@ -515,10 +543,12 @@ function ChatPage({
 function AttachmentList({
   attachments,
   locked = false,
+  onOpen,
   onRemove,
 }: {
   attachments: ChatAttachment[];
   locked?: boolean;
+  onOpen?: (file: ChatAttachment) => void;
   onRemove?: (documentId: string) => void;
 }) {
   // 附件列表同时用于待发送区和历史消息区；历史消息区不提供删除入口。
@@ -530,13 +560,21 @@ function AttachmentList({
     <div className="uploaded-files">
       {attachments.map((file) => (
         <div className="uploaded-file" key={file.document_id}>
-          {file.preview_url ? (
-            <img alt={file.filename} className="attachment-preview" src={file.preview_url} />
-          ) : null}
-          <div>
-            <strong>{file.filename}</strong>
-            <span>{formatFileSize(file.size_bytes)} · {locked ? '已进入对话' : formatUploadStatus(file)}</span>
-          </div>
+          <button
+            className="attachment-open-button"
+            disabled={!onOpen}
+            type="button"
+            onClick={() => onOpen?.(file)}
+            title="打开附件"
+          >
+            {file.preview_url ? (
+              <img alt={file.filename} className="attachment-preview" src={file.preview_url} />
+            ) : null}
+            <span>
+              <strong>{file.filename}</strong>
+              <span>{formatFileSize(file.size_bytes)} · {locked ? '已进入对话' : formatUploadStatus(file)}</span>
+            </span>
+          </button>
           {!locked && onRemove ? (
             <button
               className="icon-button"
@@ -606,6 +644,21 @@ function formatUploadStatus(file: UploadedFile): string {
     return '处理失败';
   }
   return file.status;
+}
+
+function canPreviewInBrowser(file: UploadedFile): boolean {
+  // 浏览器原生支持图片、PDF 和常见纯文本预览；Office 文件先走下载。
+  const filename = file.filename.toLowerCase();
+  if (file.content_type.startsWith('image/')) {
+    return true;
+  }
+  if (file.content_type === 'application/pdf' || filename.endsWith('.pdf')) {
+    return true;
+  }
+  if (file.content_type.startsWith('text/')) {
+    return true;
+  }
+  return ['.txt', '.md', '.csv', '.json'].some((suffix) => filename.endsWith(suffix));
 }
 
 function formatError(error: unknown): string {

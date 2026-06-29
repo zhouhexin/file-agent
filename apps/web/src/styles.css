@@ -537,6 +537,33 @@ textarea:focus {
   padding: 8px 12px;
 }
 
+.attachment-open-button {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+
+.attachment-open-button:disabled {
+  cursor: default;
+}
+
+.attachment-open-button:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 3px;
+}
+
+.user-message .attachment-open-button:focus-visible {
+  outline-color: #ffffff;
+}
+
 .attachment-preview {
   width: 44px;
   height: 44px;
@@ -551,6 +578,7 @@ textarea:focus {
 }
 
 .uploaded-file strong {
+  overflow-wrap: anywhere;
   color: #1f2933;
   font-size: 14px;
 }

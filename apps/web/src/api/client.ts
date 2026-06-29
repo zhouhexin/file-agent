@@ -62,6 +62,22 @@ export async function getConversationDetail(token: string, conversationId: strin
   return request<ConversationDetailResponse>(`/conversations/${conversationId}`, { token });
 }
 
+export async function fetchUploadedFileBlob(token: string, documentId: string): Promise<Blob> {
+  // 附件内容接口返回原始文件流，前端根据类型决定预览或下载。
+  const response = await fetch(`${API_BASE_URL}/files/${documentId}/content`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const message = data?.detail ?? data?.error?.message ?? '文件打开失败';
+    throw new ApiError(response.status, String(message));
+  }
+  return response.blob();
+}
+
 export async function uploadFile(token: string, file: File): Promise<UploadedFile> {
   // 文件上传必须使用 FormData，不能复用 JSON 请求封装。
   const formData = new FormData();

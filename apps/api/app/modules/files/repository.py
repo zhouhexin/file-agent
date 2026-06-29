@@ -70,6 +70,11 @@ class FileRepository:
             .one_or_none()
         )
 
+    def get_document(self, document_id: str) -> Document | None:
+        """按 document_id 查询 Document，不限制所属用户。"""
+
+        return self.db.get(Document, document_id)
+
     def list_file_objects(self, document_id: str) -> list[FileObject]:
         """查询 Document 对应的所有文件对象。"""
 

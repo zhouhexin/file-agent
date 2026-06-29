@@ -751,7 +751,31 @@ Response:
 }
 ```
 
-### 7.3 Delete Uploaded Document
+### 7.3 Read Uploaded Document Content
+
+```text
+GET /api/files/{document_id}/content
+```
+
+Current behavior:
+
+```text
+requires authenticated request
+document_id must exist
+does not require Document.user_id to match current user
+returns original file stream from FILE_STORAGE_ROOT
+used by frontend attachment click-to-preview/download
+```
+
+Response:
+
+```text
+200 original file stream
+Content-Type = document.content_type
+Content-Disposition = attachment filename
+```
+
+### 7.4 Delete Uploaded Document
 
 ```text
 DELETE /api/files/{document_id}

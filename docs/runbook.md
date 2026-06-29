@@ -231,6 +231,14 @@ curl -X DELETE http://127.0.0.1:8000/api/files/<document_id> \
   -H 'Authorization: Bearer <access_token>'
 ```
 
+读取附件原始内容，用于前端点击附件后预览或下载：
+
+```bash
+curl -X GET http://127.0.0.1:8000/api/files/<document_id>/content \
+  -H 'Authorization: Bearer <access_token>' \
+  --output downloaded-file
+```
+
 发送用户消息并启动一次持久化 LangGraph AgentRun：
 
 ```bash
