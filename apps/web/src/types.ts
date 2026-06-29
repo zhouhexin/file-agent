@@ -25,6 +25,36 @@ export type AgentRun = {
   selected_skills: string[];
   final_response: string | null;
   tool_invocations: ToolInvocation[];
+  document_results: DocumentResult[];
+  changeset_id: string | null;
+  operation_plan_id: string | null;
+};
+
+export type ChangeItem = {
+  id: string;
+  target_type: string;
+  target_id: string | null;
+  target_document_id: string | null;
+  change_type: string;
+  before_value_json: Record<string, unknown>;
+  after_value_json: Record<string, unknown>;
+  source: string;
+  confidence: number;
+  evidence_json: Record<string, unknown>;
+  execution_status: string;
+  created_at: string;
+};
+
+export type ChangeSetResponse = {
+  id: string;
+  conversation_id: string;
+  agent_run_id: string;
+  user_id: string;
+  status: string;
+  summary: string;
+  created_at: string;
+  updated_at: string;
+  items: ChangeItem[];
 };
 
 export type ToolInvocation = {
@@ -76,4 +106,31 @@ export type SendMessageResponse = {
     attachments: { document_id: string }[];
   };
   agent_run: AgentRun;
+};
+
+export type DocumentCategory = {
+  name: string;
+  category_path?: string[];
+  confidence: number;
+  evidence: string[];
+  status?: 'SUGGESTED' | 'CONFIRMED' | string;
+  source?: string;
+  taxonomy_version?: string;
+};
+
+export type DocumentResult = {
+  document_id: string;
+  filename: string;
+  extraction_status: 'COMPLETED' | 'FAILED' | string;
+  extractor?: string;
+  page_count: number;
+  char_count: number;
+  text_reused: boolean;
+  classification_reused: boolean;
+  categories: DocumentCategory[];
+  warnings: Array<Record<string, unknown> | string>;
+  errors: Array<{
+    code?: string;
+    message?: string;
+  }>;
 };

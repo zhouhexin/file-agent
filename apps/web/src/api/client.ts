@@ -1,4 +1,4 @@
-import type { ConversationDetailResponse, SendMessageResponse, TokenResponse, UploadedFile, User } from '../types';
+import type { ChangeSetResponse, ConversationDetailResponse, SendMessageResponse, TokenResponse, UploadedFile, User } from '../types';
 
 // API 地址集中管理，后续部署时只需要调整 VITE_API_BASE_URL。
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000/api';
@@ -132,4 +132,12 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     throw new ApiError(response.status, String(message));
   }
   return data as T;
+}
+
+export async function getChangeSet(
+  token: string,
+  changesetId: string,
+): Promise<ChangeSetResponse> {
+  // 结果回执用 ChangeSet 判断是否存在真实文件改名、移动、删除等写操作。
+  return request(`/changesets/${changesetId}`, { token });
 }

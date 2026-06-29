@@ -66,6 +66,9 @@ class AgentRunResult(BaseModel):
     tool_plan: Dict[str, Any]
     tool_results: List[Dict[str, Any]]
     tool_invocations: List[ToolInvocationRecord]
+
+    document_results: List[Dict[str, Any]] = Field(default_factory=list)
+
     changeset_id: Optional[str] = None
     operation_plan_id: Optional[str] = None
     final_response: Optional[str] = None

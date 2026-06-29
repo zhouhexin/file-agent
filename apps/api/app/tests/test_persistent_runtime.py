@@ -887,12 +887,25 @@ def test_deterministic_message_extracts_and_classifies_multiple_documents():
         assert db.query(DocumentExtractionRun).count() == 3
         assert db.query(DocumentPage).count() == 3
         document_results = db.query(AgentRun).one().graph_state_json["document_results"]
+        assert response.agent_run.document_results == document_results
         assert len(document_results) == 3
-        assert "学校/人事师资/职称" in [
-            category["name"] for category in document_results[0]["categories"]
+        assert [item["filename"] for item in response.agent_run.document_results] == [
+            "det-staff.txt",
+            "det-plan.txt",
+            "det-unknown.txt",
         ]
-        assert document_results[1]["categories"][0]["name"] == "学院/行政管理/年度计划、总结"
-        assert document_results[2]["categories"][0]["name"] == "其他"
+        assert [item["extraction_status"] for item in response.agent_run.document_results] == [
+            "COMPLETED",
+            "COMPLETED",
+            "COMPLETED",
+        ]
+        assert "学校/人事师资/职称" in [
+            category["name"] for category in response.agent_run.document_results[0]["categories"]
+        ]
+        assert response.agent_run.document_results[1]["categories"][0]["confidence"] > 0
+        assert response.agent_run.document_results[1]["categories"][0]["evidence"]
+        assert response.agent_run.document_results[1]["categories"][0]["name"] == "学院/行政管理/年度计划、总结"
+        assert response.agent_run.document_results[2]["categories"][0]["name"] == "其他"
         assert "置信度" in (response.agent_run.final_response or "")
         assert response.agent_run.changeset_id
         assert db.query(ChangeItem).filter(ChangeItem.change_type == "TEXT_EXTRACTED").count() == 3

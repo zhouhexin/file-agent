@@ -408,6 +408,11 @@ def test_tool_dispatch_records_step_failure_and_continues_batch():
     assert result.status == "COMPLETED"
     assert [item.status for item in result.tool_invocations] == ["FAILED", "COMPLETED"]
     assert [item["status"] for item in result.tool_results] == ["FAILED", "COMPLETED"]
+    assert [item["document_id"] for item in result.document_results] == ["doc-bad", "doc-good"]
+    assert [item["extraction_status"] for item in result.document_results] == ["FAILED", "COMPLETED"]
+    assert result.document_results[1]["categories"][0]["name"] == "学校/人事师资/职称"
+    assert result.document_results[1]["categories"][0]["confidence"] > 0
+    assert result.document_results[1]["categories"][0]["evidence"]
     assert "模拟解析失败" in (result.final_response or "")
     assert "学校/人事师资/职称" in (result.final_response or "")
 

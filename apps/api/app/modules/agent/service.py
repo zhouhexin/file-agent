@@ -120,6 +120,7 @@ class AgentRuntimeService:
                     tool_plan=final_state.get("tool_plan", {}),
                     tool_results=final_state.get("tool_results", []),
                     tool_invocations=invocation_records,
+                    document_results=final_state.get("document_results", []),
                     changeset_id=final_state.get("changeset_id"),
                     operation_plan_id=final_state.get("operation_plan_id"),
                     final_response=final_state.get("final_response"),

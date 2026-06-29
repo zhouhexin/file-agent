@@ -121,6 +121,7 @@ class AgentRunRepository:
             )
             for item in (invocations if invocations is not None else self.list_tool_invocations(run.id))
         ]
+        graph_state = run.graph_state_json or {}
         return AgentRunResult(
             agent_run_id=run.id,
             conversation_id=run.conversation_id,
@@ -132,6 +133,7 @@ class AgentRunRepository:
             tool_plan=run.plan_json,
             tool_results=[item.output_json for item in invocation_models],
             tool_invocations=invocation_models,
+            document_results=graph_state.get("document_results", []),
             changeset_id=run.changeset_id or _last_non_empty([item.changeset_id for item in invocation_models]),
             operation_plan_id=_last_non_empty([item.operation_plan_id for item in invocation_models]),
             final_response=run.final_response,

@@ -97,6 +97,10 @@ def test_get_conversation_returns_messages_with_agent_runs_and_attachments():
     assert history_message["attachments"][0]["filename"] == "message.txt"
     assert history_message["agent_run"]["status"] == "COMPLETED"
     assert history_message["agent_run"]["final_response"]
+    assert len(history_message["agent_run"]["document_results"]) == 1
+    assert history_message["agent_run"]["document_results"][0]["document_id"] == document_id
+    assert history_message["agent_run"]["document_results"][0]["filename"] == "message.txt"
+    assert history_message["agent_run"]["document_results"][0]["extraction_status"] == "COMPLETED"
     assert history_message["agent_run"]["tool_invocations"][0]["tool_name"] == "extract-document-text"
     clear_overrides()
 
