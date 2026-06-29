@@ -123,7 +123,7 @@
 .attachment-card-text strong {
   overflow-wrap: anywhere;
   color: #1f2933;
-  font-size: 14px;
+  font-size: 10px;
 }
 
 .attachment-card-text span {
@@ -133,14 +133,14 @@
 }
 
 .task-bubble {
-  width: 100%;
+  width: 80%;
   border-radius: 8px;
   background: #2563eb;
   color: #ffffff;
-  font-size: 16px;
-  font-weight: 700;
-  line-height: 1.7;
-  padding: 16px 18px;
+  font-size: 14px;
+  font-weight: 350;
+  line-height: 1;
+  padding: 10px 10px;
 }
 
 .composer {
