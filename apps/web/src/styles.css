@@ -573,62 +573,11 @@ textarea:focus {
   padding: 16px;
 }
 
-.result-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
 .agent-final-response {
-  margin: 0 0 14px;
+  margin: 0;
   color: #1f2933;
   font-size: 14px;
   line-height: 1.7;
-}
-
-.metric {
-  border: 1px solid #edf1f5;
-  border-radius: 8px;
-  padding: 12px;
-}
-
-.metric span {
-  display: block;
-  color: #667789;
-  font-size: 13px;
-}
-
-.metric strong {
-  display: block;
-  margin-top: 5px;
-  color: #1f2933;
-}
-
-.result-panel h3 {
-  margin: 18px 0 10px;
-  font-size: 16px;
-}
-
-.tool-list {
-  display: grid;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.tool-list li {
-  display: flex;
-  min-height: 38px;
-  align-items: center;
-  justify-content: space-between;
-  border: 1px solid #edf1f5;
-  border-radius: 8px;
-  padding: 0 12px;
-}
-
-.tool-list strong {
-  color: #047857;
 }
 
 @media (max-width: 640px) {
@@ -732,10 +681,6 @@ textarea:focus {
 
   .message-bubble {
     width: 100%;
-  }
-
-  .result-grid {
-    grid-template-columns: 1fr;
   }
 
   .send-button {

@@ -505,26 +505,27 @@ function AttachmentList({
 }
 
 function AgentResult({ response }: { response: SendMessageResponse }) {
-  // 优先展示后端生成的自然语言结果，同时保留 AgentRun 审计摘要。
+  // AgentRun 和 ToolInvocation 属于审计信息，不在普通前端页面展示，仅保留控制台调试日志。
+  useEffect(() => {
+    console.debug('[FileAgent] AgentRun 审计信息', {
+      agent_run_id: response.agent_run.agent_run_id,
+      status: response.agent_run.status,
+      intent: response.agent_run.intent,
+      tool_invocations: response.agent_run.tool_invocations.map((tool) => ({
+        id: tool.id,
+        tool_name: tool.tool_name,
+        status: tool.status,
+      })),
+    });
+  }, [response]);
+
+  if (!response.agent_run.final_response) {
+    return null;
+  }
+
   return (
     <div className="result-panel">
-      {response.agent_run.final_response ? (
-        <p className="agent-final-response">{response.agent_run.final_response}</p>
-      ) : null}
-      <div className="result-grid">
-        <Metric label="AgentRun" value={response.agent_run.status} />
-        <Metric label="Intent" value={response.agent_run.intent ?? '-'} />
-        <Metric label="Tools" value={String(response.agent_run.tool_invocations.length)} />
-      </div>
-      <h3>Tool 调用</h3>
-      <ul className="tool-list">
-        {response.agent_run.tool_invocations.map((tool) => (
-          <li key={tool.id}>
-            <span>{tool.tool_name}</span>
-            <strong>{tool.status}</strong>
-          </li>
-        ))}
-      </ul>
+      <p className="agent-final-response">{response.agent_run.final_response}</p>
     </div>
   );
 }
@@ -555,16 +556,6 @@ function formatUploadStatus(file: UploadedFile): string {
     return '处理失败';
   }
   return file.status;
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  // 小指标组件保持固定结构，避免结果区布局随内容变化跳动。
-  return (
-    <div className="metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
 }
 
 function formatError(error: unknown): string {
