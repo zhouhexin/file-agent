@@ -413,7 +413,7 @@ def test_tool_dispatch_records_step_failure_and_continues_batch():
 
 
 def test_document_results_response_lists_multiple_categories_with_confidence():
-    """逐文件回执必须展示一个文件的多个分类、置信度和证据。"""
+    """逐文件回执必须用分层文本展示多个分类、置信度和证据。"""
 
     response = _build_document_results_response(
         [
@@ -438,9 +438,45 @@ def test_document_results_response_lists_multiple_categories_with_confidence():
         ]
     )
 
-    assert "分类建议：" in response
-    assert "学校/人事师资/职称，置信度 0.80，依据：职称" in response
-    assert "学校/党委相关/干部工作，置信度 0.78，依据：干部工作" in response
+    assert response.startswith("已处理 1 个文件：\n\n1. multi.txt")
+    assert "解析结果：成功，提取 1 页/Sheet，共 30 个字符" in response
+    assert (
+        "分类建议：\n"
+        "- 学校/人事师资/职称\n"
+        "  置信度：0.80\n"
+        "  依据：职称"
+    ) in response
+    assert (
+        "- 学校/党委相关/干部工作\n"
+        "  置信度：0.78\n"
+        "  依据：干部工作"
+    ) in response
+
+
+def test_document_results_response_hides_extra_low_confidence_categories():
+    """分类建议过多时只展示前三个，避免对话回执过长。"""
+
+    response = _build_document_results_response(
+        [
+            {
+                "filename": "many.txt",
+                "extraction_status": "COMPLETED",
+                "page_count": 1,
+                "char_count": 30,
+                "categories": [
+                    {"name": f"分类{i}", "confidence": 0.9 - i * 0.01, "evidence": [f"证据{i}"]}
+                    for i in range(5)
+                ],
+            }
+        ]
+    )
+
+    assert "- 分类0" in response
+    assert "- 分类1" in response
+    assert "- 分类2" in response
+    assert "- 分类3" not in response
+    assert "- 分类4" not in response
+    assert "另有 2 个低置信度候选未展示。" in response
 
 
 def test_graph_does_not_execute_direct_file_writes_from_planner_output():

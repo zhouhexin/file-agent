@@ -311,36 +311,50 @@ def _document_results_from_extraction_results(
 def _build_document_results_response(document_results: List[Dict[str, Any]]) -> str:
     """根据 document_results 生成逐文件处理回执。"""
 
-    lines = [f"已处理 {len(document_results)} 个文件："]
+    blocks = [f"已处理 {len(document_results)} 个文件："]
     for index, result in enumerate(document_results, start=1):
         filename = result.get("filename") or result.get("document_id") or "未知文件"
         if result.get("extraction_status") == "FAILED":
             error = (result.get("errors") or [{}])[0]
             message = error.get("message") if isinstance(error, dict) else "未知错误"
-            lines.append(f"{index}. {filename}：解析失败，原因：{message}。")
+            blocks.append(
+                f"{index}. {filename}\n"
+                "解析结果：失败\n"
+                f"失败原因：{message}"
+            )
             continue
 
         categories = result.get("categories") or []
-        lines.append(
-            f"{index}. {filename}：解析成功，提取 {result.get('page_count', 0)} 页/Sheet，"
-            f"共 {result.get('char_count', 0)} 个字符；分类建议：{_format_category_receipt(categories)}。"
+        blocks.append(
+            f"{index}. {filename}\n"
+            f"解析结果：成功，提取 {result.get('page_count', 0)} 页/Sheet，共 {result.get('char_count', 0)} 个字符\n"
+            "分类建议：\n"
+            f"{_format_category_receipt(categories)}"
         )
-    return "\n".join(lines)
+    return "\n\n".join(blocks)
 
 
 def _format_category_receipt(categories: List[Dict[str, Any]]) -> str:
     """把多个分类建议格式化为带置信度和证据的回执片段。"""
 
     if not categories:
-        return "其他（暂无明确关键词依据）"
+        return "- 其他（暂无明确关键词依据）"
     formatted_items: list[str] = []
-    for category in categories[:5]:
+    visible_categories = categories[:3]
+    for category in visible_categories:
         evidence = category.get("evidence") or []
         name = category.get("name") or "其他"
         if name == "其他" and not evidence:
-            formatted_items.append("其他（暂无明确关键词依据）")
+            formatted_items.append("- 其他（暂无明确关键词依据）")
             continue
-        evidence_text = f"依据：{'、'.join(evidence)}" if evidence else "暂无明确关键词依据"
+        evidence_text = "、".join(str(item) for item in evidence[:3]) or "暂无明确关键词依据"
         confidence = float(category.get("confidence", 0))
-        formatted_items.append(f"{name}，置信度 {confidence:.2f}，{evidence_text}")
-    return "；".join(formatted_items)
+        formatted_items.append(
+            f"- {name}\n"
+            f"  置信度：{confidence:.2f}\n"
+            f"  依据：{evidence_text}"
+        )
+    hidden_count = len(categories) - len(visible_categories)
+    if hidden_count > 0:
+        formatted_items.append(f"另有 {hidden_count} 个低置信度候选未展示。")
+    return "\n".join(formatted_items)
