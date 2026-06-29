@@ -11,4 +11,5 @@ dist/
 build/
 *.tsbuildinfo
 storage/
+logs/
 *.log

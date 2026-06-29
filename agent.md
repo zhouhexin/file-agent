@@ -453,6 +453,16 @@ change_items
 
 用户只说“分类/归类/整理”且带附件时，也必须走 `extract-document-text -> document_pages -> document-classification -> ChangeSet` 真实链路，不得回落到 `document-convert -> metadata-extract -> multi-label-classify -> change-report` 占位链路。分类依据必须来自 `document_pages.text_content` 的完整正文，不能用短 `text_preview` 代替。
 
+运行日志是诊断辅助，不能替代 AgentRun、ToolInvocation、ChangeSet 或数据库审计。后端必须保留轻量结构化文件日志：
+
+- 每个请求必须有 `request_id`，并通过 `X-Request-ID` 响应头返回；如果请求自带 `X-Request-ID`，优先沿用。
+- 每个 AgentRun 日志必须带 `agent_run_id`；能取得上下文时必须同时带 `user_id`、`conversation_id`。
+- Tool、文件和分类相关日志必须尽量带 `tool_name`、`document_id`、`status`、`duration_ms`、`error_code`。
+- 日志必须写入服务器本地文件，默认 `LOG_DIR=./logs`，按天生成 `file-agent-YYYY-MM-DD.log`。
+- 日志默认保留 7 天，启动时必须清理超过 `LOG_RETENTION_DAYS` 的历史日志文件。
+- 日志内容必须是 JSONL；不得写入文件正文、OCR 全文、API key、JWT、密码或大段 LLM prompt。
+- 至少记录四类事件：API 请求与异常、Agent 节点进入/退出/耗时、Tool 调用输入摘要/结果状态/耗时、文件解析/OCR/分类/ChangeSet 的成功与失败原因。
+
 `change_type` 至少覆盖：
 
 ```text

@@ -6,11 +6,13 @@ Planner 输出永远不能直接调用 Tool handler，必须经过这里的 Regi
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Type
 
 from pydantic import BaseModel, ValidationError
 
+from app.core.logging import log_event
 from app.db.models import Document, DocumentInsight
 from app.modules.agent.state import ToolInvocationRecord
 from app.modules.agent.tool_schemas import (
@@ -100,17 +102,63 @@ class ToolRegistry:
         """校验输入、调用 Tool handler，并返回结构化调用记录。"""
 
         tool = self.get(name)
+        start = time.perf_counter()
+        document_id = str(input_json.get("document_id") or "")
+        log_event(
+            "tool.invoke.started",
+            tool_name=name,
+            document_id=document_id or None,
+            status="STARTED",
+            message="Tool 调用开始",
+            input_summary=_tool_input_summary(input_json),
+        )
         try:
             tool_input = tool.input_model.model_validate(input_json)
         except ValidationError as exc:
+            log_event(
+                "tool.invoke.failed",
+                level="ERROR",
+                tool_name=name,
+                document_id=document_id or None,
+                status="FAILED",
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                error_code="TOOL_INPUT_VALIDATION_FAILED",
+                message=str(exc),
+            )
             raise ToolInputValidationError(str(exc)) from exc
 
-        output = tool.handler(tool_input)
+        try:
+            output = tool.handler(tool_input)
+        except Exception as exc:
+            log_event(
+                "tool.invoke.failed",
+                level="ERROR",
+                tool_name=name,
+                document_id=document_id or None,
+                status="FAILED",
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                error_code=exc.__class__.__name__,
+                message=str(exc),
+            )
+            raise
+
+        status = _tool_invocation_status(output)
+        error = output.get("error") if isinstance(output.get("error"), dict) else {}
+        log_event(
+            "tool.invoke.completed",
+            level="ERROR" if status == "FAILED" else "INFO",
+            tool_name=name,
+            document_id=str(output.get("document_id") or document_id) or None,
+            status=status,
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            error_code=error.get("code"),
+            message="Tool 调用完成",
+        )
         return ToolInvocationRecord(
             tool_name=name,
             input_json=tool_input.model_dump(),
             output_json=output,
-            status=_tool_invocation_status(output),
+            status=status,
             changeset_id=output.get("changeset_id"),
             operation_plan_id=output.get("operation_plan_id"),
         )
@@ -122,6 +170,16 @@ def _tool_invocation_status(output: Dict[str, Any]) -> str:
     if output.get("ok") is False or output.get("status") == "FAILED":
         return "FAILED"
     return "COMPLETED"
+
+
+def _tool_input_summary(input_json: Dict[str, Any]) -> Dict[str, Any]:
+    """提取安全的 Tool 输入摘要，避免把正文或大对象写入日志。"""
+
+    summary: Dict[str, Any] = {}
+    for key in ["document_id", "document_ids", "force_reprocess", "operation_type", "intent"]:
+        if key in input_json:
+            summary[key] = input_json[key]
+    return summary
 
 
 def _document_handler(tool_name: str) -> ToolHandler:
@@ -305,11 +363,32 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
     def handler(tool_input: BaseModel) -> Dict[str, Any]:
         """解析当前用户文件，并把页面文本写入数据库。"""
 
+        document_id = str(getattr(tool_input, "document_id"))
+        start = time.perf_counter()
         if db is None:
+            log_event(
+                "file.extract.failed",
+                level="ERROR",
+                document_id=document_id,
+                status="FAILED",
+                duration_ms=0,
+                error_code="DB_REQUIRED",
+                message="解析文件需要数据库会话。",
+            )
             return {"ok": False, "error": {"code": "DB_REQUIRED", "message": "解析文件需要数据库会话。"}}
         repository = FileExtractionRepository(db, user_id)
-        resolved = repository.resolve_original_file(getattr(tool_input, "document_id"))
+        resolved = repository.resolve_original_file(document_id)
         if not resolved["ok"]:
+            error = resolved.get("error") or {}
+            log_event(
+                "file.extract.failed",
+                level="ERROR",
+                document_id=document_id,
+                status="FAILED",
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                error_code=error.get("code"),
+                message=error.get("message"),
+            )
             return resolved
 
         document = resolved["document"]
@@ -317,6 +396,15 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
         reusable = None if force_reprocess else repository.get_latest_successful_extraction(document_id=document.id)
         if reusable is not None:
             run = reusable["run"]
+            log_event(
+                "file.extract.completed",
+                document_id=document.id,
+                status="REUSED",
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                message="复用已有文件解析结果",
+                extractor=run.extractor,
+                page_count=len(reusable["pages"]),
+            )
             return {
                 "ok": True,
                 "document_id": document.id,
@@ -346,6 +434,30 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
             repository.complete_extraction_run(run=run, pages=extraction["pages"])
         else:
             repository.fail_extraction_run(run=run, error_message=extraction["error"]["message"])
+        extraction_status = "COMPLETED" if extraction["ok"] else "FAILED"
+        event_name = "file.extract.completed" if extraction["ok"] else "file.extract.failed"
+        error = extraction.get("error") or {}
+        log_event(
+            event_name,
+            level="ERROR" if not extraction["ok"] else "INFO",
+            document_id=document.id,
+            status=extraction_status,
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            error_code=error.get("code"),
+            message=error.get("message") or "文件解析完成",
+            extractor=extraction["extractor"],
+            page_count=len(extraction["pages"]),
+        )
+        if extraction["extractor"] == "ocr":
+            log_event(
+                "file.ocr.completed" if extraction["ok"] else "file.ocr.failed",
+                level="ERROR" if not extraction["ok"] else "INFO",
+                document_id=document.id,
+                status=extraction_status,
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                error_code=error.get("code"),
+                message=error.get("message") or "OCR 处理完成",
+            )
         return {
             "ok": extraction["ok"],
             "document_id": document.id,

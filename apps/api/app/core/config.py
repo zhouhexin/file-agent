@@ -17,6 +17,8 @@ DEFAULT_JWT_ALGORITHM = "HS256"
 DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 DEFAULT_FILE_STORAGE_ROOT = "./storage/uploads"
 DEFAULT_LLM_TIMEOUT_SECONDS = 30
+DEFAULT_LOG_DIR = "./logs"
+DEFAULT_LOG_RETENTION_DAYS = 7
 
 
 class Settings(BaseModel):
@@ -34,6 +36,9 @@ class Settings(BaseModel):
     llm_base_url: str = ""
     llm_chat_model: str = ""
     llm_timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS
+    log_dir: str = DEFAULT_LOG_DIR
+    log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
+    log_level: str = "INFO"
 
 
 def find_dotenv_file() -> Path | None:
@@ -101,4 +106,7 @@ def get_settings() -> Settings:
         llm_base_url=os.getenv("LLM_BASE_URL", ""),
         llm_chat_model=os.getenv("LLM_CHAT_MODEL", ""),
         llm_timeout_seconds=int(os.getenv("LLM_TIMEOUT_SECONDS", str(DEFAULT_LLM_TIMEOUT_SECONDS))),
+        log_dir=os.getenv("LOG_DIR", DEFAULT_LOG_DIR),
+        log_retention_days=int(os.getenv("LOG_RETENTION_DAYS", str(DEFAULT_LOG_RETENTION_DAYS))),
+        log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
     )

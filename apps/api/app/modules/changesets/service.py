@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.core.logging import log_event
 from app.db.models import AgentRun, ChangeSet
 from app.modules.changesets.repository import ChangeSetRepository
 
@@ -24,17 +26,43 @@ def persist_changeset_from_document_results(
     if not document_results:
         return None
 
+    start = time.perf_counter()
     repository = ChangeSetRepository(db)
     item_count = _count_change_items(document_results)
     status = "FAILED" if item_count == 0 else "COMPLETED"
-    changeset = repository.create_or_reset(
-        run=run,
-        workspace_id=_workspace_id_from_results(document_results),
-        summary=f"已处理 {len(document_results)} 个文件，生成 {item_count} 项变更记录。",
+    try:
+        changeset = repository.create_or_reset(
+            run=run,
+            workspace_id=_workspace_id_from_results(document_results),
+            summary=f"已处理 {len(document_results)} 个文件，生成 {item_count} 项变更记录。",
+            status=status,
+        )
+        for result in document_results:
+            _append_items_for_result(repository=repository, changeset_id=changeset.id, result=result)
+    except Exception as exc:
+        log_event(
+            "changeset.failed",
+            level="ERROR",
+            agent_run_id=run.id,
+            user_id=run.user_id,
+            conversation_id=run.conversation_id,
+            status="FAILED",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            error_code=exc.__class__.__name__,
+            message=str(exc),
+        )
+        raise
+    log_event(
+        "changeset.created",
+        agent_run_id=run.id,
+        user_id=run.user_id,
+        conversation_id=run.conversation_id,
         status=status,
+        duration_ms=int((time.perf_counter() - start) * 1000),
+        message="ChangeSet 创建完成",
+        changeset_id=changeset.id,
+        item_count=item_count,
     )
-    for result in document_results:
-        _append_items_for_result(repository=repository, changeset_id=changeset.id, result=result)
     return changeset
 
 

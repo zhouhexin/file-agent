@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List
 
 from langgraph.graph import END, StateGraph
 from langgraph.runtime import Runtime
 
+from app.core.logging import log_context, log_event
 from app.modules.agent.document_classifier import classify_document_text
 from app.modules.agent.planner import build_plan_from_user_intent
 from app.modules.agent.runtime import AgentRuntimeContext
@@ -20,13 +22,13 @@ def build_agent_graph():
     """编译 MVP LangGraph 工作流。"""
 
     graph = StateGraph(AgentGraphState, context_schema=AgentRuntimeContext)
-    graph.add_node("chat_intake", chat_intake)
-    graph.add_node("collect_context", collect_context)
-    graph.add_node("planning", planning)
-    graph.add_node("tool_dispatch", tool_dispatch)
-    graph.add_node("async_job_wait", async_job_wait)
-    graph.add_node("evidence_or_change", evidence_or_change)
-    graph.add_node("response", response)
+    graph.add_node("chat_intake", _logged_node("chat_intake", chat_intake))
+    graph.add_node("collect_context", _logged_runtime_node("collect_context", collect_context))
+    graph.add_node("planning", _logged_runtime_node("planning", planning))
+    graph.add_node("tool_dispatch", _logged_runtime_node("tool_dispatch", tool_dispatch))
+    graph.add_node("async_job_wait", _logged_node("async_job_wait", async_job_wait))
+    graph.add_node("evidence_or_change", _logged_runtime_node("evidence_or_change", evidence_or_change))
+    graph.add_node("response", _logged_node("response", response))
 
     graph.set_entry_point("chat_intake")
     graph.add_edge("chat_intake", "collect_context")
@@ -37,6 +39,66 @@ def build_agent_graph():
     graph.add_edge("evidence_or_change", "response")
     graph.add_edge("response", END)
     return graph.compile()
+
+
+def _logged_node(name: str, handler):
+    """为 LangGraph 节点增加进入、退出、耗时日志。"""
+
+    def wrapped(state: AgentGraphState):
+        """执行节点并记录结构化日志。"""
+
+        return _run_logged_node(name=name, state=state, callback=lambda: handler(state))
+
+    return wrapped
+
+
+def _logged_runtime_node(name: str, handler):
+    """为需要 Runtime 注入的 LangGraph 节点增加日志，同时保留显式签名。"""
+
+    def wrapped(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]):
+        """执行带 Runtime 的节点并记录结构化日志。"""
+
+        return _run_logged_node(name=name, state=state, callback=lambda: handler(state, runtime))
+
+    return wrapped
+
+
+def _run_logged_node(name: str, state: AgentGraphState, callback):
+    """执行节点回调并记录统一的节点日志。"""
+
+    start = time.perf_counter()
+    with log_context(
+        agent_run_id=state.get("agent_run_id"),
+        user_id=state.get("user_id"),
+        conversation_id=state.get("conversation_id"),
+    ):
+        log_event(
+            "agent.node.entered",
+            status=state.get("status"),
+            message="Agent 节点开始",
+            node=name,
+        )
+        try:
+            result = callback()
+        except Exception as exc:
+            log_event(
+                "agent.node.failed",
+                level="ERROR",
+                status="FAILED",
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                error_code=exc.__class__.__name__,
+                message=str(exc),
+                node=name,
+            )
+            raise
+        log_event(
+            "agent.node.completed",
+            status=result.get("status", state.get("status")) if isinstance(result, dict) else state.get("status"),
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            message="Agent 节点完成",
+            node=name,
+        )
+        return result
 
 
 def chat_intake(state: AgentGraphState) -> Dict[str, Any]:
@@ -286,6 +348,11 @@ def _document_results_from_extraction_results(
         text_preview = "\n".join(str(page.get("text_preview") or "") for page in pages)
         classification_text = extraction_texts.get(str(result.get("extraction_run_id") or "")) or text_preview
         error = result.get("error") if isinstance(result.get("error"), dict) else None
+        categories = (
+            _classify_with_logging(document_id=document_id, text=classification_text)
+            if result.get("status") == "COMPLETED"
+            else []
+        )
         document_results.append(
             {
                 "document_id": document_id,
@@ -296,16 +363,40 @@ def _document_results_from_extraction_results(
                 "char_count": char_count,
                 "text_reused": bool(result.get("reused")),
                 "classification_reused": bool(result.get("reused")),
-                "categories": (
-                    classify_document_text(classification_text)
-                    if result.get("status") == "COMPLETED"
-                    else []
-                ),
+                "categories": categories,
                 "warnings": [],
                 "errors": [error] if error else [],
             }
         )
     return document_results
+
+
+def _classify_with_logging(*, document_id: str, text: str) -> List[Dict[str, Any]]:
+    """执行文档分类并记录分类成功或失败日志。"""
+
+    start = time.perf_counter()
+    try:
+        categories = classify_document_text(text)
+    except Exception as exc:
+        log_event(
+            "classification.failed",
+            level="ERROR",
+            document_id=document_id or None,
+            status="FAILED",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            error_code=exc.__class__.__name__,
+            message=str(exc),
+        )
+        raise
+    log_event(
+        "classification.completed",
+        document_id=document_id or None,
+        status="COMPLETED",
+        duration_ms=int((time.perf_counter() - start) * 1000),
+        message="文档分类完成",
+        category_count=len(categories),
+    )
+    return categories
 
 
 def _build_document_results_response(document_results: List[Dict[str, Any]]) -> str:

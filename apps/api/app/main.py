@@ -1,11 +1,13 @@
 """File Agent 后端的 FastAPI 应用入口。"""
 
+import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.database import init_database
+from app.core.logging import cleanup_old_logs, log_context, log_event, new_request_id
 from app.modules.agent.router import agent_runs_router, router as agent_router
 from app.modules.auth.router import router as auth_router
 from app.modules.changesets.router import router as changesets_router
@@ -21,12 +23,57 @@ async def lifespan(app: FastAPI):
     """
 
     init_database()
+    cleanup_old_logs()
     yield
 
 
 # 这里故意保持应用入口很薄，具体业务边界交给各模块路由维护，
 # 避免 Agent Runtime 扩展后把 main.py 变成混杂的调度中心。
 app = FastAPI(title="File Agent API", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    """为每个请求生成 request_id，并记录 API 请求耗时和异常。"""
+
+    request_id = request.headers.get("X-Request-ID") or new_request_id()
+    start = time.perf_counter()
+    with log_context(request_id=request_id):
+        log_event(
+            "api.request.started",
+            method=request.method,
+            path=request.url.path,
+            message="API 请求开始",
+        )
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            duration_ms = int((time.perf_counter() - start) * 1000)
+            log_event(
+                "api.request.failed",
+                level="ERROR",
+                status="FAILED",
+                duration_ms=duration_ms,
+                error_code=exc.__class__.__name__,
+                method=request.method,
+                path=request.url.path,
+                message=str(exc),
+            )
+            raise
+
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        response.headers["X-Request-ID"] = request_id
+        log_event(
+            "api.request.completed",
+            status="COMPLETED" if response.status_code < 500 else "FAILED",
+            duration_ms=duration_ms,
+            error_code=None if response.status_code < 400 else f"HTTP_{response.status_code}",
+            method=request.method,
+            path=request.url.path,
+            http_status=response.status_code,
+            message="API 请求完成",
+        )
+        return response
 
 # 允许本地 Vite 前端跨端口调用 API；生产环境应改为正式域名白名单。
 app.add_middleware(

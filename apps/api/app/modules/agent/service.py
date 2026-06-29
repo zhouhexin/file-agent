@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
@@ -17,6 +18,7 @@ from app.modules.agent.repository import AgentRunRepository
 from app.modules.agent.runtime import AgentRuntimeContext
 from app.modules.agent.state import AgentRunResult, ToolInvocationRecord
 from app.modules.agent.tool_registry import ToolRegistry
+from app.core.logging import log_context, log_event
 from app.modules.llm.service import LLMIntentService
 
 
@@ -68,43 +70,70 @@ class AgentRuntimeService:
             attachments=attachments or [],
             planner_mode=planner_mode,
         )
-        try:
-            final_state = self.graph.invoke(
-                initial_state,
-                config={"configurable": {"thread_id": agent_run_id}},
-                context=runtime_context,
+        start = time.perf_counter()
+        with log_context(agent_run_id=agent_run_id, user_id=user_id, conversation_id=conversation_id):
+            log_event(
+                "agent.run.started",
+                status="RECEIVED",
+                message="AgentRun 开始",
+                planner_mode=planner_mode,
+                attachment_count=len(attachments or []),
             )
-        except Exception as exc:
+            try:
+                final_state = self.graph.invoke(
+                    initial_state,
+                    config={"configurable": {"thread_id": agent_run_id}},
+                    context=runtime_context,
+                )
+            except Exception as exc:
+                duration_ms = int((time.perf_counter() - start) * 1000)
+                log_event(
+                    "agent.run.failed",
+                    level="ERROR",
+                    status="FAILED",
+                    duration_ms=duration_ms,
+                    error_code=exc.__class__.__name__,
+                    message=str(exc),
+                )
+                if repository is not None and run is not None:
+                    repository.mark_failed(run, str(exc))
+                raise
+
+            invocation_records = [
+                ToolInvocationRecord.model_validate(item)
+                for item in final_state.get("tool_invocations", [])
+            ]
             if repository is not None and run is not None:
-                repository.mark_failed(run, str(exc))
-            raise
-
-        invocation_records = [
-            ToolInvocationRecord.model_validate(item)
-            for item in final_state.get("tool_invocations", [])
-        ]
-        if repository is not None and run is not None:
-            for record in invocation_records:
-                repository.create_tool_invocation(agent_run_id=run.id, record=record)
-            repository.update_run_from_state(run, final_state)
-            return repository.to_result(run)
-
-        return AgentRunResult(
-            agent_run_id=final_state["agent_run_id"],
-            conversation_id=final_state["conversation_id"],
-            user_id=final_state["user_id"],
-            message_id=final_state["message_id"],
-            intent=final_state.get("intent"),
-            status=final_state["status"],
-            selected_skills=final_state.get("selected_skills", []),
-            tool_plan=final_state.get("tool_plan", {}),
-            tool_results=final_state.get("tool_results", []),
-            tool_invocations=invocation_records,
-            changeset_id=final_state.get("changeset_id"),
-            operation_plan_id=final_state.get("operation_plan_id"),
-            final_response=final_state.get("final_response"),
-            errors=final_state.get("errors", []),
-        )
+                for record in invocation_records:
+                    repository.create_tool_invocation(agent_run_id=run.id, record=record)
+                repository.update_run_from_state(run, final_state)
+                result = repository.to_result(run)
+            else:
+                result = AgentRunResult(
+                    agent_run_id=final_state["agent_run_id"],
+                    conversation_id=final_state["conversation_id"],
+                    user_id=final_state["user_id"],
+                    message_id=final_state["message_id"],
+                    intent=final_state.get("intent"),
+                    status=final_state["status"],
+                    selected_skills=final_state.get("selected_skills", []),
+                    tool_plan=final_state.get("tool_plan", {}),
+                    tool_results=final_state.get("tool_results", []),
+                    tool_invocations=invocation_records,
+                    changeset_id=final_state.get("changeset_id"),
+                    operation_plan_id=final_state.get("operation_plan_id"),
+                    final_response=final_state.get("final_response"),
+                    errors=final_state.get("errors", []),
+                )
+            log_event(
+                "agent.run.completed",
+                status=result.status,
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                message="AgentRun 完成",
+                intent=result.intent,
+                tool_count=len(result.tool_invocations),
+            )
+            return result
 
     def _build_runtime_context(
         self,
