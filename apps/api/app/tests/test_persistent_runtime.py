@@ -305,7 +305,8 @@ def test_llm_message_extracts_document_text_and_persists_pages():
         )
         assert suggestion.status == "SUGGESTED"
         assert suggestion.source == "rule"
-        assert suggestion.evidence_json == ["职称"]
+        assert "职称" in suggestion.evidence_json
+        assert "职称申报" in suggestion.evidence_json
         assert response.agent_run.changeset_id
         assert stored_run.changeset_id == response.agent_run.changeset_id
         changeset = db.query(ChangeSet).one()
@@ -321,7 +322,8 @@ def test_llm_message_extracts_document_text_and_persists_pages():
         )
         assert category_item.target_document_id == document_id
         assert category_item.after_value_json["category_name"] == "学校/人事师资/职称"
-        assert category_item.evidence_json["evidence"] == ["职称"]
+        assert "职称" in category_item.evidence_json["evidence"]
+        assert "职称申报" in category_item.evidence_json["evidence"]
     finally:
         db.close()
         app.dependency_overrides.clear()

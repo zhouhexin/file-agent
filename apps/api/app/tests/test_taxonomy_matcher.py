@@ -1,7 +1,7 @@
 """分类体系关键词匹配测试。"""
 
 from app.modules.classification.loader import load_default_taxonomy
-from app.modules.classification.matcher import match_document_text
+from app.modules.classification.matcher import DocumentFeatures, match_document_text, recall_category_candidates
 
 
 def test_matcher_returns_specific_school_category_path():
@@ -64,3 +64,70 @@ def test_matcher_returns_other_when_no_taxonomy_keywords_match():
             "taxonomy_version": "2026-06-v2",
         }
     ]
+
+
+def test_recall_candidates_uses_aliases_and_positive_signals_for_implicit_topic():
+    """即使正文未出现标准分类名，也应通过别名和正向信号召回正确候选。"""
+
+    taxonomy = load_default_taxonomy()
+    features = DocumentFeatures(
+        filename="2025年教师岗位聘期考核工作安排.docx",
+        title="教师岗位聘期考核工作安排",
+        full_text="请各学院组织专任教师完成岗位续聘材料提交和聘期考核结果确认。",
+    )
+
+    candidates = recall_category_candidates(features, taxonomy, limit=5)
+
+    assert candidates[0].category_id == "school.hr.appointment-assessment"
+    assert candidates[0].category_path == ["学校", "人事师资", "考核聘任"]
+    assert {"教师", "岗位", "聘期", "考核", "续聘"} & set(candidates[0].matched_signals)
+    assert candidates[0].rule_score > 0
+    assert "标题" in candidates[0].candidate_reason or "正文" in candidates[0].candidate_reason
+
+
+def test_recall_candidates_penalizes_negative_signals():
+    """负向信号应降低冲突分类分数，避免奖学金文本误归入教师考核聘任。"""
+
+    taxonomy = load_default_taxonomy()
+    features = DocumentFeatures(
+        filename="学生奖学金志愿服务证明.docx",
+        title="学生奖学金志愿服务证明",
+        full_text="本材料用于学生奖学金评审和志愿服务时长证明，不涉及教师岗位聘任。",
+    )
+
+    candidates = recall_category_candidates(features, taxonomy, limit=8)
+    appointment = next(item for item in candidates if item.category_id == "school.hr.appointment-assessment")
+    student = next(item for item in candidates if item.category_id == "college.student-affairs")
+
+    assert {"奖学金", "志愿服务"} & set(appointment.negative_signals)
+    assert student.rule_score > appointment.rule_score
+
+
+def test_recall_candidates_respects_limit_and_stable_sorting():
+    """候选召回应按分数排序并遵守调用方给出的数量上限。"""
+
+    taxonomy = load_default_taxonomy()
+    features = DocumentFeatures(
+        title="学校学院教师科研财务会议纪要年度总结",
+        full_text="材料同时涉及学校、学院、教师、科研、财务、会议纪要、年度总结等多个主题。",
+    )
+
+    candidates = recall_category_candidates(features, taxonomy, limit=3)
+
+    assert len(candidates) == 3
+    assert [item.rule_score for item in candidates] == sorted(
+        [item.rule_score for item in candidates],
+        reverse=True,
+    )
+
+
+def test_match_document_text_uses_recall_candidates_for_rule_only_output():
+    """兼容入口应基于候选召回生成 rule-only 分类建议。"""
+
+    taxonomy = load_default_taxonomy()
+
+    matches = match_document_text("教师岗位聘期考核和续聘材料。", taxonomy)
+
+    assert matches[0]["category_path"] == ["学校", "人事师资", "考核聘任"]
+    assert matches[0]["source"] == "rule"
+    assert "聘期" in matches[0]["evidence"] or "续聘" in matches[0]["evidence"]

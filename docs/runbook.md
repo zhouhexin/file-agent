@@ -308,7 +308,7 @@ final_response = 已处理 N 个文件，并逐文件返回解析状态、多个
 apps/api/app/modules/classification/taxonomies/school_file_classification.json
 ```
 
-该配置由 `文件归类(1).xlsx` 的 `Sheet2` 转换而来，当前包含“学校”和“学院”两个一级域。当前 taxonomy version 为 `2026-06-v2`，分类节点保留 `name/children` 兼容字段，并为高频分类补充稳定 `id`、定义、别名、正向信号、负向信号和示例。分类 matcher 会按配置名称命中多个分类，过滤被长词包含的短词误命中，最多保留前 5 个分类建议。分类目录本身不入库；分类建议会同时保存在本次 AgentRun 的 `graph_state_json.document_results`、用户回执、`document_classification_runs` 和 `document_category_suggestions` 中。`document_category_feedback` 已预留用户反馈表，暂未开放接口；用户确认后的正式分类关系后续再写入 `document_categories`。
+该配置由 `文件归类(1).xlsx` 的 `Sheet2` 转换而来，当前包含“学校”和“学院”两个一级域。当前 taxonomy version 为 `2026-06-v2`，分类节点保留 `name/children` 兼容字段，并为高频分类补充稳定 `id`、定义、别名、正向信号、负向信号和示例。分类 matcher 当前已升级为候选召回器，会基于分类名、别名、正向信号、负向信号和一级域上下文生成 Top N 候选；`match_document_text` 仍作为 rule-only 兼容入口，最多保留前 5 个分类建议。分类目录本身不入库；分类建议会同时保存在本次 AgentRun 的 `graph_state_json.document_results`、用户回执、`document_classification_runs` 和 `document_category_suggestions` 中。`document_category_feedback` 已预留用户反馈表，暂未开放接口；用户确认后的正式分类关系后续再写入 `document_categories`。
 
 如需从 Excel 重新生成分类 JSON，可执行：
 
