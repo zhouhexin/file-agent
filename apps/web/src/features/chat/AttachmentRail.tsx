@@ -1,8 +1,7 @@
-import { Trash2 } from 'lucide-react';
-
-import { FileTypeIcon } from './FileTypeIcon';
+import { useState } from 'react';
+import { ChevronDown, ChevronUp } from 'lucide-react';
+import { FileCard } from './FileCard';
 import type { AttachmentListProps } from './presentation';
-import { formatFileSize, formatUploadStatus } from './presentation';
 
 export function AttachmentRail({
   attachments,
@@ -11,47 +10,48 @@ export function AttachmentRail({
   onOpen,
   onRemove,
 }: AttachmentListProps) {
+  const [expanded, setExpanded] = useState(false);
+
   // 附件栏同时用于发送前草稿和历史消息；历史消息不提供删除入口。
   if (attachments.length === 0) {
     return null;
   }
 
+  const visibleFiles = expanded ? attachments : attachments.slice(0, 2);
+  const showExpandButton = attachments.length > 2;
+
+  const gridClass = layout === 'rail' ? 'files-grid files-grid-2' : 'files-grid';
+
   return (
-    <div className={layout === 'rail' ? 'attachment-rail' : 'attachment-stack'}>
-      {attachments.map((file) => (
-        <div className="attachment-rail-card" key={file.document_id}>
-          <button
-            className="attachment-open-button"
-            disabled={!onOpen}
-            type="button"
-            onClick={() => onOpen?.(file)}
-            title="打开附件"
-          >
-            {file.preview_url ? (
-              <img alt={file.filename} className="attachment-preview" src={file.preview_url} />
-            ) : (
-              <span className="file-type-icon">
-                <FileTypeIcon contentType={file.content_type} filename={file.filename} />
-              </span>
-            )}
-            <span className="attachment-card-text">
-              <strong>{file.filename}</strong>
-              <span>{formatFileSize(file.size_bytes)} · {locked ? '已进入对话' : formatUploadStatus(file)}</span>
-            </span>
-          </button>
-          {!locked && onRemove ? (
-            <button
-              className="icon-button"
-              disabled={file.deleting}
-              type="button"
-              onClick={() => onRemove(file.document_id)}
-              title="删除文件"
-            >
-              <Trash2 size={16} />
-            </button>
-          ) : null}
-        </div>
-      ))}
+    <div className={`files-attachment-container files-attachment-container--${layout}`}>
+      <div className={gridClass}>
+        {visibleFiles.map((file) => (
+          <FileCard
+            key={file.document_id}
+            file={file}
+            onOpen={onOpen}
+            onRemove={!locked ? onRemove : undefined}
+            showStatus={!locked}
+          />
+        ))}
+      </div>
+
+      {showExpandButton && (
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          className="expand-button"
+        >
+          {expanded ? (
+            <>
+              <ChevronUp className="expand-icon" /> 收起
+            </>
+          ) : (
+            <>
+              <ChevronDown className="expand-icon" /> 查看全部 {attachments.length} 个文件
+            </>
+          )}
+        </button>
+      )}
     </div>
   );
 }

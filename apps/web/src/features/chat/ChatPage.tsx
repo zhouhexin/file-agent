@@ -1,5 +1,5 @@
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from 'react';
-import { LogOut, MessageSquare, Paperclip, Send, UserRound } from 'lucide-react';
+import { LogOut, MessageSquare, Paperclip, Send, User as UserIcon } from 'lucide-react';
 
 import {
   ApiError,
@@ -26,7 +26,7 @@ type ChatPageProps = {
 
 export function ChatPage({ token, user, onLogout }: ChatPageProps) {
   // ChatPage 管理对话工作台状态；具体展示交给 features/chat 下的展示组件。
-  const [message, setMessage] = useState('帮我读取并分类这批文件');
+  const [message, setMessage] = useState('');
   const [draftAttachments, setDraftAttachments] = useState<ChatAttachment[]>([]);
   const [chatTurns, setChatTurns] = useState<ChatTurn[]>([]);
   const [error, setError] = useState('');
@@ -223,7 +223,7 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
           <span>File Agent</span>
         </div>
         <div className="user-box">
-          <UserRound size={18} />
+          <UserIcon size={18} />
           <span>{user.display_name || user.username}</span>
           <button className="icon-button" type="button" onClick={onLogout} title="退出登录">
             <LogOut size={18} />
@@ -252,10 +252,16 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
           )}
 
           <form className={hasTurns ? 'composer docked-composer' : 'composer center-composer'} onSubmit={submit}>
+            <AttachmentRail
+              attachments={draftAttachments}
+              layout="rail"
+              onOpen={openAttachment}
+              onRemove={removeDraftAttachment}
+            />
             <textarea
               value={message}
               onChange={(event) => setMessage(event.target.value)}
-              rows={4}
+              rows={1}
               required
             />
             <div className="composer-actions">
@@ -278,13 +284,6 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
           </form>
 
           {error ? <p className="form-message error">{error}</p> : null}
-
-          <AttachmentRail
-            attachments={draftAttachments}
-            layout="stack"
-            onOpen={openAttachment}
-            onRemove={removeDraftAttachment}
-          />
         </div>
       </section>
     </main>
