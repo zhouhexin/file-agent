@@ -36,6 +36,8 @@ class Settings(BaseModel):
     llm_base_url: str = ""
     llm_chat_model: str = ""
     llm_timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS
+    llm_classification_mode: str = "rule_only"
+    llm_classification_allow_free_paths: bool = False
     log_dir: str = DEFAULT_LOG_DIR
     log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
     log_level: str = "INFO"
@@ -106,6 +108,8 @@ def get_settings() -> Settings:
         llm_base_url=os.getenv("LLM_BASE_URL", ""),
         llm_chat_model=os.getenv("LLM_CHAT_MODEL", ""),
         llm_timeout_seconds=int(os.getenv("LLM_TIMEOUT_SECONDS", str(DEFAULT_LLM_TIMEOUT_SECONDS))),
+        llm_classification_mode=os.getenv("LLM_CLASSIFICATION_MODE", "rule_only").lower(),
+        llm_classification_allow_free_paths=os.getenv("LLM_CLASSIFICATION_ALLOW_FREE_PATHS", "false").lower() == "true",
         log_dir=os.getenv("LOG_DIR", DEFAULT_LOG_DIR),
         log_retention_days=int(os.getenv("LOG_RETENTION_DAYS", str(DEFAULT_LOG_RETENTION_DAYS))),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),

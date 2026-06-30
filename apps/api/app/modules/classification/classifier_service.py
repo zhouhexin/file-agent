@@ -16,10 +16,12 @@ from app.modules.classification.matcher import match_document_text
 class DocumentClassificationService:
     """从 DocumentPage 读取全文并生成 rule-only 分类建议。"""
 
-    def __init__(self, db: Session | None = None) -> None:
+    def __init__(self, db: Session | None = None, llm_judge: Any = None, mode: str = "rule_only") -> None:
         """保存请求级数据库会话；无数据库时仅支持 fallback_text。"""
 
         self.db = db
+        self.llm_judge = llm_judge
+        self.mode = mode
 
     def classify(
         self,
@@ -42,6 +44,11 @@ class DocumentClassificationService:
             classification_text = full_text or fallback_text
             taxonomy = load_default_taxonomy()
             categories = match_document_text(text=f"{filename}\n{classification_text}", taxonomy=taxonomy)
+            categories = self._judge_categories(
+                filename=filename,
+                classification_text=classification_text,
+                rule_categories=categories,
+            )
             categories = [
                 self._attach_evidence_items(
                     category=category,
@@ -105,12 +112,43 @@ class DocumentClassificationService:
 
         if category.get("name") == "其他":
             return {**category, "evidence_items": []}
+        existing_items = [item for item in category.get("evidence_items", []) if isinstance(item, dict)]
+        if existing_items:
+            return {
+                **category,
+                "evidence_items": [
+                    _locate_existing_evidence_item(item=item, pages=pages)
+                    for item in existing_items
+                ],
+            }
 
         signals = [str(item) for item in category.get("evidence", []) if item]
         evidence_item = _find_text_quote(signals=signals, pages=pages, fallback_text=fallback_text)
         if evidence_item is None:
             return {**category, "status": "NEEDS_REVIEW", "evidence_items": []}
         return {**category, "evidence_items": [evidence_item]}
+
+    def _judge_categories(
+        self,
+        *,
+        filename: str,
+        classification_text: str,
+        rule_categories: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """按配置选择 rule-only、hybrid 或 review-only 分类模式。"""
+
+        if self.llm_judge is None or self.mode == "rule_only":
+            return rule_categories
+        if self.mode == "review_only" and not _needs_llm_review(rule_categories):
+            return rule_categories
+        if self.mode not in {"hybrid", "review_only"}:
+            return rule_categories
+        judged_categories = self.llm_judge.judge(
+            filename=filename,
+            document_text=classification_text,
+            candidates=[category for category in rule_categories if category.get("name") != "其他"],
+        )
+        return judged_categories or rule_categories
 
 
 def _find_text_quote(
@@ -157,3 +195,25 @@ def _quote_around_signal(*, text: str, signal: str) -> str:
     start = max(0, index - 24)
     end = min(len(text), index + len(signal) + 24)
     return text[start:end].strip()
+
+
+def _locate_existing_evidence_item(*, item: dict[str, Any], pages: list[DocumentPage]) -> dict[str, Any]:
+    """把已有 quote 反查到页码或 Sheet。"""
+
+    quote = str(item.get("quote") or "")
+    if not quote:
+        return item
+    for page in pages:
+        if quote in page.text_content:
+            return {**item, "page_number": page.page_number, "sheet_name": page.sheet_name}
+    return item
+
+
+def _needs_llm_review(categories: list[dict[str, Any]]) -> bool:
+    """判断规则结果是否需要 LLM 复核。"""
+
+    if not categories:
+        return True
+    if categories[0].get("name") == "其他":
+        return True
+    return any(float(category.get("confidence") or 0) < 0.7 for category in categories[:3])

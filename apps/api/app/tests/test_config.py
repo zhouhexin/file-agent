@@ -60,3 +60,18 @@ def test_settings_loads_dotenv_from_parent_directory(monkeypatch, tmp_path):
 
     assert settings.database_url == "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent"
     assert settings.auto_create_tables is False
+
+
+def test_settings_loads_classification_llm_options(monkeypatch, tmp_path):
+    """分类 LLM 判定开关必须通过配置显式启用。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.setenv("LLM_CLASSIFICATION_MODE", "hybrid")
+    monkeypatch.setenv("LLM_CLASSIFICATION_ALLOW_FREE_PATHS", "true")
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.llm_classification_mode == "hybrid"
+    assert settings.llm_classification_allow_free_paths is True

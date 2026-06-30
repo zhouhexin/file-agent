@@ -425,6 +425,73 @@ def test_document_classification_service_reads_full_document_pages():
         app.dependency_overrides.clear()
 
 
+def test_document_classification_service_uses_hybrid_judge_when_configured():
+    """hybrid 模式应允许受限 LLM 在候选集合中重排和确认分类。"""
+
+    class FakeJudge:
+        """测试用判定器，模拟 LLM 选择候选分类。"""
+
+        def judge(self, *, filename, document_text, candidates):
+            """返回一个已通过候选白名单的 hybrid 结果。"""
+
+            category = dict(candidates[0])
+            category.update(
+                {
+                    "confidence": 0.91,
+                    "source": "hybrid",
+                    "status": "SUGGESTED",
+                    "evidence_items": [
+                        {
+                            "type": "text_quote",
+                            "page_number": None,
+                            "sheet_name": None,
+                            "quote": "本文件涉及教师职称申报材料。",
+                            "signals": ["职称"],
+                            "source": "hybrid",
+                        }
+                    ],
+                }
+            )
+            return [category]
+
+    service = DocumentClassificationService(llm_judge=FakeJudge(), mode="hybrid")
+
+    result = service.classify(
+        document_id="doc-hybrid",
+        extraction_run_id="run-hybrid",
+        filename="职称材料.txt",
+        fallback_text="本文件涉及教师职称申报材料。",
+    )
+
+    assert result["categories"][0]["name"] == "学校/人事师资/职称"
+    assert result["categories"][0]["source"] == "hybrid"
+    assert result["categories"][0]["confidence"] == 0.91
+
+
+def test_document_classification_service_falls_back_when_hybrid_returns_no_valid_label():
+    """LLM 未返回有效候选时，分类服务必须回退 rule-only 结果。"""
+
+    class EmptyJudge:
+        """测试用判定器，模拟 LLM 输出全部被校验拒绝。"""
+
+        def judge(self, *, filename, document_text, candidates):
+            """不返回有效分类。"""
+
+            return []
+
+    service = DocumentClassificationService(llm_judge=EmptyJudge(), mode="hybrid")
+
+    result = service.classify(
+        document_id="doc-rule-fallback",
+        extraction_run_id="run-rule-fallback",
+        filename="职称材料.txt",
+        fallback_text="本文件涉及教师职称申报材料。",
+    )
+
+    assert result["categories"][0]["name"] == "学校/人事师资/职称"
+    assert result["categories"][0]["source"] == "rule"
+
+
 def test_graph_uses_classification_service_not_context_loader_texts(monkeypatch):
     """Graph 分类阶段必须调用分类服务，不能再从 ContextLoader 读取全文。"""
 

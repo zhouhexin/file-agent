@@ -121,9 +121,28 @@ LLM_API_KEY=<your-api-key>
 LLM_BASE_URL=<openai-compatible-base-url>
 LLM_CHAT_MODEL=<chat-model-name>
 LLM_TIMEOUT_SECONDS=30
+LLM_CLASSIFICATION_MODE=rule_only
+LLM_CLASSIFICATION_ALLOW_FREE_PATHS=false
 ```
 
 当前客户端调用 OpenAI-compatible `/chat/completions` 接口，并要求模型返回符合 `UserIntentPlan` 的 JSON 对象。上传阶段的 deterministic ingest 不依赖 LLM；对话阶段启用 LLM 后，会先理解用户需求，再通过白名单 Tool 读取 `document_insights` 或执行后续受控工具。
+
+分类 LLM 判定由 `LLM_CLASSIFICATION_MODE` 单独控制：
+
+```text
+rule_only：默认值，只使用 taxonomy 候选召回和规则建议。
+hybrid：LLM 只能从候选 category_id 中选择 0~3 个分类。
+review_only：仅当规则结果为“其他”、低置信度或需要复核时调用 LLM。
+```
+
+如果需要允许 LLM 自由生成分类路径，必须同时设置：
+
+```text
+LLM_CLASSIFICATION_MODE=hybrid
+LLM_CLASSIFICATION_ALLOW_FREE_PATHS=true
+```
+
+自由生成的分类路径不会自动进入正式 taxonomy，也不会写入正式 `document_categories`。系统会把它保存为 `source=llm_free_path`、`status=NEEDS_REVIEW` 的建议，等待人工确认、纠正或后续维护 taxonomy v2。
 
 2026-06-25 已完成真实模型 smoke test：临时启用 `LLM_ENABLED=true` 后，`MiniMax-M3` 可完成“总结我刚才上传的文件”请求，AgentRun 返回 `COMPLETED`，ToolInvocation 为 `read-document-insights`，且 `graph_state_json.user_intent_plan` 已写入。
 

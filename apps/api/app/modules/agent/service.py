@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.modules.agent.context import AgentContextLoader
 from app.modules.agent.graph import build_agent_graph
 from app.modules.agent.planner import DeterministicPlanner
@@ -20,6 +21,8 @@ from app.modules.agent.state import AgentRunResult, ToolInvocationRecord
 from app.modules.agent.tool_registry import ToolRegistry
 from app.core.logging import log_context, log_event
 from app.modules.classification.classifier_service import DocumentClassificationService
+from app.modules.classification.llm_judge import LLMClassificationJudge
+from app.modules.llm.client import OpenAICompatibleLLMClient
 from app.modules.llm.service import LLMIntentService
 
 
@@ -146,12 +149,18 @@ class AgentRuntimeService:
     ) -> AgentRuntimeContext:
         """为单次 AgentRun 构造运行时依赖，避免服务对象进入 State。"""
 
+        settings = get_settings()
+        llm_judge = _build_classification_judge(settings)
         return AgentRuntimeContext(
             planner=planner or DeterministicPlanner(),
             registry=self.registry_factory(db, user_id),
             context_loader=AgentContextLoader(db),
             llm_intent_service=self.llm_intent_service,
-            classification_service=DocumentClassificationService(db=db),
+            classification_service=DocumentClassificationService(
+                db=db,
+                llm_judge=llm_judge,
+                mode=settings.llm_classification_mode,
+            ),
         )
 
     def _build_initial_state(
@@ -196,3 +205,22 @@ def _default_registry_factory(db: Session | None, user_id: str) -> ToolRegistry:
     """为每次 AgentRun 创建新的用户级 ToolRegistry。"""
 
     return ToolRegistry(db=db, user_id=user_id)
+
+
+def _build_classification_judge(settings) -> LLMClassificationJudge | None:
+    """按配置构造分类 LLM 判定器；默认不启用。"""
+
+    if not settings.llm_enabled:
+        return None
+    if settings.llm_classification_mode not in {"hybrid", "review_only"}:
+        return None
+    client = OpenAICompatibleLLMClient(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+        model=settings.llm_chat_model,
+        timeout_seconds=settings.llm_timeout_seconds,
+    )
+    return LLMClassificationJudge(
+        client=client,
+        allow_free_category_paths=settings.llm_classification_allow_free_paths,
+    )

@@ -571,7 +571,9 @@ FAILED
 
 分类目录必须采用 taxonomy v2 结构：分类节点保留 `name` / `children` 向后兼容，同时新增稳定 `id`、`description`、`aliases`、`positive_signals`、`negative_signals` 和 `examples`。`id` 用作后续候选召回、反馈和正式分类关系的稳定标识，不得使用显示名称作为长期外键；修改分类定义时必须递增 `taxonomy_version`。
 
-分类匹配器的职责是候选召回，不是最终语义裁决。`recall_category_candidates` 必须基于文件名、标题、全文、别名、正向信号和负向信号生成 Top N 候选，并返回 `category_id`、`category_path`、`rule_score`、`matched_signals`、`negative_signals` 和 `candidate_reason`。`match_document_text` 仅作为 rule-only 兼容入口，把候选转换为 `SUGGESTED` 分类建议；后续 LLM 或人工复核只能在候选集合内判定，不得编造分类路径。
+分类匹配器的职责是候选召回，不是最终语义裁决。`recall_category_candidates` 必须基于文件名、标题、全文、别名、正向信号和负向信号生成 Top N 候选，并返回 `category_id`、`category_path`、`rule_score`、`matched_signals`、`negative_signals` 和 `candidate_reason`。`match_document_text` 仅作为 rule-only 兼容入口，把候选转换为 `SUGGESTED` 分类建议。默认情况下，LLM 只能从候选集合内选择分类，不得编造分类路径。
+
+如业务上确实需要允许 LLM 自由生成分类路径，必须通过 `LLM_CLASSIFICATION_ALLOW_FREE_PATHS=true` 显式开启，并且自由路径只能保存为 `source=llm_free_path`、`status=NEEDS_REVIEW` 的待复核建议。自由路径不得自动写入正式 taxonomy，不得自动写入正式 `document_categories`，也不得覆盖人工确认结果；只有经过人工评审和 taxonomy v2 配置更新后，才能成为稳定分类节点。
 
 全文分类必须通过 `DocumentClassificationService` 执行。Graph 只传 `document_id`、`extraction_run_id`、文件名和必要 fallback 摘要，不得在 `AgentGraphState` 保存全文，也不得由 Graph 直接读取 `DocumentPage` 或直接调用底层 matcher。`DocumentClassificationService` 属于 `AgentRuntimeContext` 的运行时依赖，负责从 `document_pages.text_content` 读取完整正文并返回结构化分类建议。
 
