@@ -575,7 +575,9 @@ FAILED
 
 全文分类必须通过 `DocumentClassificationService` 执行。Graph 只传 `document_id`、`extraction_run_id`、文件名和必要 fallback 摘要，不得在 `AgentGraphState` 保存全文，也不得由 Graph 直接读取 `DocumentPage` 或直接调用底层 matcher。`DocumentClassificationService` 属于 `AgentRuntimeContext` 的运行时依赖，负责从 `document_pages.text_content` 读取完整正文并返回结构化分类建议。
 
-本次 AgentRun 的逐文件分类摘要继续写入 `document_results`，用于生成回执和保存运行快照。结构化分类建议必须同步写入 `document_classification_runs` 和 `document_category_suggestions`，状态为 `SUGGESTED`，并记录 `taxonomy_key`、`taxonomy_version`、`confidence`、`source`、`rank` 和证据摘要。`document_category_feedback` 用于后续保存用户接受、拒绝或修正意见。
+本次 AgentRun 的逐文件分类摘要继续写入 `document_results`，用于生成回执和保存运行快照。结构化分类建议必须同步写入 `document_classification_runs` 和 `document_category_suggestions`，状态为 `SUGGESTED`，并记录 `taxonomy_key`、`taxonomy_version`、`confidence`、`source`、`rank` 和结构化证据。`document_category_feedback` 用于后续保存用户接受、拒绝或修正意见。
+
+分类证据必须优先使用 `evidence_items`，每项至少包含 `type=text_quote`、`page_number`、`sheet_name`、`quote`、`signals` 和 `source`。`evidence` 可以保留为兼容旧 UI 的关键词摘要，但不能替代可定位证据。非“其他”分类如果无法在原文中定位 quote，必须降级为 `NEEDS_REVIEW`，不得伪造页码或证据。
 
 当前阶段的分类建议可以作为 `SUGGESTED` 结果展示在逐文件回执中；每个文件允许展示多个分类、置信度和证据，但这些建议不等同于用户确认后的正式分类关系。未来用户确认后的正式文件分类关系再写入 `document_categories`。
 

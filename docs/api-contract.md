@@ -494,6 +494,16 @@ The per-file structured result is persisted in `agent_runs.graph_state_json.docu
         "confidence": 0.72,
         "status": "SUGGESTED",
         "evidence": ["职称"],
+        "evidence_items": [
+          {
+            "type": "text_quote",
+            "page_number": 1,
+            "sheet_name": null,
+            "quote": "本文件涉及教师职称申报材料。",
+            "signals": ["职称"],
+            "source": "rule"
+          }
+        ],
         "taxonomy_key": "school_file_classification",
         "taxonomy_version": "2026-06-v2"
       },
@@ -503,6 +513,16 @@ The per-file structured result is persisted in `agent_runs.graph_state_json.docu
         "confidence": 0.7,
         "status": "SUGGESTED",
         "evidence": ["干部工作"],
+        "evidence_items": [
+          {
+            "type": "text_quote",
+            "page_number": 1,
+            "sheet_name": null,
+            "quote": "材料同时包含干部工作和会议纪要。",
+            "signals": ["干部工作"],
+            "source": "rule"
+          }
+        ],
         "taxonomy_key": "school_file_classification",
         "taxonomy_version": "2026-06-v2"
       }
@@ -1065,6 +1085,16 @@ Response:
       "confidence": 0.72,
       "evidence_json": {
         "evidence": ["职称"],
+        "evidence_items": [
+          {
+            "type": "text_quote",
+            "page_number": 1,
+            "sheet_name": null,
+            "quote": "本文件涉及教师职称申报材料。",
+            "signals": ["职称"],
+            "source": "rule"
+          }
+        ],
         "taxonomy_key": "school_file_classification",
         "taxonomy_version": "2026-06-v2"
       },

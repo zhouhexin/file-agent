@@ -401,11 +401,14 @@ def _format_category_receipt(categories: List[Dict[str, Any]]) -> str:
     visible_categories = categories[:3]
     for category in visible_categories:
         evidence = category.get("evidence") or []
+        evidence_items = [item for item in category.get("evidence_items", []) if isinstance(item, dict)]
         name = category.get("name") or "其他"
         if name == "其他" and not evidence:
             formatted_items.append("- 其他（暂无明确关键词依据）")
             continue
-        evidence_text = "、".join(str(item) for item in evidence[:3]) or "暂无明确关键词依据"
+        evidence_text = _format_evidence_item(evidence_items[0]) if evidence_items else ""
+        if not evidence_text:
+            evidence_text = "、".join(str(item) for item in evidence[:3]) or "暂无明确关键词依据"
         confidence = float(category.get("confidence", 0))
         formatted_items.append(
             f"- {name}\n"
@@ -416,3 +419,18 @@ def _format_category_receipt(categories: List[Dict[str, Any]]) -> str:
     if hidden_count > 0:
         formatted_items.append(f"另有 {hidden_count} 个低置信度候选未展示。")
     return "\n".join(formatted_items)
+
+
+def _format_evidence_item(evidence_item: Dict[str, Any]) -> str:
+    """把结构化证据格式化为用户可读的页码/Sheet + 原文片段。"""
+
+    quote = str(evidence_item.get("quote") or "")
+    if not quote:
+        return ""
+    page_number = evidence_item.get("page_number")
+    sheet_name = evidence_item.get("sheet_name")
+    if sheet_name:
+        return f"Sheet {sheet_name}：“{quote}”"
+    if page_number:
+        return f"第 {page_number} 页：“{quote}”"
+    return f"“{quote}”"

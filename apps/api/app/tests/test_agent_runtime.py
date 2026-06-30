@@ -432,6 +432,16 @@ def test_document_results_response_lists_multiple_categories_with_confidence():
                         "name": "学校/人事师资/职称",
                         "confidence": 0.8,
                         "evidence": ["职称"],
+                        "evidence_items": [
+                            {
+                                "type": "text_quote",
+                                "page_number": 2,
+                                "sheet_name": None,
+                                "quote": "最后一页才出现教师职称申报材料。",
+                                "signals": ["职称"],
+                                "source": "rule",
+                            }
+                        ],
                     },
                     {
                         "name": "学校/党委相关/干部工作",
@@ -449,7 +459,7 @@ def test_document_results_response_lists_multiple_categories_with_confidence():
         "分类建议：\n"
         "- 学校/人事师资/职称\n"
         "  置信度：0.80\n"
-        "  依据：职称"
+        "  依据：第 2 页：“最后一页才出现教师职称申报材料。”"
     ) in response
     assert (
         "- 学校/党委相关/干部工作\n"

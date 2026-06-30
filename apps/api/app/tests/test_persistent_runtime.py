@@ -307,8 +307,10 @@ def test_llm_message_extracts_document_text_and_persists_pages():
         )
         assert suggestion.status == "SUGGESTED"
         assert suggestion.source == "rule"
-        assert "职称" in suggestion.evidence_json
-        assert "职称申报" in suggestion.evidence_json
+        assert suggestion.evidence_json[0]["type"] == "text_quote"
+        assert suggestion.evidence_json[0]["page_number"] == 1
+        assert "职称申报" in suggestion.evidence_json[0]["quote"]
+        assert "职称" in suggestion.evidence_json[0]["signals"]
         assert response.agent_run.changeset_id
         assert stored_run.changeset_id == response.agent_run.changeset_id
         changeset = db.query(ChangeSet).one()
@@ -324,8 +326,9 @@ def test_llm_message_extracts_document_text_and_persists_pages():
         )
         assert category_item.target_document_id == document_id
         assert category_item.after_value_json["category_name"] == "学校/人事师资/职称"
-        assert "职称" in category_item.evidence_json["evidence"]
-        assert "职称申报" in category_item.evidence_json["evidence"]
+        assert category_item.evidence_json["evidence_items"][0]["type"] == "text_quote"
+        assert category_item.evidence_json["evidence_items"][0]["page_number"] == 1
+        assert "职称申报" in category_item.evidence_json["evidence_items"][0]["quote"]
     finally:
         db.close()
         app.dependency_overrides.clear()
@@ -410,6 +413,13 @@ def test_document_classification_service_reads_full_document_pages():
         assert result["document_id"] == document_id
         assert result["extraction_run_id"] == run.id
         assert result["categories"][0]["name"] == "学校/人事师资/职称"
+        evidence_item = result["categories"][0]["evidence_items"][0]
+        assert evidence_item["type"] == "text_quote"
+        assert evidence_item["page_number"] == 2
+        assert evidence_item["sheet_name"] is None
+        assert "教师职称申报材料" in evidence_item["quote"]
+        assert "职称" in evidence_item["signals"]
+        assert evidence_item["source"] == "rule"
     finally:
         db.close()
         app.dependency_overrides.clear()

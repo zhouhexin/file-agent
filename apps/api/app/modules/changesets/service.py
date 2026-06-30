@@ -140,6 +140,7 @@ def _append_items_for_result(
             confidence=float(category.get("confidence") or 0),
             evidence={
                 "evidence": list(category.get("evidence") or []),
+                "evidence_items": list(category.get("evidence_items") or []),
                 "taxonomy_key": str(category.get("taxonomy_key") or ""),
                 "taxonomy_version": str(category.get("taxonomy_version") or ""),
             },

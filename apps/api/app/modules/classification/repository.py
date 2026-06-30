@@ -84,7 +84,7 @@ class ClassificationRepository:
             taxonomy_version=str(category.get("taxonomy_version") or ""),
             confidence=float(category.get("confidence") or 0),
             status=str(category.get("status") or "SUGGESTED"),
-            evidence_json=list(category.get("evidence") or []),
+            evidence_json=list(category.get("evidence_items") or category.get("evidence") or []),
             source="rule",
             rank=rank,
         )

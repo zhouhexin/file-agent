@@ -296,10 +296,10 @@ tool_invocations = 每个附件各 1 次 extract-document-text
 tool_invocations.status = Tool 输出 ok=false 或 status=FAILED 时记为 FAILED
 document_extraction_runs 默认复用同一文件最近一次成功解析结果；用户明确说“重新解析 / 重新读取 / 重新处理 / 重跑”时才新建解析运行
 document_pages 只在首次成功解析或强制重处理时写入；默认复用不会重复写页
-graph_state_json.document_results 写入逐文件解析状态、字符数、分类建议、证据、错误
-document_classification_runs / document_category_suggestions 写入本次 AgentRun 的结构化分类建议
-change_sets / change_items 写入本次处理明细；复用时记录 TEXT_REUSED、DOCUMENT_PAGES_REUSED、CATEGORY_SUGGESTION_REUSED
-final_response = 已处理 N 个文件，并逐文件返回解析状态、多个分类建议、置信度和证据。
+graph_state_json.document_results 写入逐文件解析状态、字符数、分类建议、evidence_items、错误
+document_classification_runs / document_category_suggestions 写入本次 AgentRun 的结构化分类建议和 evidence_items
+change_sets / change_items 写入本次处理明细和 evidence_items；复用时记录 TEXT_REUSED、DOCUMENT_PAGES_REUSED、CATEGORY_SUGGESTION_REUSED
+final_response = 已处理 N 个文件，并逐文件返回解析状态、多个分类建议、置信度、页码/Sheet 和原文 quote。
 ```
 
 当前对话阶段的基础分类使用项目内 JSON 分类配置：

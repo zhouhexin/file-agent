@@ -37,10 +37,19 @@ class DocumentClassificationService:
 
         start = time.perf_counter()
         try:
-            full_text = self._load_full_text(extraction_run_id=extraction_run_id)
+            pages = self._load_pages(extraction_run_id=extraction_run_id)
+            full_text = "\n".join(page.text_content for page in pages if page.text_content)
             classification_text = full_text or fallback_text
             taxonomy = load_default_taxonomy()
             categories = match_document_text(text=f"{filename}\n{classification_text}", taxonomy=taxonomy)
+            categories = [
+                self._attach_evidence_items(
+                    category=category,
+                    pages=pages,
+                    fallback_text=fallback_text,
+                )
+                for category in categories
+            ]
         except Exception as exc:
             log_event(
                 "classification.failed",
@@ -70,12 +79,12 @@ class DocumentClassificationService:
             "text_source": "document_pages" if full_text else "fallback",
         }
 
-    def _load_full_text(self, *, extraction_run_id: str) -> str:
+    def _load_pages(self, *, extraction_run_id: str) -> list[DocumentPage]:
         """按解析运行读取完整页面正文。"""
 
         if self.db is None or not extraction_run_id:
-            return ""
-        pages = (
+            return []
+        return (
             self.db.query(DocumentPage)
             .filter(DocumentPage.extraction_run_id == extraction_run_id)
             .order_by(
@@ -84,4 +93,67 @@ class DocumentClassificationService:
             )
             .all()
         )
-        return "\n".join(page.text_content for page in pages if page.text_content)
+
+    def _attach_evidence_items(
+        self,
+        *,
+        category: dict[str, Any],
+        pages: list[DocumentPage],
+        fallback_text: str,
+    ) -> dict[str, Any]:
+        """为分类建议补充可定位原文证据。"""
+
+        if category.get("name") == "其他":
+            return {**category, "evidence_items": []}
+
+        signals = [str(item) for item in category.get("evidence", []) if item]
+        evidence_item = _find_text_quote(signals=signals, pages=pages, fallback_text=fallback_text)
+        if evidence_item is None:
+            return {**category, "status": "NEEDS_REVIEW", "evidence_items": []}
+        return {**category, "evidence_items": [evidence_item]}
+
+
+def _find_text_quote(
+    *,
+    signals: list[str],
+    pages: list[DocumentPage],
+    fallback_text: str,
+) -> dict[str, Any] | None:
+    """从页面正文中定位第一个能支撑分类的证据片段。"""
+
+    for signal in signals:
+        for page in pages:
+            quote = _quote_around_signal(text=page.text_content, signal=signal)
+            if quote:
+                return {
+                    "type": "text_quote",
+                    "page_number": page.page_number,
+                    "sheet_name": page.sheet_name,
+                    "quote": quote,
+                    "signals": [signal],
+                    "source": "rule",
+                }
+        quote = _quote_around_signal(text=fallback_text, signal=signal)
+        if quote:
+            return {
+                "type": "text_quote",
+                "page_number": None,
+                "sheet_name": None,
+                "quote": quote,
+                "signals": [signal],
+                "source": "rule",
+            }
+    return None
+
+
+def _quote_around_signal(*, text: str, signal: str) -> str:
+    """截取包含信号词的短原文片段。"""
+
+    if not text or not signal:
+        return ""
+    index = text.find(signal)
+    if index < 0:
+        return ""
+    start = max(0, index - 24)
+    end = min(len(text), index + len(signal) + 24)
+    return text[start:end].strip()
