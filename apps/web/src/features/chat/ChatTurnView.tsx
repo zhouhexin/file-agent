@@ -16,7 +16,12 @@ export function ChatTurnView({ token, turn, onOpenAttachment }: ChatTurnViewProp
       <div className="message-row message-row-user">
         <div className="message-content message-content-user">
           {turn.attachments.length > 0 && (
-            <AttachmentRail attachments={turn.attachments} locked onOpen={onOpenAttachment} />
+            <AttachmentRail
+              attachments={turn.attachments}
+              layout="stack"
+              locked
+              onOpen={onOpenAttachment}
+            />
           )}
           <div className="user-message-bubble">
             {turn.userText}

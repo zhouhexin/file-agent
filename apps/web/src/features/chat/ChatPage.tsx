@@ -192,6 +192,10 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
   async function openAttachment(file: ChatAttachment) {
     // 附件内容通过鉴权接口取回 Blob，再交给浏览器预览或下载。
     setError('');
+    if (file.status === 'MISSING') {
+      setError('原始文件已不存在，无法打开附件。');
+      return;
+    }
     try {
       const blob = await fetchUploadedFileBlob(token, file.document_id);
       const objectUrl = URL.createObjectURL(blob);
@@ -211,7 +215,9 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
         previewUrls.current.delete(objectUrl);
       }, 60_000);
     } catch (err) {
-      setError(formatError(err));
+      setError(err instanceof ApiError && err.status === 404
+        ? '原始文件已不存在，无法打开附件。'
+        : formatError(err));
     }
   }
 

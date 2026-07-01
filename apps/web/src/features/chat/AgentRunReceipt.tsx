@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { CheckCircle2 } from 'lucide-react';
 
 import { getChangeSet } from '../../api/client';
 import type { AgentRun, ChangeItem } from '../../types';
@@ -97,7 +98,10 @@ export function AgentRunReceipt({
     <section className="agent-run-receipt">
       <div className="agent-run-summary">
         <div>
-          <strong>已处理 {results.length} 个文件</strong>
+          <strong>
+            <CheckCircle2 size={18} />
+            已处理 {results.length} 个文件
+          </strong>
           <span>成功 {successCount} 个 · 失败 {failedCount} 个</span>
         </div>
         <em>{mutationSummary}</em>

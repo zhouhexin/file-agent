@@ -10,6 +10,7 @@ type FileCardProps = {
 };
 
 export function FileCard({ file, onOpen, onRemove, showStatus = true }: FileCardProps) {
+  const missing = file.status === 'MISSING';
   const getFileType = () => {
     const name = file.filename.toLowerCase();
     if (name.endsWith('.docx') || name.endsWith('.doc')) return 'docx';
@@ -20,7 +21,7 @@ export function FileCard({ file, onOpen, onRemove, showStatus = true }: FileCard
 
   const fileType = getFileType();
 
-  const cardClass = `file-card file-card-${fileType}`;
+  const cardClass = missing ? `file-card file-card-${fileType} file-card-missing` : `file-card file-card-${fileType}`;
   const statusClass = file.deleting ? 'file-card-status file-card-status-loading' : 'file-card-status file-card-status-done';
 
   const FileIconComponent = () => {
@@ -35,8 +36,8 @@ export function FileCard({ file, onOpen, onRemove, showStatus = true }: FileCard
       type="button"
       className={cardClass}
       onClick={() => onOpen?.(file)}
-      disabled={!onOpen && !onRemove}
-      title={file.filename}
+      disabled={missing || (!onOpen && !onRemove)}
+      title={missing ? '原始文件已不存在，无法打开附件' : file.filename}
     >
       <FileIconComponent />
       <div className="file-card-text">
@@ -44,7 +45,7 @@ export function FileCard({ file, onOpen, onRemove, showStatus = true }: FileCard
           {file.filename}
         </p>
         <p className="file-card-size">
-          {formatFileSize(file.size_bytes)}
+          {missing ? '文件不存在' : formatFileSize(file.size_bytes)}
         </p>
       </div>
       {showStatus && (
