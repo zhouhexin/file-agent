@@ -16,7 +16,10 @@ import { ChatTurnView } from './ChatTurnView';
 import { canPreviewInBrowser } from './presentation';
 import type { ChatAttachment, ChatTurn } from './presentation';
 
-const WEB_CONVERSATION_ID = 'web-chat';
+function getWebConversationId(userId: string): string {
+  // 临时按用户隔离 Web 会话，避免多个用户共享固定 conversation_id。
+  return `web-chat-${userId}`;
+}
 
 type ChatPageProps = {
   token: string;
@@ -35,6 +38,7 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
   const [historyLoading, setHistoryLoading] = useState(true);
   const previewUrls = useRef<Set<string>>(new Set());
   const hasTurns = chatTurns.length > 0;
+  const conversationId = getWebConversationId(user.id);
 
   useEffect(() => {
     // 页面卸载时统一释放仍在展示的图片预览 object URL。
@@ -46,10 +50,10 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
   }, []);
 
   useEffect(() => {
-    // 工作台启动时恢复固定调试会话的历史记录；404 表示该用户还没有历史会话。
+    // 工作台启动时恢复当前用户自己的 Web 会话；404 表示该用户还没有历史会话。
     let cancelled = false;
     setHistoryLoading(true);
-    getConversationDetail(token, WEB_CONVERSATION_ID)
+    getConversationDetail(token, conversationId)
       .then((conversation) => {
         if (cancelled) {
           return;
@@ -91,7 +95,7 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [conversationId, token]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -116,7 +120,7 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
     try {
       const result = await sendAgentMessage(
         token,
-        WEB_CONVERSATION_ID,
+        conversationId,
         currentMessage,
         attachmentsForTurn.map((file) => file.document_id),
       );

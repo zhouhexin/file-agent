@@ -98,6 +98,42 @@ def test_upload_duplicate_file_reuses_existing_document(monkeypatch, tmp_path):
         config.get_settings.cache_clear()
 
 
+def test_cross_user_duplicate_file_creates_separate_document(monkeypatch, tmp_path):
+    """不同用户上传相同内容时，必须生成各自的 Document，不能复用对方 document_id。"""
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
+    config.get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    first_header = _auth_header(client, username="dedupe-user-a")
+    second_header = _auth_header(client, username="dedupe-user-b")
+
+    first_response = client.post(
+        "/api/files/upload",
+        headers=first_header,
+        files={"file": ("shared-a.txt", b"same-content", "text/plain")},
+    )
+    second_response = client.post(
+        "/api/files/upload",
+        headers=second_header,
+        files={"file": ("shared-b.txt", b"same-content", "text/plain")},
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert second_response.json()["document_id"] != first_response.json()["document_id"]
+    assert second_response.json()["deduplicated"] is False
+
+    db = SessionLocal()
+    try:
+        assert db.query(Document).count() == 2
+        assert db.query(FileObject).count() == 2
+        assert db.query(DocumentInsight).count() == 2
+    finally:
+        db.close()
+        clear_overrides()
+        config.get_settings.cache_clear()
+
+
 def test_get_file_content_returns_original_file(monkeypatch, tmp_path):
     """点击附件时应能通过 document_id 读取原始文件内容。"""
 
@@ -123,8 +159,8 @@ def test_get_file_content_returns_original_file(monkeypatch, tmp_path):
     config.get_settings.cache_clear()
 
 
-def test_get_file_content_does_not_require_document_owner(monkeypatch, tmp_path):
-    """文件内容读取只要求登录和 document_id 存在，不校验 Document.user_id。"""
+def test_get_file_content_rejects_other_user_document(monkeypatch, tmp_path):
+    """文件内容读取必须限制当前用户自己的 Document，避免跨用户下载附件。"""
 
     monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
     config.get_settings.cache_clear()
@@ -141,8 +177,8 @@ def test_get_file_content_does_not_require_document_owner(monkeypatch, tmp_path)
 
     response = client.get(f"/api/files/{document_id}/content", headers=viewer_header)
 
-    assert response.status_code == 200
-    assert response.content == b"shared-content"
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Document not found"
     clear_overrides()
     config.get_settings.cache_clear()
 

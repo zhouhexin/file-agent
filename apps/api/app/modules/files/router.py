@@ -45,5 +45,4 @@ def get_file_content(
 ) -> FileResponse:
     """返回原始附件内容，供前端点击预览或下载。"""
 
-    _ = current_user
-    return FileUploadService(db).get_content_response(document_id=document_id)
+    return FileUploadService(db).get_content_response(document_id=document_id, current_user=current_user)

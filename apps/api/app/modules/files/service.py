@@ -94,13 +94,13 @@ class FileUploadService:
         self.db.commit()
         return FileDeleteResponse(deleted=True)
 
-    def get_content_response(self, document_id: str) -> FileResponse:
+    def get_content_response(self, document_id: str, current_user: User) -> FileResponse:
         """按 document_id 返回原始文件内容。
 
-        当前用于对话附件点击查看，只要求 document_id 存在，不校验 Document.user_id。
+        当前用于对话附件点击查看，必须校验 Document.user_id，避免跨用户读取附件。
         """
 
-        document = self.repository.get_document(document_id=document_id)
+        document = self.repository.get_document_for_user(document_id=document_id, user_id=current_user.id)
         if document is None:
             raise HTTPException(status_code=404, detail="Document not found")
 

@@ -7,7 +7,7 @@ export function formatError(error: unknown): string {
       return '登录状态无效，请重新登录。';
     }
     if (error.status === 409) {
-      return '用户名已存在。';
+      return '工号已存在。';
     }
     return error.message;
   }
