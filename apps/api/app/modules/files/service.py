@@ -32,6 +32,7 @@ class FileUploadService:
         filename = Path(file.filename or "uploaded-file").name
         content_type = file.content_type or "application/octet-stream"
         sha256 = hashlib.sha256(content).hexdigest()
+        storage_root = Path(get_settings().file_storage_root)
         existing_document = self.repository.get_existing_document_by_hash(
             user_id=current_user.id,
             workspace_id=current_user.default_workspace_id,
@@ -40,6 +41,15 @@ class FileUploadService:
         if existing_document is not None:
             return self._to_upload_response(existing_document, deduplicated=True)
 
+        existing_file_object = self.repository.get_existing_file_object_by_hash(
+            sha256=sha256,
+            size_bytes=len(content),
+        )
+        reusable_storage_path = (
+            existing_file_object.storage_path
+            if existing_file_object and (storage_root / existing_file_object.storage_path).exists()
+            else None
+        )
         document = self.repository.create_document(
             user_id=current_user.id,
             workspace_id=current_user.default_workspace_id,
@@ -48,7 +58,11 @@ class FileUploadService:
             size_bytes=len(content),
             sha256=sha256,
         )
-        relative_path = self._write_local_file(document=document, filename=filename, content=content)
+        relative_path = reusable_storage_path or self._write_local_file(
+            document=document,
+            filename=filename,
+            content=content,
+        )
         self.repository.create_file_object(
             document_id=document.id,
             storage_path=relative_path,
@@ -58,7 +72,7 @@ class FileUploadService:
         self._run_deterministic_ingest(document=document, content=content)
         self.db.commit()
         self.db.refresh(document)
-        return self._to_upload_response(document=document, deduplicated=False)
+        return self._to_upload_response(document=document, deduplicated=reusable_storage_path is not None)
 
     def _to_upload_response(self, document: Document, deduplicated: bool) -> FileUploadResponse:
         """把 Document 转换为上传响应。"""
@@ -88,7 +102,14 @@ class FileUploadService:
         for file_object in file_objects:
             # 只删除本地存储文件；后续接对象存储时这里应抽成 StorageService。
             if file_object.storage_backend == "local":
-                (storage_root / file_object.storage_path).unlink(missing_ok=True)
+                file_path = storage_root / file_object.storage_path
+                reference_count = self.repository.count_file_objects_by_storage_path(
+                    storage_backend=file_object.storage_backend,
+                    storage_path=file_object.storage_path,
+                )
+                if reference_count <= 1:
+                    file_path.unlink(missing_ok=True)
+                    self._remove_empty_parent_dirs(file_path.parent, stop_at=storage_root)
 
         self.repository.delete_document_with_objects(document)
         self.db.commit()
@@ -130,6 +151,19 @@ class FileUploadService:
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(content)
         return relative_path.as_posix()
+
+    @staticmethod
+    def _remove_empty_parent_dirs(start_dir: Path, *, stop_at: Path) -> None:
+        """删除空父目录，但不能越过文件存储根目录。"""
+
+        stop_at = stop_at.resolve()
+        current_dir = start_dir.resolve()
+        while current_dir != stop_at and stop_at in current_dir.parents:
+            try:
+                current_dir.rmdir()
+            except OSError:
+                break
+            current_dir = current_dir.parent
 
     def _run_deterministic_ingest(self, *, document: Document, content: bytes) -> None:
         """上传后执行固定 ingest：分类并提取关键词信息。"""

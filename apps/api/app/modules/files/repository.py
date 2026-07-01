@@ -80,6 +80,32 @@ class FileRepository:
 
         return self.db.query(FileObject).filter(FileObject.document_id == document_id).all()
 
+    def get_existing_file_object_by_hash(self, *, sha256: str, size_bytes: int) -> FileObject | None:
+        """按 sha256 和大小全局查找可复用的本地文件对象。"""
+
+        return (
+            self.db.query(FileObject)
+            .filter(
+                FileObject.sha256 == sha256,
+                FileObject.size_bytes == size_bytes,
+                FileObject.storage_backend == "local",
+            )
+            .order_by(FileObject.created_at.asc())
+            .first()
+        )
+
+    def count_file_objects_by_storage_path(self, *, storage_backend: str, storage_path: str) -> int:
+        """统计同一底层存储对象仍被多少 FileObject 引用。"""
+
+        return (
+            self.db.query(FileObject)
+            .filter(
+                FileObject.storage_backend == storage_backend,
+                FileObject.storage_path == storage_path,
+            )
+            .count()
+        )
+
     def get_existing_document_by_hash(self, *, user_id: str, workspace_id: str | None, sha256: str) -> Document | None:
         """按用户、工作区和 sha256 查找已有文件。"""
 
