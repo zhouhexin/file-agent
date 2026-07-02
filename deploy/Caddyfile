@@ -1,0 +1,33 @@
+# CADDY_SITE_ADDRESS 示例：
+#   file-agent.example.com  -> 公网 HTTPS
+#   :80                     -> 局域网 HTTP 临时测试
+#
+# 当前部署允许公开注册：
+# POST /api/auth/register 会转发给 FastAPI 后端。
+
+{$CADDY_SITE_ADDRESS} {
+    encode zstd gzip
+
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    }
+
+    route {
+        @api path /api/*
+        handle @api {
+            request_body {
+                max_size {$UPLOAD_MAX_SIZE:50MB}
+            }
+            reverse_proxy api:8000
+        }
+
+        handle {
+            root * /srv
+            try_files {path} /index.html
+            file_server
+        }
+    }
+}

@@ -3,6 +3,7 @@
 .env
 .env.*
 !.env.example
+!deploy/.env.production.example
 __pycache__/
 .pytest_cache/
 .venv/

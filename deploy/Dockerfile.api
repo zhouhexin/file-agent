@@ -1,0 +1,27 @@
+# File Agent API 生产运行镜像。
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app/apps/api \
+    FILE_STORAGE_ROOT=/data/uploads \
+    LOG_DIR=/data/logs
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       libreoffice-writer \
+       libreoffice-calc \
+       ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install --upgrade pip && pip install -r /app/requirements.txt
+
+COPY . /app
+RUN chmod +x /app/deploy/entrypoint.api.sh
+
+EXPOSE 8000
+ENTRYPOINT ["/app/deploy/entrypoint.api.sh"]
