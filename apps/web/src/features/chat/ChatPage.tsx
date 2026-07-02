@@ -17,8 +17,13 @@ import { canPreviewInBrowser } from './presentation';
 import type { ChatAttachment, ChatTurn } from './presentation';
 
 function getWebConversationId(userId: string): string {
-  // 临时按用户隔离 Web 会话，避免多个用户共享固定 conversation_id。
-  return `web-chat-${userId}`;
+  // conversations.id 当前限制为 36 位；保留用户隔离，同时避免超过数据库字段长度。
+  return `chat-${userId.replace(/-/g, '').slice(0, 31)}`;
+}
+
+function getLegacyWebConversationId(): string {
+  // 兼容早期版本统一写入的 Web 会话，避免升级后用户看不到历史消息。
+  return 'web-chat';
 }
 
 type ChatPageProps = {
@@ -38,7 +43,8 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
   const [historyLoading, setHistoryLoading] = useState(true);
   const previewUrls = useRef<Set<string>>(new Set());
   const hasTurns = chatTurns.length > 0;
-  const conversationId = getWebConversationId(user.id);
+  const primaryConversationId = getWebConversationId(user.id);
+  const [conversationId, setConversationId] = useState(primaryConversationId);
 
   useEffect(() => {
     // 页面卸载时统一释放仍在展示的图片预览 object URL。
@@ -50,12 +56,33 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
   }, []);
 
   useEffect(() => {
-    // 工作台启动时恢复当前用户自己的 Web 会话；404 表示该用户还没有历史会话。
+    // 工作台启动时恢复当前用户自己的 Web 会话；新 ID 没有历史时兼容读取旧版 web-chat。
     let cancelled = false;
     setHistoryLoading(true);
-    getConversationDetail(token, conversationId)
+    setConversationId(primaryConversationId);
+    getConversationDetail(token, primaryConversationId)
+      .catch((err) => {
+        if (err instanceof ApiError && err.status === 404) {
+          return getConversationDetail(token, getLegacyWebConversationId())
+            .then((conversation) => {
+              setConversationId(conversation.id);
+              return conversation;
+            })
+            .catch((legacyErr) => {
+              if (legacyErr instanceof ApiError && [403, 404].includes(legacyErr.status)) {
+                return null;
+              }
+              throw legacyErr;
+            });
+        }
+        throw err;
+      })
       .then((conversation) => {
         if (cancelled) {
+          return;
+        }
+        if (!conversation) {
+          setChatTurns([]);
           return;
         }
         setChatTurns(conversation.messages.map((historyMessage) => ({
@@ -95,7 +122,7 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
     return () => {
       cancelled = true;
     };
-  }, [conversationId, token]);
+  }, [primaryConversationId, token]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

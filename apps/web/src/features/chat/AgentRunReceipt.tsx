@@ -92,6 +92,18 @@ export function AgentRunReceipt({
     return null;
   }
 
+  if (agentRun.intent === 'SUMMARIZE_DOCUMENTS' || agentRun.intent === 'ANSWER_DOCUMENTS') {
+    return agentRun.final_response ? (
+      <p className="agent-chat-response">{agentRun.final_response}</p>
+    ) : null;
+  }
+
+  if (results.length === 0 && attachments.length === 0) {
+    return agentRun.final_response ? (
+      <p className="agent-chat-response">{agentRun.final_response}</p>
+    ) : null;
+  }
+
   const mutationSummary = hasFileMutation(changeItems) ? '包含文件操作' : '本次仅生成分析结果';
 
   return (

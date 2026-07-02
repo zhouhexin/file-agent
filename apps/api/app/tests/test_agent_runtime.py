@@ -268,6 +268,325 @@ def test_llm_intent_reads_document_insights_instead_of_reingesting():
     assert "document-convert" not in [item.tool_name for item in result.tool_invocations]
 
 
+def test_deterministic_greeting_without_attachments_uses_general_chat():
+    """无附件普通问候不应触发文件处理工具链。"""
+
+    class DisabledLLMIntentService:
+        """测试用关闭态 LLM 服务，强制走确定性 Planner。"""
+
+        enabled = False
+
+    service = AgentRuntimeService(llm_intent_service=DisabledLLMIntentService())
+
+    result = service.run_message(
+        conversation_id="conv-general-chat",
+        user_id="user-1",
+        message_id="msg-general-chat",
+        message="你好",
+        attachments=[],
+    )
+
+    assert result.status == "COMPLETED"
+    assert result.intent == "GENERAL_CHAT"
+    assert result.selected_skills == ["llm-understanding"]
+    assert [item.tool_name for item in result.tool_invocations] == ["intent-summary"]
+    assert "AgentRun completed" not in (result.final_response or "")
+    assert "文件" not in (result.final_response or "")
+
+
+def test_llm_general_chat_returns_conversational_response():
+    """LLM 识别为普通对话时，最终回复应是自然对话而不是工具审计信息。"""
+
+    class FakeLLMIntentService:
+        """测试用 LLM 服务，固定返回普通聊天意图。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """返回不需要文件上下文的普通对话意图。"""
+
+            return UserIntentPlan(
+                intent="GENERAL_CHAT",
+                user_goal=message,
+                needs_file_context=False,
+                referenced_document_ids=[],
+                required_capabilities=[],
+                tool_plan_hint=[],
+                response_style="concise",
+            )
+
+    service = AgentRuntimeService(llm_intent_service=FakeLLMIntentService())
+
+    result = service.run_message(
+        conversation_id="conv-llm-general-chat",
+        user_id="user-1",
+        message_id="msg-llm-general-chat",
+        message="你好",
+        attachments=[],
+    )
+
+    assert result.status == "COMPLETED"
+    assert result.intent == "GENERAL_CHAT"
+    assert [item.tool_name for item in result.tool_invocations] == ["intent-summary"]
+    assert "AgentRun completed" not in (result.final_response or "")
+    assert "你好" in (result.final_response or "")
+
+
+def test_summary_request_returns_content_summary_not_classification_receipt():
+    """用户要求总结文章内容时，应返回内容总结而不是分类回执。"""
+
+    class FakeRegistry:
+        """测试用 Registry，返回稳定的正文解析结果。"""
+
+        def invoke(self, tool_name, input_json):
+            """模拟 extract-document-text 成功解析正文。"""
+
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "document_id": input_json["document_id"],
+                    "extraction_run_id": "run-summary",
+                    "status": "COMPLETED",
+                    "extractor": "plain-text",
+                    "pages": [
+                        {
+                            "page_number": 1,
+                            "text_preview": "本文围绕青年教师岗位锻炼安排展开，说明了选派对象、岗位职责、考核要求和组织保障。",
+                            "char_count": 42,
+                        }
+                    ],
+                    "error": None,
+                },
+                status="COMPLETED",
+            )
+
+    class DisabledLLMIntentService:
+        """测试用关闭态 LLM 服务，强制走确定性 Planner。"""
+
+        enabled = False
+
+    service = AgentRuntimeService(
+        registry_factory=lambda db, user_id: FakeRegistry(),
+        llm_intent_service=DisabledLLMIntentService(),
+    )
+
+    result = service.run_message(
+        conversation_id="conv-summary",
+        user_id="user-1",
+        message_id="msg-summary",
+        message="读取上面上传的文件，给我讲解大概总结一下文章内容",
+        attachments=[{"document_id": "doc-summary"}],
+    )
+
+    assert result.intent == "SUMMARIZE_DOCUMENTS"
+    assert "内容总结" in (result.final_response or "")
+    assert "青年教师岗位锻炼安排" in (result.final_response or "")
+    assert "分类建议" not in (result.final_response or "")
+
+
+def test_llm_summary_with_text_extraction_returns_content_summary():
+    """LLM 摘要意图即使调用正文解析，也必须返回内容总结而不是分类回执。"""
+
+    class FakeRegistry:
+        """测试用 Registry，返回稳定的正文解析结果。"""
+
+        def invoke(self, tool_name, input_json):
+            """模拟 extract-document-text 成功解析正文。"""
+
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "document_id": input_json["document_id"],
+                    "extraction_run_id": "run-llm-summary",
+                    "status": "COMPLETED",
+                    "extractor": "plain-text",
+                    "pages": [
+                        {
+                            "page_number": 1,
+                            "text_preview": "这份文件主要说明科研成果激励办法，包含适用范围、奖励类型、申报流程和审核要求。",
+                            "char_count": 38,
+                        }
+                    ],
+                    "error": None,
+                },
+                status="COMPLETED",
+            )
+
+    class FakeLLMIntentService:
+        """测试用 LLM 服务，固定返回摘要正文解析意图。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """返回需要读取正文后总结的用户意图。"""
+
+            return UserIntentPlan(
+                intent="SUMMARIZE_DOCUMENTS",
+                user_goal=message,
+                needs_file_context=True,
+                referenced_document_ids=[attachments[0]["document_id"]],
+                required_capabilities=["extract_document_text"],
+                skip_completed_ingest=True,
+                tool_plan_hint=["extract-document-text"],
+                response_style="concise",
+            )
+
+    service = AgentRuntimeService(
+        registry_factory=lambda db, user_id: FakeRegistry(),
+        llm_intent_service=FakeLLMIntentService(),
+    )
+
+    result = service.run_message(
+        conversation_id="conv-llm-summary",
+        user_id="user-1",
+        message_id="msg-llm-summary",
+        message="读取上面上传的文件，给我讲解大概总结一下文章内容",
+        attachments=[{"document_id": "doc-llm-summary"}],
+    )
+
+    assert result.intent == "SUMMARIZE_DOCUMENTS"
+    assert result.tool_plan["slots"]["requested_outputs"] == ["text", "summary", "receipt"]
+    assert "内容总结" in (result.final_response or "")
+    assert "科研成果激励办法" in (result.final_response or "")
+    assert "分类建议" not in (result.final_response or "")
+
+
+def test_summary_request_uses_document_summary_service():
+    """摘要请求应优先使用完整正文 LLM 总结服务生成最终回复。"""
+
+    class FakeRegistry:
+        """测试用 Registry，返回稳定的正文解析结果。"""
+
+        def invoke(self, tool_name, input_json):
+            """模拟 extract-document-text 成功解析正文。"""
+
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "document_id": input_json["document_id"],
+                    "extraction_run_id": "run-summary-service",
+                    "status": "COMPLETED",
+                    "extractor": "plain-text",
+                    "pages": [
+                        {
+                            "page_number": 1,
+                            "text_preview": "只是一段预览",
+                            "char_count": 6,
+                        }
+                    ],
+                    "error": None,
+                },
+                status="COMPLETED",
+            )
+
+    class FakeSummaryService:
+        """测试用文档总结服务，记录 Agent 传入的数据。"""
+
+        def __init__(self):
+            """初始化调用记录。"""
+
+            self.calls = []
+
+        def summarize_documents(self, *, document_results, tool_results, user_message):
+            """返回固定 LLM 总结文本。"""
+
+            self.calls.append(
+                {
+                    "document_results": document_results,
+                    "tool_results": tool_results,
+                    "user_message": user_message,
+                }
+            )
+            return "LLM 总结：这是基于完整正文生成的讲解。"
+
+    class DisabledLLMIntentService:
+        """测试用关闭态 LLM 服务，强制走确定性 Planner。"""
+
+        enabled = False
+
+    summary_service = FakeSummaryService()
+    service = AgentRuntimeService(
+        registry_factory=lambda db, user_id: FakeRegistry(),
+        llm_intent_service=DisabledLLMIntentService(),
+        document_summary_service=summary_service,
+    )
+
+    result = service.run_message(
+        conversation_id="conv-summary-service",
+        user_id="user-1",
+        message_id="msg-summary-service",
+        message="读取上面上传的文件，给我总结文章内容",
+        attachments=[{"document_id": "doc-summary-service"}],
+    )
+
+    assert result.final_response == "LLM 总结：这是基于完整正文生成的讲解。"
+    assert summary_service.calls[0]["user_message"] == "读取上面上传的文件，给我总结文章内容"
+    assert summary_service.calls[0]["document_results"][0]["document_id"] == "doc-summary-service"
+
+
+def test_document_question_uses_text_extraction_and_llm_reader():
+    """针对附件的问答请求必须先提取全文，再交给 LLM 文档阅读服务回答。"""
+
+    class FakeRegistry:
+        """测试用 Registry，返回稳定的正文解析结果。"""
+
+        def invoke(self, tool_name, input_json):
+            """模拟 extract-document-text 成功解析正文。"""
+
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "document_id": input_json["document_id"],
+                    "extraction_run_id": "run-answer-service",
+                    "status": "COMPLETED",
+                    "extractor": "plain-text",
+                    "pages": [{"page_number": 1, "text_preview": "预览", "char_count": 2}],
+                    "error": None,
+                },
+                status="COMPLETED",
+            )
+
+    class FakeReaderService:
+        """测试用文档阅读服务，返回固定问答文本。"""
+
+        def summarize_documents(self, *, document_results, tool_results, user_message):
+            """返回固定答案。"""
+
+            return "LLM 回答：文件要求申报人按时提交材料。"
+
+    class DisabledLLMIntentService:
+        """测试用关闭态 LLM 服务，强制走确定性 Planner。"""
+
+        enabled = False
+
+    service = AgentRuntimeService(
+        registry_factory=lambda db, user_id: FakeRegistry(),
+        llm_intent_service=DisabledLLMIntentService(),
+        document_summary_service=FakeReaderService(),
+    )
+
+    result = service.run_message(
+        conversation_id="conv-answer-service",
+        user_id="user-1",
+        message_id="msg-answer-service",
+        message="这个文件中申报人需要做什么？",
+        attachments=[{"document_id": "doc-answer-service"}],
+    )
+
+    assert result.intent == "ANSWER_DOCUMENTS"
+    assert result.tool_plan["slots"]["requested_outputs"] == ["text", "answer", "receipt"]
+    assert [item.tool_name for item in result.tool_invocations] == ["extract-document-text"]
+    assert result.final_response == "LLM 回答：文件要求申报人按时提交材料。"
+
+
 def test_llm_intent_extracts_document_text():
     """LLM 理解到用户要读取正文时，应调用 extract-document-text。"""
 

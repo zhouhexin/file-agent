@@ -13,11 +13,12 @@ from typing import Any, Callable, Dict, List, Type
 from pydantic import BaseModel, ValidationError
 
 from app.core.logging import log_event
-from app.db.models import Document, DocumentInsight
+from app.db.models import Document, DocumentCategorySuggestion, DocumentClassificationRun, DocumentInsight
 from app.modules.agent.state import ToolInvocationRecord
 from app.modules.agent.tool_schemas import (
     ChangeReportInput,
     ConfirmedFileActionInput,
+    DocumentClassificationsReadInput,
     DocumentInsightsReadInput,
     DocumentLineageReadInput,
     DocumentToolInput,
@@ -279,6 +280,74 @@ def _document_insights_handler(db: Any, user_id: str | None) -> ToolHandler:
     return handler
 
 
+def _document_classifications_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """创建读取历史分类建议的 Tool handler。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """按当前用户读取文件最近一次分类建议。"""
+
+        document_ids = list(getattr(tool_input, "document_ids"))
+        if db is None or user_id is None:
+            return {"ok": True, "documents": []}
+
+        documents = (
+            db.query(Document)
+            .filter(Document.id.in_(document_ids), Document.user_id == user_id)
+            .all()
+            if document_ids
+            else []
+        )
+        document_lookup = {document.id: document for document in documents}
+        if not document_lookup:
+            return {"ok": True, "documents": []}
+
+        runs = (
+            db.query(DocumentClassificationRun)
+            .filter(DocumentClassificationRun.document_id.in_(document_lookup.keys()))
+            .order_by(DocumentClassificationRun.created_at.desc(), DocumentClassificationRun.id.desc())
+            .all()
+        )
+        latest_run_by_document_id: Dict[str, DocumentClassificationRun] = {}
+        for run in runs:
+            latest_run_by_document_id.setdefault(run.document_id, run)
+
+        run_ids = [run.id for run in latest_run_by_document_id.values()]
+        suggestions = (
+            db.query(DocumentCategorySuggestion)
+            .filter(DocumentCategorySuggestion.classification_run_id.in_(run_ids))
+            .order_by(DocumentCategorySuggestion.rank.asc(), DocumentCategorySuggestion.confidence.desc())
+            .all()
+            if run_ids
+            else []
+        )
+        suggestions_by_run_id: Dict[str, list[DocumentCategorySuggestion]] = {}
+        for suggestion in suggestions:
+            suggestions_by_run_id.setdefault(suggestion.classification_run_id, []).append(suggestion)
+
+        return {
+            "ok": True,
+            "documents": [
+                {
+                    "document_id": document_id,
+                    "filename": document_lookup[document_id].original_filename,
+                    "categories": [
+                        {
+                            "name": suggestion.category_name,
+                            "confidence": suggestion.confidence,
+                            "status": suggestion.status,
+                            "source": suggestion.source,
+                            "evidence": suggestion.evidence_json,
+                        }
+                        for suggestion in suggestions_by_run_id.get(run.id, [])
+                    ],
+                }
+                for document_id, run in latest_run_by_document_id.items()
+            ],
+        }
+
+    return handler
+
+
 def _intent_summary_handler(tool_input: BaseModel) -> Dict[str, Any]:
     """记录 LLM 已完成意图理解但不需要文件工具的结果。"""
 
@@ -505,7 +574,7 @@ def _tool(
 
 
 def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str, ToolDefinition]:
-    """创建 agent.md 要求的完整 MVP Tool 目录。"""
+    """创建 AGENTS.md 要求的完整 MVP Tool 目录。"""
 
     tools = [
         _tool("document-register-upload", "Register uploaded file as a document.", DocumentToolInput, True, False, ["documents", "document_versions"], _document_handler("document-register-upload")),
@@ -518,6 +587,7 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("metadata-extract", "Extract metadata candidates.", DocumentToolInput, True, False, ["documents.metadata"], _document_handler("metadata-extract")),
         _tool("multi-label-classify", "Generate multi-label classifications with evidence.", DocumentToolInput, True, False, ["document_categories"], _document_handler("multi-label-classify")),
         _tool("read-document-insights", "Read deterministic ingest insights for uploaded documents.", DocumentInsightsReadInput, False, False, [], _document_insights_handler(db, user_id)),
+        _tool("read-document-classifications", "Read latest persisted classification suggestions for uploaded documents.", DocumentClassificationsReadInput, False, False, [], _document_classifications_handler(db, user_id)),
         _tool("read-original-file", "Read safe metadata for an uploaded original file.", DocumentToolInput, False, False, [], _read_original_file_handler(db, user_id)),
         _tool("extract-document-text", "Extract text from uploaded files and persist document pages.", DocumentToolInput, True, False, ["document_extraction_runs", "document_pages"], _extract_document_text_handler(db, user_id)),
         _tool("intent-summary", "Record LLM-understood user intent without side effects.", IntentSummaryInput, False, False, [], _intent_summary_handler),

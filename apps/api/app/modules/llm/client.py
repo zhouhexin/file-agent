@@ -61,6 +61,43 @@ class OpenAICompatibleLLMClient:
             raise LLMResponseError("LLM JSON 响应必须是对象。")
         return parsed
 
+    def complete_multimodal_json(self, *, system_prompt: str, text: str, image_url: str) -> Dict[str, Any]:
+        """调用支持 image_url 的 OpenAI-compatible Chat Completions 并解析 JSON。"""
+
+        response = httpx.post(
+            f"{self.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": text},
+                            {"type": "image_url", "image_url": {"url": image_url}},
+                        ],
+                    },
+                ],
+                "temperature": 0,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        data = response.json()
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise LLMResponseError("LLM 响应缺少 choices[0].message.content。") from exc
+        parsed = _parse_json_object_from_content(content)
+        if not isinstance(parsed, dict):
+            raise LLMResponseError("LLM JSON 响应必须是对象。")
+        return parsed
+
 
 def _parse_json_object_from_content(content: str) -> Dict[str, Any]:
     """从模型文本中解析 JSON 对象，兼容 markdown 代码块和前后说明文本。"""

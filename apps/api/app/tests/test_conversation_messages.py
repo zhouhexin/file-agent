@@ -23,13 +23,18 @@ def _auth_header(client: TestClient, username: str = "message-user") -> dict[str
     return {"Authorization": f"Bearer {login_response.json()['access_token']}"}
 
 
-def _upload_document(client: TestClient, headers: dict[str, str]) -> str:
+def _upload_document(
+    client: TestClient,
+    headers: dict[str, str],
+    filename: str = "message.txt",
+    content: bytes = b"message-file",
+) -> str:
     """上传测试文件并返回 document_id。"""
 
     response = client.post(
         "/api/files/upload",
         headers=headers,
-        files={"file": ("message.txt", b"message-file", "text/plain")},
+        files={"file": (filename, content, "text/plain")},
     )
     return response.json()["document_id"]
 
@@ -102,6 +107,118 @@ def test_get_conversation_returns_messages_with_agent_runs_and_attachments():
     assert history_message["agent_run"]["document_results"][0]["filename"] == "message.txt"
     assert history_message["agent_run"]["document_results"][0]["extraction_status"] == "COMPLETED"
     assert history_message["agent_run"]["tool_invocations"][0]["tool_name"] == "extract-document-text"
+    clear_overrides()
+
+
+def test_message_can_reference_previous_uploaded_attachment():
+    """用户说“上面上传的文件”时，应自动引用当前会话最近的附件。"""
+
+    client, _ = client_with_database()
+    headers = _auth_header(client, "previous-file-user")
+    document_id = _upload_document(client, headers)
+
+    first_response = client.post(
+        "/api/conversations/context-chat/messages",
+        headers=headers,
+        json={
+            "content": "帮我读取这个文件",
+            "attachments": [{"document_id": document_id}],
+        },
+    )
+    assert first_response.status_code == 200
+
+    second_response = client.post(
+        "/api/conversations/context-chat/messages",
+        headers=headers,
+        json={
+            "content": "读取上面上传的文件，给我讲解大概总结一下文章内容",
+            "attachments": [],
+        },
+    )
+
+    assert second_response.status_code == 200
+    data = second_response.json()
+    assert data["message"]["attachments"] == [{"document_id": document_id}]
+    assert data["agent_run"]["status"] == "COMPLETED"
+    assert data["agent_run"]["document_results"][0]["document_id"] == document_id
+    clear_overrides()
+
+
+def test_message_can_reference_second_previous_attachment_by_ordinal():
+    """用户说“第二个文件”时，应只引用当前会话上文附件中的第二个文件。"""
+
+    client, _ = client_with_database()
+    headers = _auth_header(client, "second-file-user")
+    first_document_id = _upload_document(client, headers, filename="first.txt", content=b"first-file")
+    second_document_id = _upload_document(client, headers, filename="电子发票承诺书.doc", content=b"second-file")
+
+    first_response = client.post(
+        "/api/conversations/ordinal-chat/messages",
+        headers=headers,
+        json={
+            "content": "帮我读取并分类这批文件",
+            "attachments": [
+                {"document_id": first_document_id},
+                {"document_id": second_document_id},
+            ],
+        },
+    )
+    assert first_response.status_code == 200
+
+    second_response = client.post(
+        "/api/conversations/ordinal-chat/messages",
+        headers=headers,
+        json={
+            "content": "重新对第二个文件：电子发票承诺书.doc进行分类",
+            "attachments": [],
+        },
+    )
+
+    assert second_response.status_code == 200
+    data = second_response.json()
+    assert data["message"]["attachments"] == [{"document_id": second_document_id}]
+    assert data["agent_run"]["status"] == "COMPLETED"
+    assert data["agent_run"]["document_results"][0]["document_id"] == second_document_id
+    clear_overrides()
+
+
+def test_message_can_summarize_previous_classification_results():
+    """用户要求总结之前文件分类时，应读取分类建议而不是只返回基础洞察文件名。"""
+
+    client, _ = client_with_database()
+    headers = _auth_header(client, "classification-summary-user")
+    first_document_id = _upload_document(client, headers, filename="职称材料.txt", content="教师职称申报材料".encode())
+    second_document_id = _upload_document(client, headers, filename="科研成果.txt", content="学院科研成果资助材料".encode())
+
+    first_response = client.post(
+        "/api/conversations/classification-summary-chat/messages",
+        headers=headers,
+        json={
+            "content": "帮我读取并分类这批文件",
+            "attachments": [
+                {"document_id": first_document_id},
+                {"document_id": second_document_id},
+            ],
+        },
+    )
+    assert first_response.status_code == 200
+
+    second_response = client.post(
+        "/api/conversations/classification-summary-chat/messages",
+        headers=headers,
+        json={
+            "content": "总结一下之前上传的所有项目的分类",
+            "attachments": [],
+        },
+    )
+
+    assert second_response.status_code == 200
+    final_response = second_response.json()["agent_run"]["final_response"]
+    assert "已汇总" in final_response
+    assert "分类建议" in final_response
+    assert "基础洞察" not in final_response
+    assert "职称材料.txt" in final_response
+    assert "科研成果.txt" in final_response
     clear_overrides()
 
 

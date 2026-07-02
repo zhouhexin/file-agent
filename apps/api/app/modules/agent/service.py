@@ -23,6 +23,7 @@ from app.core.logging import log_context, log_event
 from app.modules.classification.classifier_service import DocumentClassificationService
 from app.modules.classification.llm_judge import LLMClassificationJudge
 from app.modules.llm.client import OpenAICompatibleLLMClient
+from app.modules.llm.document_summary import LLMDocumentSummaryService
 from app.modules.llm.service import LLMIntentService
 
 
@@ -33,11 +34,13 @@ class AgentRuntimeService:
         self,
         registry_factory: Optional[Callable[[Session | None, str], ToolRegistry]] = None,
         llm_intent_service: Any = None,
+        document_summary_service: Any = None,
     ) -> None:
-        """注入 Registry 工厂和 LLM 意图服务，避免复用绑定旧用户的 Registry。"""
+        """注入 Registry 工厂、LLM 意图服务和文档总结服务。"""
 
         self.registry_factory = registry_factory or _default_registry_factory
         self.llm_intent_service = llm_intent_service or LLMIntentService()
+        self.document_summary_service = document_summary_service
         self.graph = build_agent_graph()
 
     def run_message(
@@ -161,6 +164,8 @@ class AgentRuntimeService:
                 llm_judge=llm_judge,
                 mode=settings.llm_classification_mode,
             ),
+            document_summary_service=self.document_summary_service
+            or _build_document_summary_service(settings=settings, db=db),
         )
 
     def _build_initial_state(
@@ -224,3 +229,17 @@ def _build_classification_judge(settings) -> LLMClassificationJudge | None:
         client=client,
         allow_free_category_paths=settings.llm_classification_allow_free_paths,
     )
+
+
+def _build_document_summary_service(*, settings, db: Session | None) -> LLMDocumentSummaryService:
+    """按配置构造文档总结服务；未启用 LLM 时返回关闭态服务。"""
+
+    if not settings.llm_enabled:
+        return LLMDocumentSummaryService(db=db, enabled=False)
+    client = OpenAICompatibleLLMClient(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+        model=settings.llm_chat_model,
+        timeout_seconds=settings.llm_timeout_seconds,
+    )
+    return LLMDocumentSummaryService(db=db, client=client, enabled=True)

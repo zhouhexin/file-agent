@@ -10,8 +10,11 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, List
 
+from app.core.config import get_settings
+from app.modules.ocr.service import build_default_ocr_service
 
-def extract_document_text(*, file_path: Path, filename: str, content_type: str) -> Dict[str, Any]:
+
+def extract_document_text(*, file_path: Path, filename: str, content_type: str, ocr_service: Any = None) -> Dict[str, Any]:
     """按文件类型解析文本内容，并返回统一结构。"""
 
     suffix = Path(filename).suffix.lower()
@@ -28,9 +31,9 @@ def extract_document_text(*, file_path: Path, filename: str, content_type: str) 
     if suffix == ".docx" or content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         return _extract_docx_text(file_path)
     if suffix == ".pdf" or content_type == "application/pdf":
-        return _extract_pdf_text(file_path)
+        return _extract_pdf_text(file_path, ocr_service=ocr_service)
     if content_type.startswith("image/") or suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"}:
-        return _extract_image_text(file_path)
+        return _extract_image_text(file_path, ocr_service=ocr_service)
     return _failed("unsupported", "UNSUPPORTED_FILE_TYPE", f"暂不支持解析该文件类型：{filename}")
 
 
@@ -184,13 +187,60 @@ def _extract_doc_text_with_libreoffice(file_path: Path) -> Dict[str, Any] | None
         )
 
 
-def _extract_pdf_text(file_path: Path) -> Dict[str, Any]:
-    """使用 PyMuPDF 读取 PDF 页面文本。"""
+def _extract_pdf_text(file_path: Path, ocr_service: Any = None) -> Dict[str, Any]:
+    """优先读取 PDF 原生文本；全文为空时按页渲染并进入 OCR。"""
+
+    try:
+        native_pages = _extract_pdf_native_pages(file_path)
+    except RuntimeError as exc:
+        return _failed("pdf", "PDF_EXTRACTOR_NOT_AVAILABLE", str(exc))
+    if any(page.get("text", "").strip() for page in native_pages):
+        return _completed("pdf", native_pages)
+
+    if not _ocr_enabled():
+        return _completed("pdf", native_pages)
+
+    service = ocr_service or build_default_ocr_service()
+    try:
+        rendered_pages = _render_pdf_pages_for_ocr(
+            file_path=file_path,
+            page_numbers=[int(page["page_number"]) for page in native_pages],
+        )
+    except RuntimeError as exc:
+        return _failed("pdf-ocr", "PDF_RENDER_FOR_OCR_FAILED", str(exc))
+    ocr_pages: List[Dict[str, Any]] = []
+    extractor_name = "pdf+ocr"
+    for page in native_pages:
+        page_number = int(page["page_number"])
+        rendered_path = rendered_pages.get(page_number)
+        if rendered_path is None:
+            ocr_pages.append(page)
+            continue
+        ocr_result = service.extract_image(image_path=rendered_path, page_number=page_number)
+        if not ocr_result.get("ok"):
+            ocr_pages.append(
+                {
+                    **page,
+                    "metadata": {
+                        **page.get("metadata", {}),
+                        "ocr_fallback": True,
+                        "ocr_error": ocr_result.get("error"),
+                    },
+                }
+            )
+            continue
+        extractor_name = f"pdf+{ocr_result.get('source') or 'ocr'}"
+        ocr_pages.append(_page_from_ocr_result(page_number=page_number, ocr_result=ocr_result, base_metadata=page.get("metadata", {})))
+    return _completed(extractor_name, ocr_pages)
+
+
+def _extract_pdf_native_pages(file_path: Path) -> List[Dict[str, Any]]:
+    """使用 PyMuPDF 读取 PDF 页面原生文本。"""
 
     try:
         import fitz
     except ImportError:
-        return _failed("pdf", "PDF_EXTRACTOR_NOT_AVAILABLE", "缺少 PyMuPDF，无法解析 PDF 文件。")
+        raise RuntimeError("缺少 PyMuPDF，无法解析 PDF 文件。") from None
 
     pages: List[Dict[str, Any]] = []
     with fitz.open(file_path) as document:
@@ -203,23 +253,76 @@ def _extract_pdf_text(file_path: Path) -> Dict[str, Any]:
                     "metadata": {"page_index": index - 1},
                 }
             )
-    return _completed("pdf", pages)
+    return pages
 
 
-def _extract_image_text(file_path: Path) -> Dict[str, Any]:
-    """使用 pytesseract 对图片做 OCR。"""
-
-    try:
-        from PIL import Image
-        import pytesseract
-    except ImportError:
-        return _failed("ocr", "OCR_EXTRACTOR_NOT_AVAILABLE", "缺少 Pillow 或 pytesseract，无法执行图片 OCR。")
+def _render_pdf_pages_for_ocr(*, file_path: Path, page_numbers: List[int]) -> Dict[int, Path]:
+    """把需要 OCR 的 PDF 页面渲染为临时 PNG 图片。"""
 
     try:
-        text = pytesseract.image_to_string(Image.open(file_path), lang="chi_sim+eng")
+        import fitz
+    except ImportError as exc:
+        raise RuntimeError("缺少 PyMuPDF，无法渲染 PDF 页面进行 OCR。") from exc
+
+    output_dir = Path(tempfile.mkdtemp(prefix="file-agent-pdf-ocr-"))
+    rendered_pages: Dict[int, Path] = {}
+    wanted = set(page_numbers)
+    with fitz.open(file_path) as document:
+        for index, page in enumerate(document, start=1):
+            if index not in wanted:
+                continue
+            output_path = output_dir / f"page-{index:04d}.png"
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            pixmap.save(output_path)
+            rendered_pages[index] = output_path
+    return rendered_pages
+
+
+def _extract_image_text(file_path: Path, ocr_service: Any = None) -> Dict[str, Any]:
+    """使用 OCR 服务对图片做文字识别。"""
+
+    if not _ocr_enabled():
+        return _failed("ocr", "OCR_DISABLED", "OCR 未启用，无法解析图片文字。")
+
+    try:
+        service = ocr_service or build_default_ocr_service()
+        ocr_result = service.extract_image(image_path=file_path, page_number=1)
     except Exception as exc:
         return _failed("ocr", "OCR_ENGINE_NOT_AVAILABLE", f"OCR 引擎不可用：{exc}")
-    return _completed("ocr", [{"page_number": 1, "sheet_name": None, "text": text, "metadata": {}}])
+    if not ocr_result.get("ok"):
+        error = ocr_result.get("error") or {}
+        return _failed("ocr", str(error.get("code") or "OCR_FAILED"), str(error.get("message") or "OCR 识别失败。"))
+    return _completed(
+        str(ocr_result.get("source") or "ocr"),
+        [_page_from_ocr_result(page_number=1, ocr_result=ocr_result, base_metadata={})],
+    )
+
+
+def _page_from_ocr_result(*, page_number: int, ocr_result: Dict[str, Any], base_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """把 OCR 结果转成 document_pages 可持久化的页面结构。"""
+
+    return {
+        "page_number": page_number,
+        "sheet_name": None,
+        "text": str(ocr_result.get("text") or ""),
+        "metadata": {
+            **base_metadata,
+            "ocr_fallback": True,
+            "ocr_source": ocr_result.get("source"),
+            "ocr_provider": ocr_result.get("provider_name"),
+            "ocr_quality_score": ocr_result.get("quality_score"),
+            "ocr_confidence": ocr_result.get("confidence"),
+            "ocr_is_llm_fallback": bool(ocr_result.get("is_fallback")),
+            "ocr_blocks": ocr_result.get("blocks") or [],
+            "ocr_warnings": ocr_result.get("warnings") or [],
+        },
+    }
+
+
+def _ocr_enabled() -> bool:
+    """读取 OCR 开关，便于测试和部署控制。"""
+
+    return get_settings().ocr_enabled
 
 
 def _completed(extractor: str, pages: List[Dict[str, Any]]) -> Dict[str, Any]:

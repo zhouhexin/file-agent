@@ -744,6 +744,15 @@
   white-space: pre-line;
 }
 
+.agent-chat-response {
+  width: min(760px, 100%);
+  margin: 0;
+  color: #1f2933;
+  font-size: 16px;
+  line-height: 1.8;
+  white-space: pre-line;
+}
+
 @media (max-width: 640px) {
   .agent-run-summary {
     align-items: flex-start;

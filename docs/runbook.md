@@ -123,9 +123,14 @@ LLM_CHAT_MODEL=<chat-model-name>
 LLM_TIMEOUT_SECONDS=30
 LLM_CLASSIFICATION_MODE=rule_only
 LLM_CLASSIFICATION_ALLOW_FREE_PATHS=false
+OCR_ENABLED=true
+OCR_LLM_ENABLED=false
+OCR_LLM_FALLBACK_QUALITY_THRESHOLD=0.68
 ```
 
 当前客户端调用 OpenAI-compatible `/chat/completions` 接口，并要求模型返回符合 `UserIntentPlan` 的 JSON 对象。上传阶段的 deterministic ingest 不依赖 LLM；对话阶段启用 LLM 后，会先理解用户需求，再通过白名单 Tool 读取 `document_insights` 或执行后续受控工具。
+
+OCR 第一阶段使用本地 PaddleOCR 作为默认 Provider。图片文件会直接进入 OCR；PDF 原生文本为空时会先渲染页面，再进入 OCR，并把识别文本写入 `document_pages.text_content`。如需启用 LLM OCR 兜底，必须显式设置 `OCR_LLM_ENABLED=true` 且 `LLM_ENABLED=true`；系统会在本地 OCR 质量低于 `OCR_LLM_FALLBACK_QUALITY_THRESHOLD` 时按页调用多模态模型，不默认外发整份文件。
 
 分类 LLM 判定由 `LLM_CLASSIFICATION_MODE` 单独控制：
 
@@ -352,11 +357,11 @@ PyMuPDF
 openpyxl
 python-docx
 Pillow
-pytesseract
+paddleocr
 textutil 或 LibreOffice
 ```
 
-图片 OCR 还需要系统安装 Tesseract OCR；旧版 `.doc` 在 macOS 可使用系统 `textutil`，服务器环境建议安装 LibreOffice。如果缺少依赖或 OCR/转换引擎不可用，Tool 会返回结构化错误，不会读取任意路径。
+图片 OCR 和扫描 PDF OCR 默认使用 PaddleOCR CPU Provider；旧版 `.doc` 在 macOS 可使用系统 `textutil`，服务器环境建议安装 LibreOffice。如果缺少依赖或 OCR/转换引擎不可用，Tool 会返回结构化错误，不会读取任意路径。
 
 当前对话触发解析已支持多个附件顺序执行。单个文件 Tool 异常会记录为该文件的失败 `document_results.errors`，后续文件继续处理；并发执行、LangGraph map/reduce、步骤级重试和恢复后续单独实现。
 

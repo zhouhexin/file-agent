@@ -25,6 +25,7 @@ TEXT_EXTRACTION_HINTS = {
     "ocr-image",
 }
 DOCUMENT_INSIGHT_HINTS = {"read_document_insights", "read-document-insights"}
+DOCUMENT_CLASSIFICATION_HINTS = {"read_document_classifications", "read-document-classifications"}
 
 
 class PlannerStep(BaseModel):
@@ -103,6 +104,14 @@ class DeterministicPlanner:
     ) -> PlannerOutput:
         """根据用户消息和附件上下文生成声明式计划。"""
 
+        lowered = message.lower()
+        if (
+            not attachments
+            and not _should_extract_text(message=message, lowered=lowered)
+            and not _has_classification_intent(message=message, lowered=lowered)
+        ):
+            return _general_chat_plan(intent="GENERAL_CHAT", user_goal=message)
+
         document_ids = _document_ids(attachments) or [_first_document_id(attachments)]
         document_id = document_ids[0]
         if self.force_unsafe_step:
@@ -127,45 +136,57 @@ class DeterministicPlanner:
                 confirmation_policy={"operation_plan_required": True},
             )
 
-        lowered = message.lower()
-        if "问" in message or "回答" in message or "answer" in lowered:
+        if _has_classification_summary_intent(message=message):
             return PlannerOutput(
-                intent="EVIDENCE_ANSWER",
+                intent="SUMMARIZE_CLASSIFICATIONS",
                 user_goal=message,
-                slots={"document_ids": [document_id], "question": message},
-                selected_skills=["chat-intake", "file-search", "evidence-answer"],
+                slots={"document_ids": document_ids, "requested_outputs": ["classification_summary"]},
+                selected_skills=["chat-intake", "document-classification-read"],
                 steps=[
                     {
                         "step_id": "step-1",
-                        "skill": "file-search",
-                        "tool_name": "hybrid-search",
-                        "input": {"query": message, "document_ids": [document_id]},
+                        "skill": "document-classification-read",
+                        "tool_name": "read-document-classifications",
+                        "input": {"document_ids": document_ids},
                         "requires_confirmation": False,
                         "risk_level": "low",
-                        "expected_outputs": ["retrieved_chunks"],
+                        "expected_outputs": ["document_category_suggestions"],
                         "writes": [],
-                    },
-                    {
-                        "step_id": "step-2",
-                        "skill": "evidence-answer",
-                        "tool_name": "evidence-answer",
-                        "input": {"question": message, "document_ids": [document_id]},
-                        "requires_confirmation": False,
-                        "risk_level": "low",
-                        "expected_outputs": ["answer", "references"],
-                        "writes": ["qa_answers", "answer_references"],
-                    },
+                    }
                 ],
-                evidence_policy={"require_page_or_cell": True, "allow_no_evidence_answer": True},
+                evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
                 confirmation_policy={"operation_plan_required": False},
             )
-        if _should_extract_text(message=message, lowered=lowered):
+
+        if _has_answer_intent(message=message, lowered=lowered):
             return PlannerOutput(
-                intent="EXTRACT_DOCUMENT_TEXT",
+                intent="ANSWER_DOCUMENTS",
                 user_goal=message,
                 slots={
                     "document_ids": document_ids,
-                    "requested_outputs": _requested_outputs_for_message(message=message, lowered=lowered),
+                    "question": message,
+                    "requested_outputs": ["text", "answer", "receipt"],
+                },
+                selected_skills=["chat-intake", "document-text-extract", "document-reading"],
+                steps=[
+                    _extract_document_text_step(
+                        document_id=item,
+                        index=index,
+                        force_reprocess=_should_force_reprocess(message=message, lowered=lowered),
+                    )
+                    for index, item in enumerate(document_ids, start=1)
+                ],
+                evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+                confirmation_policy={"operation_plan_required": False},
+            )
+        if _should_extract_text(message=message, lowered=lowered):
+            requested_outputs = _requested_outputs_for_message(message=message, lowered=lowered)
+            return PlannerOutput(
+                intent="SUMMARIZE_DOCUMENTS" if "summary" in requested_outputs else "EXTRACT_DOCUMENT_TEXT",
+                user_goal=message,
+                slots={
+                    "document_ids": document_ids,
+                    "requested_outputs": requested_outputs,
                 },
                 selected_skills=["chat-intake", "document-text-extract", "document-classification", "change-report"],
                 steps=[
@@ -259,13 +280,45 @@ def build_plan_from_user_intent(
 
     document_ids = intent_plan.referenced_document_ids or _document_ids(attachments)
     requested_capabilities = set(intent_plan.required_capabilities).union(intent_plan.tool_plan_hint)
+    if _has_classification_summary_intent(message=message) or requested_capabilities.intersection(DOCUMENT_CLASSIFICATION_HINTS):
+        return PlannerOutput(
+            intent="SUMMARIZE_CLASSIFICATIONS",
+            user_goal=intent_plan.user_goal,
+            slots={
+                "document_ids": document_ids,
+                "response_style": intent_plan.response_style,
+                "clarification_question": intent_plan.clarification_question,
+                "llm_intent_plan": intent_plan.model_dump(),
+            },
+            selected_skills=["llm-understanding", "document-classification-read"],
+            steps=[
+                {
+                    "step_id": "step-1",
+                    "skill": "document-classification-read",
+                    "tool_name": "read-document-classifications",
+                    "input": {"document_ids": document_ids},
+                    "requires_confirmation": False,
+                    "risk_level": "low",
+                    "expected_outputs": ["document_category_suggestions"],
+                    "writes": [],
+                }
+            ],
+            evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+            confirmation_policy={"operation_plan_required": False},
+        )
+
     if requested_capabilities.intersection(TEXT_EXTRACTION_HINTS):
         extraction_document_ids = document_ids or [_first_document_id(attachments)]
+        requested_outputs = _requested_outputs_for_intent(
+            intent=intent_plan.intent,
+            message=message,
+        )
         return PlannerOutput(
             intent=intent_plan.intent,
             user_goal=intent_plan.user_goal,
             slots={
                 "document_ids": extraction_document_ids,
+                "requested_outputs": requested_outputs,
                 "response_style": intent_plan.response_style,
                 "clarification_question": intent_plan.clarification_question,
                 "llm_intent_plan": intent_plan.model_dump(),
@@ -342,6 +395,31 @@ def build_plan_from_user_intent(
     )
 
 
+def _general_chat_plan(*, intent: str, user_goal: str) -> PlannerOutput:
+    """生成普通对话计划，不触发任何文件处理工具。"""
+
+    return PlannerOutput(
+        intent=intent,
+        user_goal=user_goal,
+        slots={"document_ids": [], "response_style": "concise"},
+        selected_skills=["llm-understanding"],
+        steps=[
+            {
+                "step_id": "step-1",
+                "skill": "llm-understanding",
+                "tool_name": "intent-summary",
+                "input": {"intent": intent, "user_goal": user_goal},
+                "requires_confirmation": False,
+                "risk_level": "low",
+                "expected_outputs": ["intent"],
+                "writes": [],
+            }
+        ],
+        evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+        confirmation_policy={"operation_plan_required": False},
+    )
+
+
 def _first_document_id(attachments: List[Dict[str, Any]]) -> str:
     """为 MVP 确定性计划解析第一个附件文档 id。"""
 
@@ -389,8 +467,24 @@ def _requested_outputs_for_message(*, message: str, lowered: str) -> List[str]:
     """根据确定性关键词记录用户期望输出，供审计和后续回执策略使用。"""
 
     outputs = ["text", "receipt"]
+    if _has_summary_intent(message=message, lowered=lowered):
+        outputs.insert(1, "summary")
+    if _has_answer_intent(message=message, lowered=lowered):
+        outputs.insert(1, "answer")
     if _has_classification_intent(message=message, lowered=lowered):
         outputs.insert(1, "classification")
+    return outputs
+
+
+def _requested_outputs_for_intent(*, intent: str, message: str) -> List[str]:
+    """根据 LLM 意图和原始消息记录用户期望输出。"""
+
+    lowered = message.lower()
+    outputs = _requested_outputs_for_message(message=message, lowered=lowered)
+    if "SUMMAR" in intent.upper() and "summary" not in outputs:
+        outputs.insert(1, "summary")
+    if ("ANSWER" in intent.upper() or "QUESTION" in intent.upper()) and "answer" not in outputs:
+        outputs.insert(1, "answer")
     return outputs
 
 
@@ -400,6 +494,36 @@ def _has_classification_intent(*, message: str, lowered: str) -> bool:
     classification_keywords = ["分类", "归类", "整理"]
     english_keywords = ["classify", "categorize"]
     return any(keyword in message for keyword in classification_keywords) or any(
+        keyword in lowered for keyword in english_keywords
+    )
+
+
+def _has_classification_summary_intent(*, message: str) -> bool:
+    """判断用户是否想汇总或查看已有分类结果，而不是重新解析正文。"""
+
+    summary_keywords = ["总结", "汇总", "查看", "列出", "统计"]
+    classification_keywords = ["分类", "归类", "类别"]
+    return any(keyword in message for keyword in summary_keywords) and any(
+        keyword in message for keyword in classification_keywords
+    )
+
+
+def _has_summary_intent(*, message: str, lowered: str) -> bool:
+    """判断用户是否要求总结、概括或讲解正文内容。"""
+
+    summary_keywords = ["总结", "概括", "大概", "讲解", "说明一下", "文章内容"]
+    english_keywords = ["summary", "summarize", "explain", "overview"]
+    return any(keyword in message for keyword in summary_keywords) or any(
+        keyword in lowered for keyword in english_keywords
+    )
+
+
+def _has_answer_intent(*, message: str, lowered: str) -> bool:
+    """判断用户是否在针对附件正文提问。"""
+
+    question_keywords = ["？", "?", "什么", "哪些", "如何", "怎么", "为什么", "是否", "问", "回答"]
+    english_keywords = ["question", "answer", "what", "why", "how"]
+    return any(keyword in message for keyword in question_keywords) or any(
         keyword in lowered for keyword in english_keywords
     )
 

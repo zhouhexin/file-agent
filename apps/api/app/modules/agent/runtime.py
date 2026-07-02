@@ -27,6 +27,13 @@ class ClassificationServiceProtocol(Protocol):
         """根据 document_id 和 extraction_run_id 返回分类结果。"""
 
 
+class DocumentSummaryServiceProtocol(Protocol):
+    """文档总结服务的最小接口，支持真实 LLM 和测试 fake 互换。"""
+
+    def summarize_documents(self, **kwargs: Any) -> str | None:
+        """基于完整文档正文返回总结文本。"""
+
+
 @dataclass(slots=True)
 class AgentRuntimeContext:
     """一次 AgentRun 所需的运行依赖。
@@ -39,3 +46,4 @@ class AgentRuntimeContext:
     context_loader: AgentContextLoader
     llm_intent_service: LLMIntentService
     classification_service: ClassificationServiceProtocol
+    document_summary_service: DocumentSummaryServiceProtocol

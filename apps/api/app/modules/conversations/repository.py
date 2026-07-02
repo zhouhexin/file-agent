@@ -64,6 +64,51 @@ class ConversationRepository:
         self.db.flush()
         return message
 
+    def get_recent_attachment_references(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+        limit: int = 10,
+    ) -> list[MessageAttachment]:
+        """读取当前会话最近消息中的附件引用，供“上面上传的文件”这类表达复用。"""
+
+        conversation = self.db.get(Conversation, conversation_id)
+        if conversation is None:
+            return []
+        if conversation.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Conversation belongs to another user")
+
+        messages = (
+            self.db.query(Message)
+            .filter(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(limit)
+            .all()
+        )
+        document_ids: list[str] = []
+        seen: set[str] = set()
+        for message in messages:
+            for item in message.attachments_json:
+                document_id = item.get("document_id") if isinstance(item, dict) else None
+                if document_id and document_id not in seen:
+                    seen.add(document_id)
+                    document_ids.append(document_id)
+        if not document_ids:
+            return []
+
+        owned_documents = (
+            self.db.query(Document)
+            .filter(Document.id.in_(document_ids), Document.user_id == user_id)
+            .all()
+        )
+        owned_ids = {document.id for document in owned_documents}
+        return [
+            MessageAttachment(document_id=document_id)
+            for document_id in document_ids
+            if document_id in owned_ids
+        ]
+
     def get_conversation_for_user(self, conversation_id: str, user_id: str) -> Conversation:
         """读取当前用户自己的会话，不存在或越权时返回明确错误。"""
 

@@ -14,6 +14,33 @@ from app.modules.agent.tool_registry import ToolRegistry
 from app.tests.helpers import clear_overrides, client_with_database
 
 
+class FakeOcrService:
+    """测试用 OCR 服务，避免依赖真实 PaddleOCR 或外部 LLM。"""
+
+    def __init__(self, text: str = "OCR 识别文本", source: str = "paddleocr_cpu", quality_score: float = 0.9):
+        """保存固定 OCR 返回值。"""
+
+        self.text = text
+        self.source = source
+        self.quality_score = quality_score
+        self.calls: list[dict] = []
+
+    def extract_image(self, *, image_path, page_number: int = 1):
+        """记录调用并返回固定 OCR 页面。"""
+
+        self.calls.append({"image_path": image_path, "page_number": page_number})
+        return {
+            "ok": True,
+            "text": self.text,
+            "source": self.source,
+            "provider_name": self.source,
+            "quality_score": self.quality_score,
+            "confidence": 0.88,
+            "blocks": [],
+            "warnings": [],
+        }
+
+
 def _auth_header(client: TestClient, username: str) -> dict[str, str]:
     """注册并登录测试用户，返回 Authorization header。"""
 
@@ -222,3 +249,56 @@ def test_extract_document_text_supports_doc_with_textutil(monkeypatch, tmp_path)
     assert result["status"] == "COMPLETED"
     assert result["extractor"] == "doc-textutil"
     assert "电子发票承诺书" in result["pages"][0]["text"]
+
+
+def test_extract_image_uses_injected_ocr_service(tmp_path):
+    """图片解析应通过 OCR 服务写入统一页面文本。"""
+
+    image_path = tmp_path / "scan.png"
+    image_path.write_bytes(b"fake-image")
+    ocr_service = FakeOcrService(text="电子发票承诺书 OCR 文本")
+
+    result = extract_document_text(
+        file_path=image_path,
+        filename="scan.png",
+        content_type="image/png",
+        ocr_service=ocr_service,
+    )
+
+    assert result["ok"] is True
+    assert result["extractor"] == "paddleocr_cpu"
+    assert result["pages"][0]["text"] == "电子发票承诺书 OCR 文本"
+    assert result["pages"][0]["metadata"]["ocr_source"] == "paddleocr_cpu"
+    assert ocr_service.calls[0]["page_number"] == 1
+
+
+def test_empty_pdf_triggers_ocr_fallback(monkeypatch, tmp_path):
+    """PDF 原生文本为空时应渲染页面并触发 OCR 兜底。"""
+
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"fake-pdf")
+    rendered_page = tmp_path / "page-1.png"
+    rendered_page.write_bytes(b"fake-render")
+    ocr_service = FakeOcrService(text="扫描 PDF OCR 文本")
+
+    monkeypatch.setattr(
+        "app.modules.files.extractors._extract_pdf_native_pages",
+        lambda file_path: [{"page_number": 1, "sheet_name": None, "text": "", "metadata": {"page_index": 0}}],
+    )
+    monkeypatch.setattr(
+        "app.modules.files.extractors._render_pdf_pages_for_ocr",
+        lambda file_path, page_numbers: {1: rendered_page},
+    )
+
+    result = extract_document_text(
+        file_path=pdf_path,
+        filename="scan.pdf",
+        content_type="application/pdf",
+        ocr_service=ocr_service,
+    )
+
+    assert result["ok"] is True
+    assert result["extractor"] == "pdf+paddleocr_cpu"
+    assert result["pages"][0]["text"] == "扫描 PDF OCR 文本"
+    assert result["pages"][0]["metadata"]["ocr_fallback"] is True
+    assert ocr_service.calls[0]["image_path"] == rendered_page

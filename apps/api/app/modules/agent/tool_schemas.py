@@ -49,6 +49,12 @@ class DocumentInsightsReadInput(StrictToolInput):
     document_ids: List[str] = Field(default_factory=list)
 
 
+class DocumentClassificationsReadInput(StrictToolInput):
+    """读取当前会话文件的历史分类建议。"""
+
+    document_ids: List[str] = Field(default_factory=list)
+
+
 class IntentSummaryInput(StrictToolInput):
     """仅记录 LLM 已理解用户需求的低风险 Tool 输入。"""
 

@@ -27,7 +27,7 @@ def build_agent_graph():
     graph.add_node("tool_dispatch", _logged_runtime_node("tool_dispatch", tool_dispatch))
     graph.add_node("async_job_wait", _logged_node("async_job_wait", async_job_wait))
     graph.add_node("evidence_or_change", _logged_runtime_node("evidence_or_change", evidence_or_change))
-    graph.add_node("response", _logged_node("response", response))
+    graph.add_node("response", _logged_runtime_node("response", response))
 
     graph.set_entry_point("chat_intake")
     graph.add_edge("chat_intake", "collect_context")
@@ -238,12 +238,29 @@ def evidence_or_change(state: AgentGraphState, runtime: Runtime[AgentRuntimeCont
     }
 
 
-def response(state: AgentGraphState) -> Dict[str, Any]:
+def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
     """生成面向用户的最终运行摘要。"""
 
     invocation_count = len(state.get("tool_invocations", []))
     document_results = state.get("document_results", [])
     if document_results:
+        requested_outputs = set(state.get("slots", {}).get("requested_outputs", []))
+        is_summary_intent = "SUMMAR" in str(state.get("intent") or "").upper()
+        is_answer_intent = "ANSWER" in str(state.get("intent") or "").upper()
+        if "summary" in requested_outputs or "answer" in requested_outputs or is_summary_intent or is_answer_intent:
+            llm_summary = runtime.context.document_summary_service.summarize_documents(
+                document_results=document_results,
+                tool_results=state.get("tool_results", []),
+                user_message=state.get("message", ""),
+            )
+            return {
+                "status": "COMPLETED",
+                "final_response": llm_summary
+                or _build_document_summary_response(
+                    document_results=document_results,
+                    tool_results=state.get("tool_results", []),
+                ),
+            }
         return {
             "status": "COMPLETED",
             "final_response": _build_document_results_response(document_results),
@@ -257,6 +274,13 @@ def response(state: AgentGraphState) -> Dict[str, Any]:
         }
 
     insight_documents = _insight_documents_from_results(state.get("tool_results", []))
+    classification_documents = _classification_documents_from_results(state.get("tool_results", []))
+    if classification_documents:
+        return {
+            "status": "COMPLETED",
+            "final_response": _build_classification_summary_response(classification_documents),
+        }
+
     if insight_documents:
         filenames = [
             item.get("filename") or item.get("document_id")
@@ -266,6 +290,14 @@ def response(state: AgentGraphState) -> Dict[str, Any]:
             "status": "COMPLETED",
             "final_response": f"已读取 {len(insight_documents)} 个文件的基础洞察：{', '.join(filenames)}。",
         }
+
+    intent_summary = _intent_summary_from_results(state.get("tool_results", []))
+    if intent_summary:
+        return {
+            "status": "COMPLETED",
+            "final_response": _build_general_chat_response(intent_summary),
+        }
+
     return {
         "status": "COMPLETED",
         "final_response": f"AgentRun completed with {invocation_count} tool invocation(s).",
@@ -315,6 +347,55 @@ def _insight_documents_from_results(tool_results: List[Dict[str, Any]]) -> List[
         if isinstance(result_documents, list):
             documents.extend([item for item in result_documents if isinstance(item, dict)])
     return documents
+
+
+def _classification_documents_from_results(tool_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """从 Tool 结果中提取历史分类建议文件列表。"""
+
+    for result in tool_results:
+        result_documents = result.get("documents")
+        if result.get("ok") and isinstance(result_documents, list):
+            if any(isinstance(item, dict) and "categories" in item for item in result_documents):
+                return [item for item in result_documents if isinstance(item, dict)]
+    return []
+
+
+def _build_classification_summary_response(documents: List[Dict[str, Any]]) -> str:
+    """把历史分类建议汇总为用户可读文本。"""
+
+    blocks = [f"已汇总 {len(documents)} 个文件的分类建议："]
+    for index, document in enumerate(documents, start=1):
+        filename = document.get("filename") or document.get("document_id") or "未知文件"
+        categories = [item for item in document.get("categories", []) if isinstance(item, dict)]
+        if not categories:
+            blocks.append(f"{index}. {filename}\n暂无分类建议。")
+            continue
+        category_lines = []
+        for category in categories[:5]:
+            confidence = float(category.get("confidence") or 0)
+            status = category.get("status") or "SUGGESTED"
+            # category_lines.append(f"- {category.get('name') or '其他'}，置信度 {confidence:.2f}，状态 {status}")
+            category_lines.append(f"- {category.get('name') or '其他'} ")
+        blocks.append(f"{index}. {filename}\n" + "\n".join(category_lines))
+    return "\n\n".join(blocks)
+
+
+def _intent_summary_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """从 Tool 结果中提取普通对话意图摘要。"""
+
+    for result in tool_results:
+        if result.get("ok") and result.get("intent"):
+            return result
+    return {}
+
+
+def _build_general_chat_response(intent_summary: Dict[str, Any]) -> str:
+    """为普通对话生成自然回复，避免泄露内部 Tool 审计信息。"""
+
+    user_goal = str(intent_summary.get("user_goal") or "").strip()
+    if user_goal in {"你好", "您好", "hello", "hi", "Hello", "Hi"}:
+        return "你好，我在。请告诉我你想聊什么。"
+    return "我已收到。请继续说明你的需求。"
 
 
 def _document_results_from_extraction_results(
@@ -388,6 +469,39 @@ def _build_document_results_response(document_results: List[Dict[str, Any]]) -> 
             f"解析结果：成功，提取 {result.get('page_count', 0)} 页/Sheet，共 {result.get('char_count', 0)} 个字符\n"
             "分类建议：\n"
             f"{_format_category_receipt(categories)}"
+        )
+    return "\n\n".join(blocks)
+
+
+def _build_document_summary_response(*, document_results: List[Dict[str, Any]], tool_results: List[Dict[str, Any]]) -> str:
+    """根据解析到的正文预览生成内容总结回执。"""
+
+    preview_by_document_id: Dict[str, str] = {}
+    for result in _extraction_results_from_results(tool_results):
+        document_id = str(result.get("document_id") or "")
+        pages = [page for page in result.get("pages", []) if isinstance(page, dict)]
+        preview_text = "\n".join(str(page.get("text_preview") or "").strip() for page in pages).strip()
+        preview_by_document_id[document_id] = preview_text
+
+    blocks = [f"已读取 {len(document_results)} 个文件，以下是内容总结："]
+    for index, result in enumerate(document_results, start=1):
+        filename = result.get("filename") or result.get("document_id") or "未知文件"
+        if result.get("extraction_status") == "FAILED":
+            error = (result.get("errors") or [{}])[0]
+            message = error.get("message") if isinstance(error, dict) else "未知错误"
+            blocks.append(f"{index}. {filename}\n无法总结：{message}")
+            continue
+
+        preview_text = preview_by_document_id.get(str(result.get("document_id") or ""), "")
+        if not preview_text:
+            blocks.append(f"{index}. {filename}\n暂未提取到可总结的正文内容。")
+            continue
+
+        clipped_preview = preview_text[:280]
+        suffix = "..." if len(preview_text) > len(clipped_preview) else ""
+        blocks.append(
+            f"{index}. {filename}\n"
+            f"内容概览：{clipped_preview}{suffix}"
         )
     return "\n\n".join(blocks)
 
