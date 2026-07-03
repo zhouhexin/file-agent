@@ -33,13 +33,8 @@ class OpenAICompatibleLLMClient:
     def complete_json(self, *, system_prompt: str, user_payload: Dict[str, Any]) -> Dict[str, Any]:
         """调用模型并解析 JSON 对象响应。"""
 
-        response = httpx.post(
-            f"{self.base_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
+        response = self._post_chat_completion(
+            payload={
                 "model": self.model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
@@ -47,10 +42,8 @@ class OpenAICompatibleLLMClient:
                 ],
                 "temperature": 0,
                 "response_format": {"type": "json_object"},
-            },
-            timeout=self.timeout_seconds,
+            }
         )
-        response.raise_for_status()
         data = response.json()
         try:
             content = data["choices"][0]["message"]["content"]
@@ -61,16 +54,34 @@ class OpenAICompatibleLLMClient:
             raise LLMResponseError("LLM JSON 响应必须是对象。")
         return parsed
 
+    def complete_text(self, *, system_prompt: str, user_payload: Dict[str, Any]) -> str:
+        """调用模型并返回普通文本，供总结、讲解和问答类自然语言输出使用。"""
+
+        response = self._post_chat_completion(
+            payload={
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                ],
+                "temperature": 0,
+            }
+        )
+        data = response.json()
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise LLMResponseError("LLM 响应缺少 choices[0].message.content。") from exc
+        text = str(content or "").strip()
+        if not text:
+            raise LLMResponseError("LLM 文本响应为空。")
+        return text
+
     def complete_multimodal_json(self, *, system_prompt: str, text: str, image_url: str) -> Dict[str, Any]:
         """调用支持 image_url 的 OpenAI-compatible Chat Completions 并解析 JSON。"""
 
-        response = httpx.post(
-            f"{self.base_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
+        response = self._post_chat_completion(
+            payload={
                 "model": self.model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
@@ -84,10 +95,8 @@ class OpenAICompatibleLLMClient:
                 ],
                 "temperature": 0,
                 "response_format": {"type": "json_object"},
-            },
-            timeout=self.timeout_seconds,
+            }
         )
-        response.raise_for_status()
         data = response.json()
         try:
             content = data["choices"][0]["message"]["content"]
@@ -97,6 +106,28 @@ class OpenAICompatibleLLMClient:
         if not isinstance(parsed, dict):
             raise LLMResponseError("LLM JSON 响应必须是对象。")
         return parsed
+
+    def _post_chat_completion(self, *, payload: Dict[str, Any]) -> httpx.Response:
+        """统一调用 Chat Completions，并把网络和 HTTP 错误收敛成 LLMResponseError。"""
+
+        try:
+            response = httpx.post(
+                f"{self.base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=self.timeout_seconds,
+            )
+            response.raise_for_status()
+            return response
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            body = exc.response.text[:300]
+            raise LLMResponseError(f"LLM HTTP 请求失败：status={status_code}，model={self.model}，body={body}") from exc
+        except httpx.RequestError as exc:
+            raise LLMResponseError(f"LLM 请求失败：{exc.__class__.__name__}，model={self.model}，message={exc}") from exc
 
 
 def _parse_json_object_from_content(content: str) -> Dict[str, Any]:

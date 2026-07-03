@@ -70,8 +70,8 @@ export function AgentRunReceipt({
     return (
       <section className="agent-run-receipt">
         <div className="agent-run-summary">
-          <strong>正在处理文件</strong>
-          <span>Agent 正在解析附件并生成分类建议</span>
+          <strong>正在处理</strong>
+          <span>Agent 正在解析...</span>
         </div>
       </section>
     );
@@ -82,7 +82,7 @@ export function AgentRunReceipt({
       <section className="agent-run-receipt">
         <div className="agent-run-summary agent-run-summary--failed">
           <strong>处理失败</strong>
-          <span>请检查附件或稍后重新发送。</span>
+          <span>请稍后重新发送。</span>
         </div>
       </section>
     );
@@ -98,7 +98,8 @@ export function AgentRunReceipt({
     ) : null;
   }
 
-  if (results.length === 0 && attachments.length === 0) {
+  if (results.length === 0) {
+    // 纯聊天、分类汇总、历史分类读取等任务没有逐文件处理结果时，只展示 Agent 文本回复。
     return agentRun.final_response ? (
       <p className="agent-chat-response">{agentRun.final_response}</p>
     ) : null;

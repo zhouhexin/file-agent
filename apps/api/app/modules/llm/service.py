@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from pydantic import ValidationError
+
 from app.core.config import Settings, get_settings
-from app.modules.llm.client import OpenAICompatibleLLMClient
+from app.modules.llm.client import LLMResponseError, OpenAICompatibleLLMClient
 from app.modules.llm.prompts import USER_INTENT_SYSTEM_PROMPT
 from app.modules.llm.schemas import UserIntentPlan
 
@@ -42,4 +44,8 @@ class LLMIntentService:
             "output_schema": UserIntentPlan.model_json_schema(),
         }
         parsed = client.complete_json(system_prompt=USER_INTENT_SYSTEM_PROMPT, user_payload=payload)
-        return UserIntentPlan.model_validate(parsed)
+        try:
+            return UserIntentPlan.model_validate(parsed)
+        except ValidationError as exc:
+            # LLM 可能返回合法 JSON 但不符合受控 schema；必须转成可兜底错误，不能让 Pydantic 异常穿透到 API。
+            raise LLMResponseError(f"LLM 意图响应不符合 schema：{exc}") from exc

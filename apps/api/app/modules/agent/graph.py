@@ -15,6 +15,7 @@ from app.core.logging import log_context, log_event
 from app.modules.agent.planner import build_plan_from_user_intent
 from app.modules.agent.runtime import AgentRuntimeContext
 from app.modules.agent.state import AgentGraphState, ToolInvocationRecord
+from app.modules.llm.client import LLMResponseError
 
 
 def build_agent_graph():
@@ -129,17 +130,39 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
     """调用 Planner，并且只保存通过校验的声明式计划。"""
 
     if state.get("planner_mode") == "llm":
-        intent_plan = runtime.context.llm_intent_service.understand_user_request(
-            message=state["message"],
-            attachments=state.get("attachments", []),
-            context_documents=state.get("context_documents", []),
-        )
-        plan = build_plan_from_user_intent(
-            intent_plan=intent_plan,
-            message=state["message"],
-            attachments=state.get("attachments", []),
-        )
-        user_intent_plan = intent_plan.model_dump()
+        try:
+            intent_plan = runtime.context.llm_intent_service.understand_user_request(
+                message=state["message"],
+                attachments=state.get("attachments", []),
+                context_documents=state.get("context_documents", []),
+            )
+            plan = build_plan_from_user_intent(
+                intent_plan=intent_plan,
+                message=state["message"],
+                attachments=state.get("attachments", []),
+            )
+            user_intent_plan = intent_plan.model_dump()
+        except LLMResponseError as exc:
+            # LLM 意图理解失败时回退确定性 Planner，保证消息入口可用；错误原因只进入审计快照，不交给 Tool 执行。
+            log_event(
+                "llm.intent.fallback",
+                level="WARNING",
+                status="FAILED",
+                error_code=exc.__class__.__name__,
+                message=str(exc),
+            )
+            plan = runtime.context.planner.plan(
+                conversation_id=state["conversation_id"],
+                user_id=state["user_id"],
+                message_id=state["message_id"],
+                message=state["message"],
+                attachments=state.get("attachments", []),
+            )
+            user_intent_plan = {
+                "fallback_reason": "LLM_INTENT_FAILED",
+                "error_code": exc.__class__.__name__,
+                "message": str(exc),
+            }
     else:
         plan = runtime.context.planner.plan(
             conversation_id=state["conversation_id"],

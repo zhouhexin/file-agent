@@ -136,6 +136,24 @@ class DeterministicPlanner:
                 confirmation_policy={"operation_plan_required": True},
             )
 
+        if _has_plain_document_summary_intent(message=message, lowered=lowered):
+            return PlannerOutput(
+                intent="SUMMARIZE_DOCUMENTS",
+                user_goal=message,
+                slots={"document_ids": document_ids, "requested_outputs": ["text", "summary", "receipt"]},
+                selected_skills=["chat-intake", "document-text-extract", "document-reading"],
+                steps=[
+                    _extract_document_text_step(
+                        document_id=item,
+                        index=index,
+                        force_reprocess=_should_force_reprocess(message=message, lowered=lowered),
+                    )
+                    for index, item in enumerate(document_ids, start=1)
+                ],
+                evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+                confirmation_policy={"operation_plan_required": False},
+            )
+
         if _has_classification_summary_intent(message=message):
             return PlannerOutput(
                 intent="SUMMARIZE_CLASSIFICATIONS",
@@ -280,6 +298,31 @@ def build_plan_from_user_intent(
 
     document_ids = intent_plan.referenced_document_ids or _document_ids(attachments)
     requested_capabilities = set(intent_plan.required_capabilities).union(intent_plan.tool_plan_hint)
+    if _has_plain_document_summary_intent(message=message, lowered=message.lower()):
+        extraction_document_ids = document_ids or [_first_document_id(attachments)]
+        return PlannerOutput(
+            intent="SUMMARIZE_DOCUMENTS",
+            user_goal=intent_plan.user_goal,
+            slots={
+                "document_ids": extraction_document_ids,
+                "requested_outputs": ["text", "summary", "receipt"],
+                "response_style": intent_plan.response_style,
+                "clarification_question": intent_plan.clarification_question,
+                "llm_intent_plan": intent_plan.model_dump(),
+            },
+            selected_skills=["llm-understanding", "document-text-extract", "document-reading"],
+            steps=[
+                _extract_document_text_step(
+                    document_id=document_id,
+                    index=index,
+                    force_reprocess=_should_force_reprocess(message=message, lowered=message.lower()),
+                )
+                for index, document_id in enumerate(extraction_document_ids, start=1)
+            ],
+            evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+            confirmation_policy={"operation_plan_required": False},
+        )
+
     if _has_classification_summary_intent(message=message) or requested_capabilities.intersection(DOCUMENT_CLASSIFICATION_HINTS):
         return PlannerOutput(
             intent="SUMMARIZE_CLASSIFICATIONS",
@@ -505,6 +548,14 @@ def _has_classification_summary_intent(*, message: str) -> bool:
     classification_keywords = ["分类", "归类", "类别"]
     return any(keyword in message for keyword in summary_keywords) and any(
         keyword in message for keyword in classification_keywords
+    )
+
+
+def _has_plain_document_summary_intent(*, message: str, lowered: str) -> bool:
+    """判断用户要总结文件正文，而不是查看已有分类建议。"""
+
+    return _has_summary_intent(message=message, lowered=lowered) and not _has_classification_summary_intent(
+        message=message
     )
 
 

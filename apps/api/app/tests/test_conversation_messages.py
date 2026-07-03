@@ -207,7 +207,7 @@ def test_message_can_summarize_previous_classification_results():
         "/api/conversations/classification-summary-chat/messages",
         headers=headers,
         json={
-            "content": "总结一下之前上传的所有项目的分类",
+            "content": "帮我总结一下刚刚上传文件的分类",
             "attachments": [],
         },
     )
@@ -219,6 +219,65 @@ def test_message_can_summarize_previous_classification_results():
     assert "基础洞察" not in final_response
     assert "职称材料.txt" in final_response
     assert "科研成果.txt" in final_response
+    clear_overrides()
+
+
+def test_just_uploaded_classification_uses_latest_attachment_batch_only():
+    """“刚刚上传文件”应指向最近一条带附件消息中的整批文件，而不是所有历史附件。"""
+
+    client, _ = client_with_database()
+    headers = _auth_header(client, "latest-batch-user")
+    old_first_id = _upload_document(client, headers, filename="旧批次-职称.txt", content="教师职称申报材料".encode())
+    old_second_id = _upload_document(client, headers, filename="旧批次-科研.txt", content="学院科研成果资助材料".encode())
+    latest_id = _upload_document(client, headers, filename="最新批次-财务.txt", content="电子发票财务承诺材料".encode())
+
+    old_response = client.post(
+        "/api/conversations/latest-batch-chat/messages",
+        headers=headers,
+        json={
+            "content": "帮我读取并分类这批文件",
+            "attachments": [{"document_id": old_first_id}, {"document_id": old_second_id}],
+        },
+    )
+    assert old_response.status_code == 200
+
+    latest_response = client.post(
+        "/api/conversations/latest-batch-chat/messages",
+        headers=headers,
+        json={
+            "content": "帮我读取并分类这个文件",
+            "attachments": [{"document_id": latest_id}],
+        },
+    )
+    assert latest_response.status_code == 200
+
+    historical_summary_response = client.post(
+        "/api/conversations/latest-batch-chat/messages",
+        headers=headers,
+        json={
+            "content": "总结一下之前上传的所有项目分类",
+            "attachments": [],
+        },
+    )
+    assert historical_summary_response.status_code == 200
+    assert len(historical_summary_response.json()["message"]["attachments"]) == 3
+
+    summary_response = client.post(
+        "/api/conversations/latest-batch-chat/messages",
+        headers=headers,
+        json={
+            "content": "帮我总结一下刚刚上传的所有文件分类",
+            "attachments": [],
+        },
+    )
+
+    assert summary_response.status_code == 200
+    data = summary_response.json()
+    assert data["message"]["attachments"] == [{"document_id": latest_id}]
+    final_response = data["agent_run"]["final_response"]
+    assert "最新批次-财务.txt" in final_response
+    assert "旧批次-职称.txt" not in final_response
+    assert "旧批次-科研.txt" not in final_response
     clear_overrides()
 
 

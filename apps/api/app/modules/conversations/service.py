@@ -41,21 +41,31 @@ class ConversationMessageService:
         """
 
         attachments = list(request.attachments)
+        attachment_source = "uploaded"
         if not attachments and _should_infer_recent_attachments(request.content):
-            recent_attachments = self.repository.get_recent_attachment_references(
-                conversation_id=conversation_id,
-                user_id=user_id,
+            recent_attachments = (
+                self.repository.get_latest_attachment_batch_references(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                )
+                if _should_use_latest_attachment_batch(request.content)
+                else self.repository.get_recent_attachment_references(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                )
             )
             attachments = _select_referenced_attachments(
                 content=request.content,
                 recent_attachments=recent_attachments,
             )
+            attachment_source = "inferred_context"
 
         message = self.repository.create_user_message(
             conversation_id=conversation_id,
             user_id=user_id,
             content=request.content,
             attachments=attachments,
+            attachment_source=attachment_source,
         )
         FileRepository(self.db).lock_documents_for_message(
             document_ids=[attachment.document_id for attachment in attachments],
@@ -87,7 +97,7 @@ class ConversationMessageService:
 def _should_infer_recent_attachments(content: str) -> bool:
     """判断用户是否在无附件消息中引用了当前会话上文文件。"""
 
-    reference_keywords = ["上面", "上文", "前面", "刚才", "之前", "已上传", "上传的"]
+    reference_keywords = ["上面", "上文", "前面", "刚才", "刚刚", "刚上传", "之前", "已上传", "上传的"]
     file_task_keywords = ["文件", "附件", "文章", "读取", "总结", "讲解", "内容", "分析", "分类", "归类", "重新"]
     has_file_task = any(
         keyword in content for keyword in file_task_keywords
@@ -110,6 +120,16 @@ def _select_referenced_attachments(
     if index < 0 or index >= len(recent_attachments):
         return []
     return [recent_attachments[index]]
+
+
+def _should_use_latest_attachment_batch(content: str) -> bool:
+    """判断用户是否指向最近一次上传批次，而不是历史全部文件。"""
+
+    latest_batch_keywords = ["刚刚", "刚上传", "刚才上传", "刚才发", "刚发"]
+    all_history_keywords = ["历史", "之前所有", "之前全部", "全部上传", "所有上传", "所有已上传"]
+    return any(keyword in content for keyword in latest_batch_keywords) and not any(
+        keyword in content for keyword in all_history_keywords
+    )
 
 
 def _extract_file_ordinal(content: str) -> int | None:

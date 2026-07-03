@@ -8,11 +8,12 @@ from typing import Any, Dict, List
 from sqlalchemy.orm import Session
 
 from app.db.models import DocumentPage
+from app.modules.llm.client import LLMResponseError
 
 
 DOCUMENT_SUMMARY_SYSTEM_PROMPT = """你是文件智能体的文档阅读助手。
 请严格基于用户提供的文件正文，用中文完成总结、讲解或回答用户问题，不要编造正文中不存在的信息。
-如果正文为空，请说明无法基于原文回答。输出必须是 JSON 对象，字段为 summary。"""
+如果正文为空，请说明无法基于原文回答。直接输出面向用户的中文文本，不要输出 JSON。"""
 
 
 @dataclass(slots=True)
@@ -64,17 +65,21 @@ class LLMDocumentSummaryService:
         if not documents:
             return None
 
-        total_chars = sum(len(document.text) for document in documents)
-        if total_chars <= self.small_document_limit:
-            return self._complete_summary(
-                mode="document_summary",
-                user_message=user_message,
+        try:
+            total_chars = sum(len(document.text) for document in documents)
+            if total_chars <= self.small_document_limit:
+                return self._complete_summary(
+                    mode="document_summary",
+                    user_message=user_message,
+                    documents=documents,
+                )
+            return self._summarize_large_documents(
                 documents=documents,
+                user_message=user_message,
             )
-        return self._summarize_large_documents(
-            documents=documents,
-            user_message=user_message,
-        )
+        except LLMResponseError:
+            # 总结输出是用户体验层能力；模型格式异常时交给 Graph 使用确定性回执兜底，不能让请求变成 500。
+            return None
 
     def _load_document_texts(
         self,
@@ -166,7 +171,7 @@ class LLMDocumentSummaryService:
                     )
                 )
 
-        parsed = self.client.complete_json(
+        return self._complete_with_payload(
             system_prompt=DOCUMENT_SUMMARY_SYSTEM_PROMPT,
             user_payload={
                 "mode": "merge_summary",
@@ -174,7 +179,6 @@ class LLMDocumentSummaryService:
                 "partial_summaries": partial_summaries,
             },
         )
-        return _summary_from_parsed(parsed)
 
     def _complete_summary(
         self,
@@ -185,7 +189,7 @@ class LLMDocumentSummaryService:
     ) -> str:
         """调用 LLM 生成单次总结。"""
 
-        parsed = self.client.complete_json(
+        return self._complete_with_payload(
             system_prompt=DOCUMENT_SUMMARY_SYSTEM_PROMPT,
             user_payload={
                 "mode": mode,
@@ -200,6 +204,15 @@ class LLMDocumentSummaryService:
                 ],
             },
         )
+
+    def _complete_with_payload(self, *, system_prompt: str, user_payload: Dict[str, Any]) -> str:
+        """优先使用普通文本调用；旧测试或旧客户端缺少该方法时保留 JSON 兼容路径。"""
+
+        if hasattr(self.client, "complete_text"):
+            text = str(self.client.complete_text(system_prompt=system_prompt, user_payload=user_payload) or "").strip()
+            return text or "LLM 未返回可用总结。"
+
+        parsed = self.client.complete_json(system_prompt=system_prompt, user_payload=user_payload)
         return _summary_from_parsed(parsed)
 
 

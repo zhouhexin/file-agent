@@ -12,11 +12,12 @@ from app.main import app
 from app.modules.llm.schemas import UserIntentPlan
 from app.modules.agent.graph import _build_document_results_response
 from app.modules.agent.repository import _safe_graph_state_snapshot
-from app.modules.agent.planner import DeterministicPlanner
+from app.modules.agent.planner import DeterministicPlanner, build_plan_from_user_intent
 from app.modules.agent.service import AgentRuntimeService
 from app.modules.agent.state import ToolInvocationRecord
 from app.modules.agent.tool_registry import ToolRegistry, UnknownToolError
 from app.modules.agent.tool_schemas import ToolInputValidationError
+from app.modules.llm.client import LLMResponseError
 
 
 def test_get_agent_tools_returns_mvp_catalog():
@@ -73,6 +74,108 @@ def test_planner_returns_declarative_tool_plan():
     ]
     assert [step.tool_name for step in plan.steps] == ["extract-document-text"]
     assert all(not step.requires_confirmation for step in plan.steps)
+
+
+def test_summary_of_previous_uploaded_files_uses_text_summary_plan():
+    """“总结之前上传的文件”必须总结正文内容，不能回落成分类回执。"""
+
+    planner = DeterministicPlanner()
+
+    plan = planner.plan(
+        conversation_id="conv-summary",
+        user_id="user-1",
+        message_id="msg-summary",
+        message="再次帮我对之前所有上传的文件进行总结",
+        attachments=[{"document_id": "doc-1"}, {"document_id": "doc-2"}],
+    )
+
+    assert plan.intent == "SUMMARIZE_DOCUMENTS"
+    assert plan.slots["requested_outputs"] == ["text", "summary", "receipt"]
+    assert [step.tool_name for step in plan.steps] == ["extract-document-text", "extract-document-text"]
+
+
+def test_llm_classification_hint_is_overridden_for_plain_file_summary():
+    """LLM 若把“总结文件”误判成分类读取，Planner 也必须按正文总结纠偏。"""
+
+    intent_plan = UserIntentPlan(
+        intent="SUMMARIZE_CLASSIFICATIONS",
+        user_goal="再次帮我对之前所有上传的文件进行总结",
+        needs_file_context=True,
+        referenced_document_ids=["doc-1", "doc-2"],
+        required_capabilities=["read_document_classifications"],
+        skip_completed_ingest=True,
+        tool_plan_hint=["read-document-classifications"],
+        response_style="concise",
+    )
+
+    plan = build_plan_from_user_intent(
+        intent_plan=intent_plan,
+        message="再次帮我对之前所有上传的文件进行总结",
+        attachments=[{"document_id": "doc-1"}, {"document_id": "doc-2"}],
+    )
+
+    assert plan.intent == "SUMMARIZE_DOCUMENTS"
+    assert plan.slots["requested_outputs"] == ["text", "summary", "receipt"]
+    assert [step.tool_name for step in plan.steps] == ["extract-document-text", "extract-document-text"]
+
+
+def test_planning_falls_back_when_llm_intent_schema_is_invalid():
+    """LLM 意图响应异常时，planning 节点必须回退确定性 Planner，避免接口 500。"""
+
+    class BrokenLLMIntentService:
+        """模拟真实模型返回坏 JSON 后被服务层转成 LLMResponseError。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """始终抛出可兜底的 LLM 错误。"""
+
+            raise LLMResponseError("LLM 意图响应不符合 schema。")
+
+    class FakeRegistry:
+        """测试用 Registry，返回稳定的正文解析结果。"""
+
+        def invoke(self, tool_name, input_json):
+            """模拟 extract-document-text 成功解析正文。"""
+
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "document_id": input_json["document_id"],
+                    "extraction_run_id": "run-fallback-summary",
+                    "status": "COMPLETED",
+                    "extractor": "plain-text",
+                    "pages": [
+                        {
+                            "page_number": 1,
+                            "text_preview": "这份文件说明了电子发票承诺事项和办理要求。",
+                            "char_count": 24,
+                        }
+                    ],
+                    "error": None,
+                },
+                status="COMPLETED",
+            )
+
+    service = AgentRuntimeService(
+        registry_factory=lambda db, user_id: FakeRegistry(),
+        llm_intent_service=BrokenLLMIntentService(),
+    )
+
+    result = service.run_message(
+        conversation_id="conv-llm-fallback",
+        user_id="user-1",
+        message_id="msg-llm-fallback",
+        message="总结这个文件",
+        attachments=[{"document_id": "doc-1"}],
+    )
+
+    assert result.status == "COMPLETED"
+    assert result.intent == "SUMMARIZE_DOCUMENTS"
+    assert [step["tool_name"] for step in result.tool_plan["steps"]] == ["extract-document-text"]
+    assert "内容总结" in (result.final_response or "")
 
 
 def test_unknown_tool_is_rejected():
@@ -238,10 +341,10 @@ def test_llm_intent_reads_document_insights_instead_of_reingesting():
         enabled = True
 
         def understand_user_request(self, *, message, attachments, context_documents):
-            """返回稳定的文件总结意图。"""
+            """返回稳定的文件信息读取意图。"""
 
             return UserIntentPlan(
-                intent="SUMMARIZE_DOCUMENTS",
+                intent="READ_DOCUMENT_INSIGHTS",
                 user_goal=message,
                 needs_file_context=True,
                 referenced_document_ids=[attachments[0]["document_id"]],
@@ -257,12 +360,12 @@ def test_llm_intent_reads_document_insights_instead_of_reingesting():
         conversation_id="conv-1",
         user_id="user-1",
         message_id="msg-1",
-        message="总结我刚才上传的文件",
+        message="查看我刚才上传的文件信息",
         attachments=[{"document_id": "doc-1"}],
     )
 
     assert result.status == "COMPLETED"
-    assert result.intent == "SUMMARIZE_DOCUMENTS"
+    assert result.intent == "READ_DOCUMENT_INSIGHTS"
     assert result.selected_skills == ["llm-understanding", "document-insight-read"]
     assert [item.tool_name for item in result.tool_invocations] == ["read-document-insights"]
     assert "document-convert" not in [item.tool_name for item in result.tool_invocations]

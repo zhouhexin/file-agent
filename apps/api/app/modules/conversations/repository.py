@@ -49,6 +49,7 @@ class ConversationRepository:
         user_id: str,
         content: str,
         attachments: list[MessageAttachment],
+        attachment_source: str = "uploaded",
     ) -> Message:
         """创建用户消息并保存附件引用 JSON。"""
 
@@ -58,7 +59,14 @@ class ConversationRepository:
             user_id=user_id,
             role="user",
             content=content,
-            attachments_json=[attachment.model_dump() for attachment in attachments],
+            # attachments_json 是消息上下文的一部分，额外保存 source 用于区分真实上传和后端自动补齐。
+            attachments_json=[
+                {
+                    **attachment.model_dump(),
+                    "source": attachment_source,
+                }
+                for attachment in attachments
+            ],
         )
         self.db.add(message)
         self.db.flush()
@@ -94,6 +102,56 @@ class ConversationRepository:
                 if document_id and document_id not in seen:
                     seen.add(document_id)
                     document_ids.append(document_id)
+        if not document_ids:
+            return []
+
+        owned_documents = (
+            self.db.query(Document)
+            .filter(Document.id.in_(document_ids), Document.user_id == user_id)
+            .all()
+        )
+        owned_ids = {document.id for document in owned_documents}
+        return [
+            MessageAttachment(document_id=document_id)
+            for document_id in document_ids
+            if document_id in owned_ids
+        ]
+
+    def get_latest_attachment_batch_references(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+        limit: int = 20,
+    ) -> list[MessageAttachment]:
+        """读取当前会话最近一条带附件消息中的整批附件，用于“刚刚上传的文件”。"""
+
+        conversation = self.db.get(Conversation, conversation_id)
+        if conversation is None:
+            return []
+        if conversation.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Conversation belongs to another user")
+
+        messages = (
+            self.db.query(Message)
+            .filter(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(limit)
+            .all()
+        )
+        document_ids: list[str] = []
+        seen: set[str] = set()
+        for message in messages:
+            if not message.attachments_json:
+                continue
+            if _is_inferred_attachment_message(message):
+                continue
+            for item in message.attachments_json:
+                document_id = item.get("document_id") if isinstance(item, dict) else None
+                if document_id and document_id not in seen:
+                    seen.add(document_id)
+                    document_ids.append(document_id)
+            break
         if not document_ids:
             return []
 
@@ -235,3 +293,31 @@ class ConversationRepository:
                 for item in message.attachments_json
             ],
         )
+
+
+def _is_inferred_attachment_message(message: Message) -> bool:
+    """判断消息附件是否来自后端上下文推断，避免污染“最近上传批次”。"""
+
+    attachments = [
+        item
+        for item in message.attachments_json
+        if isinstance(item, dict) and item.get("document_id")
+    ]
+    if not attachments:
+        return False
+    sources = {item.get("source") for item in attachments}
+    if "uploaded" in sources:
+        return False
+    if "inferred_context" in sources:
+        return True
+    return _looks_like_context_reference_message(message.content)
+
+
+def _looks_like_context_reference_message(content: str) -> bool:
+    """兼容历史数据：旧消息没有 source 时，用文本判断是否是上下文引用消息。"""
+
+    reference_keywords = ["上面", "上文", "前面", "刚才", "刚刚", "刚上传", "之前", "已上传", "上传的"]
+    file_task_keywords = ["文件", "附件", "文章", "读取", "总结", "讲解", "内容", "分析", "分类", "归类", "重新"]
+    return any(keyword in content for keyword in reference_keywords) and any(
+        keyword in content for keyword in file_task_keywords
+    )
