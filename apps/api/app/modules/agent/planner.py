@@ -26,6 +26,8 @@ TEXT_EXTRACTION_HINTS = {
 }
 DOCUMENT_INSIGHT_HINTS = {"read_document_insights", "read-document-insights"}
 DOCUMENT_CLASSIFICATION_HINTS = {"read_document_classifications", "read-document-classifications"}
+AGENT_CAPABILITY_HINTS = {"read_agent_capabilities", "read-agent-capabilities", "capability_help"}
+CLASSIFICATION_TAXONOMY_HINTS = {"read_classification_taxonomy", "read-classification-taxonomy"}
 
 
 class PlannerStep(BaseModel):
@@ -105,6 +107,11 @@ class DeterministicPlanner:
         """根据用户消息和附件上下文生成声明式计划。"""
 
         lowered = message.lower()
+        if _has_capability_help_intent(message=message, lowered=lowered):
+            return _capability_help_plan(user_goal=message)
+        if _has_classification_taxonomy_intent(message=message, lowered=lowered):
+            return _classification_taxonomy_plan(user_goal=message)
+
         if (
             not attachments
             and not _should_extract_text(message=message, lowered=lowered)
@@ -298,6 +305,19 @@ def build_plan_from_user_intent(
 
     document_ids = intent_plan.referenced_document_ids or _document_ids(attachments)
     requested_capabilities = set(intent_plan.required_capabilities).union(intent_plan.tool_plan_hint)
+    if (
+        _has_capability_help_intent(message=message, lowered=message.lower())
+        or intent_plan.intent == "CAPABILITY_HELP"
+        or requested_capabilities.intersection(AGENT_CAPABILITY_HINTS)
+    ):
+        return _capability_help_plan(user_goal=intent_plan.user_goal or message)
+    if (
+        _has_classification_taxonomy_intent(message=message, lowered=message.lower())
+        or intent_plan.intent == "LIST_CLASSIFICATION_TAXONOMY"
+        or requested_capabilities.intersection(CLASSIFICATION_TAXONOMY_HINTS)
+    ):
+        return _classification_taxonomy_plan(user_goal=intent_plan.user_goal or message)
+
     if _has_plain_document_summary_intent(message=message, lowered=message.lower()):
         extraction_document_ids = document_ids or [_first_document_id(attachments)]
         return PlannerOutput(
@@ -463,6 +483,56 @@ def _general_chat_plan(*, intent: str, user_goal: str) -> PlannerOutput:
     )
 
 
+def _capability_help_plan(*, user_goal: str) -> PlannerOutput:
+    """生成读取固定能力清单的声明式计划。"""
+
+    return PlannerOutput(
+        intent="CAPABILITY_HELP",
+        user_goal=user_goal,
+        slots={"document_ids": [], "response_style": "concise"},
+        selected_skills=["capability-help"],
+        steps=[
+            {
+                "step_id": "step-1",
+                "skill": "capability-help",
+                "tool_name": "read-agent-capabilities",
+                "input": {"detail_level": "brief"},
+                "requires_confirmation": False,
+                "risk_level": "low",
+                "expected_outputs": ["agent_capabilities"],
+                "writes": [],
+            }
+        ],
+        evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+        confirmation_policy={"operation_plan_required": False},
+    )
+
+
+def _classification_taxonomy_plan(*, user_goal: str) -> PlannerOutput:
+    """生成读取系统固定分类目录的声明式计划。"""
+
+    return PlannerOutput(
+        intent="LIST_CLASSIFICATION_TAXONOMY",
+        user_goal=user_goal,
+        slots={"document_ids": [], "response_style": "concise"},
+        selected_skills=["classification-taxonomy-read"],
+        steps=[
+            {
+                "step_id": "step-1",
+                "skill": "classification-taxonomy-read",
+                "tool_name": "read-classification-taxonomy",
+                "input": {"detail_level": "brief", "max_depth": 2},
+                "requires_confirmation": False,
+                "risk_level": "low",
+                "expected_outputs": ["classification_taxonomy"],
+                "writes": [],
+            }
+        ],
+        evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+        confirmation_policy={"operation_plan_required": False},
+    )
+
+
 def _first_document_id(attachments: List[Dict[str, Any]]) -> str:
     """为 MVP 确定性计划解析第一个附件文档 id。"""
 
@@ -537,6 +607,26 @@ def _has_classification_intent(*, message: str, lowered: str) -> bool:
     classification_keywords = ["分类", "归类", "整理"]
     english_keywords = ["classify", "categorize"]
     return any(keyword in message for keyword in classification_keywords) or any(
+        keyword in lowered for keyword in english_keywords
+    )
+
+
+def _has_capability_help_intent(*, message: str, lowered: str) -> bool:
+    """判断用户是否在询问 File Agent 当前可用能力。"""
+
+    chinese_patterns = ["你可以做什么", "你能做什么", "你有什么功能", "系统有什么功能", "可以帮我做什么", "你可以实现什么功能"]
+    english_patterns = ["what can you do", "capabilities", "what are your features"]
+    return any(pattern in message for pattern in chinese_patterns) or any(
+        pattern in lowered for pattern in english_patterns
+    )
+
+
+def _has_classification_taxonomy_intent(*, message: str, lowered: str) -> bool:
+    """判断用户是否在询问系统固定分类目录，而不是文件已生成的分类建议。"""
+
+    taxonomy_keywords = ["分类目录", "分类体系", "归类表", "文件归类表", "支持的文件分类", "支持哪些分类", "有哪些分类"]
+    english_keywords = ["taxonomy", "classification catalog", "category catalog"]
+    return any(keyword in message for keyword in taxonomy_keywords) or any(
         keyword in lowered for keyword in english_keywords
     )
 

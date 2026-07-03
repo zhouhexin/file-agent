@@ -6,6 +6,7 @@ HTTP 消息必须能进入 LangGraph Agent Runtime，但当前不依赖真实大
 
 from fastapi.testclient import TestClient
 
+from app.db.models import Message
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -278,6 +279,43 @@ def test_just_uploaded_classification_uses_latest_attachment_batch_only():
     assert "最新批次-财务.txt" in final_response
     assert "旧批次-职称.txt" not in final_response
     assert "旧批次-科研.txt" not in final_response
+    clear_overrides()
+
+
+def test_uploaded_message_attachments_share_batch_id():
+    """同一条用户消息里的真实上传附件必须带同一个 batch_id，供后续“刚刚上传”精确引用。"""
+
+    client, session_factory = client_with_database()
+    headers = _auth_header(client, "batch-marker-user")
+    first_document_id = _upload_document(client, headers, filename="批次-1.txt", content=b"first")
+    second_document_id = _upload_document(client, headers, filename="批次-2.txt", content=b"second")
+
+    response = client.post(
+        "/api/conversations/batch-marker-chat/messages",
+        headers=headers,
+        json={
+            "content": "帮我读取并分类这批文件",
+            "attachments": [
+                {"document_id": first_document_id},
+                {"document_id": second_document_id},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    with session_factory() as db:
+        message = (
+            db.query(Message)
+            .filter(Message.conversation_id == "batch-marker-chat")
+            .order_by(Message.created_at.desc())
+            .first()
+        )
+        assert message is not None
+        sources = {item.get("source") for item in message.attachments_json}
+        batch_ids = {item.get("batch_id") for item in message.attachments_json}
+    assert sources == {"uploaded"}
+    assert len(batch_ids) == 1
+    assert None not in batch_ids
     clear_overrides()
 
 

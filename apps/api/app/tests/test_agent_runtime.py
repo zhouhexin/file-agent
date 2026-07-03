@@ -397,6 +397,107 @@ def test_deterministic_greeting_without_attachments_uses_general_chat():
     assert "文件" not in (result.final_response or "")
 
 
+def test_capability_help_uses_fixed_capability_catalog():
+    """用户询问系统能力时，必须读取固定能力清单，不能返回通用 fallback。"""
+
+    class DisabledLLMIntentService:
+        """测试用关闭态 LLM 服务，强制走确定性 Planner。"""
+
+        enabled = False
+
+    service = AgentRuntimeService(llm_intent_service=DisabledLLMIntentService())
+
+    result = service.run_message(
+        conversation_id="conv-capability-help",
+        user_id="user-1",
+        message_id="msg-capability-help",
+        message="你可以做什么",
+        attachments=[],
+    )
+
+    assert result.status == "COMPLETED"
+    assert result.intent == "CAPABILITY_HELP"
+    assert result.selected_skills == ["capability-help"]
+    assert [item.tool_name for item in result.tool_invocations] == ["read-agent-capabilities"]
+    assert "我可以帮你完成这些文件工作" in (result.final_response or "")
+    assert "我已收到" not in (result.final_response or "")
+
+
+def test_llm_capability_help_hint_uses_fixed_capability_catalog():
+    """LLM 判断用户询问能力时，也只能转为固定能力清单 Tool。"""
+
+    intent_plan = UserIntentPlan(
+        intent="CAPABILITY_HELP",
+        user_goal="介绍系统能力",
+        needs_file_context=False,
+        referenced_document_ids=[],
+        required_capabilities=["read_agent_capabilities"],
+        tool_plan_hint=["read-agent-capabilities"],
+        response_style="concise",
+    )
+
+    plan = build_plan_from_user_intent(
+        intent_plan=intent_plan,
+        message="你有什么功能",
+        attachments=[],
+    )
+
+    assert plan.intent == "CAPABILITY_HELP"
+    assert plan.selected_skills == ["capability-help"]
+    assert [step.tool_name for step in plan.steps] == ["read-agent-capabilities"]
+
+
+def test_classification_taxonomy_request_returns_fixed_catalog():
+    """用户询问系统分类目录时，必须读取固定分类体系配置。"""
+
+    class DisabledLLMIntentService:
+        """测试用关闭态 LLM 服务，强制走确定性 Planner。"""
+
+        enabled = False
+
+    service = AgentRuntimeService(llm_intent_service=DisabledLLMIntentService())
+
+    result = service.run_message(
+        conversation_id="conv-taxonomy-catalog",
+        user_id="user-1",
+        message_id="msg-taxonomy-catalog",
+        message="列出系统当前支持的文件分类目录",
+        attachments=[],
+    )
+
+    assert result.status == "COMPLETED"
+    assert result.intent == "LIST_CLASSIFICATION_TAXONOMY"
+    assert result.selected_skills == ["classification-taxonomy-read"]
+    assert [item.tool_name for item in result.tool_invocations] == ["read-classification-taxonomy"]
+    assert "学校文件归类表" in (result.final_response or "")
+    assert "学校" in (result.final_response or "")
+    assert "学院" in (result.final_response or "")
+
+
+def test_llm_classification_taxonomy_hint_uses_fixed_catalog():
+    """LLM 判断用户询问分类目录时，必须转为固定 taxonomy Tool。"""
+
+    intent_plan = UserIntentPlan(
+        intent="LIST_CLASSIFICATION_TAXONOMY",
+        user_goal="列出系统分类目录",
+        needs_file_context=False,
+        referenced_document_ids=[],
+        required_capabilities=["read_classification_taxonomy"],
+        tool_plan_hint=["read-classification-taxonomy"],
+        response_style="concise",
+    )
+
+    plan = build_plan_from_user_intent(
+        intent_plan=intent_plan,
+        message="系统当前支持哪些文件分类",
+        attachments=[],
+    )
+
+    assert plan.intent == "LIST_CLASSIFICATION_TAXONOMY"
+    assert plan.selected_skills == ["classification-taxonomy-read"]
+    assert [step.tool_name for step in plan.steps] == ["read-classification-taxonomy"]
+
+
 def test_llm_general_chat_returns_conversational_response():
     """LLM 识别为普通对话时，最终回复应是自然对话而不是工具审计信息。"""
 

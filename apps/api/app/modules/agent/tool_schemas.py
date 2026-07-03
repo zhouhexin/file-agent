@@ -62,6 +62,19 @@ class IntentSummaryInput(StrictToolInput):
     user_goal: str = Field(min_length=1)
 
 
+class AgentCapabilitiesReadInput(StrictToolInput):
+    """读取 Agent 固定能力清单的 Tool 输入。"""
+
+    detail_level: str = "brief"
+
+
+class ClassificationTaxonomyReadInput(StrictToolInput):
+    """读取系统固定分类目录的 Tool 输入。"""
+
+    detail_level: str = "brief"
+    max_depth: int = 2
+
+
 class ChangeReportInput(StrictToolInput):
     """生成 ChangeSet 回执的 Tool 输入。"""
 

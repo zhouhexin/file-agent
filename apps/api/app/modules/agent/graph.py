@@ -314,6 +314,20 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
             "final_response": f"已读取 {len(insight_documents)} 个文件的基础洞察：{', '.join(filenames)}。",
         }
 
+    capability_catalog = _capability_catalog_from_results(state.get("tool_results", []))
+    if capability_catalog:
+        return {
+            "status": "COMPLETED",
+            "final_response": _build_capability_help_response(capability_catalog),
+        }
+
+    taxonomy_catalog = _classification_taxonomy_from_results(state.get("tool_results", []))
+    if taxonomy_catalog:
+        return {
+            "status": "COMPLETED",
+            "final_response": _build_classification_taxonomy_response(taxonomy_catalog),
+        }
+
     intent_summary = _intent_summary_from_results(state.get("tool_results", []))
     if intent_summary:
         return {
@@ -401,6 +415,67 @@ def _build_classification_summary_response(documents: List[Dict[str, Any]]) -> s
             category_lines.append(f"- {category.get('name') or '其他'} ")
         blocks.append(f"{index}. {filename}\n" + "\n".join(category_lines))
     return "\n\n".join(blocks)
+
+
+def _capability_catalog_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """从 Tool 结果中提取固定能力清单。"""
+
+    for result in tool_results:
+        if result.get("ok") and isinstance(result.get("capabilities"), list):
+            return result
+    return {}
+
+
+def _build_capability_help_response(catalog: Dict[str, Any]) -> str:
+    """把固定能力清单格式化成用户可读回答。"""
+
+    capabilities = [
+        item
+        for item in catalog.get("capabilities", [])
+        if isinstance(item, dict)
+    ]
+    if not capabilities:
+        return "我可以围绕文件上传、读取、总结、分类和高风险操作计划提供帮助。"
+    lines = ["我可以帮你完成这些文件工作："]
+    for index, capability in enumerate(capabilities, start=1):
+        name = capability.get("name") or capability.get("id") or "未命名能力"
+        description = capability.get("description") or ""
+        lines.append(f"{index}. {name}：{description}")
+    examples = [
+        example
+        for capability in capabilities
+        for example in capability.get("examples", [])[:1]
+        if isinstance(example, str)
+    ][:3]
+    if examples:
+        lines.append("\n你可以直接这样说：")
+        lines.extend(f"- {example}" for example in examples)
+    return "\n".join(lines)
+
+
+def _classification_taxonomy_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """从 Tool 结果中提取系统固定分类目录。"""
+
+    for result in tool_results:
+        if result.get("ok") and isinstance(result.get("taxonomy"), dict):
+            return result["taxonomy"]
+    return {}
+
+
+def _build_classification_taxonomy_response(taxonomy: Dict[str, Any]) -> str:
+    """把系统固定分类目录格式化为用户可读文本。"""
+
+    name = taxonomy.get("name") or "文件分类目录"
+    version = taxonomy.get("version") or "unknown"
+    lines = [f"当前系统支持的文件分类目录：{name}（版本：{version}）"]
+    for category in taxonomy.get("categories", []):
+        if not isinstance(category, dict):
+            continue
+        lines.append(f"- {category.get('name') or '未命名分类'}")
+        for child in category.get("children", []) or []:
+            if isinstance(child, dict):
+                lines.append(f"  - {child.get('name') or '未命名子类'}")
+    return "\n".join(lines)
 
 
 def _intent_summary_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:

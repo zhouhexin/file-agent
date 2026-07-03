@@ -5,6 +5,8 @@ Service 通过仓库写入 message，避免 HTTP 路由或 AgentRuntimeService �
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
 
@@ -54,16 +56,18 @@ class ConversationRepository:
         """创建用户消息并保存附件引用 JSON。"""
 
         self.ensure_conversation(conversation_id=conversation_id, user_id=user_id)
+        batch_id = str(uuid4()) if attachments and attachment_source == "uploaded" else None
         message = Message(
             conversation_id=conversation_id,
             user_id=user_id,
             role="user",
             content=content,
-            # attachments_json 是消息上下文的一部分，额外保存 source 用于区分真实上传和后端自动补齐。
+            # attachments_json 是消息上下文的一部分，source/batch_id 用于区分真实上传批次和后端自动补齐。
             attachments_json=[
                 {
                     **attachment.model_dump(),
                     "source": attachment_source,
+                    **({"batch_id": batch_id} if batch_id else {}),
                 }
                 for attachment in attachments
             ],
@@ -117,6 +121,31 @@ class ConversationRepository:
             if document_id in owned_ids
         ]
 
+    def get_all_attachment_references(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+    ) -> list[MessageAttachment]:
+        """读取当前会话全部真实或上下文附件，用于“之前所有文件”这类表达。"""
+
+        conversation = self.db.get(Conversation, conversation_id)
+        if conversation is None:
+            return []
+        if conversation.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Conversation belongs to another user")
+
+        messages = (
+            self.db.query(Message)
+            .filter(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.asc(), Message.id.asc())
+            .all()
+        )
+        document_ids = _collect_unique_document_ids(messages=messages)
+        if not document_ids:
+            return []
+        return self._filter_owned_attachment_references(document_ids=document_ids, user_id=user_id)
+
     def get_latest_attachment_batch_references(
         self,
         *,
@@ -144,9 +173,13 @@ class ConversationRepository:
         for message in messages:
             if not message.attachments_json:
                 continue
-            if _is_inferred_attachment_message(message):
+            uploaded_items = _uploaded_attachment_items(message)
+            if not uploaded_items:
                 continue
-            for item in message.attachments_json:
+            batch_id = uploaded_items[0].get("batch_id")
+            if batch_id:
+                uploaded_items = [item for item in uploaded_items if item.get("batch_id") == batch_id]
+            for item in uploaded_items:
                 document_id = item.get("document_id") if isinstance(item, dict) else None
                 if document_id and document_id not in seen:
                     seen.add(document_id)
@@ -154,6 +187,15 @@ class ConversationRepository:
             break
         if not document_ids:
             return []
+        return self._filter_owned_attachment_references(document_ids=document_ids, user_id=user_id)
+
+    def _filter_owned_attachment_references(
+        self,
+        *,
+        document_ids: list[str],
+        user_id: str,
+    ) -> list[MessageAttachment]:
+        """按当前用户过滤附件引用，防止越权文档进入 Agent 上下文。"""
 
         owned_documents = (
             self.db.query(Document)
@@ -295,8 +337,8 @@ class ConversationRepository:
         )
 
 
-def _is_inferred_attachment_message(message: Message) -> bool:
-    """判断消息附件是否来自后端上下文推断，避免污染“最近上传批次”。"""
+def _uploaded_attachment_items(message: Message) -> list[dict]:
+    """读取消息中的真实上传附件项，跳过后端自动补齐的上下文附件。"""
 
     attachments = [
         item
@@ -304,13 +346,29 @@ def _is_inferred_attachment_message(message: Message) -> bool:
         if isinstance(item, dict) and item.get("document_id")
     ]
     if not attachments:
-        return False
-    sources = {item.get("source") for item in attachments}
-    if "uploaded" in sources:
-        return False
-    if "inferred_context" in sources:
-        return True
-    return _looks_like_context_reference_message(message.content)
+        return []
+    uploaded_items = [item for item in attachments if item.get("source") == "uploaded"]
+    if uploaded_items:
+        return uploaded_items
+    if any(item.get("source") == "inferred_context" for item in attachments):
+        return []
+    if _looks_like_context_reference_message(message.content):
+        return []
+    return attachments
+
+
+def _collect_unique_document_ids(*, messages: list[Message]) -> list[str]:
+    """按消息顺序收集去重后的 document_id，供全会话附件范围使用。"""
+
+    document_ids: list[str] = []
+    seen: set[str] = set()
+    for message in messages:
+        for item in message.attachments_json:
+            document_id = item.get("document_id") if isinstance(item, dict) else None
+            if document_id and document_id not in seen:
+                seen.add(document_id)
+                document_ids.append(document_id)
+    return document_ids
 
 
 def _looks_like_context_reference_message(content: str) -> bool:

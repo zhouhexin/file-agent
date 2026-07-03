@@ -14,9 +14,12 @@ from pydantic import BaseModel, ValidationError
 
 from app.core.logging import log_event
 from app.db.models import Document, DocumentCategorySuggestion, DocumentClassificationRun, DocumentInsight
+from app.modules.agent.capabilities.service import load_agent_capabilities
 from app.modules.agent.state import ToolInvocationRecord
 from app.modules.agent.tool_schemas import (
+    AgentCapabilitiesReadInput,
     ChangeReportInput,
+    ClassificationTaxonomyReadInput,
     ConfirmedFileActionInput,
     DocumentClassificationsReadInput,
     DocumentInsightsReadInput,
@@ -30,6 +33,7 @@ from app.modules.agent.tool_schemas import (
     SearchToolInput,
     ToolInputValidationError,
 )
+from app.modules.classification.taxonomy_service import read_default_taxonomy_catalog
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text
 
@@ -358,6 +362,22 @@ def _intent_summary_handler(tool_input: BaseModel) -> Dict[str, Any]:
     }
 
 
+def _agent_capabilities_handler(tool_input: BaseModel) -> Dict[str, Any]:
+    """读取固定能力清单，避免 LLM 编造系统能力。"""
+
+    detail_level = getattr(tool_input, "detail_level", "brief")
+    return load_agent_capabilities(detail_level="full" if detail_level == "full" else "brief")
+
+
+def _classification_taxonomy_handler(tool_input: BaseModel) -> Dict[str, Any]:
+    """读取固定分类目录，避免 LLM 编造分类体系。"""
+
+    return read_default_taxonomy_catalog(
+        detail_level=getattr(tool_input, "detail_level", "brief"),
+        max_depth=int(getattr(tool_input, "max_depth", 2)),
+    )
+
+
 def _change_report_handler(tool_input: BaseModel) -> Dict[str, Any]:
     """返回 ChangeSet 回执的占位结构。"""
 
@@ -591,6 +611,8 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("read-original-file", "Read safe metadata for an uploaded original file.", DocumentToolInput, False, False, [], _read_original_file_handler(db, user_id)),
         _tool("extract-document-text", "Extract text from uploaded files and persist document pages.", DocumentToolInput, True, False, ["document_extraction_runs", "document_pages"], _extract_document_text_handler(db, user_id)),
         _tool("intent-summary", "Record LLM-understood user intent without side effects.", IntentSummaryInput, False, False, [], _intent_summary_handler),
+        _tool("read-agent-capabilities", "Read fixed File Agent capability catalog.", AgentCapabilitiesReadInput, False, False, [], _agent_capabilities_handler),
+        _tool("read-classification-taxonomy", "Read fixed classification taxonomy catalog.", ClassificationTaxonomyReadInput, False, False, [], _classification_taxonomy_handler),
         _tool("hybrid-search", "Run workspace hybrid retrieval.", SearchToolInput, False, False, [], _search_handler),
         _tool("evidence-answer", "Answer from retrieved evidence.", EvidenceAnswerInput, True, False, ["qa_answers", "answer_references"], _evidence_answer_handler),
         _tool("change-report", "Build per-file receipt from changes.", ChangeReportInput, True, False, ["change_sets"], _change_report_handler),
