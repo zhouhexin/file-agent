@@ -1,27 +1,33 @@
-# File Agent API 生产运行镜像。
+# syntax=docker/dockerfile:1.7
+
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
     PYTHONPATH=/app/apps/api \
     FILE_STORAGE_ROOT=/data/uploads \
     LOG_DIR=/data/logs
 
 WORKDIR /app
 
-RUN apt-get update \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
     && apt-get install -y --no-install-recommends \
-       libreoffice-writer \
-       libreoffice-calc \
-       ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+        libreoffice-writer \
+        libreoffice-calc \
+        ca-certificates
 
 COPY requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip && pip install -r /app/requirements.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --upgrade pip \
+    && python -m pip install --prefer-binary -r /app/requirements.txt
 
 COPY . /app
+
 RUN chmod +x /app/deploy/entrypoint.api.sh
 
 EXPOSE 8000
+
 ENTRYPOINT ["/app/deploy/entrypoint.api.sh"]
