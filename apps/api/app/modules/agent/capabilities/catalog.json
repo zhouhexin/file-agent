@@ -1,0 +1,35 @@
+{
+  "version": "2026-07-03",
+  "capabilities": [
+    {
+      "id": "file_upload_read",
+      "name": "上传和读取文件",
+      "description": "支持在对话中上传文件，并读取 DOC、DOCX、PDF、XLSX、TXT、MD、CSV 等文件的正文或表格内容。",
+      "examples": ["帮我读取这个文件", "读取上面上传的文件并总结内容"]
+    },
+    {
+      "id": "document_summary",
+      "name": "文件总结和讲解",
+      "description": "基于已解析的完整正文，对文件内容进行总结、概括、讲解或问答。",
+      "examples": ["总结刚刚上传的文件", "讲解一下这篇文章的大概内容"]
+    },
+    {
+      "id": "document_classification",
+      "name": "文件多标签分类",
+      "description": "基于学校文件归类表，为文件生成多标签分类建议，并保留分类证据和处理回执。",
+      "examples": ["帮我读取并分类这批文件", "总结一下之前所有上传文件的分类"]
+    },
+    {
+      "id": "ocr",
+      "name": "图片和扫描件 OCR",
+      "description": "对图片或扫描件尝试 OCR 文字识别，并把识别结果写入文档页面内容。",
+      "examples": ["帮我 OCR 这批扫描件", "识别这张图片里的文字"]
+    },
+    {
+      "id": "operation_plan",
+      "name": "高风险文件操作计划",
+      "description": "对改名、移动、删除等高风险文件操作先生成 OperationPlan，用户确认后才允许继续。",
+      "examples": ["给这些文件生成改名建议，先不要改", "计划删除这些重复文件"]
+    }
+  ]
+}
