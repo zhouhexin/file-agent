@@ -20,6 +20,7 @@ DEFAULT_LLM_TIMEOUT_SECONDS = 180
 DEFAULT_LOG_DIR = "./logs"
 DEFAULT_LOG_RETENTION_DAYS = 7
 DEFAULT_OCR_LLM_FALLBACK_QUALITY_THRESHOLD = 0.68
+DEFAULT_OCR_PADDLE_MODEL_SOURCE = "BOS"
 
 
 class Settings(BaseModel):
@@ -43,6 +44,7 @@ class Settings(BaseModel):
     log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
     log_level: str = "INFO"
     ocr_enabled: bool = True
+    ocr_paddle_model_source: str = DEFAULT_OCR_PADDLE_MODEL_SOURCE
     ocr_llm_enabled: bool = False
     ocr_llm_fallback_quality_threshold: float = DEFAULT_OCR_LLM_FALLBACK_QUALITY_THRESHOLD
 
@@ -118,6 +120,7 @@ def get_settings() -> Settings:
         log_retention_days=int(os.getenv("LOG_RETENTION_DAYS", str(DEFAULT_LOG_RETENTION_DAYS))),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         ocr_enabled=os.getenv("OCR_ENABLED", "true").lower() == "true",
+        ocr_paddle_model_source=os.getenv("OCR_PADDLE_MODEL_SOURCE", DEFAULT_OCR_PADDLE_MODEL_SOURCE),
         ocr_llm_enabled=os.getenv("OCR_LLM_ENABLED", "false").lower() == "true",
         ocr_llm_fallback_quality_threshold=float(
             os.getenv(

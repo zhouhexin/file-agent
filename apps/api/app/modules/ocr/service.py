@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import base64
+import os
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -28,10 +29,11 @@ class PaddleOcrProvider:
 
     name = "paddleocr_cpu"
 
-    def __init__(self) -> None:
+    def __init__(self, *, model_source: str = "BOS") -> None:
         """延迟加载 PaddleOCR，避免服务启动时强依赖模型。"""
 
         self._ocr = None
+        self.model_source = model_source
 
     def extract_image(self, *, image_path: Path, page_number: int = 1) -> dict[str, Any]:
         """使用 PaddleOCR 识别图片文字。"""
@@ -58,6 +60,8 @@ class PaddleOcrProvider:
 
         if self._ocr is None:
             try:
+                # PaddleOCR 3.x / PaddleX 支持通过该变量选择模型下载源；默认使用百度 BOS。
+                os.environ.setdefault("PADDLE_PDX_MODEL_SOURCE", self.model_source)
                 from paddleocr import PaddleOCR
             except ImportError as exc:
                 raise RuntimeError("缺少 paddleocr，无法执行本地 OCR。") from exc
@@ -146,6 +150,7 @@ def build_default_ocr_service() -> OcrService:
             )
         )
     return OcrService(
+        primary_provider=PaddleOcrProvider(model_source=settings.ocr_paddle_model_source),
         fallback_provider=fallback_provider,
         fallback_quality_threshold=settings.ocr_llm_fallback_quality_threshold,
     )

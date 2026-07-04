@@ -1,8 +1,10 @@
 """OCR Provider 编排服务测试。"""
 
 from pathlib import Path
+import sys
+from types import ModuleType
 
-from app.modules.ocr.service import OcrService
+from app.modules.ocr.service import OcrService, PaddleOcrProvider
 
 
 class FakeProvider:
@@ -71,3 +73,28 @@ def test_ocr_service_keeps_paddle_result_when_quality_is_enough(tmp_path):
     assert result["text"] == "Paddle OCR 文本"
     assert result["source"] == "paddleocr_cpu"
     assert llm.calls == []
+
+
+def test_paddle_provider_sets_baidu_bos_model_source_before_loading(monkeypatch):
+    """加载 PaddleOCR 前必须设置百度 BOS 模型下载源，避免默认源在部署环境不可用。"""
+
+    captured: dict[str, str | None] = {}
+    fake_module = ModuleType("paddleocr")
+
+    class FakePaddleOCR:
+        """测试用 PaddleOCR 类，记录初始化时的环境变量。"""
+
+        def __init__(self, **_: object) -> None:
+            """保存初始化时看到的下载源。"""
+
+            import os
+
+            captured["source"] = os.environ.get("PADDLE_PDX_MODEL_SOURCE")
+
+    fake_module.PaddleOCR = FakePaddleOCR
+    monkeypatch.setitem(sys.modules, "paddleocr", fake_module)
+    monkeypatch.delenv("PADDLE_PDX_MODEL_SOURCE", raising=False)
+
+    PaddleOcrProvider(model_source="BOS")._load_ocr()
+
+    assert captured["source"] == "BOS"

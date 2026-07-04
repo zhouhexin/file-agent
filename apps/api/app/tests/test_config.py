@@ -75,3 +75,16 @@ def test_settings_loads_classification_llm_options(monkeypatch, tmp_path):
 
     assert settings.llm_classification_mode == "hybrid"
     assert settings.llm_classification_allow_free_paths is True
+
+
+def test_settings_defaults_paddleocr_model_source_to_baidu_bos(monkeypatch, tmp_path):
+    """PaddleOCR 模型下载源默认必须使用百度 BOS，适配国内服务器部署。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.delenv("OCR_PADDLE_MODEL_SOURCE", raising=False)
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.ocr_paddle_model_source == "BOS"
