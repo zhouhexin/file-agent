@@ -119,6 +119,31 @@ def test_llm_classification_hint_is_overridden_for_plain_file_summary():
     assert [step.tool_name for step in plan.steps] == ["extract-document-text", "extract-document-text"]
 
 
+def test_llm_classification_hint_is_overridden_for_table_column_summary():
+    """LLM 若把“汇总 CSV 关键词列”误判成分类读取，Planner 也必须按正文问答纠偏。"""
+
+    intent_plan = UserIntentPlan(
+        intent="SUMMARIZE_CLASSIFICATIONS",
+        user_goal="汇总刚刚上传的csv文件中的关键词列",
+        needs_file_context=True,
+        referenced_document_ids=["doc-csv"],
+        required_capabilities=["read_document_classifications"],
+        skip_completed_ingest=True,
+        tool_plan_hint=["read-document-classifications"],
+        response_style="concise",
+    )
+
+    plan = build_plan_from_user_intent(
+        intent_plan=intent_plan,
+        message="汇总刚刚上传的csv文件中的关键词列",
+        attachments=[{"document_id": "doc-csv"}],
+    )
+
+    assert plan.intent == "ANSWER_DOCUMENTS"
+    assert plan.slots["requested_outputs"] == ["text", "answer", "receipt"]
+    assert [step.tool_name for step in plan.steps] == ["extract-document-text"]
+
+
 def test_planning_falls_back_when_llm_intent_schema_is_invalid():
     """LLM 意图响应异常时，planning 节点必须回退确定性 Planner，避免接口 500。"""
 
@@ -588,6 +613,62 @@ def test_summary_request_returns_content_summary_not_classification_receipt():
     assert "内容总结" in (result.final_response or "")
     assert "青年教师岗位锻炼安排" in (result.final_response or "")
     assert "分类建议" not in (result.final_response or "")
+
+
+def test_table_summary_request_uses_document_answer_plan():
+    """用户要求汇总表格列或金额时，应读取表格正文并回答，不能回落到分类。"""
+
+    class FakeRegistry:
+        """测试用 Registry，返回稳定的表格解析结果。"""
+
+        def invoke(self, tool_name, input_json):
+            """模拟 extract-document-text 成功解析表格文本。"""
+
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "document_id": input_json["document_id"],
+                    "extraction_run_id": "run-table-summary",
+                    "status": "COMPLETED",
+                    "extractor": "csv",
+                    "pages": [
+                        {
+                            "page_number": 1,
+                            "text_preview": "姓名\t关键词\t金额\n张三\t科研\t100\n李四\t教学\t200",
+                            "char_count": 31,
+                        }
+                    ],
+                    "error": None,
+                },
+                status="COMPLETED",
+            )
+
+    class DisabledLLMIntentService:
+        """测试用关闭态 LLM 服务，强制走确定性 Planner。"""
+
+        enabled = False
+
+    service = AgentRuntimeService(
+        registry_factory=lambda db, user_id: FakeRegistry(),
+        llm_intent_service=DisabledLLMIntentService(),
+    )
+
+    for message in ["汇总表中金额", "汇总表中关键词列"]:
+        result = service.run_message(
+            conversation_id="conv-table-summary",
+            user_id="user-1",
+            message_id=f"msg-table-summary-{message}",
+            message=message,
+            attachments=[{"document_id": "doc-table"}],
+        )
+
+        assert result.intent == "ANSWER_DOCUMENTS"
+        assert result.tool_plan["slots"]["requested_outputs"] == ["text", "answer", "receipt"]
+        assert [item.tool_name for item in result.tool_invocations] == ["extract-document-text"]
+        assert "分类建议" not in (result.final_response or "")
+        assert "AgentRun completed" not in (result.final_response or "")
 
 
 def test_llm_summary_with_text_extraction_returns_content_summary():

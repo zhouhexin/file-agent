@@ -183,6 +183,46 @@ def test_message_can_reference_second_previous_attachment_by_ordinal():
     clear_overrides()
 
 
+def test_message_can_reference_previous_attachment_by_filename_fragment():
+    """用户按文件名片段提问时，应自动引用当前会话中的对应历史附件。"""
+
+    client, _ = client_with_database()
+    headers = _auth_header(client, "filename-reference-user")
+    document_id = _upload_document(
+        client,
+        headers,
+        filename="2019年学院科研成果资助表.xlsx",
+        content="姓名,金额\n张三,100\n李四,200\n".encode(),
+    )
+
+    first_response = client.post(
+        "/api/conversations/filename-reference-chat/messages",
+        headers=headers,
+        json={
+            "content": "帮我读取这个文件",
+            "attachments": [{"document_id": document_id}],
+        },
+    )
+    assert first_response.status_code == 200
+
+    second_response = client.post(
+        "/api/conversations/filename-reference-chat/messages",
+        headers=headers,
+        json={
+            "content": "汇总2019年学院科研成果资助表中的金额",
+            "attachments": [],
+        },
+    )
+
+    assert second_response.status_code == 200
+    data = second_response.json()
+    assert data["message"]["attachments"] == [{"document_id": document_id}]
+    assert data["agent_run"]["intent"] == "ANSWER_DOCUMENTS"
+    assert [item["tool_name"] for item in data["agent_run"]["tool_invocations"]] == ["extract-document-text"]
+    assert "AgentRun completed" not in (data["agent_run"]["final_response"] or "")
+    clear_overrides()
+
+
 def test_message_can_summarize_previous_classification_results():
     """用户要求总结之前文件分类时，应读取分类建议而不是只返回基础洞察文件名。"""
 

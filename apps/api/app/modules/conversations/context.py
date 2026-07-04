@@ -54,6 +54,18 @@ class ConversationAttachmentContextService:
                 source="uploaded",
                 scope="current_message",
             )
+        if _has_file_task_intent(content):
+            named_attachments = self.repository.get_filename_matched_attachment_references(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                content=content,
+            )
+            if named_attachments:
+                return ResolvedAttachmentContext(
+                    attachments=named_attachments,
+                    source="inferred_context",
+                    scope="filename_reference",
+                )
         if not _should_infer_recent_attachments(content):
             return ResolvedAttachmentContext(attachments=[], source="uploaded", scope="none")
 
@@ -90,10 +102,41 @@ def _should_infer_recent_attachments(content: str) -> bool:
     """判断用户是否在无附件消息中引用了当前会话上文文件。"""
 
     reference_keywords = ["上面", "上文", "前面", "刚才", "刚刚", "刚上传", "之前", "已上传", "上传的"]
-    file_task_keywords = ["文件", "附件", "文章", "读取", "总结", "讲解", "内容", "分析", "分类", "归类", "重新"]
-    has_file_task = any(keyword in content for keyword in file_task_keywords)
+    has_file_task = _has_file_task_intent(content)
     has_history_reference = any(keyword in content for keyword in reference_keywords)
     return has_file_task and (has_history_reference or _extract_file_ordinal(content) is not None)
+
+
+def _has_file_task_intent(content: str) -> bool:
+    """判断文本是否像文件任务，用于决定是否尝试解析历史附件引用。"""
+
+    file_task_keywords = [
+        "文件",
+        "附件",
+        "文章",
+        "读取",
+        "总结",
+        "讲解",
+        "内容",
+        "分析",
+        "分类",
+        "归类",
+        "重新",
+        "汇总",
+        "统计",
+        "金额",
+        "关键词",
+        "关键字",
+        "列",
+        "表",
+        "csv",
+        "excel",
+        "xlsx",
+    ]
+    lowered = content.lower()
+    return any(keyword in content for keyword in file_task_keywords) or any(
+        keyword in lowered for keyword in ["csv", "excel", "xlsx", "sheet"]
+    )
 
 
 def _select_referenced_attachments(

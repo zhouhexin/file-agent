@@ -183,6 +183,28 @@ class DeterministicPlanner:
                 confirmation_policy={"operation_plan_required": False},
             )
 
+        if _has_table_summary_or_column_intent(message=message, lowered=lowered):
+            return PlannerOutput(
+                intent="ANSWER_DOCUMENTS",
+                user_goal=message,
+                slots={
+                    "document_ids": document_ids,
+                    "question": message,
+                    "requested_outputs": ["text", "answer", "receipt"],
+                },
+                selected_skills=["chat-intake", "document-text-extract", "document-reading"],
+                steps=[
+                    _extract_document_text_step(
+                        document_id=item,
+                        index=index,
+                        force_reprocess=_should_force_reprocess(message=message, lowered=lowered),
+                    )
+                    for index, item in enumerate(document_ids, start=1)
+                ],
+                evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+                confirmation_policy={"operation_plan_required": False},
+            )
+
         if _has_answer_intent(message=message, lowered=lowered):
             return PlannerOutput(
                 intent="ANSWER_DOCUMENTS",
@@ -303,22 +325,23 @@ def build_plan_from_user_intent(
 ) -> PlannerOutput:
     """把 LLM 结构化意图转换为受控 PlannerOutput。"""
 
+    lowered = message.lower()
     document_ids = intent_plan.referenced_document_ids or _document_ids(attachments)
     requested_capabilities = set(intent_plan.required_capabilities).union(intent_plan.tool_plan_hint)
     if (
-        _has_capability_help_intent(message=message, lowered=message.lower())
+        _has_capability_help_intent(message=message, lowered=lowered)
         or intent_plan.intent == "CAPABILITY_HELP"
         or requested_capabilities.intersection(AGENT_CAPABILITY_HINTS)
     ):
         return _capability_help_plan(user_goal=intent_plan.user_goal or message)
     if (
-        _has_classification_taxonomy_intent(message=message, lowered=message.lower())
+        _has_classification_taxonomy_intent(message=message, lowered=lowered)
         or intent_plan.intent == "LIST_CLASSIFICATION_TAXONOMY"
         or requested_capabilities.intersection(CLASSIFICATION_TAXONOMY_HINTS)
     ):
         return _classification_taxonomy_plan(user_goal=intent_plan.user_goal or message)
 
-    if _has_plain_document_summary_intent(message=message, lowered=message.lower()):
+    if _has_plain_document_summary_intent(message=message, lowered=lowered):
         extraction_document_ids = document_ids or [_first_document_id(attachments)]
         return PlannerOutput(
             intent="SUMMARIZE_DOCUMENTS",
@@ -335,7 +358,33 @@ def build_plan_from_user_intent(
                 _extract_document_text_step(
                     document_id=document_id,
                     index=index,
-                    force_reprocess=_should_force_reprocess(message=message, lowered=message.lower()),
+                    force_reprocess=_should_force_reprocess(message=message, lowered=lowered),
+                )
+                for index, document_id in enumerate(extraction_document_ids, start=1)
+            ],
+            evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+            confirmation_policy={"operation_plan_required": False},
+        )
+
+    if _has_table_summary_or_column_intent(message=message, lowered=lowered):
+        extraction_document_ids = document_ids or [_first_document_id(attachments)]
+        return PlannerOutput(
+            intent="ANSWER_DOCUMENTS",
+            user_goal=intent_plan.user_goal,
+            slots={
+                "document_ids": extraction_document_ids,
+                "question": message,
+                "requested_outputs": ["text", "answer", "receipt"],
+                "response_style": intent_plan.response_style,
+                "clarification_question": intent_plan.clarification_question,
+                "llm_intent_plan": intent_plan.model_dump(),
+            },
+            selected_skills=["llm-understanding", "document-text-extract", "document-reading"],
+            steps=[
+                _extract_document_text_step(
+                    document_id=document_id,
+                    index=index,
+                    force_reprocess=_should_force_reprocess(message=message, lowered=lowered),
                 )
                 for index, document_id in enumerate(extraction_document_ids, start=1)
             ],
@@ -391,7 +440,7 @@ def build_plan_from_user_intent(
                 _extract_document_text_step(
                     document_id=document_id,
                     index=index,
-                    force_reprocess=_should_force_reprocess(message=message, lowered=message.lower()),
+                    force_reprocess=_should_force_reprocess(message=message, lowered=lowered),
                 )
                 for index, document_id in enumerate(extraction_document_ids, start=1)
             ],
@@ -667,6 +716,22 @@ def _has_answer_intent(*, message: str, lowered: str) -> bool:
     return any(keyword in message for keyword in question_keywords) or any(
         keyword in lowered for keyword in english_keywords
     )
+
+
+def _has_table_summary_or_column_intent(*, message: str, lowered: str) -> bool:
+    """判断用户是否要求汇总表格字段、金额或某一列内容。"""
+
+    table_keywords = ["表", "表格", "工作表"]
+    operation_keywords = ["汇总", "统计", "合计", "求和", "列", "金额", "关键字", "关键词"]
+    english_table_keywords = ["sheet", "worksheet", "csv", "excel", "table"]
+    english_operation_keywords = ["sum", "total", "column", "amount", "keyword"]
+    has_table_context = any(keyword in message for keyword in table_keywords) or any(
+        keyword in lowered for keyword in english_table_keywords
+    )
+    has_table_operation = any(keyword in message for keyword in operation_keywords) or any(
+        keyword in lowered for keyword in english_operation_keywords
+    )
+    return has_table_context and has_table_operation
 
 
 def _document_ids(attachments: List[Dict[str, Any]]) -> List[str]:

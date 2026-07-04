@@ -264,7 +264,6 @@ def evidence_or_change(state: AgentGraphState, runtime: Runtime[AgentRuntimeCont
 def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
     """生成面向用户的最终运行摘要。"""
 
-    invocation_count = len(state.get("tool_invocations", []))
     document_results = state.get("document_results", [])
     if document_results:
         requested_outputs = set(state.get("slots", {}).get("requested_outputs", []))
@@ -337,7 +336,7 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
 
     return {
         "status": "COMPLETED",
-        "final_response": f"AgentRun completed with {invocation_count} tool invocation(s).",
+        "final_response": "本次任务已执行完成，但暂未生成可展示的业务结果。请补充要读取、汇总或处理的文件范围。",
     }
 
 
