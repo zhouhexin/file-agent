@@ -223,6 +223,52 @@ def test_message_can_reference_previous_attachment_by_filename_fragment():
     clear_overrides()
 
 
+def test_message_can_reference_previous_attachment_by_fuzzy_filename_tokens():
+    """用户只说文件名中的核心词时，应通过年份和关键词匹配到历史附件。"""
+
+    client, _ = client_with_database()
+    headers = _auth_header(client, "fuzzy-filename-reference-user")
+    old_document_id = _upload_document(
+        client,
+        headers,
+        filename="2019年学院科研成果资助汇总表.xlsx",
+        content="教师,资助金额\n王老师,100\n".encode(),
+    )
+    target_document_id = _upload_document(
+        client,
+        headers,
+        filename="2024年度学院科研成果资助汇总表.xlsx",
+        content="教师,资助金额\n张老师,300\n李老师,200\n".encode(),
+    )
+
+    first_response = client.post(
+        "/api/conversations/fuzzy-filename-reference-chat/messages",
+        headers=headers,
+        json={
+            "content": "帮我读取这批文件",
+            "attachments": [{"document_id": old_document_id}, {"document_id": target_document_id}],
+        },
+    )
+    assert first_response.status_code == 200
+
+    second_response = client.post(
+        "/api/conversations/fuzzy-filename-reference-chat/messages",
+        headers=headers,
+        json={
+            "content": "根据教师来汇总2024科研成果资助汇总表中的资助金额",
+            "attachments": [],
+        },
+    )
+
+    assert second_response.status_code == 200
+    data = second_response.json()
+    assert data["message"]["attachments"] == [{"document_id": target_document_id}]
+    assert data["agent_run"]["intent"] == "ANSWER_DOCUMENTS"
+    assert [item["tool_name"] for item in data["agent_run"]["tool_invocations"]] == ["extract-document-text"]
+    assert "AgentRun completed" not in (data["agent_run"]["final_response"] or "")
+    clear_overrides()
+
+
 def test_message_can_summarize_previous_classification_results():
     """用户要求总结之前文件分类时，应读取分类建议而不是只返回基础洞察文件名。"""
 

@@ -466,9 +466,9 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
             )
             return {"ok": False, "error": {"code": "DB_REQUIRED", "message": "解析文件需要数据库会话。"}}
         repository = FileExtractionRepository(db, user_id)
-        resolved = repository.resolve_original_file(document_id)
-        if not resolved["ok"]:
-            error = resolved.get("error") or {}
+        document = repository.get_document_for_current_user(document_id)
+        if document is None:
+            error = {"code": "DOCUMENT_NOT_FOUND", "message": "文件不存在或不属于当前用户。"}
             log_event(
                 "file.extract.failed",
                 level="ERROR",
@@ -478,9 +478,8 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
                 error_code=error.get("code"),
                 message=error.get("message"),
             )
-            return resolved
+            return _failed_extraction_output(document_id=document_id, error=error)
 
-        document = resolved["document"]
         force_reprocess = bool(getattr(tool_input, "force_reprocess", False))
         reusable = None if force_reprocess else repository.get_latest_successful_extraction(document_id=document.id)
         if reusable is not None:
@@ -512,6 +511,20 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
                 ],
                 "error": None,
             }
+
+        resolved = repository.resolve_original_file_for_document(document)
+        if not resolved["ok"]:
+            error = resolved.get("error") or {}
+            log_event(
+                "file.extract.failed",
+                level="ERROR",
+                document_id=document.id,
+                status="FAILED",
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                error_code=error.get("code"),
+                message=error.get("message"),
+            )
+            return _failed_extraction_output(document_id=document.id, error=error)
 
         extraction = extract_document_text(
             file_path=resolved["file_path"],
@@ -567,6 +580,21 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
         }
 
     return handler
+
+
+def _failed_extraction_output(*, document_id: str, error: Dict[str, Any]) -> Dict[str, Any]:
+    """生成标准解析失败输出，确保前端能展示逐文件失败原因。"""
+
+    return {
+        "ok": False,
+        "document_id": document_id,
+        "extraction_run_id": f"failed-{document_id}",
+        "status": "FAILED",
+        "extractor": "unknown",
+        "reused": False,
+        "pages": [],
+        "error": error,
+    }
 
 
 def _tool(

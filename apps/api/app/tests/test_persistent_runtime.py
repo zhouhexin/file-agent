@@ -10,6 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.db.base import Base
 from app.db.models import (
@@ -20,6 +21,7 @@ from app.db.models import (
     DocumentCategorySuggestion,
     DocumentClassificationRun,
     DocumentExtractionRun,
+    FileObject,
     DocumentPage,
     Message,
     ToolInvocation,
@@ -182,16 +184,16 @@ def test_agent_run_query_endpoints_return_persisted_records():
     app.dependency_overrides.clear()
 
 
-def test_llm_message_reuses_persisted_document_insights():
-    """LLM 对话阶段应复用上传阶段已持久化的 document_insights。"""
+def test_llm_summary_message_extracts_document_text_instead_of_insights():
+    """LLM 总结类请求应读取正文，而不是只复用上传阶段 document_insights。"""
 
     class FakeLLMIntentService:
-        """测试用 LLM 服务，固定返回读取文件洞察的计划。"""
+        """测试用 LLM 服务，模拟模型仍倾向读取文件洞察。"""
 
         enabled = True
 
         def understand_user_request(self, *, message, attachments, context_documents):
-            """返回依赖已上传文件洞察的用户意图。"""
+            """返回旧式洞察意图，Planner 应按正文总结规则纠偏。"""
 
             return UserIntentPlan(
                 intent="SUMMARIZE_DOCUMENTS",
@@ -224,10 +226,10 @@ def test_llm_message_reuses_persisted_document_insights():
         )
 
         assert response.agent_run.intent == "SUMMARIZE_DOCUMENTS"
-        assert [item.tool_name for item in response.agent_run.tool_invocations] == ["read-document-insights"]
-        assert response.agent_run.tool_results[0]["documents"][0]["document_id"] == document_id
-        assert response.agent_run.tool_results[0]["documents"][0]["ingest_status"] == "INGESTED"
-        assert db.query(ToolInvocation).one().tool_name == "read-document-insights"
+        assert [item.tool_name for item in response.agent_run.tool_invocations] == ["extract-document-text"]
+        assert response.agent_run.tool_results[0]["document_id"] == document_id
+        assert response.agent_run.tool_results[0]["status"] == "COMPLETED"
+        assert db.query(ToolInvocation).one().tool_name == "extract-document-text"
     finally:
         db.close()
         app.dependency_overrides.clear()
@@ -849,6 +851,78 @@ def test_extract_document_text_reuses_existing_successful_pages_by_default():
         ]
         assert "TEXT_REUSED" in reused_types
         assert "DOCUMENT_PAGES_REUSED" in reused_types
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_extract_document_text_reuses_pages_when_original_file_is_missing():
+    """原件丢失但已有成功解析页时，应复用 document_pages 继续回答。"""
+
+    class FakeLLMIntentService:
+        """测试用 LLM 服务，固定返回单文件正文解析计划。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """返回读取正文意图，默认允许复用历史解析结果。"""
+
+            return UserIntentPlan(
+                intent="ANSWER_DOCUMENTS",
+                user_goal=message,
+                needs_file_context=True,
+                referenced_document_ids=[attachments[0]["document_id"]],
+                required_capabilities=["extract_document_text"],
+                skip_completed_ingest=True,
+                tool_plan_hint=["extract-document-text"],
+                response_style="concise",
+            )
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="reuse-missing-original-user")
+    document_id = _upload_document(
+        client,
+        headers,
+        filename="missing-original.txt",
+        content=("教师\t资助金额\n张三\t100\n张三\t50\n李四\t200\n").encode(),
+    )
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(User.username == "reuse-missing-original-user").one()
+        service = ConversationMessageService(
+            db=db,
+            agent_service=AgentRuntimeService(llm_intent_service=FakeLLMIntentService()),
+        )
+        first_response = service.send_user_message(
+            conversation_id="reuse-missing-original-conv",
+            user_id=user.id,
+            request=SendMessageRequest(
+                content="读取这个文件内容",
+                attachments=[MessageAttachment(document_id=document_id)],
+            ),
+        )
+        file_object = db.query(FileObject).filter(FileObject.document_id == document_id).one()
+        file_path = Path(get_settings().file_storage_root) / file_object.storage_path
+        file_path.unlink(missing_ok=True)
+
+        second_response = service.send_user_message(
+            conversation_id="reuse-missing-original-conv",
+            user_id=user.id,
+            request=SendMessageRequest(
+                content="根据教师来汇总这个文件中的资助金额",
+                attachments=[MessageAttachment(document_id=document_id)],
+            ),
+        )
+
+        assert first_response.agent_run.tool_results[0]["reused"] is False
+        assert second_response.agent_run.tool_results[0]["status"] == "COMPLETED"
+        assert second_response.agent_run.tool_results[0]["reused"] is True
+        assert second_response.agent_run.tool_invocations[0].status == "COMPLETED"
+        assert "张三：150 元" in (second_response.agent_run.final_response or "")
+        assert "李四：200 元" in (second_response.agent_run.final_response or "")
+        assert db.query(DocumentExtractionRun).count() == 1
+        assert db.query(DocumentPage).count() == 1
     finally:
         db.close()
         app.dependency_overrides.clear()

@@ -46,16 +46,28 @@ class FileExtractionRepository:
 
         if self.user_id is None:
             return _error("AUTH_REQUIRED", "缺少当前用户，不能读取文件。")
-        document = (
+        document = self.get_document_for_current_user(document_id)
+        if document is None:
+            return _error("DOCUMENT_NOT_FOUND", "文件不存在或不属于当前用户。")
+        return self.resolve_original_file_for_document(document)
+
+    def get_document_for_current_user(self, document_id: str) -> Document | None:
+        """只校验当前用户是否拥有文档，不要求原件必须存在。"""
+
+        if self.user_id is None:
+            return None
+        return (
             self.db.query(Document)
             .filter(Document.id == document_id, Document.user_id == self.user_id)
             .one_or_none()
         )
-        if document is None:
-            return _error("DOCUMENT_NOT_FOUND", "文件不存在或不属于当前用户。")
+
+    def resolve_original_file_for_document(self, document: Document) -> Dict[str, Any]:
+        """在已校验文档归属后解析本地原件路径。"""
+
         file_object = (
             self.db.query(FileObject)
-            .filter(FileObject.document_id == document_id, FileObject.storage_backend == "local")
+            .filter(FileObject.document_id == document.id, FileObject.storage_backend == "local")
             .order_by(FileObject.created_at.asc())
             .first()
         )

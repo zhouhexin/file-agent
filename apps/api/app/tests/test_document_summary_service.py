@@ -137,6 +137,51 @@ def test_summary_service_reads_full_document_pages_not_preview():
         db.close()
 
 
+def test_summary_service_deterministically_aggregates_amounts_by_teacher():
+    """按教师汇总金额时必须使用确定性表格计算，不能依赖 LLM 猜测。"""
+
+    db = _db_session()
+    try:
+        run = DocumentExtractionRun(id="run-amount", document_id="doc-amount", status="COMPLETED", extractor="excel")
+        db.add(run)
+        db.add(
+            DocumentPage(
+                document_id="doc-amount",
+                extraction_run_id="run-amount",
+                page_number=1,
+                sheet_name="Sheet1",
+                text_content=(
+                    "序号\t申请人\t论文名称\t资助金额\t状态\n"
+                    "1\t孟海宁\t论文A\t5000\t已审核\n"
+                    "2\t孟海宁\t论文B\t500\t已审核\n"
+                    "3\t李四\t论文C\t3000\t已审核\n"
+                ),
+                metadata_json={},
+            )
+        )
+        db.flush()
+
+        service = LLMDocumentSummaryService(db=db, enabled=False)
+        summary = service.summarize_documents(
+            document_results=[
+                {
+                    "document_id": "doc-amount",
+                    "filename": "2024科研成果资助汇总表.xlsx",
+                    "extraction_status": "COMPLETED",
+                }
+            ],
+            tool_results=[{"document_id": "doc-amount", "extraction_run_id": "run-amount", "pages": []}],
+            user_message="根据教师来汇总2024科研成果资助汇总表中的资助金额",
+        )
+
+        assert summary is not None
+        assert "孟海宁：5500 元" in summary
+        assert "李四：3000 元" in summary
+        assert "合计：8500 元" in summary
+    finally:
+        db.close()
+
+
 def test_summary_service_chunks_large_documents_and_merges():
     """大文件必须先分块总结，再把分块摘要交给 LLM 汇总。"""
 

@@ -184,7 +184,11 @@ class ConversationRepository:
             document = documents_by_id.get(document_id)
             if document is None:
                 continue
-            if _filename_matches_content(filename=document.original_filename, normalized_content=normalized_content):
+            if _filename_matches_content(
+                filename=document.original_filename,
+                content=content,
+                normalized_content=normalized_content,
+            ):
                 matched_ids.append(document_id)
         return [MessageAttachment(document_id=document_id) for document_id in matched_ids]
 
@@ -423,13 +427,24 @@ def _looks_like_context_reference_message(content: str) -> bool:
     )
 
 
-def _filename_matches_content(*, filename: str, normalized_content: str) -> bool:
-    """判断文件名或去扩展名主干是否出现在用户消息中。"""
+def _filename_matches_content(*, filename: str, content: str, normalized_content: str) -> bool:
+    """判断文件名、主干或关键片段是否出现在用户消息中。"""
 
     normalized_filename = _normalize_filename_match_text(filename)
     stem = _normalize_filename_match_text(re.sub(r"\.[^.]{1,12}$", "", filename))
     candidates = [value for value in {normalized_filename, stem} if len(value) >= 4]
-    return any(candidate in normalized_content for candidate in candidates)
+    if any(candidate in normalized_content for candidate in candidates):
+        return True
+
+    filename_years = set(re.findall(r"(?:19|20)\d{2}", filename))
+    content_years = set(re.findall(r"(?:19|20)\d{2}", content))
+    if filename_years and content_years and filename_years.isdisjoint(content_years):
+        return False
+
+    tokens = _filename_fuzzy_tokens(stem)
+    matched_tokens = [token for token in tokens if token in normalized_content]
+    required_matches = 2 if len(tokens) <= 4 else 3
+    return len(matched_tokens) >= required_matches
 
 
 def _normalize_filename_match_text(value: str) -> str:
@@ -437,3 +452,29 @@ def _normalize_filename_match_text(value: str) -> str:
 
     lowered = value.lower()
     return re.sub(r"[\s\-_—–《》【】\[\]（）()，,。.:：;；/\\]+", "", lowered)
+
+
+def _filename_fuzzy_tokens(stem: str) -> set[str]:
+    """从文件名主干提取用于模糊匹配的中文、数字和英文片段。"""
+
+    stop_tokens = {
+        "文件",
+        "材料",
+        "资料",
+        "表格",
+        "汇总",
+        "汇总表",
+        "统计",
+        "整理",
+        "学院",
+        "学校",
+        "年度",
+    }
+    tokens: set[str] = set(re.findall(r"(?:19|20)\d{2}|[a-z]{2,}", stem))
+    for chinese_part in re.findall(r"[\u4e00-\u9fff]{2,}", stem):
+        for size in (4, 3, 2):
+            for index in range(0, max(len(chinese_part) - size + 1, 0)):
+                token = chinese_part[index : index + size]
+                if token not in stop_tokens:
+                    tokens.add(token)
+    return tokens
