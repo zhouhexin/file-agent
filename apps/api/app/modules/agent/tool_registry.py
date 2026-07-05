@@ -623,6 +623,27 @@ def _tool(
         handler=handler,
     )
 
+def _analyze_spreadsheet_handler(db, user_id):
+    def handler(tool_input):
+        repository = FileExtractionRepository(db, user_id)
+        resolved = repository.resolve_original_file(tool_input.document_id)
+
+        if not resolved["ok"]:
+            return {
+                "ok": False,
+                "kind": "spreadsheet_analysis",
+                "status": "FAILED",
+                "error": resolved["error"],
+            }
+
+        return SpreadsheetAnalysisService().analyze(
+            document_id=tool_input.document_id,
+            filename=resolved["document"].original_filename,
+            file_path=resolved["file_path"],
+            question=tool_input.question,
+        )
+
+    return handler
 
 def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str, ToolDefinition]:
     """创建 AGENTS.md 要求的完整 MVP Tool 目录。"""
@@ -652,5 +673,8 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("feedback-record", "Record user feedback.", FeedbackRecordInput, True, False, ["feedback"], _feedback_handler),
         _tool("job-status-read", "Read processing job status.", JobStatusReadInput, False, False, [], _job_status_handler),
         _tool("document-lineage-read", "Read document lineage.", DocumentLineageReadInput, False, False, [], _lineage_handler),
+        _tool( "analyze-spreadsheet", "Profile a spreadsheet, create a validated query plan, and execute deterministic aggregation.",SpreadsheetAnalysisInput, False, False, [],  _analyze_spreadsheet_handler(db, user_id),
+        )
     ]
     return {tool.name: tool for tool in tools}
+

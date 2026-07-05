@@ -718,21 +718,49 @@ def _has_answer_intent(*, message: str, lowered: str) -> bool:
     )
 
 
-def _has_table_summary_or_column_intent(*, message: str, lowered: str) -> bool:
-    """判断用户是否要求汇总表格字段、金额或某一列内容。"""
+# def _has_table_summary_or_column_intent(*, message: str, lowered: str) -> bool:
+#     """判断用户是否要求汇总表格字段、金额或某一列内容。"""
+#
+#     table_keywords = ["表", "表格", "工作表"]
+#     operation_keywords = ["汇总", "统计", "合计", "求和", "列", "金额", "关键字", "关键词"]
+#     english_table_keywords = ["sheet", "worksheet", "csv", "excel", "table", "xlsx", "xls"]
+#     english_operation_keywords = ["sum", "total", "column", "amount", "keyword"]
+#     has_table_context = any(keyword in message for keyword in table_keywords) or any(
+#         keyword in lowered for keyword in english_table_keywords
+#     )
+#     has_table_operation = any(keyword in message for keyword in operation_keywords) or any(
+#         keyword in lowered for keyword in english_operation_keywords
+#     )
+#     return has_table_context and has_table_operation
+def _has_spreadsheet_analysis_intent(
+    *,
+    message: str,
+    lowered: str,
+    attachments: list[dict],
+) -> bool:
+    spreadsheet_suffixes = {".xlsx", ".xlsm", ".xls", ".csv"}
 
-    table_keywords = ["表", "表格", "工作表"]
-    operation_keywords = ["汇总", "统计", "合计", "求和", "列", "金额", "关键字", "关键词"]
-    english_table_keywords = ["sheet", "worksheet", "csv", "excel", "table", "xlsx", "xls"]
-    english_operation_keywords = ["sum", "total", "column", "amount", "keyword"]
-    has_table_context = any(keyword in message for keyword in table_keywords) or any(
-        keyword in lowered for keyword in english_table_keywords
+    has_spreadsheet = any(
+        Path(str(item.get("filename") or "")).suffix.lower()
+        in spreadsheet_suffixes
+        for item in attachments
     )
-    has_table_operation = any(keyword in message for keyword in operation_keywords) or any(
-        keyword in lowered for keyword in english_operation_keywords
-    )
-    return has_table_context and has_table_operation
 
+    analysis_keywords = [
+        "统计", "汇总", "合计", "求和", "平均",
+        "最大", "最小", "排名", "占比", "筛选",
+        "过滤", "分组", "对比", "趋势", "多少",
+    ]
+
+    english_keywords = [
+        "sum", "total", "count", "average", "avg",
+        "max", "min", "group", "filter", "rank",
+    ]
+
+    return has_spreadsheet and (
+        any(keyword in message for keyword in analysis_keywords)
+        or any(keyword in lowered for keyword in english_keywords)
+    )
 
 def _document_ids(attachments: List[Dict[str, Any]]) -> List[str]:
     """从消息附件中提取 document_id 列表。"""

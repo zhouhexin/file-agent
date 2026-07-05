@@ -116,3 +116,7 @@ class DocumentLineageReadInput(StrictToolInput):
     """读取文档版本关系和派生件的输入。"""
 
     document_id: str = Field(min_length=1)
+
+class SpreadsheetAnalysisInput(StrictToolInput):
+    document_id: str = Field(min_length=1)
+    question: str = Field(min_length=1)

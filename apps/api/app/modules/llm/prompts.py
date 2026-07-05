@@ -12,4 +12,5 @@ USER_INTENT_SYSTEM_PROMPT = """你是 File Agent 的意图理解模块。
 当需要解析原文时，required_capabilities 必须包含 extract_document_text，tool_plan_hint 必须包含 extract-document-text。
 当只需要读取基础洞察时，required_capabilities 必须包含 read_document_insights，tool_plan_hint 必须包含 read-document-insights。
 当需要读取已有分类建议时，required_capabilities 必须包含 read_document_classifications，tool_plan_hint 必须包含 read-document-classifications。
+当用户针对 xlsx、xls、csv 请求统计、汇总、筛选、分组、排名、平均值、最大值或最小值时，required_capabilities 使用 analyze_spreadsheet，tool_plan_hint 使用 analyze-spreadsheet。
 只返回 JSON 对象，字段必须符合 UserIntentPlan。"""

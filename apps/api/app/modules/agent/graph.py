@@ -260,9 +260,17 @@ def evidence_or_change(state: AgentGraphState, runtime: Runtime[AgentRuntimeCont
         "document_results": document_results,
     }
 
+def _spreadsheet_analysis_from_results(
+    tool_results: list[dict],
+) -> dict | None:
+    for result in reversed(tool_results):
+        if result.get("kind") == "spreadsheet_analysis":
+            return result
+    return None
 
 def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
     """生成面向用户的最终运行摘要。"""
+
 
     document_results = state.get("document_results", [])
     if document_results:
@@ -332,6 +340,16 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
         return {
             "status": "COMPLETED",
             "final_response": _build_general_chat_response(intent_summary),
+        }
+
+    analysis = _spreadsheet_analysis_from_results(
+        state.get("tool_results", [])
+    )
+
+    if analysis is not None:
+        return {
+            "status": "COMPLETED",
+            "final_response": format_spreadsheet_analysis_response(analysis),
         }
 
     return {

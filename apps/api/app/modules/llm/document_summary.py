@@ -68,6 +68,7 @@ class LLMDocumentSummaryService:
             user_message=user_message,
             documents=documents,
         )
+1
         if deterministic_answer:
             return deterministic_answer
 
@@ -248,15 +249,23 @@ def _build_table_amount_aggregation_response(*, user_message: str, documents: Li
 
 
 def _looks_like_amount_aggregation_request(message: str) -> bool:
-    """判断用户是否要求按人员维度汇总金额。"""
+    # """判断用户是否要求按人员维度汇总金额。"""
+    #
+    # group_keywords = ["教师", "申请人", "姓名", "人员", "老师"]
+    # amount_keywords = ["资助金额", "金额", "经费", "费用"]
+    # aggregate_keywords = ["汇总", "统计", "合计", "求和", "总额"]
+    # return (
+    #     any(keyword in message for keyword in group_keywords)
+    #     and any(keyword in message for keyword in amount_keywords)
+    #     and any(keyword in message for keyword in aggregate_keywords)
+    # )
+    """判断用户是否请求金额统计；不强制要求人员维度。"""
+    amount_keywords = ["资助金额", "金额", "经费", "费用", "资助款"]
+    aggregate_keywords = ["汇总", "统计", "合计", "求和", "总额", "总和"]
 
-    group_keywords = ["教师", "申请人", "姓名", "人员", "老师"]
-    amount_keywords = ["资助金额", "金额", "经费", "费用"]
-    aggregate_keywords = ["汇总", "统计", "合计", "求和", "总额"]
     return (
-        any(keyword in message for keyword in group_keywords)
-        and any(keyword in message for keyword in amount_keywords)
-        and any(keyword in message for keyword in aggregate_keywords)
+            any(keyword in message for keyword in amount_keywords)
+            and any(keyword in message for keyword in aggregate_keywords)
     )
 
 
