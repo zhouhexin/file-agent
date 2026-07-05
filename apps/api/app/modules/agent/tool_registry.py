@@ -198,7 +198,8 @@ def _document_handler(tool_name: str) -> ToolHandler:
             "ok": True,
             "tool_name": tool_name,
             "document_id": document_id,
-            "changeset_id": f"changeset-{document_id}",
+            # "changeset_id": f"changeset-{document_id}",
+            "changeset_id": None,
             "summary": f"{tool_name} completed for {document_id}",
         }
 
@@ -383,9 +384,10 @@ def _change_report_handler(tool_input: BaseModel) -> Dict[str, Any]:
 
     return {
         "ok": True,
-        "changeset_id": getattr(tool_input, "changeset_id") or "changeset-memory",
+        "changeset_id": None,
         "document_id": getattr(tool_input, "document_id"),
         "items": [],
+        "receipt_status": "NOT_PERSISTED",
     }
 
 
@@ -407,7 +409,8 @@ def _confirmed_action_handler(tool_input: BaseModel) -> Dict[str, Any]:
         "ok": True,
         "operation_plan_id": getattr(tool_input, "operation_plan_id"),
         "status": "EXECUTED",
-        "changeset_id": "changeset-confirmed-action",
+        # "changeset_id": "changeset-confirmed-action",
+        "changeset_id": None,
     }
 
 

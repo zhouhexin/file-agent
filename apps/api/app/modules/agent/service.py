@@ -25,7 +25,7 @@ from app.modules.classification.llm_judge import LLMClassificationJudge
 from app.modules.llm.client import OpenAICompatibleLLMClient
 from app.modules.llm.document_summary import LLMDocumentSummaryService
 from app.modules.llm.service import LLMIntentService
-
+from app.modules.changesets.service import persist_changeset_from_document_results
 
 class AgentRuntimeService:
     """协调 Planner、Tool Registry 和 LangGraph 执行。"""
@@ -113,7 +113,23 @@ class AgentRuntimeService:
             if repository is not None and run is not None:
                 for record in invocation_records:
                     repository.create_tool_invocation(agent_run_id=run.id, record=record)
+
                 repository.update_run_from_state(run, final_state)
+
+                changeset = persist_changeset_from_document_results(
+                    db=db,
+                    run=run,
+                    document_results=final_state.get("document_results", []),
+                )
+
+                if changeset is not None:
+                    final_state["changeset_id"] = changeset.id
+                    run.changeset_id = changeset.id
+
+                db.commit()
+                db.refresh(run)
+
+
                 result = repository.to_result(run)
             else:
                 result = AgentRunResult(
