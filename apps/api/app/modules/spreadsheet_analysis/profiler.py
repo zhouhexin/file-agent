@@ -12,7 +12,7 @@ import openpyxl
 
 from .schemas import ColumnProfile, ColumnType, SheetProfile, WorkbookProfile
 
-MAX_HEADER_SCAN_ROWS = 20
+
 MAX_PROFILE_SAMPLE_ROWS = 100
 MAX_SAMPLE_VALUES_PER_COLUMN = 5
 SUPPORTED_SPREADSHEET_SUFFIXES = {".xlsx", ".xlsm", ".csv"}
@@ -25,8 +25,8 @@ def profile_workbook(
     file_path: Path,
 ) -> WorkbookProfile:
     """读取原始工作簿结构；不读取或修改数据库，也不修改文件。"""
-
     suffix = file_path.suffix.lower()
+
     if suffix not in SUPPORTED_SPREADSHEET_SUFFIXES:
         raise ValueError("当前仅支持 .xlsx、.xlsm 和 .csv 文件。")
 
@@ -51,13 +51,17 @@ def _profile_excel(*, file_path: Path) -> list[SheetProfile]:
         read_only=True,
         data_only=True,
     )
+
     try:
         sheets: list[SheetProfile] = []
+
         for sheet_index, worksheet in enumerate(workbook.worksheets, start=1):
             header_row = detect_header_row(worksheet)
             headers = read_headers(worksheet, header_row)
+
             if not headers:
                 continue
+
             sheet_id = f"sheet_{sheet_index}"
             columns = build_column_profiles(
                 row_iterable=worksheet.iter_rows(
@@ -67,17 +71,22 @@ def _profile_excel(*, file_path: Path) -> list[SheetProfile]:
                 sheet_id=sheet_id,
                 headers=headers,
             )
+
             sheets.append(
                 SheetProfile(
                     sheet_id=sheet_id,
                     sheet_name=worksheet.title or f"Sheet{sheet_index}",
                     header_row=header_row,
                     row_count=_count_nonempty_rows(
-                        worksheet.iter_rows(min_row=header_row + 1, values_only=True)
+                        worksheet.iter_rows(
+                            min_row=header_row + 1,
+                            values_only=True,
+                        )
                     ),
                     columns=columns,
                 )
             )
+
         return sheets
     finally:
         workbook.close()
@@ -85,12 +94,14 @@ def _profile_excel(*, file_path: Path) -> list[SheetProfile]:
 
 def _profile_csv(*, file_path: Path) -> SheetProfile:
     rows = _read_csv_rows(file_path)
+
     if not rows:
         raise ValueError("CSV 文件为空，无法识别表头。")
 
-    header_row_zero_based = _detect_header_row_from_values(rows)
+    header_row_zero_based = _first_non_empty_row_index(rows)
     header_row = header_row_zero_based + 1
     headers = _read_headers_from_values(rows[header_row_zero_based])
+
     if not headers:
         raise ValueError("CSV 文件未识别到有效表头。")
 
@@ -99,6 +110,7 @@ def _profile_csv(*, file_path: Path) -> SheetProfile:
         sheet_id="sheet_1",
         headers=headers,
     )
+
     return SheetProfile(
         sheet_id="sheet_1",
         sheet_name="CSV",
@@ -109,49 +121,35 @@ def _profile_csv(*, file_path: Path) -> SheetProfile:
 
 
 def detect_header_row(worksheet: Any) -> int:
-    """在前若干行中选择最像表头的一行，兼容标题行和空白行。"""
+    """
+    将第一个非空行固定作为 Excel 表头。
 
-    candidates: list[list[Any]] = []
-    max_row = min(int(worksheet.max_row or 0), MAX_HEADER_SCAN_ROWS)
-    for row_index in range(1, max_row + 1):
-        row = next(
-            worksheet.iter_rows(
-                min_row=row_index,
-                max_row=row_index,
-                values_only=True,
-            ),
-            (),
-        )
-        candidates.append(list(row))
+    规则：
+    - 第 1 行有任何非空单元格：第 1 行就是表头；
+    - 第 1 行完全为空：继续查找第 2 行、第 3 行……；
+    - 整个 Sheet 都为空：兜底返回第 1 行。
 
-    return _detect_header_row_from_values(candidates) + 1
+    本函数不再根据单元格数量、唯一值或数值比例“猜测”表头，
+    以避免把内容完整的数据行误判为表头。
+    """
+    return _first_non_empty_row_index(
+        worksheet.iter_rows(values_only=True)
+    ) + 1
 
 
-def _detect_header_row_from_values(rows: Sequence[Sequence[Any]]) -> int:
-    best_index = 0
-    best_score = float("-inf")
+def _first_non_empty_row_index(
+    rows: Iterable[Sequence[Any]],
+) -> int:
+    """返回第一个非空行的 0-based 下标；找不到时返回 0。"""
+    for row_index, row in enumerate(rows):
+        if _is_nonempty_row(row):
+            return row_index
 
-    for row_index, row in enumerate(rows[:MAX_HEADER_SCAN_ROWS]):
-        values = [_normalize_header_value(value) for value in row]
-        non_empty = [value for value in values if value]
-        if len(non_empty) < 2:
-            continue
-
-        unique_count = len(set(non_empty))
-        numeric_like_count = sum(_is_numeric_like(value) for value in non_empty)
-        score = len(non_empty) * 10 + unique_count - numeric_like_count * 4
-
-        # 表头通常靠前；分数相同时优先选更靠前的行。
-        if score > best_score:
-            best_index = row_index
-            best_score = score
-
-    return best_index
+    return 0
 
 
 def read_headers(worksheet: Any, header_row: int) -> list[str]:
     """读取并去重 Excel 表头，跳过尾部全空列。"""
-
     row = next(
         worksheet.iter_rows(
             min_row=header_row,
@@ -165,6 +163,7 @@ def read_headers(worksheet: Any, header_row: int) -> list[str]:
 
 def _read_headers_from_values(row: Sequence[Any]) -> list[str]:
     last_non_empty = 0
+
     for index, value in enumerate(row, start=1):
         if _normalize_header_value(value):
             last_non_empty = index
@@ -174,11 +173,17 @@ def _read_headers_from_values(row: Sequence[Any]) -> list[str]:
 
     used: dict[str, int] = {}
     headers: list[str] = []
+
     for column_index, value in enumerate(row[:last_non_empty], start=1):
         base_name = _normalize_header_value(value) or f"列{column_index}"
         used[base_name] = used.get(base_name, 0) + 1
-        name = base_name if used[base_name] == 1 else f"{base_name}_{used[base_name]}"
+        name = (
+            base_name
+            if used[base_name] == 1
+            else f"{base_name}_{used[base_name]}"
+        )
         headers.append(name)
+
     return headers
 
 
@@ -189,23 +194,28 @@ def build_column_profiles(
     headers: list[str],
 ) -> list[ColumnProfile]:
     """采样前若干个非空值，推断列类型并形成稳定 column_id。"""
-
     values_by_column: list[list[Any]] = [[] for _ in headers]
     rows_seen = 0
 
     for row in row_iterable:
         if rows_seen >= MAX_PROFILE_SAMPLE_ROWS:
             break
+
         if not _is_nonempty_row(row):
             continue
+
         rows_seen += 1
+
         for column_index in range(len(headers)):
             value = row[column_index] if column_index < len(row) else None
+
             if _is_empty(value):
                 continue
+
             values_by_column[column_index].append(value)
 
     columns: list[ColumnProfile] = []
+
     for column_index, header in enumerate(headers, start=1):
         values = values_by_column[column_index - 1]
         columns.append(
@@ -215,25 +225,32 @@ def build_column_profiles(
                 name=header,
                 value_type=infer_column_type(values),
                 non_empty_count=len(values),
-                sample_values=[_display_value(value) for value in values[:MAX_SAMPLE_VALUES_PER_COLUMN]],
+                sample_values=[
+                    _display_value(value)
+                    for value in values[:MAX_SAMPLE_VALUES_PER_COLUMN]
+                ],
             )
         )
+
     return columns
 
 
 def infer_column_type(values: Sequence[Any]) -> ColumnType:
     """按采样值多数推断一列的基础类型。"""
-
     non_empty = [value for value in values if not _is_empty(value)]
+
     if not non_empty:
         return ColumnType.UNKNOWN
 
     if all(isinstance(value, bool) for value in non_empty):
         return ColumnType.BOOLEAN
+
     if all(isinstance(value, (datetime, date, time)) for value in non_empty):
         return ColumnType.DATE
+
     if _ratio(non_empty, _is_number_value) >= 0.8:
         return ColumnType.NUMBER
+
     return ColumnType.STRING
 
 
@@ -241,10 +258,12 @@ def _read_csv_rows(file_path: Path) -> list[list[str]]:
     with file_path.open("r", encoding="utf-8-sig", newline="") as handle:
         sample = handle.read(4096)
         handle.seek(0)
+
         try:
             dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
         except csv.Error:
             dialect = csv.excel
+
         return [list(row) for row in csv.reader(handle, dialect)]
 
 
@@ -267,38 +286,43 @@ def _normalize_header_value(value: Any) -> str:
 def _display_value(value: Any) -> str:
     if isinstance(value, datetime):
         return value.isoformat(sep=" ")
+
     if isinstance(value, (date, time)):
         return value.isoformat()
+
     return str(value).strip()
 
 
 def _ratio(values: Sequence[Any], predicate) -> float:
     if not values:
         return 0.0
+
     return sum(1 for value in values if predicate(value)) / len(values)
 
 
 def _is_number_value(value: Any) -> bool:
     if isinstance(value, bool):
         return False
+
     if isinstance(value, (int, float, Decimal)):
         return True
+
     if isinstance(value, str):
         return _to_decimal(value) is not None
+
     return False
-
-
-def _is_numeric_like(value: str) -> bool:
-    return _to_decimal(value) is not None
 
 
 def _to_decimal(value: Any) -> Decimal | None:
     if value is None or isinstance(value, bool):
         return None
+
     text = str(value).strip().replace(",", "").replace("，", "")
     text = text.replace("￥", "").replace("¥", "")
+
     if not text:
         return None
+
     try:
         return Decimal(text)
     except InvalidOperation:
