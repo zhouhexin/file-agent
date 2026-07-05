@@ -1,7 +1,4 @@
-"""用于 Tool 输入校验的 Pydantic schema。
-
-所有 Tool 调用在执行前都必须经过这些 schema，这是声明式 Planner 步骤和副作用函数之间的第一层运行时防线。
-"""
+"""用于 Tool 输入校验的 Pydantic schema。"""
 
 from __future__ import annotations
 
@@ -12,8 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class ToolInputValidationError(ValueError):
     """Tool 输入参数未通过 schema 校验时抛出。"""
-
-    pass
 
 
 class StrictToolInput(BaseModel):
@@ -27,6 +22,13 @@ class DocumentToolInput(StrictToolInput):
 
     document_id: str = Field(min_length=1)
     force_reprocess: bool = False
+
+
+class SpreadsheetAnalysisInput(StrictToolInput):
+    """只读电子表格分析输入；不允许传入路径、SQL 或表达式。"""
+
+    document_id: str = Field(min_length=1)
+    question: str = Field(min_length=1, max_length=2000)
 
 
 class SearchToolInput(StrictToolInput):
@@ -116,7 +118,3 @@ class DocumentLineageReadInput(StrictToolInput):
     """读取文档版本关系和派生件的输入。"""
 
     document_id: str = Field(min_length=1)
-
-class SpreadsheetAnalysisInput(StrictToolInput):
-    document_id: str = Field(min_length=1)
-    question: str = Field(min_length=1)

@@ -6,6 +6,7 @@ Shell 命令、SQL 写入和文件系统路径会在 Tool dispatch 前被拒绝�
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -28,6 +29,8 @@ DOCUMENT_INSIGHT_HINTS = {"read_document_insights", "read-document-insights"}
 DOCUMENT_CLASSIFICATION_HINTS = {"read_document_classifications", "read-document-classifications"}
 AGENT_CAPABILITY_HINTS = {"read_agent_capabilities", "read-agent-capabilities", "capability_help"}
 CLASSIFICATION_TAXONOMY_HINTS = {"read_classification_taxonomy", "read-classification-taxonomy"}
+SPREADSHEET_ANALYSIS_HINTS = {"analyze_spreadsheet", "analyze-spreadsheet"}
+SPREADSHEET_SUFFIXES = {".xlsx", ".xlsm", ".csv"}
 
 
 class PlannerStep(BaseModel):
@@ -143,6 +146,18 @@ class DeterministicPlanner:
                 confirmation_policy={"operation_plan_required": True},
             )
 
+        if _has_spreadsheet_analysis_intent(
+            message=message,
+            lowered=lowered,
+            attachments=attachments,
+        ):
+            return _spreadsheet_analysis_plan(
+                user_goal=message,
+                document_ids=document_ids,
+                question=message,
+                selected_skills=["chat-intake", "spreadsheet-analysis"],
+            )
+
         if _has_plain_document_summary_intent(message=message, lowered=lowered):
             return PlannerOutput(
                 intent="SUMMARIZE_DOCUMENTS",
@@ -178,28 +193,6 @@ class DeterministicPlanner:
                         "expected_outputs": ["document_category_suggestions"],
                         "writes": [],
                     }
-                ],
-                evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
-                confirmation_policy={"operation_plan_required": False},
-            )
-
-        if _has_table_summary_or_column_intent(message=message, lowered=lowered):
-            return PlannerOutput(
-                intent="ANSWER_DOCUMENTS",
-                user_goal=message,
-                slots={
-                    "document_ids": document_ids,
-                    "question": message,
-                    "requested_outputs": ["text", "answer", "receipt"],
-                },
-                selected_skills=["chat-intake", "document-text-extract", "document-reading"],
-                steps=[
-                    _extract_document_text_step(
-                        document_id=item,
-                        index=index,
-                        force_reprocess=_should_force_reprocess(message=message, lowered=lowered),
-                    )
-                    for index, item in enumerate(document_ids, start=1)
                 ],
                 evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
                 confirmation_policy={"operation_plan_required": False},
@@ -341,6 +334,26 @@ def build_plan_from_user_intent(
     ):
         return _classification_taxonomy_plan(user_goal=intent_plan.user_goal or message)
 
+    if (
+        requested_capabilities.intersection(SPREADSHEET_ANALYSIS_HINTS)
+        or _has_spreadsheet_analysis_intent(
+            message=message,
+            lowered=lowered,
+            attachments=attachments,
+        )
+    ):
+        analysis_document_ids = document_ids or _document_ids(attachments)
+        if analysis_document_ids:
+            return _spreadsheet_analysis_plan(
+                user_goal=intent_plan.user_goal or message,
+                document_ids=analysis_document_ids,
+                question=message,
+                selected_skills=["llm-understanding", "spreadsheet-analysis"],
+                response_style=intent_plan.response_style,
+                clarification_question=intent_plan.clarification_question,
+                llm_intent_plan=intent_plan.model_dump(),
+            )
+
     if _has_plain_document_summary_intent(message=message, lowered=lowered):
         extraction_document_ids = document_ids or [_first_document_id(attachments)]
         return PlannerOutput(
@@ -349,32 +362,6 @@ def build_plan_from_user_intent(
             slots={
                 "document_ids": extraction_document_ids,
                 "requested_outputs": ["text", "summary", "receipt"],
-                "response_style": intent_plan.response_style,
-                "clarification_question": intent_plan.clarification_question,
-                "llm_intent_plan": intent_plan.model_dump(),
-            },
-            selected_skills=["llm-understanding", "document-text-extract", "document-reading"],
-            steps=[
-                _extract_document_text_step(
-                    document_id=document_id,
-                    index=index,
-                    force_reprocess=_should_force_reprocess(message=message, lowered=lowered),
-                )
-                for index, document_id in enumerate(extraction_document_ids, start=1)
-            ],
-            evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
-            confirmation_policy={"operation_plan_required": False},
-        )
-
-    if _has_table_summary_or_column_intent(message=message, lowered=lowered):
-        extraction_document_ids = document_ids or [_first_document_id(attachments)]
-        return PlannerOutput(
-            intent="ANSWER_DOCUMENTS",
-            user_goal=intent_plan.user_goal,
-            slots={
-                "document_ids": extraction_document_ids,
-                "question": message,
-                "requested_outputs": ["text", "answer", "receipt"],
                 "response_style": intent_plan.response_style,
                 "clarification_question": intent_plan.clarification_question,
                 "llm_intent_plan": intent_plan.model_dump(),
@@ -605,6 +592,58 @@ def _extract_document_text_step(*, document_id: str, index: int, force_reprocess
     }
 
 
+def _analyze_spreadsheet_step(*, document_id: str, question: str, index: int) -> Dict[str, Any]:
+    """为一个已上传电子表格生成只读分析 Tool 步骤。"""
+
+    return {
+        "step_id": f"step-spreadsheet-{index}",
+        "skill": "spreadsheet-analysis",
+        "tool_name": "analyze-spreadsheet",
+        "input": {"document_id": document_id, "question": question},
+        "requires_confirmation": False,
+        "risk_level": "low",
+        "expected_outputs": ["spreadsheet_analysis"],
+        "writes": [],
+    }
+
+
+def _spreadsheet_analysis_plan(
+    *,
+    user_goal: str,
+    document_ids: List[str],
+    question: str,
+    selected_skills: List[str],
+    response_style: str = "concise",
+    clarification_question: str | None = None,
+    llm_intent_plan: Dict[str, Any] | None = None,
+) -> PlannerOutput:
+    """构造通用电子表格分析计划；业务字段完全由运行时 Profile 决定。"""
+
+    return PlannerOutput(
+        intent="ANALYZE_SPREADSHEET",
+        user_goal=user_goal,
+        slots={
+            "document_ids": document_ids,
+            "question": question,
+            "requested_outputs": ["spreadsheet_analysis"],
+            "response_style": response_style,
+            "clarification_question": clarification_question,
+            "llm_intent_plan": llm_intent_plan or {},
+        },
+        selected_skills=selected_skills,
+        steps=[
+            _analyze_spreadsheet_step(
+                document_id=document_id,
+                question=question,
+                index=index,
+            )
+            for index, document_id in enumerate(document_ids, start=1)
+        ],
+        evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": False},
+        confirmation_policy={"operation_plan_required": False},
+    )
+
+
 def _should_extract_text(*, message: str, lowered: str) -> bool:
     """判断确定性模式下用户是否明确要求读取正文；读取优先于分类组合词。"""
 
@@ -718,49 +757,64 @@ def _has_answer_intent(*, message: str, lowered: str) -> bool:
     )
 
 
-# def _has_table_summary_or_column_intent(*, message: str, lowered: str) -> bool:
-#     """判断用户是否要求汇总表格字段、金额或某一列内容。"""
-#
-#     table_keywords = ["表", "表格", "工作表"]
-#     operation_keywords = ["汇总", "统计", "合计", "求和", "列", "金额", "关键字", "关键词"]
-#     english_table_keywords = ["sheet", "worksheet", "csv", "excel", "table", "xlsx", "xls"]
-#     english_operation_keywords = ["sum", "total", "column", "amount", "keyword"]
-#     has_table_context = any(keyword in message for keyword in table_keywords) or any(
-#         keyword in lowered for keyword in english_table_keywords
-#     )
-#     has_table_operation = any(keyword in message for keyword in operation_keywords) or any(
-#         keyword in lowered for keyword in english_operation_keywords
-#     )
-#     return has_table_context and has_table_operation
 def _has_spreadsheet_analysis_intent(
     *,
     message: str,
     lowered: str,
-    attachments: list[dict],
+    attachments: List[Dict[str, Any]],
 ) -> bool:
-    spreadsheet_suffixes = {".xlsx", ".xlsm", ".xls", ".csv"}
+    """仅凭“电子表格附件 + 分析操作”路由，不依赖任何业务字段名。"""
 
     has_spreadsheet = any(
-        Path(str(item.get("filename") or "")).suffix.lower()
-        in spreadsheet_suffixes
+        Path(
+            str(
+                item.get("filename")
+                or item.get("original_filename")
+                or item.get("name")
+                or ""
+            )
+        ).suffix.lower()
+        in SPREADSHEET_SUFFIXES
         for item in attachments
     )
+    if not has_spreadsheet:
+        return False
 
-    analysis_keywords = [
-        "统计", "汇总", "合计", "求和", "平均",
-        "最大", "最小", "排名", "占比", "筛选",
-        "过滤", "分组", "对比", "趋势", "多少",
+    chinese_operations = [
+        "统计",
+        "汇总",
+        "合计",
+        "求和",
+        "平均",
+        "最大",
+        "最小",
+        "排名",
+        "占比",
+        "筛选",
+        "过滤",
+        "分组",
+        "对比",
+        "趋势",
+        "多少",
+        "几条",
+        "数量",
     ]
-
-    english_keywords = [
-        "sum", "total", "count", "average", "avg",
-        "max", "min", "group", "filter", "rank",
+    english_operations = [
+        "sum",
+        "total",
+        "count",
+        "average",
+        "avg",
+        "max",
+        "min",
+        "group",
+        "filter",
+        "rank",
     ]
-
-    return has_spreadsheet and (
-        any(keyword in message for keyword in analysis_keywords)
-        or any(keyword in lowered for keyword in english_keywords)
+    return any(keyword in message for keyword in chinese_operations) or any(
+        keyword in lowered for keyword in english_operations
     )
+
 
 def _document_ids(attachments: List[Dict[str, Any]]) -> List[str]:
     """从消息附件中提取 document_id 列表。"""

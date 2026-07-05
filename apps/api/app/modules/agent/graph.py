@@ -16,6 +16,7 @@ from app.modules.agent.planner import build_plan_from_user_intent
 from app.modules.agent.runtime import AgentRuntimeContext
 from app.modules.agent.state import AgentGraphState, ToolInvocationRecord
 from app.modules.llm.client import LLMResponseError
+from app.modules.spreadsheet_analysis.formatter import format_spreadsheet_analysis_response
 
 
 def build_agent_graph():
@@ -198,7 +199,7 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
         try:
             invocation = registry.invoke(step["tool_name"], step["input"])
         except Exception as exc:
-            if step["tool_name"] != "extract-document-text":
+            if step["tool_name"] not in {"extract-document-text", "analyze-spreadsheet"}:
                 raise
             invocation = _failed_tool_invocation(step=step, error=exc)
         invocation_json = invocation.model_dump()
@@ -217,28 +218,43 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
 
 
 def _failed_tool_invocation(*, step: Dict[str, Any], error: Exception) -> ToolInvocationRecord:
-    """把单个 Tool 异常转成结构化失败记录，避免批量任务被一个文件阻断。"""
+    """把允许降级的单个 Tool 异常转成结构化失败记录。"""
 
+    tool_name = str(step.get("tool_name") or "unknown-tool")
     tool_input = step.get("input", {})
     document_id = str(tool_input.get("document_id") or "")
-    return ToolInvocationRecord(
-        tool_name=step.get("tool_name", "unknown-tool"),
-        input_json=tool_input,
-        output_json={
+    error_payload = {
+        "code": "TOOL_EXECUTION_FAILED",
+        "message": str(error),
+        "retryable": False,
+        "user_action_required": False,
+    }
+
+    if tool_name == "analyze-spreadsheet":
+        output_json: Dict[str, Any] = {
+            "kind": "spreadsheet_analysis",
+            "ok": False,
+            "status": "FAILED",
+            "document_id": document_id,
+            "error": error_payload,
+        }
+    else:
+        output_json = {
             "ok": False,
             "document_id": document_id,
             "extraction_run_id": f"failed-{step.get('step_id', 'unknown')}",
             "status": "FAILED",
-            "extractor": step.get("tool_name", "unknown-tool"),
+            "extractor": tool_name,
             "pages": [],
-            "error": {
-                "code": "TOOL_EXECUTION_FAILED",
-                "message": str(error),
-            },
-        },
+            "error": error_payload,
+        }
+
+    return ToolInvocationRecord(
+        tool_name=tool_name,
+        input_json=tool_input,
+        output_json=output_json,
         status="FAILED",
     )
-
 
 def async_job_wait(state: AgentGraphState) -> Dict[str, Any]:
     """异步任务边界占位，后续用于接入 processing job。"""
@@ -260,17 +276,29 @@ def evidence_or_change(state: AgentGraphState, runtime: Runtime[AgentRuntimeCont
         "document_results": document_results,
     }
 
-def _spreadsheet_analysis_from_results(
-    tool_results: list[dict],
-) -> dict | None:
-    for result in reversed(tool_results):
-        if result.get("kind") == "spreadsheet_analysis":
-            return result
-    return None
+def _spreadsheet_analysis_results_from_results(
+    tool_results: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """提取所有表格分析结果，支持多附件逐个展示。"""
+
+    return [
+        result
+        for result in tool_results
+        if result.get("kind") == "spreadsheet_analysis"
+    ]
+
 
 def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
     """生成面向用户的最终运行摘要。"""
 
+    analysis_results = _spreadsheet_analysis_results_from_results(
+        state.get("tool_results", [])
+    )
+    if analysis_results:
+        return {
+            "status": "COMPLETED",
+            "final_response": format_spreadsheet_analysis_response(analysis_results),
+        }
 
     document_results = state.get("document_results", [])
     if document_results:
@@ -340,16 +368,6 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
         return {
             "status": "COMPLETED",
             "final_response": _build_general_chat_response(intent_summary),
-        }
-
-    analysis = _spreadsheet_analysis_from_results(
-        state.get("tool_results", [])
-    )
-
-    if analysis is not None:
-        return {
-            "status": "COMPLETED",
-            "final_response": format_spreadsheet_analysis_response(analysis),
         }
 
     return {

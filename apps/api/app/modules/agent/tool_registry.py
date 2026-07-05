@@ -31,11 +31,13 @@ from app.modules.agent.tool_schemas import (
     JobStatusReadInput,
     OperationPlanCreateInput,
     SearchToolInput,
+    SpreadsheetAnalysisInput,
     ToolInputValidationError,
 )
 from app.modules.classification.taxonomy_service import read_default_taxonomy_catalog
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text
+from app.modules.spreadsheet_analysis.service import SpreadsheetAnalysisService
 
 
 class UnknownToolError(ValueError):
@@ -623,27 +625,50 @@ def _tool(
         handler=handler,
     )
 
-def _analyze_spreadsheet_handler(db, user_id):
-    def handler(tool_input):
-        repository = FileExtractionRepository(db, user_id)
-        resolved = repository.resolve_original_file(tool_input.document_id)
+def _analyze_spreadsheet_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """通过文件权限仓库定位原件，再调用只读表格分析服务。"""
 
-        if not resolved["ok"]:
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        if db is None:
             return {
-                "ok": False,
                 "kind": "spreadsheet_analysis",
+                "ok": False,
                 "status": "FAILED",
-                "error": resolved["error"],
+                "error": {
+                    "code": "DATABASE_SESSION_REQUIRED",
+                    "message": "表格分析需要数据库会话。",
+                    "retryable": False,
+                    "user_action_required": False,
+                },
             }
 
+        document_id = str(getattr(tool_input, "document_id"))
+        repository = FileExtractionRepository(db, user_id)
+        resolved = repository.resolve_original_file(document_id)
+        if not resolved.get("ok"):
+            return {
+                "kind": "spreadsheet_analysis",
+                "ok": False,
+                "status": "FAILED",
+                "document_id": document_id,
+                "error": resolved.get("error") or {
+                    "code": "FILE_RESOLUTION_FAILED",
+                    "message": "无法定位已授权的原始文件。",
+                    "retryable": False,
+                    "user_action_required": False,
+                },
+            }
+
+        document = resolved["document"]
         return SpreadsheetAnalysisService().analyze(
-            document_id=tool_input.document_id,
-            filename=resolved["document"].original_filename,
+            document_id=str(document.id),
+            filename=str(document.original_filename),
             file_path=resolved["file_path"],
-            question=tool_input.question,
+            question=str(getattr(tool_input, "question")),
         )
 
     return handler
+
 
 def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str, ToolDefinition]:
     """创建 AGENTS.md 要求的完整 MVP Tool 目录。"""
@@ -673,8 +698,15 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("feedback-record", "Record user feedback.", FeedbackRecordInput, True, False, ["feedback"], _feedback_handler),
         _tool("job-status-read", "Read processing job status.", JobStatusReadInput, False, False, [], _job_status_handler),
         _tool("document-lineage-read", "Read document lineage.", DocumentLineageReadInput, False, False, [], _lineage_handler),
-        _tool( "analyze-spreadsheet", "Profile a spreadsheet, create a validated query plan, and execute deterministic aggregation.",SpreadsheetAnalysisInput, False, False, [],  _analyze_spreadsheet_handler(db, user_id),
-        )
+        _tool(
+            "analyze-spreadsheet",
+            "Analyze an uploaded XLSX/XLSM/CSV spreadsheet through a validated read-only query plan.",
+            SpreadsheetAnalysisInput,
+            False,
+            False,
+            [],
+            _analyze_spreadsheet_handler(db, user_id),
+        ),
     ]
     return {tool.name: tool for tool in tools}
 
