@@ -723,7 +723,7 @@ def _has_table_summary_or_column_intent(*, message: str, lowered: str) -> bool:
 
     table_keywords = ["表", "表格", "工作表"]
     operation_keywords = ["汇总", "统计", "合计", "求和", "列", "金额", "关键字", "关键词"]
-    english_table_keywords = ["sheet", "worksheet", "csv", "excel", "table"]
+    english_table_keywords = ["sheet", "worksheet", "csv", "excel", "table", "xlsx", "xls"]
     english_operation_keywords = ["sum", "total", "column", "amount", "keyword"]
     has_table_context = any(keyword in message for keyword in table_keywords) or any(
         keyword in lowered for keyword in english_table_keywords
