@@ -66,7 +66,10 @@ class ConversationMessageService:
             message_id=message.id,
             message=request.content,
             attachments=[
-                attachment.model_dump()
+                {
+                    **attachment.model_dump(),
+                    "context_scope": attachment_context.scope,
+                }
                 for attachment in attachments
             ],
             db=self.db,

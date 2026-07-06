@@ -9,6 +9,8 @@ import pytest
 from pydantic import ValidationError
 
 from app.main import app
+from app.modules.agent.capabilities.service import load_agent_capabilities
+from app.modules.agent.capability_router import route_user_intent
 from app.modules.llm.schemas import UserIntentPlan
 from app.modules.agent.graph import _build_document_results_response
 from app.modules.agent.repository import _safe_graph_state_snapshot
@@ -33,6 +35,83 @@ def test_get_agent_tools_returns_mvp_catalog():
     assert "document-convert" in tool_names
     assert "operation-plan-create" in tool_names
     assert "confirmed-file-action" in tool_names
+
+
+def test_capability_catalog_exposes_router_metadata():
+    """能力目录必须暴露路由元数据，供 Planner 从能力选择 Tool。"""
+
+    catalog = load_agent_capabilities(detail_level="full")
+    routed = {
+        capability["id"]: capability
+        for capability in catalog["capabilities"]
+        if capability["id"] in {"document_summary", "document_classification", "spreadsheet_analysis"}
+    }
+
+    assert routed["document_summary"]["tool_names"] == ["extract-document-text"]
+    assert "read-document-classifications" in routed["document_classification"]["tool_names"]
+    assert routed["spreadsheet_analysis"]["tool_names"] == ["analyze-spreadsheet"]
+
+
+def test_capability_router_maps_classification_summary_to_read_tool():
+    """读取已有分类建议必须路由到分类读取 Tool。"""
+
+    route = route_user_intent(
+        intent="SUMMARIZE_CLASSIFICATIONS",
+        required_capabilities=["read_document_classifications"],
+        tool_plan_hint=["read-document-classifications"],
+    )
+
+    assert route is not None
+    assert route.intent == "SUMMARIZE_CLASSIFICATIONS"
+    assert route.tool_name == "read-document-classifications"
+
+
+def test_capability_router_maps_spreadsheet_analysis_to_table_tool():
+    """表格汇总能力必须路由到表格分析 Tool。"""
+
+    route = route_user_intent(
+        intent="SPREADSHEET_ANALYSIS",
+        required_capabilities=["analyze_spreadsheet"],
+        tool_plan_hint=[],
+        attachments=[{"document_id": "doc-csv", "filename": "test.csv"}],
+    )
+
+    assert route is not None
+    assert route.intent == "ANALYZE_SPREADSHEET"
+    assert route.tool_name == "analyze-spreadsheet"
+
+
+def test_capability_router_maps_help_and_taxonomy_tools():
+    """能力帮助和分类目录也必须能通过能力路由识别。"""
+
+    help_route = route_user_intent(
+        intent="CAPABILITY_HELP",
+        required_capabilities=["read_agent_capabilities"],
+        tool_plan_hint=[],
+    )
+    taxonomy_route = route_user_intent(
+        intent="LIST_CLASSIFICATION_TAXONOMY",
+        required_capabilities=["read_classification_taxonomy"],
+        tool_plan_hint=[],
+    )
+
+    assert help_route is not None
+    assert help_route.tool_name == "read-agent-capabilities"
+    assert taxonomy_route is not None
+    assert taxonomy_route.tool_name == "read-classification-taxonomy"
+
+
+def test_capability_router_does_not_route_by_file_type_only():
+    """文件类型只能辅助能力选择，不能仅凭 CSV 附件触发表格 Tool。"""
+
+    route = route_user_intent(
+        intent="GENERAL_CHAT",
+        required_capabilities=[],
+        tool_plan_hint=[],
+        attachments=[{"document_id": "doc-csv", "filename": "test.csv"}],
+    )
+
+    assert route is None
 
 
 def test_local_web_origin_is_allowed_for_api_requests():
@@ -120,7 +199,7 @@ def test_llm_classification_hint_is_overridden_for_plain_file_summary():
 
 
 def test_llm_classification_hint_is_overridden_for_table_column_summary():
-    """LLM 若把“汇总 CSV 关键词列”误判成分类读取，Planner 也必须按正文问答纠偏。"""
+    """LLM 若把“汇总 CSV 关键词列”误判成分类读取，Planner 也必须按表格分析纠偏。"""
 
     intent_plan = UserIntentPlan(
         intent="SUMMARIZE_CLASSIFICATIONS",
@@ -139,8 +218,116 @@ def test_llm_classification_hint_is_overridden_for_table_column_summary():
         attachments=[{"document_id": "doc-csv"}],
     )
 
-    assert plan.intent == "ANSWER_DOCUMENTS"
-    assert plan.slots["requested_outputs"] == ["text", "answer", "receipt"]
+    assert plan.intent == "ANALYZE_SPREADSHEET"
+    assert plan.slots["requested_outputs"] == ["spreadsheet_analysis"]
+    assert [step.tool_name for step in plan.steps] == ["analyze-spreadsheet"]
+
+
+def test_llm_capability_route_prefers_router_for_classification_summary():
+    """LLM 能力 hint 应先经过 CapabilityRouter，再生成受控 ToolPlan。"""
+
+    intent_plan = UserIntentPlan(
+        intent="SUMMARIZE_CLASSIFICATIONS",
+        user_goal="帮我总结刚刚上传文件的分类",
+        needs_file_context=True,
+        referenced_document_ids=["doc-1"],
+        required_capabilities=["read_document_classifications"],
+        tool_plan_hint=["read-document-classifications"],
+    )
+
+    plan = build_plan_from_user_intent(
+        intent_plan=intent_plan,
+        message="帮我总结刚刚上传文件的分类",
+        attachments=[{"document_id": "doc-1"}],
+    )
+
+    assert plan.intent == "SUMMARIZE_CLASSIFICATIONS"
+    assert [step.tool_name for step in plan.steps] == ["read-document-classifications"]
+    assert plan.slots["route_source"] == "capability_router"
+
+
+def test_llm_target_scope_is_preserved_from_backend_resolved_attachments():
+    """LLM target_scope 只能作为意图说明，Planner 必须保留后端已解析附件范围。"""
+
+    intent_plan = UserIntentPlan(
+        intent="SUMMARIZE_CLASSIFICATIONS",
+        user_goal="帮我总结上传的所有文件分类",
+        needs_file_context=True,
+        target_scope="all_conversation",
+        required_capabilities=["read_document_classifications"],
+        tool_plan_hint=["read-document-classifications"],
+    )
+
+    plan = build_plan_from_user_intent(
+        intent_plan=intent_plan,
+        message="帮我总结上传的所有文件分类",
+        attachments=[
+            {"document_id": "doc-1", "context_scope": "all_conversation"},
+            {"document_id": "doc-2", "context_scope": "all_conversation"},
+        ],
+    )
+
+    assert plan.intent == "SUMMARIZE_CLASSIFICATIONS"
+    assert plan.slots["target_scope"] == "all_conversation"
+    assert plan.slots["resolved_scope"] == "all_conversation"
+    assert plan.slots["document_ids"] == ["doc-1", "doc-2"]
+
+
+def test_llm_classification_hint_is_overridden_for_explicit_file_classification():
+    """LLM 若把“对上传文件进行分类”误判成读取历史分类，Planner 也必须重新解析并分类。"""
+
+    intent_plan = UserIntentPlan(
+        intent="SUMMARIZE_CLASSIFICATIONS",
+        user_goal="对上传文件进行分类",
+        needs_file_context=True,
+        referenced_document_ids=["doc-1"],
+        required_capabilities=["read_document_classifications"],
+        skip_completed_ingest=True,
+        tool_plan_hint=["read-document-classifications"],
+        response_style="concise",
+    )
+
+    plan = build_plan_from_user_intent(
+        intent_plan=intent_plan,
+        message="对上传文件进行分类",
+        attachments=[{"document_id": "doc-1"}],
+    )
+
+    assert plan.intent == "CLASSIFY_FILES"
+    assert plan.slots["requested_outputs"] == ["classification", "receipt"]
+    assert plan.selected_skills == [
+        "llm-understanding",
+        "document-text-extract",
+        "document-classification",
+        "change-report",
+    ]
+    assert [step.tool_name for step in plan.steps] == ["extract-document-text"]
+
+
+def test_llm_classify_intent_without_keyword_uses_classify_plan():
+    """工具入口必须以 LLM 结构化 intent 为主，不依赖用户原文包含“分类”关键词。"""
+
+    intent_plan = UserIntentPlan(
+        intent="CLASSIFY_FILES",
+        user_goal="判断这些材料应该放到哪个目录",
+        needs_file_context=True,
+        referenced_document_ids=["doc-1"],
+        target_scope="current_message",
+        required_capabilities=["classify_files"],
+        tool_plan_hint=[],
+        response_style="concise",
+    )
+
+    plan = build_plan_from_user_intent(
+        intent_plan=intent_plan,
+        message="判断这些材料应该放到哪个目录",
+        attachments=[{"document_id": "doc-1", "context_scope": "current_message"}],
+    )
+
+    assert plan.intent == "CLASSIFY_FILES"
+    assert plan.slots["route_source"] == "capability_router"
+    assert plan.slots["target_scope"] == "current_message"
+    assert plan.slots["resolved_scope"] == "current_message"
     assert [step.tool_name for step in plan.steps] == ["extract-document-text"]
 
 
@@ -615,29 +802,36 @@ def test_summary_request_returns_content_summary_not_classification_receipt():
     assert "分类建议" not in (result.final_response or "")
 
 
-def test_table_summary_request_uses_document_answer_plan():
-    """用户要求汇总表格列或金额时，应读取表格正文并回答，不能回落到分类。"""
+def test_table_summary_request_uses_spreadsheet_analysis_plan():
+    """用户要求汇总表格列或金额时，应走表格分析工具，不能回落到分类。"""
 
     class FakeRegistry:
-        """测试用 Registry，返回稳定的表格解析结果。"""
+        """测试用 Registry，返回稳定的表格分析结果。"""
 
         def invoke(self, tool_name, input_json):
-            """模拟 extract-document-text 成功解析表格文本。"""
+            """模拟 analyze-spreadsheet 成功完成只读分析。"""
 
             return ToolInvocationRecord(
                 tool_name=tool_name,
                 input_json=input_json,
                 output_json={
+                    "kind": "spreadsheet_analysis",
                     "ok": True,
                     "document_id": input_json["document_id"],
-                    "extraction_run_id": "run-table-summary",
                     "status": "COMPLETED",
-                    "extractor": "csv",
-                    "pages": [
+                    "analysis": {
+                        "title": "表格汇总结果",
+                        "summary": "已完成表格汇总。",
+                        "columns": ["姓名", "金额"],
+                        "rows": [
+                            {"姓名": "张三", "金额": 100},
+                            {"姓名": "李四", "金额": 200},
+                        ],
+                    },
+                    "result": [
                         {
-                            "page_number": 1,
-                            "text_preview": "姓名\t关键词\t金额\n张三\t科研\t100\n李四\t教学\t200",
-                            "char_count": 31,
+                            "label": "合计",
+                            "value": 300,
                         }
                     ],
                     "error": None,
@@ -664,9 +858,9 @@ def test_table_summary_request_uses_document_answer_plan():
             attachments=[{"document_id": "doc-table"}],
         )
 
-        assert result.intent == "ANSWER_DOCUMENTS"
-        assert result.tool_plan["slots"]["requested_outputs"] == ["text", "answer", "receipt"]
-        assert [item.tool_name for item in result.tool_invocations] == ["extract-document-text"]
+        assert result.intent == "ANALYZE_SPREADSHEET"
+        assert result.tool_plan["slots"]["requested_outputs"] == ["spreadsheet_analysis"]
+        assert [item.tool_name for item in result.tool_invocations] == ["analyze-spreadsheet"]
         assert "分类建议" not in (result.final_response or "")
         assert "AgentRun completed" not in (result.final_response or "")
 

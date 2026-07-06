@@ -23,6 +23,9 @@ class AgentCapability(BaseModel):
     name: str = Field(min_length=1)
     description: str = Field(min_length=1)
     examples: list[str] = Field(default_factory=list)
+    intents: list[str] = Field(default_factory=list)
+    capability_keys: list[str] = Field(default_factory=list)
+    tool_names: list[str] = Field(default_factory=list)
 
 
 class AgentCapabilityCatalog(BaseModel):

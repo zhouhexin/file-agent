@@ -29,9 +29,11 @@ from app.db.models import (
 )
 from app.main import app
 from app.modules.agent.service import AgentRuntimeService
+from app.modules.changesets.service import persist_changeset_from_document_results
 from app.modules.classification.classifier_service import DocumentClassificationService
 from app.modules.classification.service import persist_document_results_classifications
 from app.modules.agent.context import AgentContextLoader
+from app.modules.conversations.repository import ConversationRepository
 from app.modules.conversations.schemas import MessageAttachment, SendMessageRequest
 from app.modules.conversations.service import ConversationMessageService
 from app.modules.llm.schemas import UserIntentPlan
@@ -589,7 +591,7 @@ def test_llm_message_extracts_multiple_documents_and_builds_document_results():
             ),
         )
 
-        assert response.agent_run.intent == "EXTRACT_DOCUMENT_TEXT"
+        assert response.agent_run.intent == "CLASSIFY_FILES"
         assert [item.tool_name for item in response.agent_run.tool_invocations] == [
             "extract-document-text",
             "extract-document-text",
@@ -637,6 +639,70 @@ def test_llm_message_extracts_multiple_documents_and_builds_document_results():
         assert db.query(ChangeItem).filter(ChangeItem.change_type == "TEXT_EXTRACTED").count() == 3
         assert db.query(ChangeItem).filter(ChangeItem.change_type == "DOCUMENT_PAGES_CREATED").count() == 3
         assert db.query(ChangeItem).filter(ChangeItem.change_type == "CATEGORY_SUGGESTED").count() >= 3
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_persist_changeset_skips_missing_document_ids():
+    """ChangeSet 持久化必须跳过不存在的 document_id，避免写入悬空 ChangeItem。"""
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="changeset-missing-document-user")
+    document_id = _upload_document(
+        client,
+        headers,
+        filename="valid-changeset.txt",
+        content="本文件涉及教师职称申报材料。".encode(),
+    )
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(User.username == "changeset-missing-document-user").one()
+        message = ConversationRepository(db).create_user_message(
+            conversation_id="changeset-filter-conv",
+            user_id=user.id,
+            content="帮我读取并分类这个文件",
+            attachments=[MessageAttachment(document_id=document_id)],
+        )
+        run = AgentRun(
+            conversation_id="changeset-filter-conv",
+            message_id=message.id,
+            user_id=user.id,
+            intent="EXTRACT_DOCUMENT_TEXT",
+            status="COMPLETED",
+        )
+        db.add(run)
+        db.flush()
+
+        changeset = persist_changeset_from_document_results(
+            db=db,
+            run=run,
+            document_results=[
+                {
+                    "document_id": document_id,
+                    "filename": "valid-changeset.txt",
+                    "extraction_status": "COMPLETED",
+                    "char_count": 10,
+                    "page_count": 1,
+                    "categories": [],
+                },
+                {
+                    "document_id": "document-memory",
+                    "filename": "missing.txt",
+                    "extraction_status": "COMPLETED",
+                    "char_count": 20,
+                    "page_count": 1,
+                    "categories": [{"name": "学校/其他", "confidence": 0.5}],
+                },
+            ],
+        )
+
+        assert changeset is not None
+        assert changeset.summary == "已处理 1 个文件，生成 2 项变更记录。"
+        change_items = db.query(ChangeItem).order_by(ChangeItem.created_at.asc()).all()
+        assert [item.target_document_id for item in change_items] == [document_id, document_id]
+        assert [item.change_type for item in change_items] == ["TEXT_EXTRACTED", "DOCUMENT_PAGES_CREATED"]
     finally:
         db.close()
         app.dependency_overrides.clear()
@@ -1157,13 +1223,13 @@ def test_deterministic_message_extracts_and_classifies_multiple_documents():
 def test_alembic_files_exist_for_runtime_tables():
     """迁移配置必须存在，避免 ORM 表只停留在测试内存里。"""
 
-    assert Path("apps/api/alembic.ini").exists()
-    assert Path("apps/api/alembic/env.py").exists()
-    versions = list(Path("apps/api/alembic/versions").glob("*_create_runtime_tables.py"))
+    assert Path("alembic.ini").exists()
+    assert Path("alembic/env.py").exists()
+    versions = list(Path("alembic/versions").glob("*_create_runtime_tables.py"))
     assert len(versions) == 1
     classification_versions = list(
-        Path("apps/api/alembic/versions").glob("*_create_classification_suggestion_tables.py")
+        Path("alembic/versions").glob("*_create_classification_suggestion_tables.py")
     )
     assert len(classification_versions) == 1
-    changeset_versions = list(Path("apps/api/alembic/versions").glob("*_create_changeset_tables.py"))
+    changeset_versions = list(Path("alembic/versions").glob("*_create_changeset_tables.py"))
     assert len(changeset_versions) == 1

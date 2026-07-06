@@ -5,31 +5,73 @@
       "id": "file_upload_read",
       "name": "上传和读取文件",
       "description": "支持在对话中上传文件，并读取 DOC、DOCX、PDF、XLSX、TXT、MD、CSV 等文件的正文或表格内容。",
-      "examples": ["帮我读取这个文件", "读取上面上传的文件并总结内容"]
+      "examples": ["帮我读取这个文件", "读取上面上传的文件并总结内容"],
+      "intents": ["EXTRACT_DOCUMENT_TEXT"],
+      "capability_keys": ["extract_document_text", "extract-document-text"],
+      "tool_names": ["extract-document-text"]
     },
     {
       "id": "document_summary",
       "name": "文件总结和讲解",
       "description": "基于已解析的完整正文，对文件内容进行总结、概括、讲解或问答。",
-      "examples": ["总结刚刚上传的文件", "讲解一下这篇文章的大概内容"]
+      "examples": ["总结刚刚上传的文件", "讲解一下这篇文章的大概内容"],
+      "intents": ["SUMMARIZE_DOCUMENTS", "ANSWER_DOCUMENTS"],
+      "capability_keys": ["extract_document_text", "extract-document-text"],
+      "tool_names": ["extract-document-text"]
     },
     {
       "id": "document_classification",
       "name": "文件多标签分类",
       "description": "基于学校文件归类表，为文件生成多标签分类建议，并保留分类证据和处理回执。",
-      "examples": ["帮我读取并分类这批文件", "总结一下之前所有上传文件的分类"]
+      "examples": ["帮我读取并分类这批文件", "总结一下之前所有上传文件的分类"],
+      "intents": ["CLASSIFY_FILES", "SUMMARIZE_CLASSIFICATIONS"],
+      "capability_keys": ["read_document_classifications", "read-document-classifications", "classify_files"],
+      "tool_names": ["extract-document-text", "read-document-classifications"]
+    },
+    {
+      "id": "spreadsheet_analysis",
+      "name": "表格汇总和统计",
+      "description": "对 XLSX、XLSM、CSV 表格执行受控的汇总、统计、筛选、分组和金额计算。",
+      "examples": ["汇总刚刚上传 CSV 文件中的金额", "统计 Excel 表中每个老师的资助金额"],
+      "intents": ["ANALYZE_SPREADSHEET", "SPREADSHEET_ANALYSIS"],
+      "capability_keys": ["analyze_spreadsheet", "analyze-spreadsheet", "spreadsheet_file"],
+      "tool_names": ["analyze-spreadsheet"]
     },
     {
       "id": "ocr",
       "name": "图片和扫描件 OCR",
       "description": "对图片或扫描件尝试 OCR 文字识别，并把识别结果写入文档页面内容。",
-      "examples": ["帮我 OCR 这批扫描件", "识别这张图片里的文字"]
+      "examples": ["帮我 OCR 这批扫描件", "识别这张图片里的文字"],
+      "intents": ["EXTRACT_DOCUMENT_TEXT"],
+      "capability_keys": ["ocr_image", "ocr-image", "extract_document_text"],
+      "tool_names": ["extract-document-text"]
     },
     {
       "id": "operation_plan",
       "name": "高风险文件操作计划",
       "description": "对改名、移动、删除等高风险文件操作先生成 OperationPlan，用户确认后才允许继续。",
-      "examples": ["给这些文件生成改名建议，先不要改", "计划删除这些重复文件"]
+      "examples": ["给这些文件生成改名建议，先不要改", "计划删除这些重复文件"],
+      "intents": ["SUGGEST_RENAME", "CONFIRMED_OPERATION"],
+      "capability_keys": ["operation_plan", "operation-plan"],
+      "tool_names": ["operation-plan-create"]
+    },
+    {
+      "id": "capability_help",
+      "name": "能力说明",
+      "description": "读取系统固定能力清单，回答用户可以做什么。",
+      "examples": ["你可以做什么", "系统有哪些功能"],
+      "intents": ["CAPABILITY_HELP"],
+      "capability_keys": ["read_agent_capabilities", "read-agent-capabilities", "capability_help"],
+      "tool_names": ["read-agent-capabilities"]
+    },
+    {
+      "id": "classification_taxonomy",
+      "name": "分类目录查询",
+      "description": "读取系统当前支持的文件分类目录。",
+      "examples": ["列出系统当前支持的文件分类目录", "现在文件有哪几种分类"],
+      "intents": ["LIST_CLASSIFICATION_TAXONOMY"],
+      "capability_keys": ["read_classification_taxonomy", "read-classification-taxonomy"],
+      "tool_names": ["read-classification-taxonomy"]
     }
   ]
 }

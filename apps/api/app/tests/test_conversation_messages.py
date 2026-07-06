@@ -217,8 +217,8 @@ def test_message_can_reference_previous_attachment_by_filename_fragment():
     assert second_response.status_code == 200
     data = second_response.json()
     assert data["message"]["attachments"] == [{"document_id": document_id}]
-    assert data["agent_run"]["intent"] == "ANSWER_DOCUMENTS"
-    assert [item["tool_name"] for item in data["agent_run"]["tool_invocations"]] == ["extract-document-text"]
+    assert data["agent_run"]["intent"] == "ANALYZE_SPREADSHEET"
+    assert [item["tool_name"] for item in data["agent_run"]["tool_invocations"]] == ["analyze-spreadsheet"]
     assert "AgentRun completed" not in (data["agent_run"]["final_response"] or "")
     clear_overrides()
 
@@ -263,8 +263,8 @@ def test_message_can_reference_previous_attachment_by_fuzzy_filename_tokens():
     assert second_response.status_code == 200
     data = second_response.json()
     assert data["message"]["attachments"] == [{"document_id": target_document_id}]
-    assert data["agent_run"]["intent"] == "ANSWER_DOCUMENTS"
-    assert [item["tool_name"] for item in data["agent_run"]["tool_invocations"]] == ["extract-document-text"]
+    assert data["agent_run"]["intent"] == "ANALYZE_SPREADSHEET"
+    assert [item["tool_name"] for item in data["agent_run"]["tool_invocations"]] == ["analyze-spreadsheet"]
     assert "AgentRun completed" not in (data["agent_run"]["final_response"] or "")
     clear_overrides()
 

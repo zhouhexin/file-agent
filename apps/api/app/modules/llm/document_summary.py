@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+import re
 from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
@@ -53,13 +55,19 @@ class LLMDocumentSummaryService:
         tool_results: List[Dict[str, Any]],
         user_message: str,
     ) -> str | None:
-        """基于完整正文生成总结；不再包含任何业务字段特例。"""
+        """基于完整正文生成总结；金额汇总先走确定性计算，避免 LLM 心算。"""
 
         documents = self._load_document_texts(
             document_results=document_results,
             tool_results=tool_results,
         )
         documents = [document for document in documents if document.text.strip()]
+        deterministic_answer = _try_build_amount_summary_answer(
+            documents=documents,
+            user_message=user_message,
+        )
+        if deterministic_answer:
+            return deterministic_answer
         if not documents or not self.enabled or self.client is None:
             return None
 
@@ -234,3 +242,119 @@ def _summary_from_parsed(parsed: Dict[str, Any]) -> str:
 
     summary = str(parsed.get("summary") or "").strip()
     return summary or "LLM 未返回可用总结。"
+
+
+def _try_build_amount_summary_answer(*, documents: List[_DocumentText], user_message: str) -> str | None:
+    """对正文中的简单表格金额汇总做确定性计算，不把数字计算交给 LLM。"""
+
+    if not _looks_like_amount_summary_request(user_message):
+        return None
+
+    sections: List[str] = []
+    grand_total = Decimal("0")
+    for document in documents:
+        summary = _summarize_amounts_by_person(document.text)
+        if not summary:
+            continue
+        grand_total += summary["total"]
+        lines = [document.filename]
+        lines.extend(
+            f"{person}：{_format_decimal(amount)} 元"
+            for person, amount in summary["amounts"].items()
+        )
+        lines.append(f"小计：{_format_decimal(summary['total'])} 元")
+        sections.append("\n".join(lines))
+
+    if not sections:
+        return None
+
+    response = "已按人员汇总金额：\n\n" + "\n\n".join(sections)
+    if len(sections) > 1:
+        response += f"\n\n合计：{_format_decimal(grand_total)} 元"
+    elif sections:
+        response += f"\n合计：{_format_decimal(grand_total)} 元"
+    return response
+
+
+def _looks_like_amount_summary_request(message: str) -> bool:
+    """识别用户是否要求按人员维度汇总金额。"""
+
+    group_keywords = ["教师", "申请人", "姓名", "人员", "学生"]
+    amount_keywords = ["金额", "资助", "费用", "经费", "总额"]
+    operation_keywords = ["汇总", "合计", "统计", "求和"]
+    return (
+        any(keyword in message for keyword in group_keywords)
+        and any(keyword in message for keyword in amount_keywords)
+        and any(keyword in message for keyword in operation_keywords)
+    )
+
+
+def _summarize_amounts_by_person(text: str) -> Dict[str, Any] | None:
+    """从制表符或多空格分隔的正文表格中按人员列聚合金额列。"""
+
+    rows = [_split_table_row(line) for line in text.splitlines() if line.strip()]
+    rows = [row for row in rows if len(row) >= 2]
+    if len(rows) < 2:
+        return None
+
+    header = rows[0]
+    person_index = _find_header_index(header, ["教师", "申请人", "姓名", "人员", "学生"])
+    amount_index = _find_header_index(header, ["资助金额", "金额", "费用", "经费", "总额"])
+    if person_index is None or amount_index is None:
+        return None
+
+    amounts: Dict[str, Decimal] = {}
+    total = Decimal("0")
+    for row in rows[1:]:
+        if len(row) <= max(person_index, amount_index):
+            continue
+        person = row[person_index].strip()
+        amount = _parse_decimal(row[amount_index])
+        if not person or amount is None:
+            continue
+        amounts[person] = amounts.get(person, Decimal("0")) + amount
+        total += amount
+
+    if not amounts:
+        return None
+    return {"amounts": amounts, "total": total}
+
+
+def _split_table_row(line: str) -> List[str]:
+    """按常见抽取文本分隔符切分表格行，避免解析自然段。"""
+
+    if "\t" in line:
+        return [cell.strip() for cell in line.split("\t")]
+    if "," in line:
+        return [cell.strip() for cell in line.split(",")]
+    return [cell.strip() for cell in re.split(r"\s{2,}", line.strip()) if cell.strip()]
+
+
+def _find_header_index(header: List[str], candidates: List[str]) -> int | None:
+    """在表头中寻找业务列，返回稳定下标。"""
+
+    for index, name in enumerate(header):
+        if any(candidate in name for candidate in candidates):
+            return index
+    return None
+
+
+def _parse_decimal(value: str) -> Decimal | None:
+    """把带单位或千分位的金额文本转为 Decimal。"""
+
+    cleaned = re.sub(r"[,\s元￥¥]", "", str(value))
+    if not cleaned:
+        return None
+    try:
+        return Decimal(cleaned)
+    except InvalidOperation:
+        return None
+
+
+def _format_decimal(value: Decimal) -> str:
+    """格式化金额，整数不显示小数位。"""
+
+    normalized = value.normalize()
+    if normalized == normalized.to_integral():
+        return str(normalized.quantize(Decimal("1")))
+    return format(normalized, "f")

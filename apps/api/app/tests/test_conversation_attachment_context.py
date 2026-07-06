@@ -26,7 +26,10 @@ class FakeConversationRepository:
         """模拟最近上下文附件。"""
 
         self.calls.append("recent")
-        return [MessageAttachment(document_id="recent-doc")]
+        return [
+            MessageAttachment(document_id="latest-doc"),
+            MessageAttachment(document_id="old-doc"),
+        ]
 
     def get_all_attachment_references(self, **_: object) -> list[MessageAttachment]:
         """模拟当前会话全部附件。"""
@@ -63,6 +66,22 @@ def test_context_resolver_uses_all_conversation_scope_for_history_all_request():
     assert [attachment.document_id for attachment in context.attachments] == ["old-doc", "latest-doc"]
 
 
+def test_context_resolver_uses_all_conversation_scope_for_uploaded_all_request():
+    """“上传的所有文件”必须解析为当前会话全部附件，不能退到最近上下文。"""
+
+    repository = FakeConversationRepository()
+    context = ConversationAttachmentContextService(repository).resolve(
+        conversation_id="chat-1",
+        user_id="user-1",
+        content="帮我总结上传的所有文件分类",
+        explicit_attachments=[],
+    )
+
+    assert repository.calls == ["filename", "all"]
+    assert context.scope == "all_conversation"
+    assert [attachment.document_id for attachment in context.attachments] == ["old-doc", "latest-doc"]
+
+
 def test_context_resolver_uses_latest_batch_for_just_uploaded_request():
     """“刚刚上传”必须解析为最近真实上传批次。"""
 
@@ -76,6 +95,22 @@ def test_context_resolver_uses_latest_batch_for_just_uploaded_request():
 
     assert repository.calls == ["filename", "latest"]
     assert context.scope == "latest_upload_batch"
+    assert [attachment.document_id for attachment in context.attachments] == ["latest-doc"]
+
+
+def test_context_resolver_uses_recent_first_for_previous_single_file_request():
+    """“上一个文件”必须解析为最近上下文中的第一个附件。"""
+
+    repository = FakeConversationRepository()
+    context = ConversationAttachmentContextService(repository).resolve(
+        conversation_id="chat-1",
+        user_id="user-1",
+        content="重新对上一个文件分类",
+        explicit_attachments=[],
+    )
+
+    assert repository.calls == ["filename", "recent"]
+    assert context.scope == "all_recent_context"
     assert [attachment.document_id for attachment in context.attachments] == ["latest-doc"]
 
 

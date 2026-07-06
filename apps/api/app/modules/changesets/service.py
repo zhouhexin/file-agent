@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.logging import log_event
-from app.db.models import AgentRun, ChangeSet
+from app.db.models import AgentRun, ChangeSet, Document
 from app.modules.changesets.repository import ChangeSetRepository
 
 
@@ -27,17 +27,32 @@ def persist_changeset_from_document_results(
         return None
 
     start = time.perf_counter()
+    valid_document_results = _filter_existing_document_results(db=db, run=run, document_results=document_results)
+    if not valid_document_results:
+        log_event(
+            "changeset.skipped",
+            level="WARNING",
+            agent_run_id=run.id,
+            user_id=run.user_id,
+            conversation_id=run.conversation_id,
+            status="SKIPPED",
+            duration_ms=int((time.perf_counter() - start) * 1000),
+            error_code="NO_EXISTING_DOCUMENT_RESULTS",
+            message="ChangeSet 跳过：document_results 中没有存在的 document_id",
+        )
+        return None
+
     repository = ChangeSetRepository(db)
-    item_count = _count_change_items(document_results)
+    item_count = _count_change_items(valid_document_results)
     status = "FAILED" if item_count == 0 else "COMPLETED"
     try:
         changeset = repository.create_or_reset(
             run=run,
-            workspace_id=_workspace_id_from_results(document_results),
-            summary=f"已处理 {len(document_results)} 个文件，生成 {item_count} 项变更记录。",
+            workspace_id=_workspace_id_from_results(valid_document_results),
+            summary=f"已处理 {len(valid_document_results)} 个文件，生成 {item_count} 项变更记录。",
             status=status,
         )
-        for result in document_results:
+        for result in valid_document_results:
             _append_items_for_result(repository=repository, changeset_id=changeset.id, result=result)
     except Exception as exc:
         log_event(
@@ -64,6 +79,45 @@ def persist_changeset_from_document_results(
         item_count=item_count,
     )
     return changeset
+
+
+def _filter_existing_document_results(
+    *,
+    db: Session,
+    run: AgentRun,
+    document_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """过滤不存在的 document_id，避免 ChangeItem 写入悬空外键。"""
+
+    document_ids = [str(result.get("document_id") or "") for result in document_results]
+    document_ids = [document_id for document_id in document_ids if document_id]
+    if not document_ids:
+        return []
+
+    existing_document_ids = {
+        row[0]
+        for row in db.query(Document.id)
+        .filter(Document.id.in_(document_ids))
+        .all()
+    }
+    valid_results: list[dict[str, Any]] = []
+    for result in document_results:
+        document_id = str(result.get("document_id") or "")
+        if document_id in existing_document_ids:
+            valid_results.append(result)
+            continue
+        log_event(
+            "changeset.document_result_skipped",
+            level="WARNING",
+            agent_run_id=run.id,
+            user_id=run.user_id,
+            conversation_id=run.conversation_id,
+            document_id=document_id,
+            status="SKIPPED",
+            error_code="DOCUMENT_NOT_FOUND",
+            message="跳过不存在的 document_id，未生成 ChangeItem",
+        )
+    return valid_results
 
 
 def _append_items_for_result(

@@ -101,7 +101,19 @@ class ConversationAttachmentContextService:
 def _should_infer_recent_attachments(content: str) -> bool:
     """判断用户是否在无附件消息中引用了当前会话上文文件。"""
 
-    reference_keywords = ["上面", "上文", "前面", "刚才", "刚刚", "刚上传", "之前", "已上传", "上传的"]
+    reference_keywords = [
+        "上面",
+        "上文",
+        "前面",
+        "刚才",
+        "刚刚",
+        "刚上传",
+        "之前",
+        "已上传",
+        "上传的",
+        "上一个",
+        "上个",
+    ]
     has_file_task = _has_file_task_intent(content)
     has_history_reference = any(keyword in content for keyword in reference_keywords)
     return has_file_task and (has_history_reference or _extract_file_ordinal(content) is not None)
@@ -168,12 +180,26 @@ def _should_use_latest_attachment_batch(content: str) -> bool:
 def _should_use_all_conversation_attachments(content: str) -> bool:
     """判断用户是否明确要求当前会话历史全部附件。"""
 
-    all_history_keywords = ["之前所有", "之前全部", "历史全部", "所有上传", "全部上传", "所有已上传"]
+    all_history_keywords = [
+        "之前所有",
+        "之前全部",
+        "历史全部",
+        "所有上传",
+        "全部上传",
+        "所有已上传",
+        "上传的所有",
+        "所有上传的",
+        "全部上传的",
+        "已上传的所有",
+    ]
     return any(keyword in content for keyword in all_history_keywords)
 
 
 def _extract_file_ordinal(content: str) -> int | None:
     """从“第二个文件 / 第2个文件 / 2号文件”中解析一基序号。"""
+
+    if re.search(r"(?:上一个|上个)\s*(?:文件|附件)", content):
+        return 1
 
     digit_match = re.search(r"第\s*(\d+)\s*[个份]?\s*(?:文件|附件)", content)
     if digit_match:
