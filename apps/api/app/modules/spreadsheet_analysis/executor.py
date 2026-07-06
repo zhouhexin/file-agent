@@ -125,8 +125,8 @@ def iter_data_rows(*, file_path: Path, sheet: SheetProfile) -> Iterator[dict[str
     """按 Profile 中稳定 column_id 产出每条非空数据行。"""
 
     suffix = file_path.suffix.lower()
-    if suffix == ".csv":
-        rows = _read_csv_rows(file_path)
+    if suffix in {".csv", ".tsv"}:
+        rows = _read_delimited_rows(file_path=file_path, suffix=suffix)
         for row in rows[sheet.header_row :]:
             mapped = _map_row_to_columns(row=row, columns=sheet.columns)
             if _is_nonempty_mapped_row(mapped):
@@ -134,7 +134,7 @@ def iter_data_rows(*, file_path: Path, sheet: SheetProfile) -> Iterator[dict[str
         return
 
     if suffix not in {".xlsx", ".xlsm"}:
-        raise ValueError("当前仅支持 .xlsx、.xlsm 和 .csv 文件。")
+        raise ValueError("当前仅支持 .xlsx、.xlsm、.csv 和 .tsv 文件。")
 
     workbook = openpyxl.load_workbook(
         filename=file_path,
@@ -269,10 +269,14 @@ def _is_nonempty_mapped_row(row: dict[str, Any]) -> bool:
     return any(value is not None and str(value).strip() for value in row.values())
 
 
-def _read_csv_rows(file_path: Path) -> list[list[str]]:
+def _read_delimited_rows(*, file_path: Path, suffix: str) -> list[list[str]]:
+    """读取 CSV/TSV 数据行；TSV 固定制表符，CSV 嗅探常见分隔符。"""
+
     with file_path.open("r", encoding="utf-8-sig", newline="") as handle:
         sample = handle.read(4096)
         handle.seek(0)
+        if suffix == ".tsv":
+            return [list(row) for row in csv.reader(handle, delimiter="\t")]
         try:
             dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
         except csv.Error:

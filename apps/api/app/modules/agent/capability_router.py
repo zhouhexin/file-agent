@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from app.modules.agent.capabilities.service import load_agent_capabilities
 
 
-SPREADSHEET_SUFFIXES = {".xlsx", ".xlsm", ".csv"}
+SPREADSHEET_SUFFIXES = {".xlsx", ".xlsm", ".csv", ".tsv"}
 INTENT_ALIASES = {
     "SPREADSHEET_ANALYSIS": "ANALYZE_SPREADSHEET",
 }

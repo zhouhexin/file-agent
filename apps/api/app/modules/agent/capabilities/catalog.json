@@ -31,11 +31,20 @@
     {
       "id": "spreadsheet_analysis",
       "name": "表格汇总和统计",
-      "description": "对 XLSX、XLSM、CSV 表格执行受控的汇总、统计、筛选、分组和金额计算。",
+      "description": "对 XLSX、XLSM、CSV、TSV 表格执行受控的汇总、统计、筛选、分组和金额计算。",
       "examples": ["汇总刚刚上传 CSV 文件中的金额", "统计 Excel 表中每个老师的资助金额"],
       "intents": ["ANALYZE_SPREADSHEET", "SPREADSHEET_ANALYSIS"],
       "capability_keys": ["analyze_spreadsheet", "analyze-spreadsheet", "spreadsheet_file"],
       "tool_names": ["analyze-spreadsheet"]
+    },
+    {
+      "id": "spreadsheet_workbench",
+      "name": "表格工作台",
+      "description": "统一发现、校验和后续编排 XLSX、XLSM、CSV、TSV 表格任务；第一阶段支持表结构读取和公式/质量校验。",
+      "examples": ["查看这个 Excel 有哪些工作表和字段", "检查这份表格有没有公式错误"],
+      "intents": ["PROFILE_SPREADSHEET", "VALIDATE_SPREADSHEET", "EDIT_SPREADSHEET", "RECALCULATE_SPREADSHEET"],
+      "capability_keys": ["profile_spreadsheet", "profile-spreadsheet", "validate_spreadsheet", "validate-spreadsheet", "spreadsheet_workbench"],
+      "tool_names": ["profile-spreadsheet", "validate-spreadsheet"]
     },
     {
       "id": "ocr",

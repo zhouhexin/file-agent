@@ -35,6 +35,8 @@ def test_get_agent_tools_returns_mvp_catalog():
     assert "document-convert" in tool_names
     assert "operation-plan-create" in tool_names
     assert "confirmed-file-action" in tool_names
+    assert "profile-spreadsheet" in tool_names
+    assert "validate-spreadsheet" in tool_names
 
 
 def test_capability_catalog_exposes_router_metadata():
@@ -44,12 +46,14 @@ def test_capability_catalog_exposes_router_metadata():
     routed = {
         capability["id"]: capability
         for capability in catalog["capabilities"]
-        if capability["id"] in {"document_summary", "document_classification", "spreadsheet_analysis"}
+        if capability["id"]
+        in {"document_summary", "document_classification", "spreadsheet_analysis", "spreadsheet_workbench"}
     }
 
     assert routed["document_summary"]["tool_names"] == ["extract-document-text"]
     assert "read-document-classifications" in routed["document_classification"]["tool_names"]
     assert routed["spreadsheet_analysis"]["tool_names"] == ["analyze-spreadsheet"]
+    assert routed["spreadsheet_workbench"]["tool_names"] == ["profile-spreadsheet", "validate-spreadsheet"]
 
 
 def test_capability_router_maps_classification_summary_to_read_tool():
@@ -79,6 +83,28 @@ def test_capability_router_maps_spreadsheet_analysis_to_table_tool():
     assert route is not None
     assert route.intent == "ANALYZE_SPREADSHEET"
     assert route.tool_name == "analyze-spreadsheet"
+
+
+def test_capability_router_maps_spreadsheet_workbench_tools():
+    """表格 Profile 和校验必须通过工作台能力路由到对应只读 Tool。"""
+
+    profile_route = route_user_intent(
+        intent="PROFILE_SPREADSHEET",
+        required_capabilities=["profile_spreadsheet"],
+        tool_plan_hint=["profile-spreadsheet"],
+        attachments=[{"document_id": "doc-xlsx", "filename": "demo.xlsx"}],
+    )
+    validate_route = route_user_intent(
+        intent="VALIDATE_SPREADSHEET",
+        required_capabilities=["validate_spreadsheet"],
+        tool_plan_hint=["validate-spreadsheet"],
+        attachments=[{"document_id": "doc-xlsx", "filename": "demo.xlsx"}],
+    )
+
+    assert profile_route is not None
+    assert profile_route.tool_name == "profile-spreadsheet"
+    assert validate_route is not None
+    assert validate_route.tool_name == "validate-spreadsheet"
 
 
 def test_capability_router_maps_help_and_taxonomy_tools():
@@ -129,6 +155,30 @@ def test_local_web_origin_is_allowed_for_api_requests():
 
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+
+
+def test_deterministic_planner_routes_spreadsheet_profile_and_validation():
+    """确定性 Planner 必须把表结构和质量检查分流到表格工作台 Tool。"""
+
+    profile_plan = DeterministicPlanner().plan(
+        conversation_id="conversation-1",
+        user_id="user-1",
+        message_id="message-1",
+        message="查看这个 Excel 有哪些工作表和字段",
+        attachments=[{"document_id": "doc-1", "filename": "demo.xlsx"}],
+    )
+    validation_plan = DeterministicPlanner().plan(
+        conversation_id="conversation-1",
+        user_id="user-1",
+        message_id="message-2",
+        message="检查这份表格有没有公式错误",
+        attachments=[{"document_id": "doc-1", "filename": "demo.xlsx"}],
+    )
+
+    assert profile_plan.intent == "PROFILE_SPREADSHEET"
+    assert profile_plan.steps[0].tool_name == "profile-spreadsheet"
+    assert validation_plan.intent == "VALIDATE_SPREADSHEET"
+    assert validation_plan.steps[0].tool_name == "validate-spreadsheet"
 
 
 def test_planner_returns_declarative_tool_plan():

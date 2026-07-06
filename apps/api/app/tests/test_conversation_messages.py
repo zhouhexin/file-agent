@@ -4,7 +4,10 @@
 HTTP 消息必须能进入 LangGraph Agent Runtime，但当前不依赖真实大模型或数据库。
 """
 
+from io import BytesIO
+
 from fastapi.testclient import TestClient
+import openpyxl
 
 from app.db.models import Message
 from app.tests.helpers import clear_overrides, client_with_database
@@ -38,6 +41,19 @@ def _upload_document(
         files={"file": (filename, content, "text/plain")},
     )
     return response.json()["document_id"]
+
+
+def _xlsx_with_formula_error() -> bytes:
+    """构造包含显式公式错误的 Excel 测试文件。"""
+
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "汇总"
+    worksheet.append(["项目", "公式"])
+    worksheet.append(["A", "=SUM(#REF!)"])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
 
 
 def test_post_message_starts_agent_run():
@@ -266,6 +282,35 @@ def test_message_can_reference_previous_attachment_by_fuzzy_filename_tokens():
     assert data["agent_run"]["intent"] == "ANALYZE_SPREADSHEET"
     assert [item["tool_name"] for item in data["agent_run"]["tool_invocations"]] == ["analyze-spreadsheet"]
     assert "AgentRun completed" not in (data["agent_run"]["final_response"] or "")
+    clear_overrides()
+
+
+def test_message_can_validate_uploaded_spreadsheet_formula_errors():
+    """聊天入口中的表格校验请求必须路由到 validate-spreadsheet。"""
+
+    client, _ = client_with_database()
+    headers = _auth_header(client, "spreadsheet-validation-user")
+    document_id = _upload_document(
+        client,
+        headers,
+        filename="公式错误.xlsx",
+        content=_xlsx_with_formula_error(),
+    )
+
+    response = client.post(
+        "/api/conversations/spreadsheet-validation-chat/messages",
+        headers=headers,
+        json={
+            "content": "检查这份表格有没有公式错误",
+            "attachments": [{"document_id": document_id}],
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["agent_run"]["intent"] == "VALIDATE_SPREADSHEET"
+    assert [item["tool_name"] for item in data["agent_run"]["tool_invocations"]] == ["validate-spreadsheet"]
+    assert "#REF!" in (data["agent_run"]["final_response"] or "")
     clear_overrides()
 
 

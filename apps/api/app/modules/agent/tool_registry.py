@@ -32,12 +32,14 @@ from app.modules.agent.tool_schemas import (
     OperationPlanCreateInput,
     SearchToolInput,
     SpreadsheetAnalysisInput,
+    SpreadsheetDocumentInput,
     ToolInputValidationError,
 )
 from app.modules.classification.taxonomy_service import read_default_taxonomy_catalog
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text
 from app.modules.spreadsheet_analysis.service import SpreadsheetAnalysisService
+from app.modules.spreadsheet_workbench.service import SpreadsheetWorkbenchService
 
 
 class UnknownToolError(ValueError):
@@ -670,6 +672,56 @@ def _analyze_spreadsheet_handler(db: Any, user_id: str | None) -> ToolHandler:
     return handler
 
 
+def _spreadsheet_workbench_handler(db: Any, user_id: str | None, *, action: str) -> ToolHandler:
+    """创建表格工作台只读 Tool handler；不接受任何文件路径参数。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """解析当前用户原件后执行 Profile 或校验。"""
+
+        if db is None:
+            return {
+                "kind": f"spreadsheet_{action}",
+                "ok": False,
+                "status": "FAILED",
+                "error": {
+                    "code": "DATABASE_SESSION_REQUIRED",
+                    "message": "表格工作台需要数据库会话。",
+                    "retryable": False,
+                    "user_action_required": False,
+                },
+            }
+
+        document_id = str(getattr(tool_input, "document_id"))
+        repository = FileExtractionRepository(db, user_id)
+        resolved = repository.resolve_original_file(document_id)
+        if not resolved.get("ok"):
+            return {
+                "kind": f"spreadsheet_{action}",
+                "ok": False,
+                "status": "FAILED",
+                "document_id": document_id,
+                "error": resolved.get("error") or {
+                    "code": "FILE_RESOLUTION_FAILED",
+                    "message": "无法定位已授权的原始文件。",
+                    "retryable": False,
+                    "user_action_required": False,
+                },
+            }
+
+        document = resolved["document"]
+        service = SpreadsheetWorkbenchService()
+        kwargs = {
+            "document_id": str(document.id),
+            "filename": str(document.original_filename),
+            "file_path": resolved["file_path"],
+        }
+        if action == "profile":
+            return service.profile(**kwargs)
+        return service.validate(**kwargs)
+
+    return handler
+
+
 def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str, ToolDefinition]:
     """创建 AGENTS.md 要求的完整 MVP Tool 目录。"""
 
@@ -700,13 +752,30 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("document-lineage-read", "Read document lineage.", DocumentLineageReadInput, False, False, [], _lineage_handler),
         _tool(
             "analyze-spreadsheet",
-            "Analyze an uploaded XLSX/XLSM/CSV spreadsheet through a validated read-only query plan.",
+            "Analyze an uploaded XLSX/XLSM/CSV/TSV spreadsheet through a validated read-only query plan.",
             SpreadsheetAnalysisInput,
             False,
             False,
             [],
             _analyze_spreadsheet_handler(db, user_id),
         ),
+        _tool(
+            "profile-spreadsheet",
+            "Read spreadsheet workbook, sheet and column schema without modifying the original file.",
+            SpreadsheetDocumentInput,
+            False,
+            False,
+            [],
+            _spreadsheet_workbench_handler(db, user_id, action="profile"),
+        ),
+        _tool(
+            "validate-spreadsheet",
+            "Scan spreadsheet formula errors and structural warnings without modifying the original file.",
+            SpreadsheetDocumentInput,
+            False,
+            False,
+            [],
+            _spreadsheet_workbench_handler(db, user_id, action="validation"),
+        ),
     ]
     return {tool.name: tool for tool in tools}
-

@@ -17,6 +17,7 @@ from app.modules.agent.runtime import AgentRuntimeContext
 from app.modules.agent.state import AgentGraphState, ToolInvocationRecord
 from app.modules.llm.client import LLMResponseError
 from app.modules.spreadsheet_analysis.formatter import format_spreadsheet_analysis_response
+from app.modules.spreadsheet_workbench.formatter import format_spreadsheet_workbench_response
 
 
 def build_agent_graph():
@@ -199,7 +200,12 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
         try:
             invocation = registry.invoke(step["tool_name"], step["input"])
         except Exception as exc:
-            if step["tool_name"] not in {"extract-document-text", "analyze-spreadsheet"}:
+            if step["tool_name"] not in {
+                "extract-document-text",
+                "analyze-spreadsheet",
+                "profile-spreadsheet",
+                "validate-spreadsheet",
+            }:
                 raise
             invocation = _failed_tool_invocation(step=step, error=exc)
         invocation_json = invocation.model_dump()
@@ -288,8 +294,29 @@ def _spreadsheet_analysis_results_from_results(
     ]
 
 
+def _spreadsheet_workbench_results_from_results(
+    tool_results: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """提取表格 Profile 和校验 Tool 结果。"""
+
+    return [
+        result
+        for result in tool_results
+        if result.get("kind") in {"spreadsheet_profile", "spreadsheet_validation"}
+    ]
+
+
 def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
     """生成面向用户的最终运行摘要。"""
+
+    workbench_results = _spreadsheet_workbench_results_from_results(
+        state.get("tool_results", [])
+    )
+    if workbench_results:
+        return {
+            "status": "COMPLETED",
+            "final_response": format_spreadsheet_workbench_response(workbench_results),
+        }
 
     analysis_results = _spreadsheet_analysis_results_from_results(
         state.get("tool_results", [])

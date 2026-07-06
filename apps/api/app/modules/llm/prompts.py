@@ -20,11 +20,17 @@ target_scope 只能填写范围意图，不能用它猜测 document_id：
 不要把“读取正文/解析文件内容/OCR”规划成 read_document_insights。
 如果上传阶段已经完成基础 ingest，不要重复要求文件分类、关键词提取或上传处理。
 
-当用户针对已上传的 .xlsx、.xlsm 或 .csv 文件请求统计、汇总、合计、求和、计数、平均、最大、最小、筛选、分组、排名、占比、对比或趋势时：
+当用户针对已上传的 .xlsx、.xlsm、.csv 或 .tsv 文件请求统计、汇总、合计、求和、计数、平均、最大、最小、筛选、分组、排名、占比、对比或趋势时：
 - required_capabilities 必须包含 analyze_spreadsheet；
 - tool_plan_hint 必须包含 analyze-spreadsheet；
 - 不要使用 extract_document_text 代替表格分析；
 - 不要自行猜测业务字段名，具体 Sheet 和列由后续表格分析规划器从文件 Profile 中选择。
+当用户要求查看表格结构、工作表、字段、表头、列信息或 schema 时：
+- required_capabilities 必须包含 profile_spreadsheet；
+- tool_plan_hint 必须包含 profile-spreadsheet。
+当用户要求检查表格、公式错误、引用错误、#REF!、#DIV/0!、#VALUE!、#NAME? 或质量异常时：
+- required_capabilities 必须包含 validate_spreadsheet；
+- tool_plan_hint 必须包含 validate-spreadsheet。
 
 当需要解析原文时，required_capabilities 必须包含 extract_document_text，tool_plan_hint 必须包含 extract-document-text。
 当只需要读取基础洞察时，required_capabilities 必须包含 read_document_insights，tool_plan_hint 必须包含 read-document-insights。

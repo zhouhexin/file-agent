@@ -1,4 +1,4 @@
-"""从 XLSX/XLSM/CSV 原件构建受控工作簿 Profile。"""
+"""从 XLSX/XLSM/CSV/TSV 原件构建受控工作簿 Profile。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from .schemas import ColumnProfile, ColumnType, SheetProfile, WorkbookProfile
 
 MAX_PROFILE_SAMPLE_ROWS = 100
 MAX_SAMPLE_VALUES_PER_COLUMN = 5
-SUPPORTED_SPREADSHEET_SUFFIXES = {".xlsx", ".xlsm", ".csv"}
+SUPPORTED_SPREADSHEET_SUFFIXES = {".xlsx", ".xlsm", ".csv", ".tsv"}
 
 
 def profile_workbook(
@@ -28,10 +28,10 @@ def profile_workbook(
     suffix = file_path.suffix.lower()
 
     if suffix not in SUPPORTED_SPREADSHEET_SUFFIXES:
-        raise ValueError("当前仅支持 .xlsx、.xlsm 和 .csv 文件。")
+        raise ValueError("当前仅支持 .xlsx、.xlsm、.csv 和 .tsv 文件。")
 
-    if suffix == ".csv":
-        sheets = [_profile_csv(file_path=file_path)]
+    if suffix in {".csv", ".tsv"}:
+        sheets = [_profile_delimited_text(file_path=file_path, suffix=suffix)]
     else:
         sheets = _profile_excel(file_path=file_path)
 
@@ -92,11 +92,13 @@ def _profile_excel(*, file_path: Path) -> list[SheetProfile]:
         workbook.close()
 
 
-def _profile_csv(*, file_path: Path) -> SheetProfile:
-    rows = _read_csv_rows(file_path)
+def _profile_delimited_text(*, file_path: Path, suffix: str) -> SheetProfile:
+    """读取 CSV/TSV 的表头和列 Profile；只采样文本，不修改文件。"""
+
+    rows = _read_delimited_rows(file_path=file_path, suffix=suffix)
 
     if not rows:
-        raise ValueError("CSV 文件为空，无法识别表头。")
+        raise ValueError("表格文本文件为空，无法识别表头。")
 
     header_row_zero_based = _first_non_empty_row_index(rows)
     header_row = header_row_zero_based + 1
@@ -113,7 +115,7 @@ def _profile_csv(*, file_path: Path) -> SheetProfile:
 
     return SheetProfile(
         sheet_id="sheet_1",
-        sheet_name="CSV",
+        sheet_name="TSV" if suffix == ".tsv" else "CSV",
         header_row=header_row,
         row_count=_count_nonempty_rows(rows[header_row_zero_based + 1 :]),
         columns=columns,
@@ -254,10 +256,15 @@ def infer_column_type(values: Sequence[Any]) -> ColumnType:
     return ColumnType.STRING
 
 
-def _read_csv_rows(file_path: Path) -> list[list[str]]:
+def _read_delimited_rows(*, file_path: Path, suffix: str) -> list[list[str]]:
+    """读取 CSV/TSV 行；TSV 固定制表符，CSV 尝试嗅探常见分隔符。"""
+
     with file_path.open("r", encoding="utf-8-sig", newline="") as handle:
         sample = handle.read(4096)
         handle.seek(0)
+
+        if suffix == ".tsv":
+            return [list(row) for row in csv.reader(handle, delimiter="\t")]
 
         try:
             dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")

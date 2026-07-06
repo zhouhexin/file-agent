@@ -119,6 +119,33 @@ def test_count_rows_with_filter(tmp_path: Path) -> None:
     assert result["rows_matched"] == 2
 
 
+def test_tsv_sum_executes_with_same_query_pipeline(tmp_path: Path) -> None:
+    """TSV 必须复用统一表格分析链路，而不是退回普通文本读取。"""
+
+    path = tmp_path / "资助汇总.tsv"
+    path.write_text("教师\t资助金额\n张三\t100\n李四\t200\n", encoding="utf-8")
+    profile = _profile(path)
+    plan = SpreadsheetQueryPlan.model_validate(
+        {
+            "sheet_id": "sheet_1",
+            "metric": {
+                "operation": "sum",
+                "column_id": "sheet_1_col_2",
+                "label": "资助金额合计",
+            },
+        }
+    )
+
+    result = execute_query(
+        file_path=path,
+        profile=profile,
+        plan=validate_plan(profile=profile, plan=plan),
+    )
+
+    assert result["status"] == "COMPLETED"
+    assert result["results"] == [{"group": "全部", "value": "300"}]
+
+
 def test_validator_rejects_hallucinated_column_id(tmp_path: Path) -> None:
     """校验器必须拒绝不存在的 column_id，防止 LLM 编造字段。"""
 

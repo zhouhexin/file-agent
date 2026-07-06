@@ -50,7 +50,9 @@ CLASSIFICATION_TAXONOMY_HINTS = {
     "read-classification-taxonomy",
 }
 SPREADSHEET_ANALYSIS_HINTS = {"analyze_spreadsheet", "analyze-spreadsheet"}
-SPREADSHEET_SUFFIXES = {".xlsx", ".xlsm", ".csv"}
+SPREADSHEET_PROFILE_HINTS = {"profile_spreadsheet", "profile-spreadsheet"}
+SPREADSHEET_VALIDATE_HINTS = {"validate_spreadsheet", "validate-spreadsheet"}
+SPREADSHEET_SUFFIXES = {".xlsx", ".xlsm", ".csv", ".tsv"}
 
 
 class PlannerStep(BaseModel):
@@ -142,6 +144,8 @@ class DeterministicPlanner:
             or _has_classification_intent(message=message, lowered=lowered)
             or _has_answer_intent(message=message, lowered=lowered)
             or _has_summary_intent(message=message, lowered=lowered)
+            or _has_spreadsheet_profile_intent(message=message, lowered=lowered)
+            or _has_spreadsheet_validation_intent(message=message, lowered=lowered)
             or _has_spreadsheet_analysis_intent(
                 message=message,
                 lowered=lowered,
@@ -179,6 +183,26 @@ class DeterministicPlanner:
                 ],
                 evidence_policy={"require_page_or_cell": True, "allow_no_evidence_answer": False},
                 confirmation_policy={"operation_plan_required": True},
+            )
+
+        if _has_spreadsheet_validation_intent(message=message, lowered=lowered):
+            return _spreadsheet_workbench_plan(
+                intent="VALIDATE_SPREADSHEET",
+                user_goal=message,
+                document_ids=document_ids,
+                tool_name="validate-spreadsheet",
+                expected_outputs=["spreadsheet_validation"],
+                selected_skills=["chat-intake", "spreadsheet-workbench"],
+            )
+
+        if _has_spreadsheet_profile_intent(message=message, lowered=lowered):
+            return _spreadsheet_workbench_plan(
+                intent="PROFILE_SPREADSHEET",
+                user_goal=message,
+                document_ids=document_ids,
+                tool_name="profile-spreadsheet",
+                expected_outputs=["spreadsheet_profile"],
+                selected_skills=["chat-intake", "spreadsheet-workbench"],
             )
 
         if _has_spreadsheet_analysis_intent(
@@ -358,6 +382,52 @@ def build_plan_from_user_intent(
         or requested_capabilities.intersection(CLASSIFICATION_TAXONOMY_HINTS)
     ):
         return _classification_taxonomy_plan(user_goal=intent_plan.user_goal or message)
+
+    if (
+        requested_capabilities.intersection(SPREADSHEET_VALIDATE_HINTS)
+        or intent_plan.intent == "VALIDATE_SPREADSHEET"
+        or (capability_route is not None and capability_route.tool_name == "validate-spreadsheet")
+        or _has_spreadsheet_validation_intent(message=message, lowered=lowered)
+    ):
+        if not document_ids:
+            return _missing_file_scope_plan(user_goal=intent_plan.user_goal or message)
+        return _spreadsheet_workbench_plan(
+            intent="VALIDATE_SPREADSHEET",
+            user_goal=intent_plan.user_goal or message,
+            document_ids=document_ids,
+            tool_name="validate-spreadsheet",
+            expected_outputs=["spreadsheet_validation"],
+            selected_skills=["llm-understanding", "spreadsheet-workbench"],
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
+            llm_intent_plan=intent_plan.model_dump(),
+            route_source="capability_router" if capability_route else "legacy_planner",
+            target_scope=intent_plan.target_scope,
+            resolved_scope=resolved_scope,
+        )
+
+    if (
+        requested_capabilities.intersection(SPREADSHEET_PROFILE_HINTS)
+        or intent_plan.intent == "PROFILE_SPREADSHEET"
+        or (capability_route is not None and capability_route.tool_name == "profile-spreadsheet")
+        or _has_spreadsheet_profile_intent(message=message, lowered=lowered)
+    ):
+        if not document_ids:
+            return _missing_file_scope_plan(user_goal=intent_plan.user_goal or message)
+        return _spreadsheet_workbench_plan(
+            intent="PROFILE_SPREADSHEET",
+            user_goal=intent_plan.user_goal or message,
+            document_ids=document_ids,
+            tool_name="profile-spreadsheet",
+            expected_outputs=["spreadsheet_profile"],
+            selected_skills=["llm-understanding", "spreadsheet-workbench"],
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
+            llm_intent_plan=intent_plan.model_dump(),
+            route_source="capability_router" if capability_route else "legacy_planner",
+            target_scope=intent_plan.target_scope,
+            resolved_scope=resolved_scope,
+        )
 
     if (
         requested_capabilities.intersection(SPREADSHEET_ANALYSIS_HINTS)
@@ -795,6 +865,55 @@ def _spreadsheet_analysis_plan(
     )
 
 
+def _spreadsheet_workbench_plan(
+    *,
+    intent: str,
+    user_goal: str,
+    document_ids: List[str],
+    tool_name: str,
+    expected_outputs: List[str],
+    selected_skills: List[str],
+    response_style: str = "concise",
+    clarification_question: str | None = None,
+    llm_intent_plan: Dict[str, Any] | None = None,
+    route_source: str = "legacy_planner",
+    target_scope: str = "unspecified",
+    resolved_scope: str = "unspecified",
+) -> PlannerOutput:
+    """构造表格工作台只读计划；Profile/校验不得修改原件。"""
+
+    return PlannerOutput(
+        intent=intent,
+        user_goal=user_goal,
+        slots={
+            "document_ids": document_ids,
+            "requested_outputs": expected_outputs,
+            "response_style": response_style,
+            "clarification_question": clarification_question,
+            "llm_intent_plan": llm_intent_plan or {},
+            "route_source": route_source,
+            "target_scope": target_scope,
+            "resolved_scope": resolved_scope,
+        },
+        selected_skills=selected_skills,
+        steps=[
+            {
+                "step_id": f"step-spreadsheet-workbench-{index}",
+                "skill": "spreadsheet-workbench",
+                "tool_name": tool_name,
+                "input": {"document_id": document_id},
+                "requires_confirmation": False,
+                "risk_level": "low",
+                "expected_outputs": expected_outputs,
+                "writes": [],
+            }
+            for index, document_id in enumerate(document_ids, start=1)
+        ],
+        evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+        confirmation_policy={"operation_plan_required": False},
+    )
+
+
 def _should_extract_text(*, message: str, lowered: str) -> bool:
     """判断确定性模式下用户是否明确要求读取正文；读取优先于分类组合词。"""
     extraction_keywords = ["读取", "解析", "正文", "内容", "OCR"]
@@ -934,7 +1053,7 @@ def _has_spreadsheet_analysis_intent(
     )
     has_spreadsheet_text = any(
         keyword in message for keyword in ["表格", "工作表", "汇总表", "表中", "表内", "表里"]
-    ) or any(keyword in lowered for keyword in ["csv", "excel", "xlsx", "xls", "spreadsheet", "sheet"])
+    ) or any(keyword in lowered for keyword in ["csv", "tsv", "excel", "xlsx", "xls", "spreadsheet", "sheet"])
     if not has_spreadsheet_attachment and not has_spreadsheet_text:
         return False
 
@@ -971,6 +1090,49 @@ def _has_spreadsheet_analysis_intent(
     ]
     return any(keyword in message for keyword in chinese_operations) or any(
         keyword in lowered for keyword in english_operations
+    )
+
+
+def _has_spreadsheet_profile_intent(*, message: str, lowered: str) -> bool:
+    """判断用户是否要求查看表格结构、工作表或字段信息。"""
+
+    scope_keywords = ["表格", "工作表", "sheet", "excel", "csv", "tsv", "schema"]
+    profile_keywords = ["结构", "字段", "列信息", "表头", "有哪些工作表", "有哪些sheet", "schema", "profile"]
+    analysis_keywords = ["统计", "汇总", "合计", "求和", "平均", "最大", "最小", "筛选", "分组"]
+    if any(keyword in message for keyword in analysis_keywords):
+        return False
+    return (
+        any(keyword in message for keyword in scope_keywords)
+        or any(keyword in lowered for keyword in scope_keywords)
+    ) and (
+        any(keyword in message for keyword in profile_keywords)
+        or any(keyword in lowered for keyword in profile_keywords)
+    )
+
+
+def _has_spreadsheet_validation_intent(*, message: str, lowered: str) -> bool:
+    """判断用户是否要求检查表格公式错误或质量异常。"""
+
+    validation_keywords = [
+        "检查",
+        "校验",
+        "验证",
+        "错误",
+        "异常",
+        "公式错误",
+        "引用错误",
+        "#REF!",
+        "#DIV/0!",
+        "#VALUE!",
+        "#NAME?",
+    ]
+    spreadsheet_keywords = ["表格", "工作表", "excel", "xlsx", "xlsm", "csv", "tsv", "公式"]
+    return (
+        any(keyword in message for keyword in validation_keywords)
+        or any(keyword.lower() in lowered for keyword in validation_keywords)
+    ) and (
+        any(keyword in message for keyword in spreadsheet_keywords)
+        or any(keyword in lowered for keyword in spreadsheet_keywords)
     )
 
 

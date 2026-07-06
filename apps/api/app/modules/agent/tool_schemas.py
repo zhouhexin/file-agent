@@ -31,6 +31,12 @@ class SpreadsheetAnalysisInput(StrictToolInput):
     question: str = Field(min_length=1, max_length=2000)
 
 
+class SpreadsheetDocumentInput(StrictToolInput):
+    """表格工作台只读 Tool 输入；路径必须由后端仓库解析。"""
+
+    document_id: str = Field(min_length=1)
+
+
 class SearchToolInput(StrictToolInput):
     """检索类 Tool 的输入。"""
 
