@@ -120,6 +120,37 @@ class JobStatusReadInput(StrictToolInput):
     job_id: str = Field(min_length=1)
 
 
+class ManagedRootListInput(StrictToolInput):
+    """列出受管逻辑目录的输入。"""
+
+    enabled_only: bool = True
+
+
+class ManagedFileListInput(StrictToolInput):
+    """列出受管文件元数据的输入。"""
+
+    root_key: Optional[str] = None
+    extension: Optional[str] = None
+    filename_contains: Optional[str] = None
+    status: str = "ACTIVE"
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+
+
+class ManagedFileSearchInput(StrictToolInput):
+    """按文件名关键词搜索受管文件的输入。"""
+
+    query: str = Field(min_length=1)
+    root_key: Optional[str] = None
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class ManagedRootScanInput(StrictToolInput):
+    """创建受管目录扫描任务的输入。"""
+
+    root_key: str = Field(min_length=1)
+
+
 class DocumentLineageReadInput(StrictToolInput):
     """读取文档版本关系和派生件的输入。"""
 

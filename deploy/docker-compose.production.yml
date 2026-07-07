@@ -28,9 +28,11 @@ services:
       AUTO_CREATE_TABLES: "false"
       FILE_STORAGE_ROOT: /data/uploads
       LOG_DIR: /data/logs
+      APP_RUNTIME: api
     volumes:
       - ../data/uploads:/data/uploads
       - ../data/logs:/data/logs
+      - ../data/managed/student-affairs:/managed/student-affairs:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -41,6 +43,29 @@ services:
       timeout: 5s
       retries: 12
       start_period: 20s
+    networks: [internal]
+
+  filesystem-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      AUTO_CREATE_TABLES: "false"
+      FILE_STORAGE_ROOT: /data/uploads
+      LOG_DIR: /data/logs
+      APP_RUNTIME: filesystem-worker
+      FILESYSTEM_WORKER_ID: filesystem-worker-1
+      FILESYSTEM_WORKER_POLL_SECONDS: 3
+    volumes:
+      - ../data/uploads:/data/uploads
+      - ../data/logs:/data/logs
+      - ../data/managed/student-affairs:/managed/student-affairs:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks: [internal]
 
   gateway:

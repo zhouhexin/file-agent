@@ -29,6 +29,10 @@ from app.modules.agent.tool_schemas import (
     FeedbackRecordInput,
     IntentSummaryInput,
     JobStatusReadInput,
+    ManagedFileListInput,
+    ManagedFileSearchInput,
+    ManagedRootListInput,
+    ManagedRootScanInput,
     OperationPlanCreateInput,
     SearchToolInput,
     SpreadsheetAnalysisInput,
@@ -38,6 +42,9 @@ from app.modules.agent.tool_schemas import (
 from app.modules.classification.taxonomy_service import read_default_taxonomy_catalog
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text
+from app.modules.managed_files.jobs import FilesystemJobQueue
+from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
+from app.modules.managed_files.service import ManagedFileService
 from app.modules.spreadsheet_analysis.service import SpreadsheetAnalysisService
 from app.modules.spreadsheet_workbench.service import SpreadsheetWorkbenchService
 
@@ -434,6 +441,108 @@ def _job_status_handler(tool_input: BaseModel) -> Dict[str, Any]:
     return {"ok": True, "job_id": getattr(tool_input, "job_id"), "status": "PENDING"}
 
 
+def _managed_root_list_handler(db: Any) -> ToolHandler:
+    """创建受管目录列表 Tool handler。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """返回安全的受管逻辑目录列表，不暴露容器路径。"""
+
+        if db is None:
+            return {"ok": False, "error": {"code": "DB_REQUIRED", "message": "读取受管目录需要数据库会话。"}}
+        enabled_only = bool(getattr(tool_input, "enabled_only", True))
+        roots = ManagedFileRepository(db).list_roots()
+        if enabled_only:
+            roots = [root for root in roots if root.enabled]
+        return {
+            "ok": True,
+            "roots": [ManagedFileService.to_root_response(root).model_dump() for root in roots],
+        }
+
+    return handler
+
+
+def _managed_file_list_handler(db: Any) -> ToolHandler:
+    """创建受管文件列表 Tool handler。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """按逻辑目录、扩展名和文件名过滤受管文件。"""
+
+        if db is None:
+            return {"ok": False, "error": {"code": "DB_REQUIRED", "message": "读取受管文件需要数据库会话。"}}
+        rows = ManagedFileRepository(db).list_files(
+            root_key=getattr(tool_input, "root_key", None),
+            extension=getattr(tool_input, "extension", None),
+            filename_contains=getattr(tool_input, "filename_contains", None),
+            status=getattr(tool_input, "status", None),
+            limit=int(getattr(tool_input, "limit", 50)),
+            offset=int(getattr(tool_input, "offset", 0)),
+        )
+        return {
+            "ok": True,
+            "files": [
+                ManagedFileService.to_file_response(file=file, root=root).model_dump(mode="json")
+                for file, root in rows
+            ],
+        }
+
+    return handler
+
+
+def _managed_file_search_handler(db: Any) -> ToolHandler:
+    """创建受管文件搜索 Tool handler。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """按文件名关键词执行轻量搜索。"""
+
+        if db is None:
+            return {"ok": False, "error": {"code": "DB_REQUIRED", "message": "搜索受管文件需要数据库会话。"}}
+        rows = ManagedFileRepository(db).list_files(
+            root_key=getattr(tool_input, "root_key", None),
+            filename_contains=getattr(tool_input, "query"),
+            status="ACTIVE",
+            limit=int(getattr(tool_input, "limit", 50)),
+            offset=0,
+        )
+        return {
+            "ok": True,
+            "files": [
+                ManagedFileService.to_file_response(file=file, root=root).model_dump(mode="json")
+                for file, root in rows
+            ],
+        }
+
+    return handler
+
+
+def _managed_root_scan_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """创建受管目录扫描任务 Tool handler。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """创建异步扫描任务，供后续 worker 领取执行。"""
+
+        if db is None:
+            return {"ok": False, "error": {"code": "DB_REQUIRED", "message": "创建扫描任务需要数据库会话。"}}
+        root = ManagedFileRepository(db).get_root_by_key(getattr(tool_input, "root_key"))
+        if root is None or not root.enabled:
+            return {"ok": False, "status": "FAILED", "error": {"code": "ROOT_NOT_FOUND", "message": "受管目录不存在。"}}
+        job = FilesystemJobQueue(db).create_job(
+            job_type="SCAN_MANAGED_ROOT",
+            root_id=root.id,
+            created_by=user_id,
+            payload={"root_key": root.root_key},
+        )
+        db.flush()
+        return {
+            "ok": True,
+            "job_id": job.id,
+            "root_id": root.id,
+            "root_key": root.root_key,
+            "status": job.status,
+        }
+
+    return handler
+
+
 def _lineage_handler(tool_input: BaseModel) -> Dict[str, Any]:
     """返回文档 lineage 占位结果。"""
 
@@ -750,6 +859,10 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("feedback-record", "Record user feedback.", FeedbackRecordInput, True, False, ["feedback"], _feedback_handler),
         _tool("job-status-read", "Read processing job status.", JobStatusReadInput, False, False, [], _job_status_handler),
         _tool("document-lineage-read", "Read document lineage.", DocumentLineageReadInput, False, False, [], _lineage_handler),
+        _tool("managed-root-list", "List server managed logical roots.", ManagedRootListInput, False, False, [], _managed_root_list_handler(db)),
+        _tool("managed-file-list", "List server managed files by logical metadata filters.", ManagedFileListInput, False, False, [], _managed_file_list_handler(db)),
+        _tool("managed-file-search", "Search server managed files by filename keyword.", ManagedFileSearchInput, False, False, [], _managed_file_search_handler(db)),
+        _tool("managed-root-scan", "Create an async scan job for a managed logical root.", ManagedRootScanInput, True, False, ["filesystem_jobs", "filesystem_job_events"], _managed_root_scan_handler(db, user_id)),
         _tool(
             "analyze-spreadsheet",
             "Analyze an uploaded XLSX/XLSM/CSV/TSV spreadsheet through a validated read-only query plan.",

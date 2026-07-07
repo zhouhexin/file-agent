@@ -13,6 +13,7 @@ from app.modules.auth.router import router as auth_router
 from app.modules.changesets.router import router as changesets_router
 from app.modules.conversations.router import router as conversations_router
 from app.modules.files.router import router as files_router
+from app.modules.managed_files.router import router as managed_files_router
 from app.modules.operations.router import router as operations_router
 
 @asynccontextmanager
@@ -90,6 +91,7 @@ app.include_router(auth_router)
 app.include_router(changesets_router)
 app.include_router(conversations_router)
 app.include_router(files_router)
+app.include_router(managed_files_router)
 app.include_router(operations_router)
 
 

@@ -37,6 +37,9 @@ def test_get_agent_tools_returns_mvp_catalog():
     assert "confirmed-file-action" in tool_names
     assert "profile-spreadsheet" in tool_names
     assert "validate-spreadsheet" in tool_names
+    assert "managed-file-list" in tool_names
+    assert "managed-file-search" in tool_names
+    assert "managed-root-scan" in tool_names
 
 
 def test_capability_catalog_exposes_router_metadata():

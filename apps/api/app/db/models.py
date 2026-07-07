@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -399,3 +399,103 @@ class ChangeItem(Base):
     evidence_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     execution_status: Mapped[str] = mapped_column(String(40), nullable=False, default="COMPLETED")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class ManagedRoot(Base):
+    """服务器受管目录表。
+
+    该表只保存部署层已经授权的逻辑目录，业务层通过 root_key 访问目录，
+    不把宿主机任意路径暴露给用户或 LLM。
+    """
+
+    __tablename__ = "managed_roots"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    root_key: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    container_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
+    read_only: Mapped[bool] = mapped_column(default=True, nullable=False)
+    allowed_operations_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    created_by: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class ManagedFile(Base):
+    """受管目录扫描得到的文件元数据。
+
+    P0 只记录元数据，不读取正文、不移动、不删除、不覆盖真实文件。
+    """
+
+    __tablename__ = "managed_files"
+    __table_args__ = (
+        UniqueConstraint("root_id", "relative_path", name="uq_managed_files_root_relative_path"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    root_id: Mapped[str] = mapped_column(String(36), ForeignKey("managed_roots.id", ondelete="CASCADE"), nullable=False, index=True)
+    relative_path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    extension: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    modified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    fingerprint: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="ACTIVE", index=True)
+    last_seen_scan_run_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class FilesystemJob(Base):
+    """文件系统异步任务表。
+
+    扫描和未来确认后的文件操作都先进入任务队列，聊天请求不直接遍历目录。
+    """
+
+    __tablename__ = "filesystem_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    job_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    root_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("managed_roots.id", ondelete="CASCADE"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="PENDING", index=True)
+    progress_current: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    progress_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    result_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    locked_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class FilesystemJobEvent(Base):
+    """文件系统任务过程事件表，用于记录扫描进度和错误。"""
+
+    __tablename__ = "filesystem_job_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    job_id: Mapped[str] = mapped_column(String(36), ForeignKey("filesystem_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    level: Mapped[str] = mapped_column(String(20), nullable=False, default="INFO")
+    message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    details_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class FilesystemScanRun(Base):
+    """单次受管目录扫描汇总表。"""
+
+    __tablename__ = "filesystem_scan_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    root_id: Mapped[str] = mapped_column(String(36), ForeignKey("managed_roots.id", ondelete="CASCADE"), nullable=False, index=True)
+    job_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("filesystem_jobs.id", ondelete="SET NULL"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="RUNNING")
+    files_discovered: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    files_updated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    files_missing: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    errors: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
