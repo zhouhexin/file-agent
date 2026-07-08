@@ -31,6 +31,13 @@ target_scope 只能填写范围意图，不能用它猜测 document_id：
 当用户要求检查表格、公式错误、引用错误、#REF!、#DIV/0!、#VALUE!、#NAME? 或质量异常时：
 - required_capabilities 必须包含 validate_spreadsheet；
 - tool_plan_hint 必须包含 validate-spreadsheet。
+当用户要求列出、查看或搜索服务器受管目录中的文件时：
+- intent 使用 LIST_MANAGED_FILES；
+- required_capabilities 必须包含 managed_file_list；
+- tool_plan_hint 必须包含 managed-file-list；
+- 如果消息中出现 file_agent_spreadsheet_patch_files 这类逻辑目录名，写入 managed_root_key；
+- 如果用户指定逻辑目录下的子目录，例如“deploy 目录”“apps/api 目录”，写入 managed_path_prefix，值必须是受管目录内的相对路径，不要添加开头斜杠；
+- 不要把受管目录文件查询理解为用户上传附件处理。
 
 当需要解析原文时，required_capabilities 必须包含 extract_document_text，tool_plan_hint 必须包含 extract-document-text。
 当只需要读取基础洞察时，required_capabilities 必须包含 read_document_insights，tool_plan_hint 必须包含 read-document-insights。

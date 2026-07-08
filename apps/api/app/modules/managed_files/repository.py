@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import FilesystemJob, FilesystemJobEvent, ManagedFile, ManagedRoot, utcnow
@@ -80,6 +80,7 @@ class ManagedFileRepository:
         self,
         *,
         root_key: str | None = None,
+        path_prefix: str | None = None,
         extension: str | None = None,
         filename_contains: str | None = None,
         category_path: str | None = None,
@@ -95,6 +96,15 @@ class ManagedFileRepository:
             query = query.filter(ManagedRoot.root_key == root_key)
         if classification_mode:
             query = query.filter(ManagedRoot.classification_mode == classification_mode)
+        if path_prefix:
+            normalized_prefix = _normalize_path_prefix(path_prefix)
+            escaped_prefix = _escape_like(normalized_prefix)
+            query = query.filter(
+                or_(
+                    ManagedFile.relative_path == normalized_prefix,
+                    ManagedFile.relative_path.like(f"{escaped_prefix}/%", escape="\\"),
+                )
+            )
         if category_path:
             query = query.filter(ManagedFile.category_path == category_path)
         if extension:
@@ -133,6 +143,18 @@ class ManagedFileRepository:
             .order_by(ManagedRoot.root_key.asc(), ManagedFile.category_path.asc())
             .all()
         )
+
+
+def _normalize_path_prefix(path_prefix: str) -> str:
+    """把子目录前缀规范化为数据库中的 POSIX 相对路径。"""
+
+    return path_prefix.replace("\\", "/").strip().strip("/")
+
+
+def _escape_like(value: str) -> str:
+    """转义 SQL LIKE 通配符，避免路径中的 %/_ 被当成通配符。"""
+
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 class FilesystemJobRepository:

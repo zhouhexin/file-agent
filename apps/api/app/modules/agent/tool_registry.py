@@ -479,6 +479,7 @@ def _managed_file_list_handler(db: Any) -> ToolHandler:
         db.commit()
         rows = ManagedFileRepository(db).list_files(
             root_key=getattr(tool_input, "root_key", None),
+            path_prefix=getattr(tool_input, "path_prefix", None),
             extension=getattr(tool_input, "extension", None),
             filename_contains=getattr(tool_input, "filename_contains", None),
             category_path=getattr(tool_input, "category_path", None),
@@ -490,6 +491,7 @@ def _managed_file_list_handler(db: Any) -> ToolHandler:
         # 返回查询条件用于空结果回执，避免 response 节点无法说明是哪一个受管目录没有文件。
         query = {
             "root_key": getattr(tool_input, "root_key", None),
+            "path_prefix": getattr(tool_input, "path_prefix", None),
             "extension": getattr(tool_input, "extension", None),
             "filename_contains": getattr(tool_input, "filename_contains", None),
             "category_path": getattr(tool_input, "category_path", None),
@@ -524,6 +526,7 @@ def _managed_file_search_handler(db: Any) -> ToolHandler:
         db.commit()
         rows = ManagedFileRepository(db).list_files(
             root_key=getattr(tool_input, "root_key", None),
+            path_prefix=getattr(tool_input, "path_prefix", None),
             filename_contains=getattr(tool_input, "query"),
             status="ACTIVE",
             limit=int(getattr(tool_input, "limit", 50)),

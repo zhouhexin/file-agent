@@ -195,6 +195,35 @@ def test_user_query_auto_reads_env_managed_root_without_admin_registration(monke
         clear_overrides()
 
 
+def test_managed_files_query_filters_path_prefix(monkeypatch, tmp_path):
+    """普通用户可以按受管目录内子目录查询文件。"""
+
+    managed_root = tmp_path / "spreadsheet-patches"
+    nested_dir = managed_root / "deploy" / "nested"
+    nested_dir.mkdir(parents=True)
+    (managed_root / "README.md").write_text("root", encoding="utf-8")
+    (managed_root / "deploy" / "a.ps1").write_text("deploy", encoding="utf-8")
+    (nested_dir / "b.txt").write_text("nested", encoding="utf-8")
+    monkeypatch.setenv("MANAGED_ROOT_FILE_AGENT_SPREADSHEET_PATCH_FILES", str(managed_root))
+    client, _ = client_with_database()
+    _, token = _register_and_login(client, "managed-path-reader")
+
+    response = client.get(
+        "/api/managed-files"
+        "?root_key=file_agent_spreadsheet_patch_files"
+        "&path_prefix=deploy",
+        headers=_auth_header(token),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [file["relative_path"] for file in data] == [
+        "deploy/a.ps1",
+        "deploy/nested/b.txt",
+    ]
+    clear_overrides()
+
+
 def test_category_tree_only_uses_path_classified_roots():
     """分类目录树只能来自 PATH_AS_CATEGORY 受管目录。"""
 

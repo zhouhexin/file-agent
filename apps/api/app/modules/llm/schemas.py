@@ -9,7 +9,6 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-
 ALLOWED_TARGET_SCOPES = {
     "unspecified",
     "current_message",
@@ -37,6 +36,13 @@ class UserIntentPlan(BaseModel):
     tool_plan_hint: List[str] = Field(default_factory=list)
     response_style: str = "concise"
     clarification_question: Optional[str] = None
+
+    # 受管目录相关字段只描述用户意图，真实目录和路径仍由后端白名单与 Tool schema 校验。
+    managed_root_key: Optional[str] = None
+    managed_path_prefix: Optional[str] = None
+    managed_filename_contains: Optional[str] = None
+    managed_extension: Optional[str] = None
+    managed_query: Optional[str] = None
 
     @field_validator("target_scope")
     @classmethod

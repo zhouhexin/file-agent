@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ToolInputValidationError(ValueError):
@@ -15,6 +16,26 @@ class StrictToolInput(BaseModel):
     """拒绝 Planner 输出中未声明字段的 Tool 输入基类。"""
 
     model_config = ConfigDict(extra="forbid")
+
+
+def _normalize_path_prefix(value: Optional[str]) -> Optional[str]:
+    """规范化相对路径前缀，用于限制受管目录子目录查询。"""
+
+    if value is None:
+        return None
+
+    normalized = value.replace("\\", "/").strip().strip("/")
+    if normalized in {"", "."}:
+        return None
+
+    path = PurePosixPath(normalized)
+    if path.is_absolute():
+        raise ValueError("path_prefix must be a relative path")
+
+    if any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError("path_prefix must not contain '.', '..' or empty path segments")
+
+    return path.as_posix()
 
 
 class DocumentToolInput(StrictToolInput):
@@ -130,6 +151,13 @@ class ManagedFileListInput(StrictToolInput):
     """列出受管文件元数据的输入。"""
 
     root_key: Optional[str] = None
+    path_prefix: Optional[str] = Field(
+        default=None,
+        description=(
+            "受管根目录下的相对目录或文件路径前缀；"
+            "用户要求查看某个子目录下文件时使用，例如：合同/2024。"
+        ),
+    )
     extension: Optional[str] = None
     filename_contains: Optional[str] = None
     category_path: Optional[str] = None
@@ -138,13 +166,34 @@ class ManagedFileListInput(StrictToolInput):
     limit: int = Field(default=50, ge=1, le=200)
     offset: int = Field(default=0, ge=0)
 
+    @field_validator("path_prefix")
+    @classmethod
+    def validate_path_prefix(cls, value: Optional[str]) -> Optional[str]:
+        """校验并规范化受管目录内的相对路径前缀。"""
+
+        return _normalize_path_prefix(value)
+
 
 class ManagedFileSearchInput(StrictToolInput):
     """按文件名关键词搜索受管文件的输入。"""
 
     query: str = Field(min_length=1)
     root_key: Optional[str] = None
+    path_prefix: Optional[str] = Field(
+        default=None,
+        description=(
+            "受管根目录下的可选相对路径前缀；"
+            "用户要求在某个子目录内搜索时使用。"
+        ),
+    )
     limit: int = Field(default=50, ge=1, le=200)
+
+    @field_validator("path_prefix")
+    @classmethod
+    def validate_path_prefix(cls, value: Optional[str]) -> Optional[str]:
+        """校验并规范化受管目录内的相对路径前缀。"""
+
+        return _normalize_path_prefix(value)
 
 
 class ManagedRootScanInput(StrictToolInput):

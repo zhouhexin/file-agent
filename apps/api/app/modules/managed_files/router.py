@@ -70,6 +70,7 @@ def get_filesystem_job(
 @router.get("/api/managed-files", response_model=list[ManagedFileResponse])
 def list_managed_files(
     root_key: str | None = None,
+    path_prefix: str | None = None,
     extension: str | None = None,
     filename_contains: str | None = None,
     category_path: str | None = None,
@@ -85,6 +86,7 @@ def list_managed_files(
     return ManagedFileService(db).list_files(
         current_user=current_user,
         root_key=root_key,
+        path_prefix=path_prefix,
         extension=extension,
         filename_contains=filename_contains,
         category_path=category_path,

@@ -57,6 +57,39 @@ def test_managed_file_list_tool_auto_reads_env_root_without_registration(monkeyp
         clear_overrides()
 
 
+def test_managed_file_list_tool_filters_path_prefix(monkeypatch, tmp_path):
+    """managed-file-list Tool 应按受管目录内的相对路径前缀过滤。"""
+
+    managed_root = tmp_path / "spreadsheet-patches"
+    deploy_dir = managed_root / "deploy" / "nested"
+    deploy_dir.mkdir(parents=True)
+    (managed_root / "README.md").write_text("root", encoding="utf-8")
+    (managed_root / "deploy" / "a.ps1").write_text("deploy", encoding="utf-8")
+    (deploy_dir / "b.txt").write_text("nested", encoding="utf-8")
+    monkeypatch.setenv("MANAGED_ROOT_FILE_AGENT_SPREADSHEET_PATCH_FILES", str(managed_root))
+    client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        result = ToolRegistry(db=db, user_id="user-1").invoke(
+            "managed-file-list",
+            {
+                "root_key": "file_agent_spreadsheet_patch_files",
+                "path_prefix": "deploy",
+            },
+        )
+
+        assert result.status == "COMPLETED"
+        assert result.output_json["ok"] is True
+        assert [file["relative_path"] for file in result.output_json["files"]] == [
+            "deploy/a.ps1",
+            "deploy/nested/b.txt",
+        ]
+        assert result.output_json["query"]["path_prefix"] == "deploy"
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def test_env_managed_root_classification_mode_uses_parent_path(monkeypatch, tmp_path):
     """env 声明 PATH_AS_CATEGORY 时，父目录应自动作为受管文件分类路径。"""
 

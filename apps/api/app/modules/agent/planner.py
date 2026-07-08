@@ -143,7 +143,15 @@ class DeterministicPlanner:
 
         managed_root_key = _managed_root_key_from_list_request(message)
         if managed_root_key:
-            return _managed_file_list_plan(user_goal=message, root_key=managed_root_key)
+            managed_path_prefix = _managed_path_prefix_from_list_request(
+                message=message,
+                root_key=managed_root_key,
+            )
+            return _managed_file_list_plan(
+                user_goal=message,
+                root_key=managed_root_key,
+                path_prefix=managed_path_prefix,
+            )
 
         needs_file_scope = (
             _should_extract_text(message=message, lowered=lowered)
@@ -389,7 +397,11 @@ def build_plan_from_user_intent(
     ):
         return _classification_taxonomy_plan(user_goal=intent_plan.user_goal or message)
 
-    managed_root_key = _managed_root_key_from_list_request(message)
+    managed_root_key = intent_plan.managed_root_key or _managed_root_key_from_list_request(message)
+    managed_path_prefix = intent_plan.managed_path_prefix or _managed_path_prefix_from_list_request(
+        message=message,
+        root_key=managed_root_key,
+    )
     if (
         managed_root_key
         or intent_plan.intent in {"LIST_MANAGED_FILES", "SEARCH_MANAGED_FILES"}
@@ -399,6 +411,7 @@ def build_plan_from_user_intent(
         return _managed_file_list_plan(
             user_goal=intent_plan.user_goal or message,
             root_key=managed_root_key,
+            path_prefix=managed_path_prefix,
             response_style=intent_plan.response_style,
             clarification_question=intent_plan.clarification_question,
             llm_intent_plan=intent_plan.model_dump(),
@@ -782,6 +795,7 @@ def _managed_file_list_plan(
     *,
     user_goal: str,
     root_key: str | None,
+    path_prefix: str | None = None,
     response_style: str = "concise",
     clarification_question: str | None = None,
     llm_intent_plan: Dict[str, Any] | None = None,
@@ -792,12 +806,15 @@ def _managed_file_list_plan(
     input_json: Dict[str, Any] = {"status": "ACTIVE"}
     if root_key:
         input_json["root_key"] = root_key
+    if path_prefix:
+        input_json["path_prefix"] = path_prefix
     return PlannerOutput(
         intent="LIST_MANAGED_FILES",
         user_goal=user_goal,
         slots={
             "document_ids": [],
             "root_key": root_key,
+            "path_prefix": path_prefix,
             "requested_outputs": ["managed_files"],
             "response_style": response_style,
             "clarification_question": clarification_question,
@@ -1088,6 +1105,51 @@ def _managed_root_key_from_list_request(message: str) -> str | None:
         if match:
             return match.group(1)
     return None
+
+
+def _managed_path_prefix_from_list_request(*, message: str, root_key: str | None) -> str | None:
+    """从“root_key 下某子目录中的文件”提取受管目录内的相对路径。"""
+
+    if not root_key:
+        return None
+
+    escaped_root = re.escape(root_key)
+    slash_match = re.search(
+        rf"{escaped_root}/(?P<path>[^\s，。！？]+?)\s*(?:下|目录下|中的|里的|里面的)?\s*(?:的)?\s*(?:所有)?\s*(?:文件|目录)",
+        message,
+    )
+    if slash_match:
+        return _normalize_managed_path_prefix(slash_match.group("path"))
+
+    root_match = re.search(escaped_root, message)
+    if not root_match:
+        return None
+
+    tail = message[root_match.end() :].strip()
+    tail = re.sub(r"^(?:目录下|下|中的|里的|里面的|内|目录中|目录里)\s*", "", tail)
+    tail = tail.strip()
+    tail = re.sub(r"^(?:的)?(?:所有|全部)?(?:文件|目录)?\s*", "", tail)
+    tail = re.sub(
+        r"\s*(?:目录|文件夹)?(?:中|里|下|里面)?(?:的)?(?:所有|全部)?(?:文件|目录)\s*$",
+        "",
+        tail,
+    )
+    return _normalize_managed_path_prefix(tail)
+
+
+def _normalize_managed_path_prefix(value: str | None) -> str | None:
+    """规范化 Planner 从自然语言中解析出的受管目录相对路径。"""
+
+    if value is None:
+        return None
+
+    normalized = value.replace("\\", "/").strip().strip("/").strip()
+    normalized = re.sub(r"\s+", "", normalized)
+    if normalized in {"", ".", "的", "所有", "全部"}:
+        return None
+    if any(part in {"", ".", ".."} for part in normalized.split("/")):
+        return None
+    return normalized
 
 
 def _has_plain_document_summary_intent(*, message: str, lowered: str) -> bool:

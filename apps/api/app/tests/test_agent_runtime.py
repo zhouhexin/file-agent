@@ -172,6 +172,62 @@ def test_deterministic_planner_routes_managed_file_list_by_root_key():
     assert plan.steps[0].input["root_key"] == "file_agent_spreadsheet_patch_files"
 
 
+def test_deterministic_planner_routes_managed_file_list_by_subdirectory():
+    """受管目录子目录查询必须生成 path_prefix，不能返回整个根目录。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-managed-subdir",
+        user_id="user-1",
+        message_id="msg-managed-subdir",
+        message="列出file_agent_spreadsheet_patch_files下deploy目录中的文件",
+        attachments=[],
+    )
+
+    assert plan.intent == "LIST_MANAGED_FILES"
+    assert plan.steps[0].input["root_key"] == "file_agent_spreadsheet_patch_files"
+    assert plan.steps[0].input["path_prefix"] == "deploy"
+    assert plan.slots["path_prefix"] == "deploy"
+
+
+def test_deterministic_planner_routes_nested_managed_file_subdirectory():
+    """受管目录嵌套子目录查询必须保留 POSIX 相对路径。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-managed-nested",
+        user_id="user-1",
+        message_id="msg-managed-nested",
+        message="查看file_agent_spreadsheet_patch_files下apps/api目录里的文件",
+        attachments=[],
+    )
+
+    assert plan.intent == "LIST_MANAGED_FILES"
+    assert plan.steps[0].input["path_prefix"] == "apps/api"
+
+
+def test_llm_managed_file_list_uses_structured_path_prefix():
+    """LLM 输出的受管目录子目录字段必须进入 Tool 输入。"""
+
+    intent_plan = UserIntentPlan(
+        intent="LIST_MANAGED_FILES",
+        user_goal="查看 deploy 子目录文件",
+        needs_file_context=False,
+        required_capabilities=["managed_file_list"],
+        tool_plan_hint=["managed-file-list"],
+        managed_root_key="file_agent_spreadsheet_patch_files",
+        managed_path_prefix="deploy",
+    )
+
+    plan = build_plan_from_user_intent(
+        intent_plan=intent_plan,
+        message="查看file_agent_spreadsheet_patch_files下deploy目录里的文件",
+        attachments=[],
+    )
+
+    assert plan.intent == "LIST_MANAGED_FILES"
+    assert plan.steps[0].input["root_key"] == "file_agent_spreadsheet_patch_files"
+    assert plan.steps[0].input["path_prefix"] == "deploy"
+
+
 def test_llm_general_chat_is_overridden_for_managed_file_list_request():
     """LLM 把受管目录列表误判成普通对话时，Planner 必须按目录文件列表执行。"""
 

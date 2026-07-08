@@ -88,6 +88,7 @@ class ManagedFileService:
         *,
         current_user: User,
         root_key: str | None = None,
+        path_prefix: str | None = None,
         extension: str | None = None,
         filename_contains: str | None = None,
         category_path: str | None = None,
@@ -103,6 +104,7 @@ class ManagedFileService:
         self.db.commit()
         rows = self.repository.list_files(
             root_key=root_key,
+            path_prefix=path_prefix,
             extension=extension,
             filename_contains=filename_contains,
             category_path=category_path,
