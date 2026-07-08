@@ -52,6 +52,38 @@ def test_managed_root_key_is_unique():
         db.close()
 
 
+def test_upsert_managed_root_skips_update_when_config_is_unchanged():
+    """受管目录配置未变化时不应重复 UPDATE，避免列表查询产生无意义写锁。"""
+
+    from app.modules.managed_files.repository import ManagedFileRepository
+
+    db = _session()
+    try:
+        repository = ManagedFileRepository(db)
+        root = repository.upsert_root(
+            root_key="student_affairs",
+            display_name="student_affairs",
+            container_path="/managed/student-affairs",
+            classification_mode="NONE",
+            created_by=None,
+        )
+        db.commit()
+        db.refresh(root)
+        first_updated_at = root.updated_at
+
+        root = repository.upsert_root(
+            root_key="student_affairs",
+            display_name="student_affairs",
+            container_path="/managed/student-affairs",
+            classification_mode="NONE",
+            created_by=None,
+        )
+
+        assert root.updated_at == first_updated_at
+    finally:
+        db.close()
+
+
 def test_managed_file_relative_path_is_unique_per_root():
     """同一逻辑目录内 relative_path 必须唯一，避免重复扫描重复入库。"""
 

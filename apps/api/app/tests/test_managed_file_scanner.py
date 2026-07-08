@@ -35,3 +35,44 @@ def test_scanner_records_file_metadata_and_marks_missing(tmp_path):
     finally:
         db.close()
         clear_overrides()
+
+
+def test_scanner_derives_category_path_only_for_path_classified_root(tmp_path):
+    """只有 PATH_AS_CATEGORY 目录会把父目录写成分类路径。"""
+
+    classified_dir = tmp_path / "classified"
+    plain_dir = tmp_path / "plain"
+    (classified_dir / "奖学金" / "国家励志奖学金").mkdir(parents=True)
+    plain_dir.mkdir()
+    (classified_dir / "奖学金" / "国家励志奖学金" / "a.pdf").write_bytes(b"pdf")
+    (plain_dir / "临时" ).mkdir()
+    (plain_dir / "临时" / "b.pdf").write_bytes(b"pdf")
+
+    client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        classified_root = ManagedRoot(
+            root_key="classified_library",
+            display_name="已分类文件库",
+            container_path=str(classified_dir),
+            classification_mode="PATH_AS_CATEGORY",
+        )
+        plain_root = ManagedRoot(
+            root_key="plain_inbox",
+            display_name="普通收件箱",
+            container_path=str(plain_dir),
+            classification_mode="NONE",
+        )
+        db.add_all([classified_root, plain_root])
+        db.commit()
+
+        ManagedFileScanner(db).scan_root(classified_root)
+        ManagedFileScanner(db).scan_root(plain_root)
+
+        classified_file = db.query(ManagedFile).filter(ManagedFile.root_id == classified_root.id).one()
+        plain_file = db.query(ManagedFile).filter(ManagedFile.root_id == plain_root.id).one()
+        assert classified_file.category_path == "奖学金/国家励志奖学金"
+        assert plain_file.category_path is None
+    finally:
+        db.close()
+        clear_overrides()

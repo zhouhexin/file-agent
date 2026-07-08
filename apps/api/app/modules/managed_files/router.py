@@ -11,7 +11,13 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.db.models import User
 from app.modules.auth.dependencies import get_current_user
-from app.modules.managed_files.schemas import FilesystemJobResponse, ManagedFileResponse, ManagedRootCreateRequest, ManagedRootResponse
+from app.modules.managed_files.schemas import (
+    FilesystemJobResponse,
+    ManagedCategoryResponse,
+    ManagedFileResponse,
+    ManagedRootCreateRequest,
+    ManagedRootResponse,
+)
 from app.modules.managed_files.service import ManagedFileService
 
 
@@ -66,6 +72,8 @@ def list_managed_files(
     root_key: str | None = None,
     extension: str | None = None,
     filename_contains: str | None = None,
+    category_path: str | None = None,
+    classification_mode: str | None = None,
     status: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
@@ -79,7 +87,20 @@ def list_managed_files(
         root_key=root_key,
         extension=extension,
         filename_contains=filename_contains,
+        category_path=category_path,
+        classification_mode=classification_mode,
         status=status,
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/api/managed-file-categories", response_model=list[ManagedCategoryResponse])
+def list_managed_file_categories(
+    root_key: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[ManagedCategoryResponse]:
+    """列出已分类受管目录中的分类路径。"""
+
+    return ManagedFileService(db).list_categories(current_user=current_user, root_key=root_key)

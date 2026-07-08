@@ -57,10 +57,40 @@ data/managed/student-affairs
 MANAGED_ROOT_STUDENT_AFFAIRS=/managed/student-affairs
 ```
 
-然后由管理员通过 API 启用该 root。后续如果要增加更多受管目录，需要同时修改：
+该 root 会在用户通过对话或 API 查询时自动生效：系统会按 env 配置自动同步
+`managed_roots`，扫描并更新 `managed_files` 索引，不需要管理员再通过 API 启用。
+后续如果要增加更多受管目录，需要同时修改：
 
 1. `deploy/docker-compose.production.yml` 中的只读 volume mount。
 2. `deploy/.env` 中的 `MANAGED_ROOT_<ROOT_KEY>` 环境变量。
+
+受管目录默认分类模式为 `NONE`：
+
+```text
+MANAGED_ROOT_STUDENT_AFFAIRS=/managed/student-affairs
+```
+
+普通受管目录，只扫描、列出、搜索文件，不认为父目录代表分类。
+
+如果该目录本身已经按父目录分好类，可以在 env 中额外声明：
+
+```text
+MANAGED_ROOT_STUDENT_AFFAIRS_CLASSIFICATION_MODE=PATH_AS_CATEGORY
+```
+
+已分类文件库，文件父目录会作为分类路径。例如：
+
+```text
+奖学金/国家励志奖学金/a.pdf
+```
+
+对应分类路径是：
+
+```text
+奖学金/国家励志奖学金
+```
+
+后续新上传文件归档时，只能把 `PATH_AS_CATEGORY` 目录作为目标分类库；`NONE` 目录不会被当成分类体系。
 
 ## 公网访问必须额外完成的网络步骤
 

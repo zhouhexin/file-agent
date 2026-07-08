@@ -19,6 +19,15 @@
 - [x] Task 7: Agent Tools
 - [x] Task 8: Deployment Files
 
+## Follow-Up Adjustment: Classified Managed Roots
+
+受管目录需要显式区分普通目录和已分类目录，不能默认把所有父目录都当作分类。
+
+- `classification_mode=NONE`：普通受管目录，只扫描、列出、搜索文件。
+- `classification_mode=PATH_AS_CATEGORY`：已分类文件库，文件父目录作为分类路径。
+
+后续新上传文件归档时，只能把 `PATH_AS_CATEGORY` 目录作为目标分类库。系统会先对新上传文件分类，再推荐目标目录；真实移动或复制仍必须生成 OperationPlan 并等待用户确认。
+
 ---
 
 ## Inputs Reviewed
@@ -144,8 +153,8 @@ P0 不做：
 
 **Rules:**
 
-- 只允许管理员启用部署层预定义 `mount_key`。
-- `mount_key` 由环境变量声明，例如 `MANAGED_ROOT_STUDENT_AFFAIRS=/managed/student-affairs`。
+- 受管目录以 env 为唯一配置入口，例如 `MANAGED_ROOT_STUDENT_AFFAIRS=/managed/student-affairs`。
+- 普通用户通过对话或查询接口访问受管目录时，系统自动同步 env root、扫描目录并更新索引。
 - API 不接受任意宿主机绝对路径。
 - 查询和扫描只传 `root_key`、`relative_path`。
 - 拒绝：
@@ -164,7 +173,7 @@ P0 不做：
 - 普通相对路径 `2026/inbox/a.pdf` 通过。
 - symlink 指向 root 外部时被拒绝。
 
-### Task 3: Admin Managed Root API
+### Task 3: Managed Root API
 
 **Files:**
 - Create: `apps/api/app/modules/managed_files/router.py`
@@ -175,7 +184,7 @@ P0 不做：
 
 - `POST /api/admin/managed-roots`
   - 输入：`root_key`、`display_name`
-  - 行为：只能启用环境变量中存在的 `root_key`
+  - 行为：兼容保留，用于调试或显式刷新环境变量中存在的 `root_key`
   - 权限：`admin`
 
 - `GET /api/admin/managed-roots`
@@ -184,8 +193,9 @@ P0 不做：
 
 **Acceptance:**
 
+- env 配置后，普通 `user` 查询受管目录会自动同步并扫描，不需要管理员预登记。
 - 普通 `user` 调用返回 403。
-- `admin` 可以启用 `MANAGED_ROOT_STUDENT_AFFAIRS`。
+- `admin` 可以查看或刷新 `MANAGED_ROOT_STUDENT_AFFAIRS`。
 - 请求体中出现任意路径字段时返回 400。
 - 响应不返回宿主机绝对路径，只返回 `root_key`、`display_name` 和状态。
 
@@ -328,7 +338,7 @@ P0 不做：
   - mode: `ro`
 - 增加环境变量：
   - `MANAGED_ROOT_STUDENT_AFFAIRS=/managed/student-affairs`
-  - `MANAGED_ROOT_STUDENT_AFFAIRS_NAME=学工收件箱`
+  - `MANAGED_ROOT_STUDENT_AFFAIRS_CLASSIFICATION_MODE=PATH_AS_CATEGORY` 可选，不配置默认 `NONE`
 
 **Acceptance:**
 

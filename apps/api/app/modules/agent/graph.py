@@ -132,6 +132,9 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
     """调用 Planner，并且只保存通过校验的声明式计划。"""
 
     if state.get("planner_mode") == "llm":
+        preflight_plan = _deterministic_preflight_plan(state=state, runtime=runtime)
+        if preflight_plan is not None:
+            return _planner_state_update(plan=preflight_plan, user_intent_plan={"source": "deterministic_preflight"})
         try:
             intent_plan = runtime.context.llm_intent_service.understand_user_request(
                 message=state["message"],
@@ -174,6 +177,31 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
             attachments=state.get("attachments", []),
         )
         user_intent_plan = {}
+    return _planner_state_update(plan=plan, user_intent_plan=user_intent_plan)
+
+
+def _deterministic_preflight_plan(
+    *,
+    state: AgentGraphState,
+    runtime: Runtime[AgentRuntimeContext],
+):
+    """在 LLM 前识别固定系统命令，避免目录列表等请求被模型网络调用阻塞。"""
+
+    plan = runtime.context.planner.plan(
+        conversation_id=state["conversation_id"],
+        user_id=state["user_id"],
+        message_id=state["message_id"],
+        message=state["message"],
+        attachments=state.get("attachments", []),
+    )
+    if plan.intent in {"LIST_MANAGED_FILES", "CAPABILITY_HELP", "LIST_CLASSIFICATION_TAXONOMY"}:
+        return plan
+    return None
+
+
+def _planner_state_update(*, plan, user_intent_plan: Dict[str, Any]) -> Dict[str, Any]:
+    """把 Planner 输出转换为 LangGraph State 更新。"""
+
     return {
         "intent": plan.intent,
         "slots": plan.slots,
@@ -390,6 +418,13 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
             "final_response": _build_classification_taxonomy_response(taxonomy_catalog),
         }
 
+    managed_file_list = _managed_file_list_from_results(state.get("tool_results", []))
+    if managed_file_list:
+        return {
+            "status": "COMPLETED",
+            "final_response": _build_managed_file_list_response(managed_file_list),
+        }
+
     intent_summary = _intent_summary_from_results(state.get("tool_results", []))
     if intent_summary:
         return {
@@ -524,6 +559,44 @@ def _classification_taxonomy_from_results(tool_results: List[Dict[str, Any]]) ->
     return {}
 
 
+def _managed_file_list_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """从 Tool 结果中提取受管目录文件列表载荷。
+
+    这里返回完整载荷而不是仅返回 files，是为了让空目录也能生成明确回复，
+    避免 files=[] 被误判为没有业务结果。
+    """
+
+    for result in tool_results:
+        result_files = result.get("files")
+        if result.get("ok") and isinstance(result_files, list):
+            return {
+                "query": result.get("query") if isinstance(result.get("query"), dict) else {},
+                "files": [item for item in result_files if isinstance(item, dict)],
+            }
+    return {}
+
+
+def _build_managed_file_list_response(payload: Dict[str, Any]) -> str:
+    """把受管目录文件列表格式化为用户可读文本。"""
+
+    files = [item for item in payload.get("files", []) if isinstance(item, dict)]
+    query = payload.get("query") if isinstance(payload.get("query"), dict) else {}
+    root_key = str(query.get("root_key") or (files[0].get("root_key") if files else "") or "受管目录")
+    if not files:
+        return f"{root_key} 下暂未找到文件。请确认该受管目录已启用，并且已完成扫描。"
+    lines = [f"{root_key} 下共有 {len(files)} 个文件："]
+    for index, file in enumerate(files[:50], start=1):
+        filename = file.get("filename") or file.get("relative_path") or "未知文件"
+        relative_path = file.get("relative_path") or filename
+        size_bytes = int(file.get("size_bytes") or 0)
+        category_path = file.get("category_path")
+        suffix = f"；分类：{category_path}" if category_path else ""
+        lines.append(f"{index}. {relative_path}（{_format_size(size_bytes)}{suffix}）")
+    if len(files) > 50:
+        lines.append(f"仅展示前 50 个文件，其余 {len(files) - 50} 个可继续筛选查看。")
+    return "\n".join(lines)
+
+
 def _build_classification_taxonomy_response(taxonomy: Dict[str, Any]) -> str:
     """把系统固定分类目录格式化为用户可读文本。"""
 
@@ -538,6 +611,16 @@ def _build_classification_taxonomy_response(taxonomy: Dict[str, Any]) -> str:
             if isinstance(child, dict):
                 lines.append(f"  - {child.get('name') or '未命名子类'}")
     return "\n".join(lines)
+
+
+def _format_size(size_bytes: int) -> str:
+    """格式化文件大小，避免直接展示原始字节数。"""
+
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes / 1024 / 1024:.1f} MB"
 
 
 def _intent_summary_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:

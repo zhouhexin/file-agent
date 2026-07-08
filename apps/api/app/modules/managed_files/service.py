@@ -13,8 +13,10 @@ from sqlalchemy.orm import Session
 from app.db.models import FilesystemJob, ManagedFile, ManagedRoot, User
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
+from app.modules.managed_files.scanner import ManagedFileScanner
 from app.modules.managed_files.schemas import (
     FilesystemJobResponse,
+    ManagedCategoryResponse,
     ManagedFileResponse,
     ManagedRootCreateRequest,
     ManagedRootResponse,
@@ -41,6 +43,7 @@ class ManagedFileService:
             root_key=request.root_key,
             display_name=request.display_name,
             container_path=container_path,
+            classification_mode=request.classification_mode,
             created_by=current_user.id,
         )
         self.db.commit()
@@ -51,6 +54,7 @@ class ManagedFileService:
         """列出受管目录。"""
 
         _require_role(current_user, {"admin", "ops"})
+        sync_configured_managed_roots(self.db, scan=False)
         return [self.to_root_response(root) for root in self.repository.list_roots()]
 
     def create_scan_job(self, *, root_id: str, current_user: User) -> FilesystemJobResponse:
@@ -86,6 +90,8 @@ class ManagedFileService:
         root_key: str | None = None,
         extension: str | None = None,
         filename_contains: str | None = None,
+        category_path: str | None = None,
+        classification_mode: str | None = None,
         status: str | None = None,
         limit: int = 100,
         offset: int = 0,
@@ -93,15 +99,35 @@ class ManagedFileService:
         """按元数据查询受管文件。"""
 
         _require_role(current_user, {"user", "ops", "admin"})
+        sync_configured_managed_roots(self.db, root_key=root_key, scan=True)
+        self.db.commit()
         rows = self.repository.list_files(
             root_key=root_key,
             extension=extension,
             filename_contains=filename_contains,
+            category_path=category_path,
+            classification_mode=classification_mode,
             status=status,
             limit=limit,
             offset=offset,
         )
         return [self.to_file_response(file=file, root=root) for file, root in rows]
+
+    def list_categories(self, *, current_user: User, root_key: str | None = None) -> list[ManagedCategoryResponse]:
+        """列出父目录作为分类的受管目录分类树。"""
+
+        _require_role(current_user, {"user", "ops", "admin"})
+        sync_configured_managed_roots(self.db, root_key=root_key, scan=True)
+        self.db.commit()
+        return [
+            ManagedCategoryResponse(
+                root_key=row_root_key,
+                display_name=display_name,
+                category_path=category_path,
+                file_count=int(file_count),
+            )
+            for row_root_key, display_name, category_path, file_count in self.repository.list_category_paths(root_key=root_key)
+        ]
 
     @staticmethod
     def to_root_response(root: ManagedRoot) -> ManagedRootResponse:
@@ -111,6 +137,7 @@ class ManagedFileService:
             id=root.id,
             root_key=root.root_key,
             display_name=root.display_name,
+            classification_mode=root.classification_mode,
             enabled=root.enabled,
             read_only=root.read_only,
             allowed_operations=list(root.allowed_operations_json or []),
@@ -139,6 +166,7 @@ class ManagedFileService:
             root_key=root.root_key,
             display_name=root.display_name,
             relative_path=file.relative_path,
+            category_path=file.category_path,
             filename=file.filename,
             extension=file.extension,
             size_bytes=file.size_bytes,
@@ -152,6 +180,103 @@ def _configured_container_path(root_key: str) -> str | None:
 
     env_key = f"MANAGED_ROOT_{root_key.upper()}"
     return os.getenv(env_key)
+
+
+def sync_configured_managed_roots(
+    db: Session,
+    *,
+    root_key: str | None = None,
+    scan: bool = False,
+    created_by: str | None = None,
+) -> list[ManagedRoot]:
+    """把 env 中声明的受管目录同步到数据库，并按需执行只读扫描。
+
+    env 是受管目录的唯一配置入口；数据库只保存运行时索引和扫描结果。
+    因此普通用户查询时也会自动同步，避免必须先由管理员手动登记。
+    """
+
+    repository = ManagedFileRepository(db)
+    roots: list[ManagedRoot] = []
+    for configured_root_key in _configured_root_keys(root_key=root_key):
+        container_path = _configured_container_path(configured_root_key)
+        if container_path is None:
+            continue
+        existing_root = repository.get_root_by_key(configured_root_key)
+        config_changed = existing_root is None or _root_config_changed(
+            root=existing_root,
+            display_name=configured_root_key,
+            container_path=container_path,
+            classification_mode=_configured_classification_mode(configured_root_key),
+        )
+        root = repository.upsert_root(
+            root_key=configured_root_key,
+            display_name=configured_root_key,
+            container_path=container_path,
+            classification_mode=_configured_classification_mode(configured_root_key),
+            created_by=created_by,
+        )
+        roots.append(root)
+        if scan and (config_changed or not _has_active_managed_files(db, root_id=root.id)):
+            ManagedFileScanner(db).scan_root(root)
+    db.flush()
+    return roots
+
+
+def _root_config_changed(
+    *,
+    root: ManagedRoot,
+    display_name: str,
+    container_path: str,
+    classification_mode: str,
+) -> bool:
+    """判断 env 配置是否相对数据库索引发生变化。"""
+
+    return (
+        root.display_name != display_name
+        or root.container_path != container_path
+        or root.classification_mode != classification_mode
+        or root.enabled is not True
+        or root.read_only is not True
+    )
+
+
+def _has_active_managed_files(db: Session, *, root_id: str) -> bool:
+    """判断受管目录是否已有可用文件索引，用于避免每次查询都全量扫描。"""
+
+    return (
+        db.query(ManagedFile.id)
+        .filter(ManagedFile.root_id == root_id, ManagedFile.status == "ACTIVE")
+        .first()
+        is not None
+    )
+
+
+def _configured_root_keys(*, root_key: str | None = None) -> list[str]:
+    """从环境变量中提取受管目录 root_key，忽略分类模式等元数据配置。"""
+
+    if root_key:
+        return [root_key] if _configured_container_path(root_key) is not None else []
+
+    prefix = "MANAGED_ROOT_"
+    ignored_suffixes = {"_CLASSIFICATION_MODE", "_NAME", "_DISPLAY_NAME"}
+    keys: list[str] = []
+    for env_key in os.environ:
+        if not env_key.startswith(prefix):
+            continue
+        if any(env_key.endswith(suffix) for suffix in ignored_suffixes):
+            continue
+        keys.append(env_key[len(prefix):].lower())
+    return sorted(set(keys))
+
+
+def _configured_classification_mode(root_key: str) -> str:
+    """读取受管目录分类模式；未配置或非法时默认 NONE。"""
+
+    env_key = f"MANAGED_ROOT_{root_key.upper()}_CLASSIFICATION_MODE"
+    value = os.getenv(env_key, "NONE").upper()
+    if value not in {"NONE", "PATH_AS_CATEGORY"}:
+        return "NONE"
+    return value
 
 
 def _require_role(current_user: User, allowed_roles: set[str]) -> None:

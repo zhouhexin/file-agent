@@ -57,6 +57,7 @@ def test_admin_can_enable_predefined_managed_root(monkeypatch):
     data = response.json()
     assert data["root_key"] == "student_affairs"
     assert data["display_name"] == "学工收件箱"
+    assert data["classification_mode"] == "NONE"
     assert data["read_only"] is True
     assert "container_path" not in data
 
@@ -65,6 +66,37 @@ def test_admin_can_enable_predefined_managed_root(monkeypatch):
         root = db.query(ManagedRoot).one()
         assert root.container_path == "/managed/student-affairs"
         assert root.created_by == user_id
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_admin_can_mark_managed_root_as_path_classified(monkeypatch):
+    """管理员可以显式声明某个受管目录使用父目录作为分类。"""
+
+    monkeypatch.setenv("MANAGED_ROOT_CLASSIFIED_LIBRARY", "/managed/classified-library")
+    client, SessionLocal = client_with_database()
+    user_id, token = _register_and_login(client, "managed-root-classified")
+    _make_admin(SessionLocal, user_id)
+
+    response = client.post(
+        "/api/admin/managed-roots",
+        headers=_auth_header(token),
+        json={
+            "root_key": "classified_library",
+            "display_name": "已分类文件库",
+            "classification_mode": "PATH_AS_CATEGORY",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["classification_mode"] == "PATH_AS_CATEGORY"
+
+    db = SessionLocal()
+    try:
+        root = db.query(ManagedRoot).one()
+        assert root.classification_mode == "PATH_AS_CATEGORY"
     finally:
         db.close()
         clear_overrides()
@@ -104,43 +136,17 @@ def test_admin_rejects_unconfigured_root_key():
     clear_overrides()
 
 
-def test_managed_files_query_returns_logical_metadata_only():
+def test_managed_files_query_returns_logical_metadata_only(monkeypatch, tmp_path):
     """用户可以按扩展名查询受管文件，响应不能泄露 container_path。"""
 
+    managed_root = tmp_path / "student-affairs"
+    file_dir = managed_root / "2026"
+    file_dir.mkdir(parents=True)
+    (file_dir / "a.pdf").write_text("demo", encoding="utf-8")
+    (file_dir / "b.xlsx").write_text("demo", encoding="utf-8")
+    monkeypatch.setenv("MANAGED_ROOT_STUDENT_AFFAIRS", str(managed_root))
     client, SessionLocal = client_with_database()
     _, token = _register_and_login(client, "managed-file-reader")
-    db = SessionLocal()
-    try:
-        root = ManagedRoot(root_key="student_affairs", display_name="学工收件箱", container_path="/managed/student-affairs")
-        db.add(root)
-        db.flush()
-        db.add(
-            ManagedFile(
-                root_id=root.id,
-                relative_path="2026/a.pdf",
-                filename="a.pdf",
-                extension=".pdf",
-                size_bytes=100,
-                modified_at=datetime.now(timezone.utc),
-                fingerprint="fp",
-                status="ACTIVE",
-            )
-        )
-        db.add(
-            ManagedFile(
-                root_id=root.id,
-                relative_path="2026/b.xlsx",
-                filename="b.xlsx",
-                extension=".xlsx",
-                size_bytes=200,
-                modified_at=datetime.now(timezone.utc),
-                fingerprint="fp2",
-                status="ACTIVE",
-            )
-        )
-        db.commit()
-    finally:
-        db.close()
 
     response = client.get(
         "/api/managed-files?root_key=student_affairs&extension=pdf",
@@ -152,5 +158,107 @@ def test_managed_files_query_returns_logical_metadata_only():
     assert len(data) == 1
     assert data[0]["root_key"] == "student_affairs"
     assert data[0]["relative_path"] == "2026/a.pdf"
+    assert data[0]["category_path"] is None
     assert "container_path" not in data[0]
+    clear_overrides()
+
+
+def test_user_query_auto_reads_env_managed_root_without_admin_registration(monkeypatch, tmp_path):
+    """普通用户查询 env 受管目录时，系统应自动登记和扫描，不需要 Admin 预操作。"""
+
+    managed_root = tmp_path / "spreadsheet-patches"
+    managed_root.mkdir()
+    (managed_root / "a.xlsx").write_text("name,amount\nalice,10\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_FILE_AGENT_SPREADSHEET_PATCH_FILES", str(managed_root))
+    client, SessionLocal = client_with_database()
+    _, token = _register_and_login(client, "managed-env-reader")
+
+    response = client.get(
+        "/api/managed-files?root_key=file_agent_spreadsheet_patch_files",
+        headers=_auth_header(token),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [file["relative_path"] for file in data] == ["a.xlsx"]
+    assert data[0]["display_name"] == "file_agent_spreadsheet_patch_files"
+
+    db = SessionLocal()
+    try:
+        root = db.query(ManagedRoot).one()
+        assert root.root_key == "file_agent_spreadsheet_patch_files"
+        assert root.display_name == "file_agent_spreadsheet_patch_files"
+        assert root.container_path == str(managed_root)
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_category_tree_only_uses_path_classified_roots():
+    """分类目录树只能来自 PATH_AS_CATEGORY 受管目录。"""
+
+    client, SessionLocal = client_with_database()
+    _, token = _register_and_login(client, "managed-category-reader")
+    db = SessionLocal()
+    try:
+        classified_root = ManagedRoot(
+            root_key="classified_library",
+            display_name="已分类文件库",
+            container_path="/managed/classified-library",
+            classification_mode="PATH_AS_CATEGORY",
+        )
+        plain_root = ManagedRoot(
+            root_key="plain_inbox",
+            display_name="普通收件箱",
+            container_path="/managed/plain-inbox",
+            classification_mode="NONE",
+        )
+        db.add_all([classified_root, plain_root])
+        db.flush()
+        db.add(
+            ManagedFile(
+                root_id=classified_root.id,
+                relative_path="奖学金/国家励志奖学金/a.pdf",
+                category_path="奖学金/国家励志奖学金",
+                filename="a.pdf",
+                extension=".pdf",
+                size_bytes=100,
+                modified_at=datetime.now(timezone.utc),
+                fingerprint="fp",
+                status="ACTIVE",
+            )
+        )
+        db.add(
+            ManagedFile(
+                root_id=plain_root.id,
+                relative_path="临时/b.pdf",
+                category_path=None,
+                filename="b.pdf",
+                extension=".pdf",
+                size_bytes=100,
+                modified_at=datetime.now(timezone.utc),
+                fingerprint="fp2",
+                status="ACTIVE",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.get(
+        "/api/managed-file-categories?root_key=classified_library",
+        headers=_auth_header(token),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data == [
+        {
+            "root_key": "classified_library",
+            "display_name": "已分类文件库",
+            "category_path": "奖学金/国家励志奖学金",
+            "file_count": 1,
+        }
+    ]
     clear_overrides()

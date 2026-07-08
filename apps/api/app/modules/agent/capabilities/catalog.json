@@ -81,6 +81,15 @@
       "intents": ["LIST_CLASSIFICATION_TAXONOMY"],
       "capability_keys": ["read_classification_taxonomy", "read-classification-taxonomy"],
       "tool_names": ["read-classification-taxonomy"]
+    },
+    {
+      "id": "managed_files",
+      "name": "服务器受管目录文件列表",
+      "description": "列出或搜索服务器受管目录中的文件元数据，不读取正文、不暴露服务器真实路径。",
+      "examples": ["列出学工收件箱下的所有文件", "列出file_agent_spreadsheet_patch_files下的所有文件"],
+      "intents": ["LIST_MANAGED_FILES", "SEARCH_MANAGED_FILES"],
+      "capability_keys": ["managed_file_list", "managed-file-list", "managed_file_search", "managed-file-search"],
+      "tool_names": ["managed-file-list", "managed-file-search"]
     }
   ]
 }

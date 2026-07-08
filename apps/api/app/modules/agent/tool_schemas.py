@@ -132,6 +132,8 @@ class ManagedFileListInput(StrictToolInput):
     root_key: Optional[str] = None
     extension: Optional[str] = None
     filename_contains: Optional[str] = None
+    category_path: Optional[str] = None
+    classification_mode: Optional[str] = None
     status: str = "ACTIVE"
     limit: int = Field(default=50, ge=1, le=200)
     offset: int = Field(default=0, ge=0)

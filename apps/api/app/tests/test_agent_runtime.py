@@ -130,6 +130,19 @@ def test_capability_router_maps_help_and_taxonomy_tools():
     assert taxonomy_route.tool_name == "read-classification-taxonomy"
 
 
+def test_capability_router_maps_managed_file_list_tool():
+    """受管目录文件列表能力必须路由到 managed-file-list。"""
+
+    route = route_user_intent(
+        intent="LIST_MANAGED_FILES",
+        required_capabilities=["managed_file_list"],
+        tool_plan_hint=["managed-file-list"],
+    )
+
+    assert route is not None
+    assert route.tool_name == "managed-file-list"
+
+
 def test_capability_router_does_not_route_by_file_type_only():
     """文件类型只能辅助能力选择，不能仅凭 CSV 附件触发表格 Tool。"""
 
@@ -141,6 +154,170 @@ def test_capability_router_does_not_route_by_file_type_only():
     )
 
     assert route is None
+
+
+def test_deterministic_planner_routes_managed_file_list_by_root_key():
+    """“列出某个受管目录下文件”不应被当成普通对话。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-managed",
+        user_id="user-1",
+        message_id="msg-managed",
+        message="列出file_agent_spreadsheet_patch_files下的所有文件",
+        attachments=[],
+    )
+
+    assert plan.intent == "LIST_MANAGED_FILES"
+    assert [step.tool_name for step in plan.steps] == ["managed-file-list"]
+    assert plan.steps[0].input["root_key"] == "file_agent_spreadsheet_patch_files"
+
+
+def test_llm_general_chat_is_overridden_for_managed_file_list_request():
+    """LLM 把受管目录列表误判成普通对话时，Planner 必须按目录文件列表执行。"""
+
+    intent_plan = UserIntentPlan(
+        intent="GENERAL_CHAT",
+        user_goal="列出file_agent_spreadsheet_patch_files下的所有文件",
+        needs_file_context=False,
+        required_capabilities=[],
+        tool_plan_hint=[],
+    )
+
+    plan = build_plan_from_user_intent(
+        intent_plan=intent_plan,
+        message="列出file_agent_spreadsheet_patch_files下的所有文件",
+        attachments=[],
+    )
+
+    assert plan.intent == "LIST_MANAGED_FILES"
+    assert [step.tool_name for step in plan.steps] == ["managed-file-list"]
+    assert plan.steps[0].input["root_key"] == "file_agent_spreadsheet_patch_files"
+
+
+def test_agent_runtime_bypasses_llm_for_managed_file_list_request():
+    """受管目录列表请求必须先走确定性 Planner，不能被 LLM 网络调用阻塞。"""
+
+    class BlockingLLMIntentService:
+        """测试用 LLM 服务；如果被调用说明路由顺序错误。"""
+
+        enabled = True
+
+        def understand_user_request(self, **kwargs):
+            """模拟不可用的 LLM 意图服务。"""
+
+            raise AssertionError("managed file list request should not call LLM")
+
+    class FakeRegistry:
+        """测试用 Registry，返回空受管文件清单。"""
+
+        def invoke(self, tool_name, input_json):
+            """返回稳定 Tool 输出。"""
+
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "query": {"root_key": input_json.get("root_key")},
+                    "files": [],
+                },
+                status="COMPLETED",
+            )
+
+    service = AgentRuntimeService(
+        registry_factory=lambda db, user_id: FakeRegistry(),
+        llm_intent_service=BlockingLLMIntentService(),
+    )
+
+    result = service.run_message(
+        conversation_id="conv-managed-bypass",
+        user_id="user-1",
+        message_id="msg-managed-bypass",
+        message="列出file_agent_spreadsheet_patch_files下的所有文件",
+    )
+
+    assert result.intent == "LIST_MANAGED_FILES"
+    assert [item.tool_name for item in result.tool_invocations] == ["managed-file-list"]
+
+
+def test_agent_runtime_formats_managed_file_list_response():
+    """受管目录文件列表 Tool 结果必须展示为文件清单，而不是普通对话回复。"""
+
+    class FakeRegistry:
+        """测试用 Registry，模拟受管目录文件列表返回。"""
+
+        def invoke(self, tool_name, input_json):
+            """返回一个稳定的受管文件清单。"""
+
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "files": [
+                        {
+                            "root_key": "file_agent_spreadsheet_patch_files",
+                            "display_name": "表格补丁文件",
+                            "relative_path": "a.xlsx",
+                            "category_path": None,
+                            "filename": "a.xlsx",
+                            "extension": ".xlsx",
+                            "size_bytes": 1024,
+                            "modified_at": None,
+                            "status": "ACTIVE",
+                        }
+                    ],
+                },
+                status="COMPLETED",
+            )
+
+    service = AgentRuntimeService(registry_factory=lambda db, user_id: FakeRegistry())
+
+    result = service.run_message(
+        conversation_id="conv-managed-list",
+        user_id="user-1",
+        message_id="msg-managed-list",
+        message="列出file_agent_spreadsheet_patch_files下的所有文件",
+    )
+
+    assert [item.tool_name for item in result.tool_invocations] == ["managed-file-list"]
+    assert "file_agent_spreadsheet_patch_files 下共有 1 个文件" in (result.final_response or "")
+    assert "a.xlsx" in (result.final_response or "")
+    assert "我已收到" not in (result.final_response or "")
+
+
+def test_agent_runtime_formats_empty_managed_file_list_response():
+    """受管目录文件列表为空时也必须给出明确回复，不能落到兜底文本。"""
+
+    class FakeRegistry:
+        """测试用 Registry，模拟受管目录没有扫描到文件。"""
+
+        def invoke(self, tool_name, input_json):
+            """返回空受管文件清单。"""
+
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "query": {"root_key": input_json.get("root_key")},
+                    "files": [],
+                },
+                status="COMPLETED",
+            )
+
+    service = AgentRuntimeService(registry_factory=lambda db, user_id: FakeRegistry())
+
+    result = service.run_message(
+        conversation_id="conv-managed-empty",
+        user_id="user-1",
+        message_id="msg-managed-empty",
+        message="列出file_agent_spreadsheet_patch_files下的所有文件",
+    )
+
+    assert [item.tool_name for item in result.tool_invocations] == ["managed-file-list"]
+    assert "file_agent_spreadsheet_patch_files 下暂未找到文件" in (result.final_response or "")
+    assert "暂未生成可展示的业务结果" not in (result.final_response or "")
 
 
 def test_local_web_origin_is_allowed_for_api_requests():

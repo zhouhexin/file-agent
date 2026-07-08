@@ -6,6 +6,7 @@ Shell 命令、SQL 写入和文件系统路径会在 Tool dispatch 前被拒绝�
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -52,6 +53,7 @@ CLASSIFICATION_TAXONOMY_HINTS = {
 SPREADSHEET_ANALYSIS_HINTS = {"analyze_spreadsheet", "analyze-spreadsheet"}
 SPREADSHEET_PROFILE_HINTS = {"profile_spreadsheet", "profile-spreadsheet"}
 SPREADSHEET_VALIDATE_HINTS = {"validate_spreadsheet", "validate-spreadsheet"}
+MANAGED_FILE_LIST_HINTS = {"managed_file_list", "managed-file-list"}
 SPREADSHEET_SUFFIXES = {".xlsx", ".xlsm", ".csv", ".tsv"}
 
 
@@ -138,6 +140,10 @@ class DeterministicPlanner:
 
         if _has_classification_taxonomy_intent(message=message, lowered=lowered):
             return _classification_taxonomy_plan(user_goal=message)
+
+        managed_root_key = _managed_root_key_from_list_request(message)
+        if managed_root_key:
+            return _managed_file_list_plan(user_goal=message, root_key=managed_root_key)
 
         needs_file_scope = (
             _should_extract_text(message=message, lowered=lowered)
@@ -382,6 +388,22 @@ def build_plan_from_user_intent(
         or requested_capabilities.intersection(CLASSIFICATION_TAXONOMY_HINTS)
     ):
         return _classification_taxonomy_plan(user_goal=intent_plan.user_goal or message)
+
+    managed_root_key = _managed_root_key_from_list_request(message)
+    if (
+        managed_root_key
+        or intent_plan.intent in {"LIST_MANAGED_FILES", "SEARCH_MANAGED_FILES"}
+        or requested_capabilities.intersection(MANAGED_FILE_LIST_HINTS)
+        or (capability_route is not None and capability_route.tool_name == "managed-file-list")
+    ):
+        return _managed_file_list_plan(
+            user_goal=intent_plan.user_goal or message,
+            root_key=managed_root_key,
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
+            llm_intent_plan=intent_plan.model_dump(),
+            route_source="capability_router" if capability_route else "legacy_planner",
+        )
 
     if (
         requested_capabilities.intersection(SPREADSHEET_VALIDATE_HINTS)
@@ -756,6 +778,50 @@ def _classification_taxonomy_plan(*, user_goal: str) -> PlannerOutput:
     )
 
 
+def _managed_file_list_plan(
+    *,
+    user_goal: str,
+    root_key: str | None,
+    response_style: str = "concise",
+    clarification_question: str | None = None,
+    llm_intent_plan: Dict[str, Any] | None = None,
+    route_source: str = "legacy_planner",
+) -> PlannerOutput:
+    """生成受管目录文件列表查询计划。"""
+
+    input_json: Dict[str, Any] = {"status": "ACTIVE"}
+    if root_key:
+        input_json["root_key"] = root_key
+    return PlannerOutput(
+        intent="LIST_MANAGED_FILES",
+        user_goal=user_goal,
+        slots={
+            "document_ids": [],
+            "root_key": root_key,
+            "requested_outputs": ["managed_files"],
+            "response_style": response_style,
+            "clarification_question": clarification_question,
+            "llm_intent_plan": llm_intent_plan or {},
+            "route_source": route_source,
+        },
+        selected_skills=["managed-files"],
+        steps=[
+            {
+                "step_id": "step-1",
+                "skill": "managed-files",
+                "tool_name": "managed-file-list",
+                "input": input_json,
+                "requires_confirmation": False,
+                "risk_level": "low",
+                "expected_outputs": ["managed_files"],
+                "writes": [],
+            }
+        ],
+        evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+        confirmation_policy={"operation_plan_required": False},
+    )
+
+
 def _classify_files_plan(
     *,
     user_goal: str,
@@ -1004,6 +1070,24 @@ def _has_classification_summary_intent(*, message: str) -> bool:
     return any(keyword in message for keyword in summary_keywords) and any(
         keyword in message for keyword in classification_keywords
     )
+
+
+def _managed_root_key_from_list_request(message: str) -> str | None:
+    """从“列出 root_key 下的文件”这类表达中提取受管目录 root_key。"""
+
+    if not any(keyword in message for keyword in ["列出", "查看", "显示"]):
+        return None
+    if not any(keyword in message for keyword in ["文件", "目录"]):
+        return None
+    patterns = [
+        r"(?:列出|查看|显示)\s*([A-Za-z0-9_-]+)\s*(?:下|目录下|中的|里的|里面的)",
+        r"([A-Za-z0-9_-]+)\s*(?:下|目录下|中的|里的|里面的)\s*(?:所有)?\s*文件",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, message)
+        if match:
+            return match.group(1)
+    return None
 
 
 def _has_plain_document_summary_intent(*, message: str, lowered: str) -> bool:

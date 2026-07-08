@@ -30,6 +30,10 @@ class ManagedFileScanner:
         self.db.flush()
 
         root_path = Path(root.container_path)
+        existing_by_path = {
+            file.relative_path: file
+            for file in self.db.query(ManagedFile).filter(ManagedFile.root_id == root.id).all()
+        }
         seen_paths: set[str] = set()
         files_updated = 0
         errors = 0
@@ -43,15 +47,13 @@ class ManagedFileScanner:
                     continue
                 stat = resolved.stat()
                 fingerprint = _fingerprint(relative_path=relative_path, size_bytes=stat.st_size, modified_at=stat.st_mtime)
-                existing = (
-                    self.db.query(ManagedFile)
-                    .filter(ManagedFile.root_id == root.id, ManagedFile.relative_path == relative_path)
-                    .one_or_none()
-                )
+                category_path = _category_path_for(root=root, relative_path=relative_path)
+                existing = existing_by_path.get(relative_path)
                 if existing is None:
                     existing = ManagedFile(
                         root_id=root.id,
                         relative_path=relative_path,
+                        category_path=category_path,
                         filename=resolved.name,
                         extension=resolved.suffix.lower(),
                         size_bytes=stat.st_size,
@@ -63,6 +65,7 @@ class ManagedFileScanner:
                     self.db.add(existing)
                 else:
                     existing.filename = resolved.name
+                    existing.category_path = category_path
                     existing.extension = resolved.suffix.lower()
                     existing.size_bytes = stat.st_size
                     existing.modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
@@ -93,3 +96,14 @@ def _fingerprint(*, relative_path: str, size_bytes: int, modified_at: float) -> 
     """生成 P0 轻量 fingerprint，后续可升级为内容 hash。"""
 
     return f"{relative_path}:{size_bytes}:{int(modified_at)}"
+
+
+def _category_path_for(*, root: ManagedRoot, relative_path: str) -> str | None:
+    """按受管目录模式从父目录推导分类路径。"""
+
+    if root.classification_mode != "PATH_AS_CATEGORY":
+        return None
+    parent = Path(relative_path).parent.as_posix()
+    if parent in {"", "."}:
+        return None
+    return parent

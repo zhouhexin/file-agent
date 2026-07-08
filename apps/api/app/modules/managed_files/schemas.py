@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,6 +18,7 @@ class ManagedRootCreateRequest(BaseModel):
 
     root_key: str = Field(min_length=1, max_length=100)
     display_name: str = Field(min_length=1, max_length=200)
+    classification_mode: Literal["NONE", "PATH_AS_CATEGORY"] = "NONE"
 
 
 class ManagedRootResponse(BaseModel):
@@ -26,6 +27,7 @@ class ManagedRootResponse(BaseModel):
     id: str
     root_key: str
     display_name: str
+    classification_mode: str
     enabled: bool
     read_only: bool
     allowed_operations: list[str]
@@ -50,8 +52,18 @@ class ManagedFileResponse(BaseModel):
     root_key: str
     display_name: str
     relative_path: str
+    category_path: Optional[str]
     filename: str
     extension: str
     size_bytes: int
     modified_at: Optional[datetime]
     status: str
+
+
+class ManagedCategoryResponse(BaseModel):
+    """已分类受管目录中的分类路径响应。"""
+
+    root_key: str
+    display_name: str
+    category_path: str
+    file_count: int

@@ -62,6 +62,28 @@ def test_settings_loads_dotenv_from_parent_directory(monkeypatch, tmp_path):
     assert settings.auto_create_tables is False
 
 
+def test_dotenv_managed_root_overrides_stale_process_env(monkeypatch, tmp_path):
+    """受管目录配置必须允许 `.env` 覆盖旧进程值，适配本地 reload 后的目录变更。"""
+
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "\n".join(
+            [
+                "DATABASE_URL=postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent",
+                "MANAGED_ROOT_FILE_AGENT_SPREADSHEET_PATCH_FILES=/new/root",
+            ],
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.setenv("MANAGED_ROOT_FILE_AGENT_SPREADSHEET_PATCH_FILES", "/old/root")
+
+    config.load_dotenv_file()
+
+    assert config.os.environ["MANAGED_ROOT_FILE_AGENT_SPREADSHEET_PATCH_FILES"] == "/new/root"
+
+
 def test_settings_loads_classification_llm_options(monkeypatch, tmp_path):
     """分类 LLM 判定开关必须通过配置显式启用。"""
 

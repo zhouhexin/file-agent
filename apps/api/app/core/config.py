@@ -75,7 +75,10 @@ def load_dotenv_file() -> None:
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        if key:
+        if key.startswith("MANAGED_ROOT_"):
+            # 受管目录以 .env 为本地开发和部署配置入口，reload 后必须允许新值覆盖旧进程环境。
+            os.environ[key] = value
+        elif key:
             os.environ.setdefault(key, value)
 
 

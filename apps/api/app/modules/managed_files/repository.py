@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import FilesystemJob, FilesystemJobEvent, ManagedFile, ManagedRoot, utcnow
@@ -39,6 +40,7 @@ class ManagedFileRepository:
         root_key: str,
         display_name: str,
         container_path: str,
+        classification_mode: str,
         created_by: str | None,
     ) -> ManagedRoot:
         """创建或更新受管目录配置。"""
@@ -49,6 +51,7 @@ class ManagedFileRepository:
                 root_key=root_key,
                 display_name=display_name,
                 container_path=container_path,
+                classification_mode=classification_mode,
                 enabled=True,
                 read_only=True,
                 allowed_operations_json=["scan", "list", "search"],
@@ -56,11 +59,20 @@ class ManagedFileRepository:
             )
             self.db.add(root)
         else:
-            root.display_name = display_name
-            root.container_path = container_path
-            root.enabled = True
-            root.read_only = True
-            root.updated_at = utcnow()
+            changed = (
+                root.display_name != display_name
+                or root.container_path != container_path
+                or root.classification_mode != classification_mode
+                or root.enabled is not True
+                or root.read_only is not True
+            )
+            if changed:
+                root.display_name = display_name
+                root.container_path = container_path
+                root.classification_mode = classification_mode
+                root.enabled = True
+                root.read_only = True
+                root.updated_at = utcnow()
         self.db.flush()
         return root
 
@@ -70,6 +82,8 @@ class ManagedFileRepository:
         root_key: str | None = None,
         extension: str | None = None,
         filename_contains: str | None = None,
+        category_path: str | None = None,
+        classification_mode: str | None = None,
         status: str | None = None,
         limit: int = 100,
         offset: int = 0,
@@ -79,6 +93,10 @@ class ManagedFileRepository:
         query = self.db.query(ManagedFile, ManagedRoot).join(ManagedRoot, ManagedFile.root_id == ManagedRoot.id)
         if root_key:
             query = query.filter(ManagedRoot.root_key == root_key)
+        if classification_mode:
+            query = query.filter(ManagedRoot.classification_mode == classification_mode)
+        if category_path:
+            query = query.filter(ManagedFile.category_path == category_path)
         if extension:
             normalized_extension = extension if extension.startswith(".") else f".{extension}"
             query = query.filter(ManagedFile.extension == normalized_extension.lower())
@@ -90,6 +108,29 @@ class ManagedFileRepository:
             query.order_by(ManagedRoot.root_key.asc(), ManagedFile.relative_path.asc())
             .offset(offset)
             .limit(limit)
+            .all()
+        )
+
+    def list_category_paths(self, *, root_key: str | None = None) -> list[tuple[str, str, str, int]]:
+        """列出已分类受管目录中的分类路径和文件数量。"""
+
+        query = (
+            self.db.query(
+                ManagedRoot.root_key,
+                ManagedRoot.display_name,
+                ManagedFile.category_path,
+                func.count(ManagedFile.id),
+            )
+            .join(ManagedRoot, ManagedFile.root_id == ManagedRoot.id)
+            .filter(ManagedRoot.classification_mode == "PATH_AS_CATEGORY")
+            .filter(ManagedFile.status == "ACTIVE")
+            .filter(ManagedFile.category_path.isnot(None))
+        )
+        if root_key:
+            query = query.filter(ManagedRoot.root_key == root_key)
+        return (
+            query.group_by(ManagedRoot.root_key, ManagedRoot.display_name, ManagedFile.category_path)
+            .order_by(ManagedRoot.root_key.asc(), ManagedFile.category_path.asc())
             .all()
         )
 

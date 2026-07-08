@@ -44,7 +44,7 @@ from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
-from app.modules.managed_files.service import ManagedFileService
+from app.modules.managed_files.service import ManagedFileService, sync_configured_managed_roots
 from app.modules.spreadsheet_analysis.service import SpreadsheetAnalysisService
 from app.modules.spreadsheet_workbench.service import SpreadsheetWorkbenchService
 
@@ -450,6 +450,8 @@ def _managed_root_list_handler(db: Any) -> ToolHandler:
         if db is None:
             return {"ok": False, "error": {"code": "DB_REQUIRED", "message": "读取受管目录需要数据库会话。"}}
         enabled_only = bool(getattr(tool_input, "enabled_only", True))
+        sync_configured_managed_roots(db, scan=False)
+        db.commit()
         roots = ManagedFileRepository(db).list_roots()
         if enabled_only:
             roots = [root for root in roots if root.enabled]
@@ -469,16 +471,34 @@ def _managed_file_list_handler(db: Any) -> ToolHandler:
 
         if db is None:
             return {"ok": False, "error": {"code": "DB_REQUIRED", "message": "读取受管文件需要数据库会话。"}}
+        sync_configured_managed_roots(
+            db,
+            root_key=getattr(tool_input, "root_key", None),
+            scan=True,
+        )
+        db.commit()
         rows = ManagedFileRepository(db).list_files(
             root_key=getattr(tool_input, "root_key", None),
             extension=getattr(tool_input, "extension", None),
             filename_contains=getattr(tool_input, "filename_contains", None),
+            category_path=getattr(tool_input, "category_path", None),
+            classification_mode=getattr(tool_input, "classification_mode", None),
             status=getattr(tool_input, "status", None),
             limit=int(getattr(tool_input, "limit", 50)),
             offset=int(getattr(tool_input, "offset", 0)),
         )
+        # 返回查询条件用于空结果回执，避免 response 节点无法说明是哪一个受管目录没有文件。
+        query = {
+            "root_key": getattr(tool_input, "root_key", None),
+            "extension": getattr(tool_input, "extension", None),
+            "filename_contains": getattr(tool_input, "filename_contains", None),
+            "category_path": getattr(tool_input, "category_path", None),
+            "classification_mode": getattr(tool_input, "classification_mode", None),
+            "status": getattr(tool_input, "status", None),
+        }
         return {
             "ok": True,
+            "query": query,
             "files": [
                 ManagedFileService.to_file_response(file=file, root=root).model_dump(mode="json")
                 for file, root in rows
@@ -496,6 +516,12 @@ def _managed_file_search_handler(db: Any) -> ToolHandler:
 
         if db is None:
             return {"ok": False, "error": {"code": "DB_REQUIRED", "message": "搜索受管文件需要数据库会话。"}}
+        sync_configured_managed_roots(
+            db,
+            root_key=getattr(tool_input, "root_key", None),
+            scan=True,
+        )
+        db.commit()
         rows = ManagedFileRepository(db).list_files(
             root_key=getattr(tool_input, "root_key", None),
             filename_contains=getattr(tool_input, "query"),
@@ -859,9 +885,9 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("feedback-record", "Record user feedback.", FeedbackRecordInput, True, False, ["feedback"], _feedback_handler),
         _tool("job-status-read", "Read processing job status.", JobStatusReadInput, False, False, [], _job_status_handler),
         _tool("document-lineage-read", "Read document lineage.", DocumentLineageReadInput, False, False, [], _lineage_handler),
-        _tool("managed-root-list", "List server managed logical roots.", ManagedRootListInput, False, False, [], _managed_root_list_handler(db)),
-        _tool("managed-file-list", "List server managed files by logical metadata filters.", ManagedFileListInput, False, False, [], _managed_file_list_handler(db)),
-        _tool("managed-file-search", "Search server managed files by filename keyword.", ManagedFileSearchInput, False, False, [], _managed_file_search_handler(db)),
+        _tool("managed-root-list", "List server managed logical roots.", ManagedRootListInput, True, False, ["managed_roots"], _managed_root_list_handler(db)),
+        _tool("managed-file-list", "List server managed files by logical metadata filters.", ManagedFileListInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_list_handler(db)),
+        _tool("managed-file-search", "Search server managed files by filename keyword.", ManagedFileSearchInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_search_handler(db)),
         _tool("managed-root-scan", "Create an async scan job for a managed logical root.", ManagedRootScanInput, True, False, ["filesystem_jobs", "filesystem_job_events"], _managed_root_scan_handler(db, user_id)),
         _tool(
             "analyze-spreadsheet",
