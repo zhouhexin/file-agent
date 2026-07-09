@@ -214,6 +214,7 @@ class AgentRuntimeService:
             "tool_plan": {},
             "tool_results": [],
             "tool_invocations": [],
+            "result_summary": {},
             "document_results": [],
             "changeset_id": None,
             "operation_plan_id": None,

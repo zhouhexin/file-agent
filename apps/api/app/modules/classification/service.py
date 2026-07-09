@@ -27,6 +27,9 @@ def persist_document_results_classifications(
         if not document_id:
             continue
         categories = [item for item in result.get("categories", []) if isinstance(item, dict)]
+        if not categories:
+            # 纯读取/总结任务不会生成分类建议；此时不创建空分类运行，避免把读取误记为分类。
+            continue
         status = "FAILED" if result.get("extraction_status") == "FAILED" else "COMPLETED"
         error_message = _first_error_message(result)
         taxonomy_key = _first_category_value(categories, "taxonomy_key")

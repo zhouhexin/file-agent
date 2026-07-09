@@ -289,7 +289,7 @@ def test_llm_message_extracts_document_text_and_persists_pages():
         assert [item.tool_name for item in response.agent_run.tool_invocations] == ["extract-document-text"]
         assert response.agent_run.tool_results[0]["status"] == "COMPLETED"
         assert "extract.txt" in (response.agent_run.final_response or "")
-        assert "学校/人事师资/职称" in (response.agent_run.final_response or "")
+        assert "分类建议" not in (response.agent_run.final_response or "")
         assert db.query(DocumentExtractionRun).count() == 1
         page = db.query(DocumentPage).one()
         assert page.document_id == document_id
@@ -298,25 +298,9 @@ def test_llm_message_extracts_document_text_and_persists_pages():
         document_results = stored_run.graph_state_json["document_results"]
         assert document_results[0]["document_id"] == document_id
         assert document_results[0]["extraction_status"] == "COMPLETED"
-        assert document_results[0]["categories"][0]["name"] == "学校/人事师资/职称"
-        assert document_results[0]["categories"][0]["taxonomy_key"] == "school_file_classification"
-        classification_run = db.query(DocumentClassificationRun).one()
-        assert classification_run.agent_run_id == stored_run.id
-        assert classification_run.document_id == document_id
-        assert classification_run.status == "COMPLETED"
-        suggestion_names = [item.category_name for item in db.query(DocumentCategorySuggestion).all()]
-        assert "学校/人事师资/职称" in suggestion_names
-        suggestion = (
-            db.query(DocumentCategorySuggestion)
-            .filter(DocumentCategorySuggestion.category_name == "学校/人事师资/职称")
-            .one()
-        )
-        assert suggestion.status == "SUGGESTED"
-        assert suggestion.source == "rule"
-        assert suggestion.evidence_json[0]["type"] == "text_quote"
-        assert suggestion.evidence_json[0]["page_number"] == 1
-        assert "职称申报" in suggestion.evidence_json[0]["quote"]
-        assert "职称" in suggestion.evidence_json[0]["signals"]
+        assert document_results[0]["categories"] == []
+        assert db.query(DocumentClassificationRun).count() == 0
+        assert db.query(DocumentCategorySuggestion).count() == 0
         assert response.agent_run.changeset_id
         assert stored_run.changeset_id == response.agent_run.changeset_id
         changeset = db.query(ChangeSet).one()
@@ -324,17 +308,7 @@ def test_llm_message_extracts_document_text_and_persists_pages():
         assert changeset.summary == f"已处理 1 个文件，生成 {db.query(ChangeItem).count()} 项变更记录。"
         change_types = [item.change_type for item in db.query(ChangeItem).order_by(ChangeItem.created_at.asc()).all()]
         assert change_types[:2] == ["TEXT_EXTRACTED", "DOCUMENT_PAGES_CREATED"]
-        assert change_types.count("CATEGORY_SUGGESTED") >= 1
-        category_item = next(
-            item
-            for item in db.query(ChangeItem).filter(ChangeItem.change_type == "CATEGORY_SUGGESTED").all()
-            if item.after_value_json["category_name"] == "学校/人事师资/职称"
-        )
-        assert category_item.target_document_id == document_id
-        assert category_item.after_value_json["category_name"] == "学校/人事师资/职称"
-        assert category_item.evidence_json["evidence_items"][0]["type"] == "text_quote"
-        assert category_item.evidence_json["evidence_items"][0]["page_number"] == 1
-        assert "职称申报" in category_item.evidence_json["evidence_items"][0]["quote"]
+        assert "CATEGORY_SUGGESTED" not in change_types
     finally:
         db.close()
         app.dependency_overrides.clear()

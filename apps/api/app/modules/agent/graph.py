@@ -48,9 +48,10 @@ def build_agent_graph():
 def _logged_node(name: str, handler):
     """为 LangGraph 节点增加进入、退出、耗时日志。"""
 
+    # 内层包装函数，state是LangGraph运行时自动注入的实参
     def wrapped(state: AgentGraphState):
         """执行节点并记录结构化日志。"""
-
+        # 此处state = 图引擎传入的当前会话全局可变状态
         return _run_logged_node(name=name, state=state, callback=lambda: handler(state))
 
     return wrapped
@@ -61,9 +62,9 @@ def _logged_runtime_node(name: str, handler):
 
     def wrapped(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]):
         """执行带 Runtime 的节点并记录结构化日志。"""
-
+        # 产出节点运行结果
         return _run_logged_node(name=name, state=state, callback=lambda: handler(state, runtime))
-
+    # 产出一个新函数
     return wrapped
 
 
@@ -205,6 +206,7 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
         tool_name=plan.steps[0].tool_name if plan.steps else None,
         tool_input=plan.steps[0].input if plan.steps else {},
     )
+    # 把 plan 转成 LangGraph state 更新
     return _planner_state_update(plan=plan, user_intent_plan=user_intent_plan)
 
 
@@ -254,6 +256,7 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
             operation_plan_id = operation_plan_id or "operation-plan-pending"
             continue
         try:
+            # 调用工具注册表执行工具
             invocation = registry.invoke(step["tool_name"], step["input"])
         except Exception as exc:
             if step["tool_name"] not in {
@@ -325,9 +328,10 @@ def async_job_wait(state: AgentGraphState) -> Dict[str, Any]:
 
 
 def evidence_or_change(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
-    """为响应节点收集 evidence、ChangeSet 和 OperationPlan 标识。"""
+    """聚合 Tool 结果、evidence、ChangeSet 和 OperationPlan，供 response 节点消费。"""
 
-    document_results = _document_results_from_extraction_results(
+    result_summary = _aggregate_tool_results(
+        state=state,
         tool_results=state.get("tool_results", []),
         context_documents=state.get("context_documents", []),
         classification_service=runtime.context.classification_service,
@@ -335,8 +339,49 @@ def evidence_or_change(state: AgentGraphState, runtime: Runtime[AgentRuntimeCont
     return {
         "changeset_id": state.get("changeset_id"),
         "operation_plan_id": state.get("operation_plan_id"),
-        "document_results": document_results,
+        "result_summary": result_summary,
+        "document_results": result_summary.get("document_results", []),
     }
+
+
+def _aggregate_tool_results(
+    *,
+    state: AgentGraphState,
+    tool_results: List[Dict[str, Any]],
+    context_documents: List[Dict[str, Any]],
+    classification_service,
+) -> Dict[str, Any]:
+    """把所有 Tool 输出聚合为 response 可直接消费的通用结果结构。"""
+
+    extraction_results = _extraction_results_from_results(tool_results)
+    insight_documents = _insight_documents_from_results(tool_results)
+    classification_documents = _classification_documents_from_results(tool_results)
+    return {
+        "spreadsheet_workbench_results": _spreadsheet_workbench_results_from_results(tool_results),
+        "spreadsheet_analysis_results": _spreadsheet_analysis_results_from_results(tool_results),
+        "document_results": _document_results_from_extraction_results(
+            extraction_results=extraction_results,
+            context_documents=context_documents,
+            classification_service=classification_service,
+            include_categories=_should_classify_documents(state),
+        ),
+        "extraction_results": extraction_results,
+        "insight_documents": insight_documents,
+        "classification_documents": classification_documents,
+        "capability_catalog": _capability_catalog_from_results(tool_results),
+        "classification_taxonomy": _classification_taxonomy_from_results(tool_results),
+        "managed_file_list": _managed_file_list_from_results(tool_results),
+        "intent_summary": _intent_summary_from_results(tool_results),
+    }
+
+
+def _should_classify_documents(state: AgentGraphState) -> bool:
+    """判断本次文件读取是否需要执行和展示分类建议。"""
+
+    requested_outputs = set(state.get("slots", {}).get("requested_outputs", []))
+    intent = str(state.get("intent") or "").upper()
+    return "classification" in requested_outputs or "CLASSIFY" in intent
+
 
 def _spreadsheet_analysis_results_from_results(
     tool_results: List[Dict[str, Any]],
@@ -365,25 +410,23 @@ def _spreadsheet_workbench_results_from_results(
 def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
     """生成面向用户的最终运行摘要。"""
 
-    workbench_results = _spreadsheet_workbench_results_from_results(
-        state.get("tool_results", [])
-    )
+    result_summary = state.get("result_summary", {})
+
+    workbench_results = result_summary.get("spreadsheet_workbench_results", [])
     if workbench_results:
         return {
             "status": "COMPLETED",
             "final_response": format_spreadsheet_workbench_response(workbench_results),
         }
 
-    analysis_results = _spreadsheet_analysis_results_from_results(
-        state.get("tool_results", [])
-    )
+    analysis_results = result_summary.get("spreadsheet_analysis_results", [])
     if analysis_results:
         return {
             "status": "COMPLETED",
             "final_response": format_spreadsheet_analysis_response(analysis_results),
         }
 
-    document_results = state.get("document_results", [])
+    document_results = result_summary.get("document_results", [])
     if document_results:
         requested_outputs = set(state.get("slots", {}).get("requested_outputs", []))
         is_summary_intent = "SUMMAR" in str(state.get("intent") or "").upper()
@@ -391,7 +434,7 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
         if "summary" in requested_outputs or "answer" in requested_outputs or is_summary_intent or is_answer_intent:
             llm_summary = runtime.context.document_summary_service.summarize_documents(
                 document_results=document_results,
-                tool_results=state.get("tool_results", []),
+                tool_results=result_summary.get("extraction_results", []),
                 user_message=state.get("message", ""),
             )
             return {
@@ -399,7 +442,7 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                 "final_response": llm_summary
                 or _build_document_summary_response(
                     document_results=document_results,
-                    tool_results=state.get("tool_results", []),
+                    extraction_results=result_summary.get("extraction_results", []),
                 ),
             }
         return {
@@ -407,15 +450,15 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
             "final_response": _build_document_results_response(document_results),
         }
 
-    extraction_results = _extraction_results_from_results(state.get("tool_results", []))
+    extraction_results = result_summary.get("extraction_results", [])
     if extraction_results:
         return {
             "status": "COMPLETED",
             "final_response": _build_extraction_response(extraction_results),
         }
 
-    insight_documents = _insight_documents_from_results(state.get("tool_results", []))
-    classification_documents = _classification_documents_from_results(state.get("tool_results", []))
+    insight_documents = result_summary.get("insight_documents", [])
+    classification_documents = result_summary.get("classification_documents", [])
     if classification_documents:
         return {
             "status": "COMPLETED",
@@ -432,28 +475,28 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
             "final_response": f"已读取 {len(insight_documents)} 个文件的基础洞察：{', '.join(filenames)}。",
         }
 
-    capability_catalog = _capability_catalog_from_results(state.get("tool_results", []))
+    capability_catalog = result_summary.get("capability_catalog", {})
     if capability_catalog:
         return {
             "status": "COMPLETED",
             "final_response": _build_capability_help_response(capability_catalog),
         }
 
-    taxonomy_catalog = _classification_taxonomy_from_results(state.get("tool_results", []))
+    taxonomy_catalog = result_summary.get("classification_taxonomy", {})
     if taxonomy_catalog:
         return {
             "status": "COMPLETED",
             "final_response": _build_classification_taxonomy_response(taxonomy_catalog),
         }
 
-    managed_file_list = _managed_file_list_from_results(state.get("tool_results", []))
+    managed_file_list = result_summary.get("managed_file_list", {})
     if managed_file_list:
         return {
             "status": "COMPLETED",
             "final_response": _build_managed_file_list_response(managed_file_list),
         }
 
-    intent_summary = _intent_summary_from_results(state.get("tool_results", []))
+    intent_summary = result_summary.get("intent_summary", {})
     if intent_summary:
         return {
             "status": "COMPLETED",
@@ -671,9 +714,10 @@ def _build_general_chat_response(intent_summary: Dict[str, Any]) -> str:
 
 def _document_results_from_extraction_results(
     *,
-    tool_results: List[Dict[str, Any]],
+    extraction_results: List[Dict[str, Any]],
     context_documents: List[Dict[str, Any]],
     classification_service,
+    include_categories: bool,
 ) -> List[Dict[str, Any]]:
     """把正文解析 Tool 输出聚合成逐文件业务结果。"""
 
@@ -683,7 +727,7 @@ def _document_results_from_extraction_results(
         if document.get("document_id")
     }
     document_results: List[Dict[str, Any]] = []
-    for result in _extraction_results_from_results(tool_results):
+    for result in extraction_results:
         document_id = str(result.get("document_id") or "")
         document_context = document_lookup.get(document_id, {})
         pages = [page for page in result.get("pages", []) if isinstance(page, dict)]
@@ -697,7 +741,7 @@ def _document_results_from_extraction_results(
                 filename=str(document_context.get("filename") or ""),
                 fallback_text=text_preview,
             ).get("categories", [])
-            if result.get("status") == "COMPLETED"
+            if include_categories and result.get("status") == "COMPLETED"
             else []
         )
         document_results.append(
@@ -737,20 +781,21 @@ def _build_document_results_response(document_results: List[Dict[str, Any]]) -> 
             continue
 
         categories = result.get("categories") or []
-        blocks.append(
+        block = (
             f"{index}. {filename}\n"
-            f"解析结果：成功，提取 {result.get('page_count', 0)} 页/Sheet，共 {result.get('char_count', 0)} 个字符\n"
-            "分类建议：\n"
-            f"{_format_category_receipt(categories)}"
+            f"解析结果：成功，提取 {result.get('page_count', 0)} 页/Sheet，共 {result.get('char_count', 0)} 个字符"
         )
+        if categories:
+            block += "\n分类建议：\n" + _format_category_receipt(categories)
+        blocks.append(block)
     return "\n\n".join(blocks)
 
 
-def _build_document_summary_response(*, document_results: List[Dict[str, Any]], tool_results: List[Dict[str, Any]]) -> str:
+def _build_document_summary_response(*, document_results: List[Dict[str, Any]], extraction_results: List[Dict[str, Any]]) -> str:
     """根据解析到的正文预览生成内容总结回执。"""
 
     preview_by_document_id: Dict[str, str] = {}
-    for result in _extraction_results_from_results(tool_results):
+    for result in extraction_results:
         document_id = str(result.get("document_id") or "")
         pages = [page for page in result.get("pages", []) if isinstance(page, dict)]
         preview_text = "\n".join(str(page.get("text_preview") or "").strip() for page in pages).strip()

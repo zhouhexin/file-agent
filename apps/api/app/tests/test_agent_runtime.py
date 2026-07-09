@@ -14,7 +14,7 @@ from app.main import app
 from app.modules.agent.capabilities.service import load_agent_capabilities
 from app.modules.agent.capability_router import route_user_intent
 from app.modules.llm.schemas import UserIntentPlan
-from app.modules.agent.graph import _build_document_results_response
+from app.modules.agent.graph import _build_document_results_response, response
 from app.modules.agent.repository import _safe_graph_state_snapshot
 from app.modules.agent.planner import DeterministicPlanner, build_plan_from_user_intent
 from app.modules.agent.service import AgentRuntimeService
@@ -519,6 +519,35 @@ def test_agent_runtime_formats_empty_managed_file_list_response():
     assert "暂未生成可展示的业务结果" not in (result.final_response or "")
 
 
+def test_response_consumes_aggregated_result_summary_without_rescanning_tool_results():
+    """response 节点应消费 evidence_or_change 聚合结果，而不是重新扫描 tool_results。"""
+
+    state = {
+        "result_summary": {
+            "managed_file_list": {
+                "query": {"root_key": "downloads"},
+                "files": [
+                    {
+                        "root_key": "downloads",
+                        "relative_path": "docs/a.pdf",
+                        "filename": "a.pdf",
+                        "size_bytes": 2048,
+                        "category_path": None,
+                    }
+                ],
+            }
+        },
+        "tool_results": [],
+        "document_results": [],
+    }
+
+    result = response(state, None)
+
+    assert result["status"] == "COMPLETED"
+    assert "downloads 下共有 1 个文件" in result["final_response"]
+    assert "docs/a.pdf" in result["final_response"]
+
+
 def test_local_web_origin_is_allowed_for_api_requests():
     """本地前端开发服务必须可以通过浏览器预检访问后端 API。"""
 
@@ -863,6 +892,46 @@ def test_document_results_include_read_profile_and_quality():
     assert result.document_results[0]["read_quality"] == "GOOD"
     assert result.document_results[0]["read_profile"]["file_type"] == "text"
     assert result.document_results[0]["read_profile"]["requires_ocr"] is False
+    assert result.document_results[0]["categories"] == []
+    assert "分类建议" not in (result.final_response or "")
+
+
+def test_read_and_classify_keeps_document_categories_in_receipt():
+    """读取并分类意图应继续执行分类并在回执中展示分类建议。"""
+
+    class FakeRegistry:
+        """测试用 Registry，返回可命中职称分类的解析结果。"""
+
+        def invoke(self, tool_name, input_json):
+            """模拟 extract-document-text 成功解析正文。"""
+
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "document_id": input_json["document_id"],
+                    "extraction_run_id": "run-read-classify",
+                    "status": "COMPLETED",
+                    "extractor": "plain-text",
+                    "pages": [{"page_number": 1, "text_preview": "教师职称材料", "char_count": 6}],
+                    "error": None,
+                },
+                status="COMPLETED",
+            )
+
+    service = AgentRuntimeService(registry_factory=lambda db, user_id: FakeRegistry())
+
+    result = service.run_message(
+        conversation_id="conv-read-classify",
+        user_id="user-1",
+        message_id="msg-read-classify",
+        message="读取并分类这个文件",
+        attachments=[{"document_id": "doc-read-classify"}],
+    )
+
+    assert result.document_results[0]["categories"]
+    assert "分类建议" in (result.final_response or "")
 
 
 def test_unknown_tool_is_rejected():
@@ -972,6 +1041,7 @@ def test_initial_state_does_not_include_runtime_dependencies():
     for key in ["planner", "registry", "context_loader", "llm_intent_service", "prefer_explicit_planner"]:
         assert key not in state
     assert state["planner_mode"] == "deterministic"
+    assert state["result_summary"] == {}
     assert state["document_results"] == []
 
 
@@ -987,6 +1057,7 @@ def test_safe_snapshot_excludes_runtime_dependencies():
             "llm_intent_service": object(),
             "planner_mode": "llm",
             "tool_plan": {"steps": []},
+            "result_summary": {"managed_file_list": {"files": []}},
             "document_results": [{"document_id": "doc-1", "categories": []}],
         }
     )
@@ -994,6 +1065,7 @@ def test_safe_snapshot_excludes_runtime_dependencies():
     for key in ["planner", "registry", "context_loader", "llm_intent_service"]:
         assert key not in snapshot
     assert snapshot["planner_mode"] == "llm"
+    assert snapshot["result_summary"] == {"managed_file_list": {"files": []}}
     assert snapshot["document_results"] == [{"document_id": "doc-1", "categories": []}]
 
 

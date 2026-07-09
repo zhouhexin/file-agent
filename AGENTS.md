@@ -307,6 +307,7 @@ LangGraph 实现规则：
   - `AgentRuntimeContext`：运行时依赖，只保存 Planner、Tool Registry、Context Loader、LLM Intent Service，以及后续 Storage、Queue、DB Factory、Settings 等服务对象。
   - `Persistent Stores`：数据库、对象存储、向量库、图数据库等长期事实存储，保存文件、解析结果、证据、分类、ChangeSet、OperationPlan 和审计记录。
 - `document_results` 属于 `AgentGraphState` 中的逐文件运行结果容器，只能保存本次 AgentRun 的轻量摘要、状态、分类建议、证据摘要、警告和错误；正式长期事实仍应进入 `Persistent Stores`，不能用 State 快照替代 `document_pages`、`document_categories`、ChangeSet 或 Evidence 表。
+- `result_summary` 属于 `AgentGraphState` 中的通用结果聚合容器，由 `evidence_or_change` 节点一次性从 Tool 输出中整理生成，用于保存表格分析、文件读取、分类读取、能力清单、分类目录、受管目录文件列表和普通对话摘要等响应所需的结构化业务结果；`response` 节点必须消费 `result_summary`，不得在每个响应分支里重复扫描原始 `tool_results`。
 - `planner`、`registry`、`context_loader`、`llm_intent_service`、数据库 Session、LLM client、API key、HTTP client 等运行对象不得写入 `AgentGraphState`、checkpoint 或 `graph_state_json`。
 - LangGraph 节点需要运行依赖时，必须通过 `AgentRuntimeContext` 或等价的运行时上下文机制获取，不能把服务对象塞进 State。
 - 会话附件范围必须先由后端 `ConversationAttachmentContextService` 或等价服务解析成确定的 `document_ids`，并标记 `uploaded` / `inferred_context` 与真实上传 `batch_id`；Planner、LLM 和 Graph 节点不得自行猜测“刚刚上传”“上面文件”“第二个文件”对应的文件集合。
