@@ -4,6 +4,8 @@
 Tool 输入必须经过 schema 校验，直接文件写入必须在 dispatch 前被拒绝。
 """
 
+import json
+
 from fastapi.testclient import TestClient
 import pytest
 from pydantic import ValidationError
@@ -169,6 +171,8 @@ def test_deterministic_planner_routes_managed_file_list_by_root_key():
 
     assert plan.intent == "LIST_MANAGED_FILES"
     assert [step.tool_name for step in plan.steps] == ["managed-file-list"]
+    assert plan.selected_skills == ["managed-file-query"]
+    assert plan.steps[0].skill == "managed-file-query"
     assert plan.steps[0].input["root_key"] == "file_agent_spreadsheet_patch_files"
 
 
@@ -312,6 +316,35 @@ def test_llm_managed_file_list_uses_structured_filters():
     assert plan.steps[0].input["root_key"] == "downloads"
     assert plan.steps[0].input["extension"] == "pdf"
     assert plan.steps[0].input["filename_contains"] == "发票"
+
+
+def test_feedback_record_writes_managed_file_query_skill_sample(monkeypatch, tmp_path):
+    """managed-file-query 的反馈必须写入本地样本 JSONL，供后续 Skill 演进使用。"""
+
+    monkeypatch.chdir(tmp_path)
+    result = ToolRegistry(user_id="user-1").invoke(
+        "feedback-record",
+        {
+            "target_type": "SKILL",
+            "target_id": "managed-file-query",
+            "feedback_type": "BAD_SKILL_PARSE",
+            "comment": "pdf 被识别成 path_prefix",
+            "context_json": {
+                "message": "列出Downloads下所有pdf文件",
+                "actual_input": {"root_key": "downloads", "path_prefix": "pdf"},
+                "expected_input": {"root_key": "downloads", "extension": "pdf"},
+            },
+        },
+    )
+
+    assert result.status == "COMPLETED"
+    assert result.output_json["ok"] is True
+    assert result.output_json["sample"]["skill_id"] == "managed-file-query"
+    sample_path = tmp_path / "storage" / "skill-artifacts" / "managed-file-query-feedback.jsonl"
+    sample = json.loads(sample_path.read_text(encoding="utf-8").strip())
+    assert sample["skill_id"] == "managed-file-query"
+    assert sample["feedback_type"] == "BAD_SKILL_PARSE"
+    assert sample["context_json"]["expected_input"]["extension"] == "pdf"
 
 
 def test_llm_managed_file_list_uses_structured_path_prefix():

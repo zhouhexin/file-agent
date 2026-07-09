@@ -881,11 +881,11 @@ def _managed_file_list_plan(
             "llm_intent_plan": llm_intent_plan or {},
             "route_source": route_source,
         },
-        selected_skills=["managed-files"],
+        selected_skills=["managed-file-query"],
         steps=[
             {
                 "step_id": "step-1",
-                "skill": "managed-files",
+                "skill": "managed-file-query",
                 "tool_name": "managed-file-list",
                 "input": input_json,
                 "requires_confirmation": False,

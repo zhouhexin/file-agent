@@ -6,7 +6,7 @@
 
 MVP 阶段每个 Skill 至少应有一个 `SKILL.md`，用于定义触发条件、输入输出、可调用 Tool、处理步骤、证据规则、ChangeSet 规则、OperationPlan 规则和禁止事项。
 
-当前 MVP 只保留 9 个业务 Skill：
+当前 MVP 保留以下业务 Skill：
 
 ```text
 change-report
@@ -17,6 +17,7 @@ evidence-answer
 feedback-and-memory
 file-ingest
 file-search
+managed-file-query
 operation-plan
 ```
 

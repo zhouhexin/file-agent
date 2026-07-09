@@ -49,6 +49,10 @@ from app.modules.managed_files.service import (
     resolve_managed_file_query_scope,
     sync_configured_managed_roots,
 )
+from app.modules.skills.managed_file_query_feedback import (
+    SKILL_ID as MANAGED_FILE_QUERY_SKILL_ID,
+    record_managed_file_query_feedback_sample,
+)
 from app.modules.spreadsheet_analysis.service import SpreadsheetAnalysisService
 from app.modules.spreadsheet_workbench.service import SpreadsheetWorkbenchService
 
@@ -429,14 +433,35 @@ def _confirmed_action_handler(tool_input: BaseModel) -> Dict[str, Any]:
     }
 
 
-def _feedback_handler(tool_input: BaseModel) -> Dict[str, Any]:
-    """返回反馈持久化的占位结果。"""
+def _feedback_handler(user_id: str | None = None) -> ToolHandler:
+    """创建反馈记录 Tool handler。"""
 
-    return {
-        "ok": True,
-        "target_type": getattr(tool_input, "target_type"),
-        "target_id": getattr(tool_input, "target_id"),
-    }
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """记录用户反馈；managed-file-query 反馈写入 Skill 样本文件。"""
+
+        target_type = str(getattr(tool_input, "target_type")).upper()
+        target_id = str(getattr(tool_input, "target_id"))
+        if target_type == "SKILL" and target_id == MANAGED_FILE_QUERY_SKILL_ID:
+            sample = record_managed_file_query_feedback_sample(
+                user_id=user_id,
+                feedback_type=str(getattr(tool_input, "feedback_type")),
+                comment=str(getattr(tool_input, "comment", "")),
+                context_json=getattr(tool_input, "context_json", None),
+            )
+            return {
+                "ok": True,
+                "target_type": target_type,
+                "target_id": target_id,
+                "sample": sample,
+            }
+
+        return {
+            "ok": True,
+            "target_type": target_type,
+            "target_id": target_id,
+        }
+
+    return handler
 
 
 def _job_status_handler(tool_input: BaseModel) -> Dict[str, Any]:
@@ -905,7 +930,7 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("change-report", "Build per-file receipt from changes.", ChangeReportInput, True, False, ["change_sets"], _change_report_handler),
         _tool("operation-plan-create", "Create high-risk operation plan.", OperationPlanCreateInput, True, False, ["operation_plans"], _operation_plan_handler),
         _tool("confirmed-file-action", "Execute confirmed operation plan.", ConfirmedFileActionInput, True, True, ["change_items"], _confirmed_action_handler),
-        _tool("feedback-record", "Record user feedback.", FeedbackRecordInput, True, False, ["feedback"], _feedback_handler),
+        _tool("feedback-record", "Record user feedback.", FeedbackRecordInput, True, False, ["feedback", "skill_feedback_samples"], _feedback_handler(user_id)),
         _tool("job-status-read", "Read processing job status.", JobStatusReadInput, False, False, [], _job_status_handler),
         _tool("document-lineage-read", "Read document lineage.", DocumentLineageReadInput, False, False, [], _lineage_handler),
         _tool("managed-root-list", "List server managed logical roots.", ManagedRootListInput, True, False, ["managed_roots"], _managed_root_list_handler(db)),

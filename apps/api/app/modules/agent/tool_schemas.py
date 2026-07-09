@@ -133,6 +133,7 @@ class FeedbackRecordInput(StrictToolInput):
     target_id: str = Field(min_length=1)
     feedback_type: str = Field(min_length=1)
     comment: str = ""
+    context_json: Dict[str, Any] = Field(default_factory=dict)
 
 
 class JobStatusReadInput(StrictToolInput):
