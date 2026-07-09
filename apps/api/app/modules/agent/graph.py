@@ -141,10 +141,29 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                 attachments=state.get("attachments", []),
                 context_documents=state.get("context_documents", []),
             )
+            log_event(
+                "agent.planning.llm_intent",
+                status="COMPLETED",
+                intent=intent_plan.intent,
+                target_scope=intent_plan.target_scope,
+                managed_root_key=intent_plan.managed_root_key,
+                managed_path_prefix=intent_plan.managed_path_prefix,
+                managed_extension=intent_plan.managed_extension,
+                managed_filename_contains=intent_plan.managed_filename_contains,
+                required_capabilities=intent_plan.required_capabilities,
+                tool_plan_hint=intent_plan.tool_plan_hint,
+            )
             plan = build_plan_from_user_intent(
                 intent_plan=intent_plan,
                 message=state["message"],
                 attachments=state.get("attachments", []),
+            )
+            log_event(
+                "agent.planning.tool_plan",
+                status="COMPLETED",
+                intent=plan.intent,
+                tool_name=plan.steps[0].tool_name if plan.steps else None,
+                tool_input=plan.steps[0].input if plan.steps else {},
             )
             user_intent_plan = intent_plan.model_dump()
         except LLMResponseError as exc:
@@ -177,6 +196,13 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
             attachments=state.get("attachments", []),
         )
         user_intent_plan = {}
+    log_event(
+        "agent.planning.final_tool_plan",
+        status="COMPLETED",
+        intent=plan.intent,
+        tool_name=plan.steps[0].tool_name if plan.steps else None,
+        tool_input=plan.steps[0].input if plan.steps else {},
+    )
     return _planner_state_update(plan=plan, user_intent_plan=user_intent_plan)
 
 

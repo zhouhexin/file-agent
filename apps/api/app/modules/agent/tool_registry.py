@@ -44,7 +44,11 @@ from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
-from app.modules.managed_files.service import ManagedFileService, sync_configured_managed_roots
+from app.modules.managed_files.service import (
+    ManagedFileService,
+    resolve_managed_file_query_scope,
+    sync_configured_managed_roots,
+)
 from app.modules.spreadsheet_analysis.service import SpreadsheetAnalysisService
 from app.modules.spreadsheet_workbench.service import SpreadsheetWorkbenchService
 
@@ -471,27 +475,36 @@ def _managed_file_list_handler(db: Any) -> ToolHandler:
 
         if db is None:
             return {"ok": False, "error": {"code": "DB_REQUIRED", "message": "读取受管文件需要数据库会话。"}}
+        scope = resolve_managed_file_query_scope(
+            root_key=getattr(tool_input, "root_key", None),
+            path_prefix=getattr(tool_input, "path_prefix", None),
+        )
         sync_configured_managed_roots(
             db,
-            root_key=getattr(tool_input, "root_key", None),
+            root_key=scope.root_key,
             scan=True,
         )
         db.commit()
-        rows = ManagedFileRepository(db).list_files(
-            root_key=getattr(tool_input, "root_key", None),
-            path_prefix=getattr(tool_input, "path_prefix", None),
-            extension=getattr(tool_input, "extension", None),
-            filename_contains=getattr(tool_input, "filename_contains", None),
-            category_path=getattr(tool_input, "category_path", None),
-            classification_mode=getattr(tool_input, "classification_mode", None),
-            status=getattr(tool_input, "status", None),
-            limit=int(getattr(tool_input, "limit", 50)),
-            offset=int(getattr(tool_input, "offset", 0)),
-        )
+        rows = []
+        if not scope.unresolved_root_key:
+            rows = ManagedFileRepository(db).list_files(
+                root_key=scope.root_key,
+                root_keys=scope.configured_root_keys if scope.root_key is None else None,
+                path_prefix=scope.path_prefix,
+                extension=getattr(tool_input, "extension", None),
+                filename_contains=getattr(tool_input, "filename_contains", None),
+                category_path=getattr(tool_input, "category_path", None),
+                classification_mode=getattr(tool_input, "classification_mode", None),
+                status=getattr(tool_input, "status", None),
+                limit=int(getattr(tool_input, "limit", 50)),
+                offset=int(getattr(tool_input, "offset", 0)),
+            )
         # 返回查询条件用于空结果回执，避免 response 节点无法说明是哪一个受管目录没有文件。
         query = {
-            "root_key": getattr(tool_input, "root_key", None),
-            "path_prefix": getattr(tool_input, "path_prefix", None),
+            "root_key": scope.root_key,
+            "path_prefix": scope.path_prefix,
+            "requested_root_key": getattr(tool_input, "root_key", None),
+            "unresolved_root_key": scope.unresolved_root_key,
             "extension": getattr(tool_input, "extension", None),
             "filename_contains": getattr(tool_input, "filename_contains", None),
             "category_path": getattr(tool_input, "category_path", None),
@@ -518,20 +531,27 @@ def _managed_file_search_handler(db: Any) -> ToolHandler:
 
         if db is None:
             return {"ok": False, "error": {"code": "DB_REQUIRED", "message": "搜索受管文件需要数据库会话。"}}
+        scope = resolve_managed_file_query_scope(
+            root_key=getattr(tool_input, "root_key", None),
+            path_prefix=getattr(tool_input, "path_prefix", None),
+        )
         sync_configured_managed_roots(
             db,
-            root_key=getattr(tool_input, "root_key", None),
+            root_key=scope.root_key,
             scan=True,
         )
         db.commit()
-        rows = ManagedFileRepository(db).list_files(
-            root_key=getattr(tool_input, "root_key", None),
-            path_prefix=getattr(tool_input, "path_prefix", None),
-            filename_contains=getattr(tool_input, "query"),
-            status="ACTIVE",
-            limit=int(getattr(tool_input, "limit", 50)),
-            offset=0,
-        )
+        rows = []
+        if not scope.unresolved_root_key:
+            rows = ManagedFileRepository(db).list_files(
+                root_key=scope.root_key,
+                root_keys=scope.configured_root_keys if scope.root_key is None else None,
+                path_prefix=scope.path_prefix,
+                filename_contains=getattr(tool_input, "query"),
+                status="ACTIVE",
+                limit=int(getattr(tool_input, "limit", 50)),
+                offset=0,
+            )
         return {
             "ok": True,
             "files": [

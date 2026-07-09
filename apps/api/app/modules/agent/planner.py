@@ -55,6 +55,36 @@ SPREADSHEET_PROFILE_HINTS = {"profile_spreadsheet", "profile-spreadsheet"}
 SPREADSHEET_VALIDATE_HINTS = {"validate_spreadsheet", "validate-spreadsheet"}
 MANAGED_FILE_LIST_HINTS = {"managed_file_list", "managed-file-list"}
 SPREADSHEET_SUFFIXES = {".xlsx", ".xlsm", ".csv", ".tsv"}
+MANAGED_EXTENSION_ALIASES = {
+    "pdf": "pdf",
+    ".pdf": "pdf",
+    "doc": "doc",
+    ".doc": "doc",
+    "docx": "docx",
+    ".docx": "docx",
+    "word": "docx",
+    "xls": "xls",
+    ".xls": "xls",
+    "xlsx": "xlsx",
+    ".xlsx": "xlsx",
+    "xlsm": "xlsm",
+    ".xlsm": "xlsm",
+    "excel": "xlsx",
+    "csv": "csv",
+    ".csv": "csv",
+    "tsv": "tsv",
+    ".tsv": "tsv",
+    "txt": "txt",
+    ".txt": "txt",
+    "md": "md",
+    ".md": "md",
+    "png": "png",
+    ".png": "png",
+    "jpg": "jpg",
+    ".jpg": "jpg",
+    "jpeg": "jpeg",
+    ".jpeg": "jpeg",
+}
 
 
 class PlannerStep(BaseModel):
@@ -141,6 +171,8 @@ class DeterministicPlanner:
         if _has_classification_taxonomy_intent(message=message, lowered=lowered):
             return _classification_taxonomy_plan(user_goal=message)
 
+        managed_extension = _managed_extension_from_list_request(message)
+        managed_filename_contains = _managed_filename_contains_from_list_request(message)
         managed_root_key = _managed_root_key_from_list_request(message)
         if managed_root_key:
             managed_path_prefix = _managed_path_prefix_from_list_request(
@@ -151,6 +183,19 @@ class DeterministicPlanner:
                 user_goal=message,
                 root_key=managed_root_key,
                 path_prefix=managed_path_prefix,
+                extension=managed_extension,
+                filename_contains=managed_filename_contains,
+            )
+        if _has_managed_file_list_filter_intent(
+            message=message,
+            extension=managed_extension,
+            filename_contains=managed_filename_contains,
+        ):
+            return _managed_file_list_plan(
+                user_goal=message,
+                root_key=None,
+                extension=managed_extension,
+                filename_contains=managed_filename_contains,
             )
 
         needs_file_scope = (
@@ -402,6 +447,11 @@ def build_plan_from_user_intent(
         message=message,
         root_key=managed_root_key,
     )
+    managed_extension = intent_plan.managed_extension or _managed_extension_from_list_request(message)
+    managed_filename_contains = (
+        intent_plan.managed_filename_contains
+        or _managed_filename_contains_from_list_request(message)
+    )
     if (
         managed_root_key
         or intent_plan.intent in {"LIST_MANAGED_FILES", "SEARCH_MANAGED_FILES"}
@@ -412,6 +462,8 @@ def build_plan_from_user_intent(
             user_goal=intent_plan.user_goal or message,
             root_key=managed_root_key,
             path_prefix=managed_path_prefix,
+            extension=managed_extension,
+            filename_contains=managed_filename_contains,
             response_style=intent_plan.response_style,
             clarification_question=intent_plan.clarification_question,
             llm_intent_plan=intent_plan.model_dump(),
@@ -796,6 +848,8 @@ def _managed_file_list_plan(
     user_goal: str,
     root_key: str | None,
     path_prefix: str | None = None,
+    extension: str | None = None,
+    filename_contains: str | None = None,
     response_style: str = "concise",
     clarification_question: str | None = None,
     llm_intent_plan: Dict[str, Any] | None = None,
@@ -808,6 +862,10 @@ def _managed_file_list_plan(
         input_json["root_key"] = root_key
     if path_prefix:
         input_json["path_prefix"] = path_prefix
+    if extension:
+        input_json["extension"] = extension
+    if filename_contains:
+        input_json["filename_contains"] = filename_contains
     return PlannerOutput(
         intent="LIST_MANAGED_FILES",
         user_goal=user_goal,
@@ -815,6 +873,8 @@ def _managed_file_list_plan(
             "document_ids": [],
             "root_key": root_key,
             "path_prefix": path_prefix,
+            "extension": extension,
+            "filename_contains": filename_contains,
             "requested_outputs": ["managed_files"],
             "response_style": response_style,
             "clarification_question": clarification_question,
@@ -1107,6 +1167,47 @@ def _managed_root_key_from_list_request(message: str) -> str | None:
     return None
 
 
+def _managed_extension_from_list_request(message: str) -> str | None:
+    """从受管目录列表请求中提取文件扩展名过滤条件。"""
+
+    lowered = message.lower()
+    for alias in sorted(MANAGED_EXTENSION_ALIASES, key=len, reverse=True):
+        normalized_alias = re.escape(alias.lower())
+        if re.search(rf"(?<![A-Za-z0-9_]){normalized_alias}(?:\s*(?:文件|文档|表格|图片))?", lowered):
+            return MANAGED_EXTENSION_ALIASES[alias]
+    return None
+
+
+def _managed_filename_contains_from_list_request(message: str) -> str | None:
+    """从“文件名包含 xxx”这类表达中提取文件名关键字。"""
+
+    patterns = [
+        r"(?:文件名|名称|名字)\s*(?:包含|含有|带有|里有|中有)\s*[“\"']?(?P<keyword>[^”\"'，。！？\s]+?)[”\"']?(?:的)?(?:[A-Za-z0-9.]+)?(?:文件|文档)?(?:$|[，。！？\s])",
+        r"(?:包含|含有|带有)\s*[“\"']?(?P<keyword>[^”\"'，。！？\s]+?)[”\"']?\s*(?:的)?(?:[A-Za-z0-9.]+)?(?:文件|文档)(?:$|[，。！？\s])",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, message)
+        if not match:
+            continue
+        keyword = _normalize_managed_filename_keyword(match.group("keyword"))
+        if keyword:
+            return keyword
+    return None
+
+
+def _has_managed_file_list_filter_intent(
+    *,
+    message: str,
+    extension: str | None,
+    filename_contains: str | None,
+) -> bool:
+    """判断无明确 root 时是否仍是受管文件元数据列表请求。"""
+
+    if not (extension or filename_contains):
+        return False
+    return any(keyword in message for keyword in ["列出", "查看", "显示"]) and "文件" in message
+
+
 def _managed_path_prefix_from_list_request(*, message: str, root_key: str | None) -> str | None:
     """从“root_key 下某子目录中的文件”提取受管目录内的相对路径。"""
 
@@ -1128,7 +1229,10 @@ def _managed_path_prefix_from_list_request(*, message: str, root_key: str | None
     tail = message[root_match.end() :].strip()
     tail = re.sub(r"^(?:目录下|下|中的|里的|里面的|内|目录中|目录里)\s*", "", tail)
     tail = tail.strip()
-    tail = re.sub(r"^(?:的)?(?:所有|全部)?(?:文件|目录)?\s*", "", tail)
+    tail = re.sub(r"^(?:的)?(?:所有|全部)?\s*", "", tail)
+    tail = _strip_managed_file_filter_words(tail)
+    tail = re.sub(r"(?:目录|文件夹)?(?:中|里|下|里面)(?:的)?$", "", tail).strip()
+    tail = re.sub(r"(?:目录|文件夹)$", "", tail).strip()
     tail = re.sub(
         r"\s*(?:目录|文件夹)?(?:中|里|下|里面)?(?:的)?(?:所有|全部)?(?:文件|目录)\s*$",
         "",
@@ -1147,9 +1251,63 @@ def _normalize_managed_path_prefix(value: str | None) -> str | None:
     normalized = re.sub(r"\s+", "", normalized)
     if normalized in {"", ".", "的", "所有", "全部"}:
         return None
+    if _is_known_managed_file_extension(normalized):
+        return None
+    if _managed_filename_contains_from_list_request(normalized):
+        return None
     if any(part in {"", ".", ".."} for part in normalized.split("/")):
         return None
     return normalized
+
+
+def _strip_managed_file_filter_words(value: str) -> str:
+    """移除尾部文件类型或文件名过滤表达，避免误当成目录。"""
+
+    stripped = value.strip()
+    extension_words = "|".join(
+        sorted((re.escape(item.lstrip(".")) for item in MANAGED_EXTENSION_ALIASES), key=len, reverse=True)
+    )
+    stripped = re.sub(
+        rf"(?:所有|全部)?(?:{extension_words})(?:文件|文档|表格|图片)?$",
+        "",
+        stripped,
+        flags=re.IGNORECASE,
+    ).strip()
+    stripped = re.sub(
+        r"(?:文件名|名称|名字)\s*(?:包含|含有|带有|里有|中有)\s*[“\"']?[^”\"'，。！？\s]+[”\"']?$",
+        "",
+        stripped,
+    ).strip()
+    return stripped
+
+
+def _is_known_managed_file_extension(value: str) -> bool:
+    """判断字符串是否是已知文件扩展名或别名。"""
+
+    return value.lower().lstrip(".") in {
+        extension.lstrip(".")
+        for extension in MANAGED_EXTENSION_ALIASES
+    }
+
+
+def _normalize_managed_filename_keyword(value: str | None) -> str | None:
+    """清理文件名包含条件，排除明显不是文件名关键字的过滤词。"""
+
+    if value is None:
+        return None
+    keyword = value.strip().strip("“”\"'").strip()
+    extension_words = "|".join(
+        sorted((re.escape(item.lstrip(".")) for item in MANAGED_EXTENSION_ALIASES), key=len, reverse=True)
+    )
+    keyword = re.sub(
+        rf"(?:的)?(?:所有|全部)?(?:{extension_words})?(?:文件|文档|表格|图片)$",
+        "",
+        keyword,
+        flags=re.IGNORECASE,
+    ).strip()
+    if not keyword or _is_known_managed_file_extension(keyword):
+        return None
+    return keyword
 
 
 def _has_plain_document_summary_intent(*, message: str, lowered: str) -> bool:

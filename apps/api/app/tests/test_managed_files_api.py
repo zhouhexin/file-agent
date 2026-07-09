@@ -224,6 +224,61 @@ def test_managed_files_query_filters_path_prefix(monkeypatch, tmp_path):
     clear_overrides()
 
 
+def test_managed_files_query_treats_unknown_root_as_single_configured_subdirectory(monkeypatch, tmp_path):
+    """HTTP 查询遇到未配置 root_key 时，应优先按唯一受管根下子目录处理。"""
+
+    downloads_root = tmp_path / "Downloads"
+    target_dir = downloads_root / "file_agent_spreadsheet_patch_files"
+    target_dir.mkdir(parents=True)
+    (downloads_root / "parent.xlsx").write_text("parent", encoding="utf-8")
+    (downloads_root / ".DS_Store").write_text("hidden", encoding="utf-8")
+    (target_dir / "README.md").write_text("readme", encoding="utf-8")
+    (target_dir / ".DS_Store").write_text("hidden", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(downloads_root))
+    client, SessionLocal = client_with_database()
+    _, token = _register_and_login(client, "managed-unknown-root-reader")
+    db = SessionLocal()
+    try:
+        stale_root = ManagedRoot(
+            root_key="file_agent_spreadsheet_patch_files",
+            display_name="file_agent_spreadsheet_patch_files",
+            container_path=str(downloads_root),
+            classification_mode="NONE",
+        )
+        db.add(stale_root)
+        db.flush()
+        db.add(
+            ManagedFile(
+                root_id=stale_root.id,
+                relative_path="parent.xlsx",
+                category_path=None,
+                filename="parent.xlsx",
+                extension=".xlsx",
+                size_bytes=100,
+                modified_at=datetime.now(timezone.utc),
+                fingerprint="stale",
+                status="ACTIVE",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.get(
+        "/api/managed-files?root_key=file_agent_spreadsheet_patch_files",
+        headers=_auth_header(token),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [file["relative_path"] for file in data] == [
+        "file_agent_spreadsheet_patch_files/README.md",
+    ]
+    assert data[0]["root_key"] == "downloads"
+    clear_overrides()
+
+
 def test_category_tree_only_uses_path_classified_roots():
     """分类目录树只能来自 PATH_AS_CATEGORY 受管目录。"""
 

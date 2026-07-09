@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -21,6 +22,16 @@ from app.modules.managed_files.schemas import (
     ManagedRootCreateRequest,
     ManagedRootResponse,
 )
+
+
+@dataclass(frozen=True)
+class ManagedFileQueryScope:
+    """受管文件查询的最终 root 与子路径范围。"""
+
+    root_key: str | None
+    path_prefix: str | None
+    configured_root_keys: list[str]
+    unresolved_root_key: str | None = None
 
 
 class ManagedFileService:
@@ -100,11 +111,15 @@ class ManagedFileService:
         """按元数据查询受管文件。"""
 
         _require_role(current_user, {"user", "ops", "admin"})
-        sync_configured_managed_roots(self.db, root_key=root_key, scan=True)
+        scope = resolve_managed_file_query_scope(root_key=root_key, path_prefix=path_prefix)
+        sync_configured_managed_roots(self.db, root_key=scope.root_key, scan=True)
         self.db.commit()
+        if scope.unresolved_root_key:
+            return []
         rows = self.repository.list_files(
-            root_key=root_key,
-            path_prefix=path_prefix,
+            root_key=scope.root_key,
+            root_keys=scope.configured_root_keys if scope.root_key is None else None,
+            path_prefix=scope.path_prefix,
             extension=extension,
             filename_contains=filename_contains,
             category_path=category_path,
@@ -182,6 +197,56 @@ def _configured_container_path(root_key: str) -> str | None:
 
     env_key = f"MANAGED_ROOT_{root_key.upper()}"
     return os.getenv(env_key)
+
+
+def resolve_managed_file_query_scope(
+    *,
+    root_key: str | None,
+    path_prefix: str | None,
+) -> ManagedFileQueryScope:
+    """把用户提到的逻辑目录或子目录解析成当前 env 配置内的查询范围。"""
+
+    configured_root_keys = _configured_root_keys(root_key=None)
+    normalized_root_key = root_key.strip().lower() if root_key else None
+    normalized_path_prefix = _join_path_parts(path_prefix)
+
+    if not normalized_root_key:
+        return ManagedFileQueryScope(
+            root_key=None,
+            path_prefix=normalized_path_prefix,
+            configured_root_keys=configured_root_keys,
+        )
+
+    if _configured_container_path(normalized_root_key) is not None:
+        return ManagedFileQueryScope(
+            root_key=normalized_root_key,
+            path_prefix=normalized_path_prefix,
+            configured_root_keys=[normalized_root_key],
+        )
+
+    if len(configured_root_keys) == 1:
+        # 用户可能把唯一受管根目录下的子目录名说成了 root_key，例如：
+        # env 只配置 downloads，但用户说“列出 file_agent_spreadsheet_patch_files 下的文件”。
+        return ManagedFileQueryScope(
+            root_key=configured_root_keys[0],
+            path_prefix=_join_path_parts(normalized_root_key, normalized_path_prefix),
+            configured_root_keys=configured_root_keys,
+        )
+
+    return ManagedFileQueryScope(
+        root_key=normalized_root_key,
+        path_prefix=normalized_path_prefix,
+        configured_root_keys=configured_root_keys,
+        unresolved_root_key=normalized_root_key,
+    )
+
+
+def _join_path_parts(*parts: str | None) -> str | None:
+    """拼接受管目录内的 POSIX 相对路径片段。"""
+
+    cleaned = [part.replace("\\", "/").strip().strip("/") for part in parts if part]
+    joined = "/".join(part for part in cleaned if part)
+    return joined or None
 
 
 def sync_configured_managed_roots(

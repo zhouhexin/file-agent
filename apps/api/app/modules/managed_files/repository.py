@@ -80,6 +80,7 @@ class ManagedFileRepository:
         self,
         *,
         root_key: str | None = None,
+        root_keys: list[str] | None = None,
         path_prefix: str | None = None,
         extension: str | None = None,
         filename_contains: str | None = None,
@@ -94,6 +95,11 @@ class ManagedFileRepository:
         query = self.db.query(ManagedFile, ManagedRoot).join(ManagedRoot, ManagedFile.root_id == ManagedRoot.id)
         if root_key:
             query = query.filter(ManagedRoot.root_key == root_key)
+        elif root_keys is not None:
+            # env 是受管目录 source of truth；无 root_key 查询时只允许当前配置内的 root，避免旧数据库索引泄漏。
+            if not root_keys:
+                return []
+            query = query.filter(ManagedRoot.root_key.in_(root_keys))
         if classification_mode:
             query = query.filter(ManagedRoot.classification_mode == classification_mode)
         if path_prefix:
@@ -114,6 +120,7 @@ class ManagedFileRepository:
             query = query.filter(ManagedFile.filename.contains(filename_contains))
         if status:
             query = query.filter(ManagedFile.status == status)
+        query = _exclude_hidden_managed_paths(query)
         return (
             query.order_by(ManagedRoot.root_key.asc(), ManagedFile.relative_path.asc())
             .offset(offset)
@@ -136,6 +143,7 @@ class ManagedFileRepository:
             .filter(ManagedFile.status == "ACTIVE")
             .filter(ManagedFile.category_path.isnot(None))
         )
+        query = _exclude_hidden_managed_paths(query)
         if root_key:
             query = query.filter(ManagedRoot.root_key == root_key)
         return (
@@ -155,6 +163,12 @@ def _escape_like(value: str) -> str:
     """转义 SQL LIKE 通配符，避免路径中的 %/_ 被当成通配符。"""
 
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _exclude_hidden_managed_paths(query):
+    """过滤任意路径段以点号开头的隐藏文件或隐藏目录。"""
+
+    return query.filter(~ManagedFile.relative_path.like(".%")).filter(~ManagedFile.relative_path.like("%/.%"))
 
 
 class FilesystemJobRepository:

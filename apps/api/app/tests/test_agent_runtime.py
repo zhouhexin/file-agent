@@ -204,6 +204,116 @@ def test_deterministic_planner_routes_nested_managed_file_subdirectory():
     assert plan.steps[0].input["path_prefix"] == "apps/api"
 
 
+def test_deterministic_planner_routes_managed_file_list_by_extension():
+    """“列出某目录下所有 PDF 文件”必须生成 extension，而不是 path_prefix。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-managed-pdf",
+        user_id="user-1",
+        message_id="msg-managed-pdf",
+        message="列出Downloads下所有pdf文件",
+        attachments=[],
+    )
+
+    assert plan.intent == "LIST_MANAGED_FILES"
+    assert plan.steps[0].input["root_key"] == "Downloads"
+    assert plan.steps[0].input["extension"] == "pdf"
+    assert "path_prefix" not in plan.steps[0].input
+
+
+def test_deterministic_planner_routes_all_managed_files_by_extension_without_root():
+    """没有显式 root 时，扩展名过滤请求仍应列出受管文件而不是普通聊天。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-managed-all-pdf",
+        user_id="user-1",
+        message_id="msg-managed-all-pdf",
+        message="列出所有pdf文件",
+        attachments=[],
+    )
+
+    assert plan.intent == "LIST_MANAGED_FILES"
+    assert plan.steps[0].input["extension"] == "pdf"
+    assert "root_key" not in plan.steps[0].input
+    assert "path_prefix" not in plan.steps[0].input
+
+
+def test_deterministic_planner_routes_managed_file_list_by_filename_keyword():
+    """文件名包含条件必须进入 filename_contains。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-managed-name",
+        user_id="user-1",
+        message_id="msg-managed-name",
+        message="列出Downloads下文件名包含发票的文件",
+        attachments=[],
+    )
+
+    assert plan.intent == "LIST_MANAGED_FILES"
+    assert plan.steps[0].input["filename_contains"] == "发票"
+    assert "path_prefix" not in plan.steps[0].input
+
+
+def test_deterministic_planner_routes_managed_file_list_by_filename_and_extension():
+    """文件名关键字和扩展名过滤必须可以同时存在。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-managed-name-pdf",
+        user_id="user-1",
+        message_id="msg-managed-name-pdf",
+        message="列出Downloads下文件名包含发票的pdf文件",
+        attachments=[],
+    )
+
+    assert plan.intent == "LIST_MANAGED_FILES"
+    assert plan.steps[0].input["filename_contains"] == "发票"
+    assert plan.steps[0].input["extension"] == "pdf"
+    assert "path_prefix" not in plan.steps[0].input
+
+
+def test_deterministic_planner_routes_managed_subdirectory_with_extension():
+    """子目录和扩展名过滤必须可以同时存在。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-managed-subdir-pdf",
+        user_id="user-1",
+        message_id="msg-managed-subdir-pdf",
+        message="列出Downloads下file_agent_spreadsheet_patch_files目录中的pdf文件",
+        attachments=[],
+    )
+
+    assert plan.intent == "LIST_MANAGED_FILES"
+    assert plan.steps[0].input["root_key"] == "Downloads"
+    assert plan.steps[0].input["path_prefix"] == "file_agent_spreadsheet_patch_files"
+    assert plan.steps[0].input["extension"] == "pdf"
+
+
+def test_llm_managed_file_list_uses_structured_filters():
+    """LLM 输出的扩展名和文件名过滤字段必须进入 Tool 输入。"""
+
+    intent_plan = UserIntentPlan(
+        intent="LIST_MANAGED_FILES",
+        user_goal="列出发票 PDF",
+        needs_file_context=False,
+        required_capabilities=["managed_file_list"],
+        tool_plan_hint=["managed-file-list"],
+        managed_root_key="downloads",
+        managed_extension="pdf",
+        managed_filename_contains="发票",
+    )
+
+    plan = build_plan_from_user_intent(
+        intent_plan=intent_plan,
+        message="列出Downloads下文件名包含发票的pdf文件",
+        attachments=[],
+    )
+
+    assert plan.intent == "LIST_MANAGED_FILES"
+    assert plan.steps[0].input["root_key"] == "downloads"
+    assert plan.steps[0].input["extension"] == "pdf"
+    assert plan.steps[0].input["filename_contains"] == "发票"
+
+
 def test_llm_managed_file_list_uses_structured_path_prefix():
     """LLM 输出的受管目录子目录字段必须进入 Tool 输入。"""
 

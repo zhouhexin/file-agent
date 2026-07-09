@@ -90,6 +90,107 @@ def test_managed_file_list_tool_filters_path_prefix(monkeypatch, tmp_path):
         clear_overrides()
 
 
+def test_managed_file_list_tool_filters_extension_and_filename(monkeypatch, tmp_path):
+    """managed-file-list Tool 应能组合扩展名和文件名关键字过滤。"""
+
+    managed_root = tmp_path / "downloads"
+    managed_root.mkdir()
+    (managed_root / "电子发票.pdf").write_text("invoice", encoding="utf-8")
+    (managed_root / "合同.pdf").write_text("contract", encoding="utf-8")
+    (managed_root / "电子发票.xlsx").write_text("invoice table", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
+    client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        pdf_result = ToolRegistry(db=db, user_id="user-1").invoke(
+            "managed-file-list",
+            {"root_key": "downloads", "extension": "pdf"},
+        )
+        invoice_result = ToolRegistry(db=db, user_id="user-1").invoke(
+            "managed-file-list",
+            {"root_key": "downloads", "filename_contains": "发票"},
+        )
+        invoice_pdf_result = ToolRegistry(db=db, user_id="user-1").invoke(
+            "managed-file-list",
+            {"root_key": "downloads", "extension": "pdf", "filename_contains": "发票"},
+        )
+
+        assert [file["relative_path"] for file in pdf_result.output_json["files"]] == [
+            "合同.pdf",
+            "电子发票.pdf",
+        ]
+        assert [file["relative_path"] for file in invoice_result.output_json["files"]] == [
+            "电子发票.pdf",
+            "电子发票.xlsx",
+        ]
+        assert [file["relative_path"] for file in invoice_pdf_result.output_json["files"]] == [
+            "电子发票.pdf",
+        ]
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_managed_file_list_tool_treats_unknown_root_as_single_configured_subdirectory(monkeypatch, tmp_path):
+    """只有一个 env 受管根时，未配置 root_key 应按该根下子目录解析。"""
+
+    downloads_root = tmp_path / "Downloads"
+    target_dir = downloads_root / "file_agent_spreadsheet_patch_files"
+    target_dir.mkdir(parents=True)
+    (downloads_root / "parent.xlsx").write_text("parent", encoding="utf-8")
+    (downloads_root / ".DS_Store").write_text("hidden", encoding="utf-8")
+    hidden_dir = downloads_root / ".hidden"
+    hidden_dir.mkdir()
+    (hidden_dir / "secret.txt").write_text("hidden", encoding="utf-8")
+    (target_dir / "README.md").write_text("readme", encoding="utf-8")
+    (target_dir / "apply_spreadsheet_patch.ps1").write_text("patch", encoding="utf-8")
+    (target_dir / ".DS_Store").write_text("hidden", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(downloads_root))
+    client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        stale_root = ManagedRoot(
+            root_key="file_agent_spreadsheet_patch_files",
+            display_name="file_agent_spreadsheet_patch_files",
+            container_path=str(downloads_root),
+            classification_mode="NONE",
+        )
+        db.add(stale_root)
+        db.flush()
+        db.add(
+            ManagedFile(
+                root_id=stale_root.id,
+                relative_path="parent.xlsx",
+                category_path=None,
+                filename="parent.xlsx",
+                extension=".xlsx",
+                size_bytes=100,
+                modified_at=datetime.now(timezone.utc),
+                fingerprint="stale",
+                status="ACTIVE",
+            )
+        )
+        db.commit()
+
+        result = ToolRegistry(db=db, user_id="user-1").invoke(
+            "managed-file-list",
+            {"root_key": "file_agent_spreadsheet_patch_files"},
+        )
+
+        assert result.status == "COMPLETED"
+        assert result.output_json["query"]["root_key"] == "downloads"
+        assert result.output_json["query"]["path_prefix"] == "file_agent_spreadsheet_patch_files"
+        assert [file["relative_path"] for file in result.output_json["files"]] == [
+            "file_agent_spreadsheet_patch_files/README.md",
+            "file_agent_spreadsheet_patch_files/apply_spreadsheet_patch.ps1",
+        ]
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def test_env_managed_root_classification_mode_uses_parent_path(monkeypatch, tmp_path):
     """env 声明 PATH_AS_CATEGORY 时，父目录应自动作为受管文件分类路径。"""
 
@@ -115,22 +216,35 @@ def test_env_managed_root_classification_mode_uses_parent_path(monkeypatch, tmp_
         clear_overrides()
 
 
-def test_managed_file_list_tool_filters_path_classified_categories():
+def test_managed_file_list_tool_filters_path_classified_categories(monkeypatch, tmp_path):
     """managed-file-list Tool 应能按已分类目录和分类路径筛选。"""
 
+    classified_root_path = tmp_path / "classified-library"
+    classified_file_dir = classified_root_path / "奖学金" / "国家励志奖学金"
+    classified_file_dir.mkdir(parents=True)
+    (classified_file_dir / "a.pdf").write_text("demo", encoding="utf-8")
+    (classified_file_dir / ".DS_Store").write_text("hidden", encoding="utf-8")
+    plain_root_path = tmp_path / "plain-inbox"
+    plain_file_dir = plain_root_path / "奖学金" / "国家励志奖学金"
+    plain_file_dir.mkdir(parents=True)
+    (plain_file_dir / "b.pdf").write_text("demo", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_CLASSIFIED_LIBRARY", str(classified_root_path))
+    monkeypatch.setenv("MANAGED_ROOT_CLASSIFIED_LIBRARY_CLASSIFICATION_MODE", "PATH_AS_CATEGORY")
+    monkeypatch.setenv("MANAGED_ROOT_PLAIN_INBOX", str(plain_root_path))
     client, SessionLocal = client_with_database()
     db = SessionLocal()
     try:
         classified_root = ManagedRoot(
             root_key="classified_library",
             display_name="已分类文件库",
-            container_path="/managed/classified-library",
+            container_path=str(classified_root_path),
             classification_mode="PATH_AS_CATEGORY",
         )
         plain_root = ManagedRoot(
             root_key="plain_inbox",
             display_name="普通收件箱",
-            container_path="/managed/plain-inbox",
+            container_path=str(plain_root_path),
             classification_mode="NONE",
         )
         db.add_all([classified_root, plain_root])

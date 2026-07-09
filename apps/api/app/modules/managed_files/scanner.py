@@ -40,6 +40,9 @@ class ManagedFileScanner:
         if root_path.exists():
             for path in sorted(item for item in root_path.rglob("*") if item.is_file() or item.is_symlink()):
                 relative_path = path.relative_to(root_path).as_posix()
+                if _is_hidden_relative_path(relative_path):
+                    # 受管目录只展示业务文件，macOS .DS_Store、点号目录等隐藏项不进入索引。
+                    continue
                 try:
                     resolved = resolve_managed_relative_path(root_path=root_path, relative_path=relative_path)
                 except PathPolicyError:
@@ -96,6 +99,12 @@ def _fingerprint(*, relative_path: str, size_bytes: int, modified_at: float) -> 
     """生成 P0 轻量 fingerprint，后续可升级为内容 hash。"""
 
     return f"{relative_path}:{size_bytes}:{int(modified_at)}"
+
+
+def _is_hidden_relative_path(relative_path: str) -> bool:
+    """判断受管目录相对路径中是否包含隐藏文件或隐藏目录。"""
+
+    return any(part.startswith(".") for part in Path(relative_path).parts)
 
 
 def _category_path_for(*, root: ManagedRoot, relative_path: str) -> str | None:
