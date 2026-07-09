@@ -819,6 +819,52 @@ def test_planning_falls_back_when_llm_intent_schema_is_invalid():
     assert "内容总结" in (result.final_response or "")
 
 
+def test_document_results_include_read_profile_and_quality():
+    """Agent 文件结果应保留 extract-document-text 返回的读取质量和 Profile。"""
+
+    class FakeRegistry:
+        """测试用 Registry，返回带读取质量的解析结果。"""
+
+        def invoke(self, tool_name, input_json):
+            """模拟 extract-document-text 的结构化输出。"""
+
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "document_id": input_json["document_id"],
+                    "extraction_run_id": "run-read-profile",
+                    "status": "COMPLETED",
+                    "extractor": "plain-text",
+                    "read_quality": "GOOD",
+                    "read_profile": {
+                        "file_type": "text",
+                        "char_count": 12,
+                        "page_count": 1,
+                        "requires_ocr": False,
+                    },
+                    "pages": [{"page_number": 1, "text_preview": "教师职称材料", "char_count": 6}],
+                    "error": None,
+                },
+                status="COMPLETED",
+            )
+
+    service = AgentRuntimeService(registry_factory=lambda db, user_id: FakeRegistry())
+
+    result = service.run_message(
+        conversation_id="conv-read-profile",
+        user_id="user-1",
+        message_id="msg-read-profile",
+        message="读取这个文件",
+        attachments=[{"document_id": "doc-read-profile"}],
+    )
+
+    assert result.document_results[0]["read_quality"] == "GOOD"
+    assert result.document_results[0]["read_profile"]["file_type"] == "text"
+    assert result.document_results[0]["read_profile"]["requires_ocr"] is False
+
+
 def test_unknown_tool_is_rejected():
     """Planner 引用白名单外 Tool 时必须关闭式失败。"""
 

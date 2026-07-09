@@ -12,14 +12,16 @@ from langgraph.graph import END, StateGraph
 from langgraph.runtime import Runtime
 
 from app.core.logging import log_context, log_event
-from app.modules.agent.planner import build_plan_from_user_intent
-from app.modules.agent.runtime import AgentRuntimeContext
-from app.modules.agent.state import AgentGraphState, ToolInvocationRecord
+from app.modules.agent.planner import build_plan_from_user_intent # 导入一个函数：把 LLM 理解出来的用户意图转换成工具执行计划。
+from app.modules.agent.runtime import AgentRuntimeContext # LangGraph runtime 里要用的上下文类型。这个上下文里会放 planner、registry、context_loader、llm_intent_service 等运行时对象。
+from app.modules.agent.state import AgentGraphState, ToolInvocationRecord # AgentGraphState 是整个图在节点之间传递的状态结构；ToolInvocationRecord 是工具调用记录结构。
 from app.modules.llm.client import LLMResponseError
+# 两个表格结果格式化器，用于最终 response 阶段生成自然语言回复。
 from app.modules.spreadsheet_analysis.formatter import format_spreadsheet_analysis_response
 from app.modules.spreadsheet_workbench.formatter import format_spreadsheet_workbench_response
 
 
+# 构建 LangGraph 主流程
 def build_agent_graph():
     """编译 MVP LangGraph 工作流。"""
 
@@ -704,6 +706,8 @@ def _document_results_from_extraction_results(
                 "filename": document_context.get("filename") or document_id,
                 "extraction_status": result.get("status"),
                 "extractor": result.get("extractor"),
+                "read_quality": result.get("read_quality"),
+                "read_profile": result.get("read_profile") or {},
                 "page_count": len(pages),
                 "char_count": char_count,
                 "text_reused": bool(result.get("reused")),

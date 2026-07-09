@@ -31,8 +31,8 @@ MVP Skill 只保留业务编排边界。文件读取、表格读取、chunk、em
 | Skill | 开源使用方式 | 触发条件 | 可调用 Tool | 主要输出 |
 |---|---|---|---|---|
 | `chat-intake` | 不直接使用开源 Skill；可经 Tool 读取自研索引 | 每次用户发送消息 | `job-status-read`, `document-lineage-read` | intent、slots、附件上下文、候选 Skill |
-| `file-ingest` | 使用开源 Tool Adapter：Unstructured、Haystack、LlamaIndex、LangChain、Docling、openpyxl | 用户上传文件或要求读取/处理文件 | `document-register-upload`, `security-scan`, `document-convert`, `table-extract`, `artifact-write`, `metadata-extract`, `chunk-build`, `embedding-generate` | Document、Version、Artifact、pages/chunks、metadata、初始 ChangeSet |
-| `document-classification` | 分类编排自研；证据召回可使用 LangChain/LlamaIndex/pgvector adapter | 文档完成解析和索引 | `multi-label-classify`, `hybrid-search`, `document-lineage-read` | document_categories、置信度、证据、NEEDS_REVIEW 原因 |
+| `file-ingest` | 使用开源 Tool Adapter：Unstructured、Haystack、LlamaIndex、LangChain、Docling、openpyxl | 用户上传文件或要求读取/处理文件 | `document-register-upload`, `security-scan`, `document-convert`, `table-extract`, `artifact-write`, `metadata-extract`, `chunk-build`, `embedding-generate` | Document、Version、Artifact、pages/chunks、metadata、read_profile、read_quality、初始 ChangeSet |
+| `document-classification` | 分类编排自研；证据召回可使用 LangChain/LlamaIndex/pgvector adapter；可参考文件整理类 Skill 的“先建议、后确认”模式 | 文档完成解析和索引；或存在 `PATH_AS_CATEGORY` 受管目录可作为动态分类来源 | `multi-label-classify`, `hybrid-search`, `document-lineage-read` | document_categories、动态目录分类建议、置信度、证据、NEEDS_REVIEW 原因 |
 | `file-search` | 使用开源检索 adapter：LangChain、LlamaIndex、pgvector | 用户请求查找文件或材料 | `hybrid-search`, `document-lineage-read` | 分层检索结果、推荐理由 |
 | `managed-file-query` | 不直接使用开源 Skill；自研受管目录元数据查询编排 | 用户请求列出、查看或搜索服务器受管目录文件 | `managed-file-list`, `managed-file-search`, `feedback-record` | 受管目录文件清单、元数据过滤条件、解析反馈样本 |
 | `spreadsheet-workbench` | 使用 openpyxl、pandas 和可选 LibreOffice adapter | 用户请求表格 Profile、统计、校验、编辑、重算或格式转换 | `profile-spreadsheet`, `analyze-spreadsheet`, `validate-spreadsheet`, `operation-plan-create`；后续 `edit-spreadsheet`, `recalculate-spreadsheet` | 表结构、只读分析结果、校验报告、待确认编辑计划 |
@@ -65,7 +65,7 @@ feedback-learning + user-memory -> feedback-and-memory
 |---|---|---|---|
 | `chat-intake` | 间接 | LangGraph Agent Runtime 编排 | https://github.com/langchain-ai/langgraph |
 | `file-ingest` | 是 | 文档解析、表格解析、chunk、可选安全扫描 | https://github.com/Unstructured-IO/unstructured, https://github.com/deepset-ai/haystack, https://github.com/docling-project/docling, https://github.com/run-llama/llama_index, https://github.com/langchain-ai/langchain, https://foss.heptapod.net/openpyxl/openpyxl, https://github.com/Cisco-Talos/clamav |
-| `document-classification` | 间接 | 分类证据召回、相似文档检索 | https://github.com/langchain-ai/langchain, https://github.com/run-llama/llama_index, https://github.com/pgvector/pgvector |
+| `document-classification` | 间接 | 分类证据召回、相似文档检索；受管目录子目录可作为动态分类候选源 | https://github.com/langchain-ai/langchain, https://github.com/run-llama/llama_index, https://github.com/pgvector/pgvector |
 | `file-search` | 是 | 混合检索、retriever/query engine adapter | https://github.com/langchain-ai/langchain, https://github.com/run-llama/llama_index, https://github.com/pgvector/pgvector |
 | `managed-file-query` | 否 | 自研受管目录元数据查询和反馈样本记录 | 无 |
 | `spreadsheet-workbench` | 是 | 表格 Profile、只读分析、校验、后续编辑和重算 | https://foss.heptapod.net/openpyxl/openpyxl, https://github.com/pandas-dev/pandas, https://www.libreoffice.org |

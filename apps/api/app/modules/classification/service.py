@@ -31,12 +31,14 @@ def persist_document_results_classifications(
         error_message = _first_error_message(result)
         taxonomy_key = _first_category_value(categories, "taxonomy_key")
         taxonomy_version = _first_category_value(categories, "taxonomy_version")
+        source = _first_category_value(categories, "source") or "rule"
         classification_run = repository.create_run(
             agent_run_id=agent_run_id,
             document_id=document_id,
             taxonomy_key=taxonomy_key,
             taxonomy_version=taxonomy_version,
             status=status,
+            source=source,
             error_message=error_message,
         )
         for rank, category in enumerate(categories, start=1):

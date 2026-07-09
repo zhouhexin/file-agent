@@ -328,7 +328,26 @@ def _ocr_enabled() -> bool:
 def _completed(extractor: str, pages: List[Dict[str, Any]]) -> Dict[str, Any]:
     """构造解析成功结果。"""
 
-    return {"ok": True, "status": "COMPLETED", "extractor": extractor, "pages": pages}
+    read_profile = _build_read_profile(extractor=extractor, pages=pages)
+    read_quality = _read_quality_from_profile(profile=read_profile)
+    profiled_pages = [
+        {
+            **page,
+            "metadata": {
+                **page.get("metadata", {}),
+                "read_quality": read_quality,
+            },
+        }
+        for page in pages
+    ]
+    return {
+        "ok": True,
+        "status": "COMPLETED",
+        "extractor": extractor,
+        "read_quality": read_quality,
+        "read_profile": read_profile,
+        "pages": profiled_pages,
+    }
 
 
 def _failed(extractor: str, code: str, message: str) -> Dict[str, Any]:
@@ -338,6 +357,16 @@ def _failed(extractor: str, code: str, message: str) -> Dict[str, Any]:
         "ok": False,
         "status": "FAILED",
         "extractor": extractor,
+        "read_quality": "FAILED",
+        "read_profile": {
+            "file_type": _file_type_from_extractor(extractor),
+            "page_count": 0,
+            "sheet_count": 0,
+            "char_count": 0,
+            "has_text": False,
+            "requires_ocr": False,
+            "ocr_used": False,
+        },
         "error": {
             "code": code,
             "message": message,
@@ -346,3 +375,53 @@ def _failed(extractor: str, code: str, message: str) -> Dict[str, Any]:
         },
         "pages": [],
     }
+
+
+def _build_read_profile(*, extractor: str, pages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """基于解析页生成统一读取 Profile。"""
+
+    char_count = sum(len(str(page.get("text") or "")) for page in pages)
+    sheet_count = len([page for page in pages if page.get("sheet_name")])
+    ocr_used = any(bool((page.get("metadata") or {}).get("ocr_fallback")) for page in pages) or _extractor_uses_ocr(extractor)
+    requires_ocr = extractor == "pdf" and char_count == 0 and bool(pages)
+    return {
+        "file_type": _file_type_from_extractor(extractor),
+        "page_count": len(pages),
+        "sheet_count": sheet_count,
+        "char_count": char_count,
+        "has_text": char_count > 0,
+        "requires_ocr": requires_ocr,
+        "ocr_used": ocr_used,
+    }
+
+
+def _read_quality_from_profile(*, profile: Dict[str, Any]) -> str:
+    """把 Profile 转换为前端和 Agent 可直接使用的读取质量枚举。"""
+
+    if profile.get("requires_ocr"):
+        return "OCR_NEEDED"
+    if not profile.get("has_text"):
+        return "PARTIAL"
+    return "GOOD"
+
+
+def _file_type_from_extractor(extractor: str) -> str:
+    """把具体解析器名称归一成文件类型。"""
+
+    if extractor in {"plain-text", "csv"}:
+        return "text" if extractor == "plain-text" else "spreadsheet"
+    if extractor == "excel":
+        return "spreadsheet"
+    if extractor.startswith("doc"):
+        return "document"
+    if extractor.startswith("pdf"):
+        return "pdf"
+    if extractor in {"ocr", "paddleocr_cpu", "llm_ocr_remote"}:
+        return "image"
+    return "unknown"
+
+
+def _extractor_uses_ocr(extractor: str) -> bool:
+    """判断解析器是否已经使用 OCR。"""
+
+    return "ocr" in extractor or extractor in {"paddleocr_cpu", "llm_ocr_remote"}

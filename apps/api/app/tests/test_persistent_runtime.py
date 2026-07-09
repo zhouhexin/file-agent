@@ -23,6 +23,8 @@ from app.db.models import (
     DocumentExtractionRun,
     FileObject,
     DocumentPage,
+    ManagedFile,
+    ManagedRoot,
     Message,
     ToolInvocation,
     User,
@@ -424,6 +426,72 @@ def test_document_classification_service_reads_full_document_pages():
         assert "教师职称申报材料" in evidence_item["quote"]
         assert "职称" in evidence_item["signals"]
         assert evidence_item["source"] == "rule"
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_document_classification_service_prefers_managed_path_categories_when_available():
+    """存在已分类受管目录时，分类服务应优先使用子目录作为动态分类候选。"""
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="managed-path-classification-user")
+    document_id = _upload_document(
+        client,
+        headers,
+        filename="国家励志奖学金申请表.txt",
+        content="上传原文不会被本测试直接读取。".encode(),
+    )
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        root = ManagedRoot(
+            root_key="classified_library",
+            display_name="classified_library",
+            container_path="/managed/classified_library",
+            classification_mode="PATH_AS_CATEGORY",
+            enabled=True,
+            read_only=True,
+            allowed_operations_json=["scan", "list", "search"],
+        )
+        db.add(root)
+        db.flush()
+        db.add(
+            ManagedFile(
+                root_id=root.id,
+                relative_path="奖学金/国家励志奖学金/示例.pdf",
+                category_path="奖学金/国家励志奖学金",
+                filename="示例.pdf",
+                extension=".pdf",
+                size_bytes=128,
+                fingerprint="managed-path-example",
+                status="ACTIVE",
+            )
+        )
+        run = DocumentExtractionRun(document_id=document_id, status="COMPLETED", extractor="plain-text")
+        db.add(run)
+        db.flush()
+        db.add(
+            DocumentPage(
+                document_id=document_id,
+                extraction_run_id=run.id,
+                page_number=1,
+                text_content="本文件是国家励志奖学金申请表和承诺材料。",
+                metadata_json={},
+            )
+        )
+        db.flush()
+
+        result = DocumentClassificationService(db=db).classify(
+            document_id=document_id,
+            extraction_run_id=run.id,
+            filename="国家励志奖学金申请表.txt",
+        )
+
+        assert result["categories"][0]["name"] == "奖学金/国家励志奖学金"
+        assert result["categories"][0]["category_path"] == ["奖学金", "国家励志奖学金"]
+        assert result["categories"][0]["taxonomy_key"] == "managed_path_categories"
+        assert result["categories"][0]["source"] == "managed_path"
+        assert result["categories"][0]["evidence_items"][0]["source"] == "managed_path"
     finally:
         db.close()
         app.dependency_overrides.clear()
@@ -1130,6 +1198,58 @@ def test_classification_persistence_replaces_existing_suggestions_for_same_agent
 
         assert db.query(DocumentClassificationRun).count() == 1
         assert db.query(DocumentCategorySuggestion).count() == 2
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_classification_persistence_keeps_managed_path_source():
+    """动态子目录分类建议落库时必须保留 managed_path 来源。"""
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="classification-managed-source-user")
+    document_id = _upload_document(client, headers, filename="managed-source.txt")
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(User.username == "classification-managed-source-user").one()
+        agent_run = AgentRun(conversation_id="conv-managed-source", message_id="msg-managed-source", user_id=user.id)
+        db.add(agent_run)
+        db.flush()
+
+        persist_document_results_classifications(
+            db=db,
+            agent_run_id=agent_run.id,
+            document_results=[
+                {
+                    "document_id": document_id,
+                    "categories": [
+                        {
+                            "name": "奖学金/国家励志奖学金",
+                            "category_path": ["奖学金", "国家励志奖学金"],
+                            "confidence": 0.86,
+                            "status": "SUGGESTED",
+                            "source": "managed_path",
+                            "evidence_items": [
+                                {
+                                    "type": "text_quote",
+                                    "quote": "国家励志奖学金申请表",
+                                    "signals": ["国家励志奖学金"],
+                                    "source": "managed_path",
+                                }
+                            ],
+                            "taxonomy_key": "managed_path_categories",
+                            "taxonomy_version": "managed-path-v1",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        run = db.query(DocumentClassificationRun).one()
+        suggestion = db.query(DocumentCategorySuggestion).one()
+        assert run.source == "managed_path"
+        assert suggestion.source == "managed_path"
     finally:
         db.close()
         app.dependency_overrides.clear()

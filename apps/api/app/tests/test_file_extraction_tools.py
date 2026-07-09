@@ -179,11 +179,15 @@ def test_extract_document_text_persists_text_pages(monkeypatch, tmp_path):
 
         assert result.output_json["ok"] is True
         assert result.output_json["status"] == "COMPLETED"
+        assert result.output_json["read_quality"] == "GOOD"
+        assert result.output_json["read_profile"]["file_type"] == "text"
+        assert result.output_json["read_profile"]["char_count"] > 0
         assert result.output_json["pages"][0]["char_count"] > 0
         assert db.query(DocumentExtractionRun).count() == 1
         page = db.query(DocumentPage).one()
         assert page.document_id == document_id
         assert "张三" in page.text_content
+        assert page.metadata_json["read_quality"] == "GOOD"
     finally:
         db.close()
         clear_overrides()
@@ -302,3 +306,29 @@ def test_empty_pdf_triggers_ocr_fallback(monkeypatch, tmp_path):
     assert result["pages"][0]["text"] == "扫描 PDF OCR 文本"
     assert result["pages"][0]["metadata"]["ocr_fallback"] is True
     assert ocr_service.calls[0]["image_path"] == rendered_page
+
+
+def test_empty_pdf_marks_ocr_needed_when_ocr_disabled(monkeypatch, tmp_path):
+    """PDF 原生文本为空且 OCR 关闭时，应返回统一读取质量而不是误报 GOOD。"""
+
+    monkeypatch.setenv("OCR_ENABLED", "false")
+    config.get_settings.cache_clear()
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"fake-pdf")
+    monkeypatch.setattr(
+        "app.modules.files.extractors._extract_pdf_native_pages",
+        lambda file_path: [{"page_number": 1, "sheet_name": None, "text": "", "metadata": {"page_index": 0}}],
+    )
+
+    result = extract_document_text(
+        file_path=pdf_path,
+        filename="scan.pdf",
+        content_type="application/pdf",
+    )
+
+    assert result["ok"] is True
+    assert result["read_quality"] == "OCR_NEEDED"
+    assert result["read_profile"]["requires_ocr"] is True
+    assert result["read_profile"]["char_count"] == 0
+    assert result["pages"][0]["metadata"]["read_quality"] == "OCR_NEEDED"
+    config.get_settings.cache_clear()

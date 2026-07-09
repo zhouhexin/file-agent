@@ -690,12 +690,15 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
                 "status": "COMPLETED",
                 "extractor": run.extractor,
                 "reused": True,
+                "read_quality": _read_quality_from_persisted_pages(pages=reusable["pages"]),
+                "read_profile": _read_profile_from_persisted_pages(extractor=run.extractor, pages=reusable["pages"]),
                 "pages": [
                     {
                         "page_number": page.page_number,
                         "sheet_name": page.sheet_name,
                         "text_preview": page.text_content[:300],
                         "char_count": len(page.text_content),
+                        "metadata": page.metadata_json,
                     }
                     for page in reusable["pages"]
                 ],
@@ -757,12 +760,15 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
             "status": extraction["status"],
             "extractor": extraction["extractor"],
             "reused": False,
+            "read_quality": extraction.get("read_quality"),
+            "read_profile": extraction.get("read_profile"),
             "pages": [
                 {
                     "page_number": page.get("page_number"),
                     "sheet_name": page.get("sheet_name"),
                     "text_preview": page.get("text", "")[:300],
                     "char_count": len(page.get("text", "")),
+                    "metadata": page.get("metadata", {}),
                 }
                 for page in extraction["pages"]
             ],
@@ -782,9 +788,62 @@ def _failed_extraction_output(*, document_id: str, error: Dict[str, Any]) -> Dic
         "status": "FAILED",
         "extractor": "unknown",
         "reused": False,
+        "read_quality": "FAILED",
+        "read_profile": {
+            "file_type": "unknown",
+            "page_count": 0,
+            "sheet_count": 0,
+            "char_count": 0,
+            "has_text": False,
+            "requires_ocr": False,
+            "ocr_used": False,
+        },
         "pages": [],
         "error": error,
     }
+
+
+def _read_quality_from_persisted_pages(*, pages: list[Any]) -> str:
+    """从已持久化页面推导读取质量，优先复用页面 metadata。"""
+
+    for page in pages:
+        quality = (page.metadata_json or {}).get("read_quality")
+        if quality:
+            return str(quality)
+    return "GOOD" if any(page.text_content for page in pages) else "PARTIAL"
+
+
+def _read_profile_from_persisted_pages(*, extractor: str, pages: list[Any]) -> Dict[str, Any]:
+    """从已持久化页面反推读取 Profile，用于复用解析结果。"""
+
+    char_count = sum(len(page.text_content or "") for page in pages)
+    sheet_count = len([page for page in pages if page.sheet_name])
+    quality = _read_quality_from_persisted_pages(pages=pages)
+    return {
+        "file_type": _file_type_from_extractor_name(extractor),
+        "page_count": len(pages),
+        "sheet_count": sheet_count,
+        "char_count": char_count,
+        "has_text": char_count > 0,
+        "requires_ocr": quality == "OCR_NEEDED",
+        "ocr_used": any(bool((page.metadata_json or {}).get("ocr_fallback")) for page in pages) or "ocr" in extractor,
+    }
+
+
+def _file_type_from_extractor_name(extractor: str) -> str:
+    """把解析器名称归一为读取 Profile 的文件类型。"""
+
+    if extractor == "plain-text":
+        return "text"
+    if extractor in {"csv", "excel"}:
+        return "spreadsheet"
+    if extractor.startswith("doc"):
+        return "document"
+    if extractor.startswith("pdf"):
+        return "pdf"
+    if extractor in {"ocr", "paddleocr_cpu", "llm_ocr_remote"}:
+        return "image"
+    return "unknown"
 
 
 def _tool(

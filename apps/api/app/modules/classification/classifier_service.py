@@ -10,7 +10,9 @@ from sqlalchemy.orm import Session
 from app.core.logging import log_event
 from app.db.models import DocumentPage
 from app.modules.classification.loader import load_default_taxonomy
+from app.modules.classification.managed_path import match_managed_path_categories
 from app.modules.classification.matcher import match_document_text
+from app.modules.managed_files.repository import ManagedFileRepository
 
 
 class DocumentClassificationService:
@@ -42,8 +44,10 @@ class DocumentClassificationService:
             pages = self._load_pages(extraction_run_id=extraction_run_id)
             full_text = "\n".join(page.text_content for page in pages if page.text_content)
             classification_text = full_text or fallback_text
-            taxonomy = load_default_taxonomy()
-            categories = match_document_text(text=f"{filename}\n{classification_text}", taxonomy=taxonomy)
+            categories = self._classify_with_available_taxonomy(
+                filename=filename,
+                classification_text=classification_text,
+            )
             categories = self._judge_categories(
                 filename=filename,
                 classification_text=classification_text,
@@ -86,6 +90,31 @@ class DocumentClassificationService:
             "text_source": "document_pages" if full_text else "fallback",
         }
 
+    def _classify_with_available_taxonomy(
+        self,
+        *,
+        filename: str,
+        classification_text: str,
+    ) -> list[dict[str, Any]]:
+        """优先使用受管目录子目录分类，缺失时回退到预置 taxonomy。"""
+
+        managed_rows = self._load_managed_path_categories()
+        if managed_rows:
+            return match_managed_path_categories(
+                filename=filename,
+                text=classification_text,
+                category_rows=managed_rows,
+            )
+        taxonomy = load_default_taxonomy()
+        return match_document_text(text=f"{filename}\n{classification_text}", taxonomy=taxonomy)
+
+    def _load_managed_path_categories(self) -> list[tuple[str, str, str, int]]:
+        """读取 `PATH_AS_CATEGORY` 受管目录中的动态分类路径。"""
+
+        if self.db is None:
+            return []
+        return ManagedFileRepository(self.db).list_category_paths()
+
     def _load_pages(self, *, extraction_run_id: str) -> list[DocumentPage]:
         """按解析运行读取完整页面正文。"""
 
@@ -123,7 +152,12 @@ class DocumentClassificationService:
             }
 
         signals = [str(item) for item in category.get("evidence", []) if item]
-        evidence_item = _find_text_quote(signals=signals, pages=pages, fallback_text=fallback_text)
+        evidence_item = _find_text_quote(
+            signals=signals,
+            pages=pages,
+            fallback_text=fallback_text,
+            source=str(category.get("source") or "rule"),
+        )
         if evidence_item is None:
             return {**category, "status": "NEEDS_REVIEW", "evidence_items": []}
         return {**category, "evidence_items": [evidence_item]}
@@ -156,6 +190,7 @@ def _find_text_quote(
     signals: list[str],
     pages: list[DocumentPage],
     fallback_text: str,
+    source: str = "rule",
 ) -> dict[str, Any] | None:
     """从页面正文中定位第一个能支撑分类的证据片段。"""
 
@@ -169,7 +204,7 @@ def _find_text_quote(
                     "sheet_name": page.sheet_name,
                     "quote": quote,
                     "signals": [signal],
-                    "source": "rule",
+                    "source": source,
                 }
         quote = _quote_around_signal(text=fallback_text, signal=signal)
         if quote:
@@ -179,7 +214,7 @@ def _find_text_quote(
                 "sheet_name": None,
                 "quote": quote,
                 "signals": [signal],
-                "source": "rule",
+                "source": source,
             }
     return None
 

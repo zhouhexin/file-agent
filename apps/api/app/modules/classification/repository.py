@@ -47,6 +47,7 @@ class ClassificationRepository:
         taxonomy_key: str,
         taxonomy_version: str,
         status: str,
+        source: str = "rule",
         error_message: str | None = None,
     ) -> DocumentClassificationRun:
         """创建一个文件在本次 AgentRun 中的分类运行记录。"""
@@ -57,7 +58,7 @@ class ClassificationRepository:
             taxonomy_key=taxonomy_key,
             taxonomy_version=taxonomy_version,
             classifier_version="taxonomy-rule-v1",
-            source="rule",
+            source=source,
             status=status,
             error_message=error_message,
         )
@@ -85,7 +86,7 @@ class ClassificationRepository:
             confidence=float(category.get("confidence") or 0),
             status=str(category.get("status") or "SUGGESTED"),
             evidence_json=list(category.get("evidence_items") or category.get("evidence") or []),
-            source="rule",
+            source=str(category.get("source") or "rule"),
             rank=rank,
         )
         self.db.add(suggestion)
