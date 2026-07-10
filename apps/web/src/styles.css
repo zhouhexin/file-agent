@@ -387,17 +387,42 @@ textarea:focus {
 
 .workspace {
   display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 18px;
   min-height: calc(100vh - 64px);
   padding: 32px 28px;
 }
 
 .workspace.empty-mode {
-  align-items: center;
+  align-items: start;
+  justify-items: center;
+}
+
+.workspace > .chat-column {
+  width: 100%;
+  max-width: 900px;
+}
+
+@media (max-width: 880px) {
+  .workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workspace > .chat-sidebar {
+    order: -1;
+  }
 }
 
 .workspace.conversation-mode {
   align-items: stretch;
   padding-bottom: 190px;
+}
+
+.workspace.conversation-mode > .chat-column {
+  /* 会话态在大屏下靠左一些，避免聊天内容被右侧空白推到视觉中心偏右。 */
+  justify-self: start;
+  margin-right: auto;
+  margin-left: clamp(12px, 2vw, 44px);
 }
 
 @media (max-width: 640px) {
@@ -488,6 +513,10 @@ textarea:focus {
 
   .workspace.conversation-mode {
     padding-bottom: 210px;
+  }
+
+  .workspace.conversation-mode > .chat-column {
+    margin-left: 0;
   }
 
 }

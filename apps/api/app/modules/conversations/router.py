@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -20,6 +20,8 @@ router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 @router.get("/{conversation_id}", response_model=ConversationDetailResponse)
 def get_conversation_detail(
     conversation_id: str,
+    limit: int = Query(default=10, ge=1, le=50),
+    before_message_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ConversationDetailResponse:
@@ -28,6 +30,8 @@ def get_conversation_detail(
     return ConversationMessageService(db=db).get_conversation_detail(
         conversation_id=conversation_id,
         user_id=current_user.id,
+        limit=limit,
+        before_message_id=before_message_id,
     )
 
 

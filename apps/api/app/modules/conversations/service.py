@@ -78,7 +78,18 @@ class ConversationMessageService:
         self.db.refresh(message)
         return SendMessageResponse(message=self.repository.to_schema(message), agent_run=agent_run)
 
-    def get_conversation_detail(self, conversation_id: str, user_id: str) -> ConversationDetailResponse:
+    def get_conversation_detail(
+        self,
+        conversation_id: str,
+        user_id: str,
+        limit: int = 10,
+        before_message_id: str | None = None,
+    ) -> ConversationDetailResponse:
         """读取会话详情，供前端刷新后恢复历史聊天记录。"""
 
-        return self.repository.get_detail(conversation_id=conversation_id, user_id=user_id)
+        return self.repository.get_detail(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            limit=limit,
+            before_message_id=before_message_id,
+        )

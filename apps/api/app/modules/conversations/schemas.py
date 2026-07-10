@@ -67,6 +67,14 @@ class ConversationHistoryMessage(BaseModel):
     agent_run: AgentRunResult | None = None
 
 
+class ConversationPagination(BaseModel):
+    """会话历史分页信息，供前端向上滚动继续加载更早消息。"""
+
+    has_more: bool
+    oldest_message_id: str | None = None
+    limit: int
+
+
 class ConversationDetailResponse(BaseModel):
     """会话详情响应，用于前端刷新后恢复聊天记录。"""
 
@@ -75,6 +83,7 @@ class ConversationDetailResponse(BaseModel):
     title: str
     status: str
     messages: List[ConversationHistoryMessage]
+    pagination: ConversationPagination
 
 
 class SendMessageResponse(BaseModel):

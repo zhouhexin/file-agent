@@ -23,7 +23,42 @@
 .message-list {
   display: grid;
   gap: 44px;
+  max-height: calc(100vh - 184px);
+  overflow-y: auto;
   padding: 20px 0 144px;
+  scroll-behavior: smooth;
+}
+
+.chat-initial-loading {
+  display: flex;
+  min-height: calc(100vh - 250px);
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-loading-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid #e5e7eb;
+  border-top-color: #8b8f97;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.chat-loading-spinner-small {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
+
+.chat-history-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #667789;
+  font-size: 13px;
+  padding: 4px 0 8px;
 }
 
 .chat-turn {
@@ -784,5 +819,66 @@
 
   .file-picker {
     width: 100%;
+  }
+}
+
+/* 左侧功能菜单：保持贴近聊天背景的简约浅色样式。 */
+.chat-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 150px;
+  flex-shrink: 0;
+  padding: 8px;
+  /*border: 1px solid #e4e9f1;*/
+  /*border-radius: 16px;*/
+  background: #f8fafc;
+  color: #334e68;
+  align-self: flex-start;
+  position: sticky;
+  top: 16px;
+  max-height: calc(100vh - 120px);
+  /*box-shadow: 0 12px 32px rgb(31 41 51 / 0.04);*/
+}
+
+.sidebar-menu-item {
+  width: 100%;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: #52616f;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /*padding: 10px;*/
+  text-align: left;
+  font: inherit;
+  font-weight: 650;
+  transition: background 0.16s, color 0.16s, box-shadow 0.16s;
+}
+
+.sidebar-menu-item:hover {
+  background: #ffffff;
+  color: #2563eb;
+  box-shadow: 0 8px 18px rgb(37 99 235 / 0.08);
+}
+
+.sidebar-menu-item:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+}
+
+@media (max-width: 880px) {
+  .chat-sidebar {
+    width: 100%;
+    flex-direction: row;
+    flex-wrap: wrap;
+    position: static;
+    max-height: none;
+  }
+
+  .sidebar-menu-item {
+    flex: 1 1 160px;
   }
 }

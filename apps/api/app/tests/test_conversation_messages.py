@@ -4,12 +4,13 @@
 HTTP 消息必须能进入 LangGraph Agent Runtime，但当前不依赖真实大模型或数据库。
 """
 
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 
 from fastapi.testclient import TestClient
 import openpyxl
 
-from app.db.models import Message
+from app.db.models import Conversation, Message
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -124,6 +125,85 @@ def test_get_conversation_returns_messages_with_agent_runs_and_attachments():
     assert history_message["agent_run"]["document_results"][0]["filename"] == "message.txt"
     assert history_message["agent_run"]["document_results"][0]["extraction_status"] == "COMPLETED"
     assert history_message["agent_run"]["tool_invocations"][0]["tool_name"] == "extract-document-text"
+    clear_overrides()
+
+
+def test_get_conversation_returns_latest_page_with_pagination():
+    """会话详情默认只返回最近一页消息，避免聊天页首屏加载完整历史。"""
+
+    client, session_factory = client_with_database()
+    headers = _auth_header(client, "paged-history-user")
+    me_response = client.get("/api/auth/me", headers=headers)
+    current_user_id = me_response.json()["id"]
+    base_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with session_factory() as db:
+        db.add(Conversation(id="paged-chat", user_id=current_user_id, title=""))
+        for index in range(15):
+            db.add(
+                Message(
+                    conversation_id="paged-chat",
+                    user_id=current_user_id,
+                    role="user",
+                    content=f"历史消息 {index + 1}",
+                    attachments_json=[],
+                    created_at=base_time + timedelta(seconds=index),
+                )
+            )
+        db.commit()
+
+    response = client.get("/api/conversations/paged-chat?limit=10", headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [message["content"] for message in data["messages"]] == [
+        f"历史消息 {index}" for index in range(6, 16)
+    ]
+    assert data["pagination"]["has_more"] is True
+    assert data["pagination"]["oldest_message_id"] == data["messages"][0]["id"]
+    assert data["pagination"]["limit"] == 10
+    clear_overrides()
+
+
+def test_get_conversation_returns_older_page_before_message_id():
+    """传入 before_message_id 时返回该消息之前的更早历史。"""
+
+    client, session_factory = client_with_database()
+    headers = _auth_header(client, "older-history-user")
+    current_user_id = client.get("/api/auth/me", headers=headers).json()["id"]
+    message_ids: list[str] = []
+    base_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with session_factory() as db:
+        db.add(Conversation(id="older-chat", user_id=current_user_id, title=""))
+        for index in range(12):
+            message = Message(
+                conversation_id="older-chat",
+                user_id=current_user_id,
+                role="user",
+                content=f"消息 {index + 1}",
+                attachments_json=[],
+                created_at=base_time + timedelta(seconds=index),
+            )
+            db.add(message)
+            db.flush()
+            message_ids.append(message.id)
+        db.commit()
+
+    response = client.get(
+        f"/api/conversations/older-chat?limit=5&before_message_id={message_ids[7]}",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [message["content"] for message in data["messages"]] == [
+        "消息 3",
+        "消息 4",
+        "消息 5",
+        "消息 6",
+        "消息 7",
+    ]
+    assert data["pagination"]["has_more"] is True
+    assert data["pagination"]["oldest_message_id"] == data["messages"][0]["id"]
     clear_overrides()
 
 

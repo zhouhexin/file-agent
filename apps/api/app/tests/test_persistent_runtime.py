@@ -30,6 +30,7 @@ from app.db.models import (
     User,
 )
 from app.main import app
+from app.modules.agent.repository import AgentRunRepository
 from app.modules.agent.service import AgentRuntimeService
 from app.modules.changesets.service import persist_changeset_from_document_results
 from app.modules.classification.classifier_service import DocumentClassificationService
@@ -186,6 +187,44 @@ def test_agent_run_query_endpoints_return_persisted_records():
         for item in invocations_response.json()["tool_invocations"]
     ] == ["extract-document-text"]
     app.dependency_overrides.clear()
+
+
+def test_agent_run_result_filters_placeholder_changeset_id():
+    """历史占位 changeset-memory 不应返回给前端触发无效详情请求。"""
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="placeholder-changeset-user")
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(User.username == "placeholder-changeset-user").one()
+        run = AgentRun(
+            conversation_id="placeholder-conv",
+            message_id="placeholder-msg",
+            user_id=user.id,
+            intent="GENERAL_CHAT",
+            status="COMPLETED",
+        )
+        db.add(run)
+        db.flush()
+        invocation = ToolInvocation(
+            agent_run_id=run.id,
+            tool_name="legacy-tool",
+            input_json={},
+            output_json={"ok": True},
+            status="COMPLETED",
+            changeset_id="changeset-memory",
+        )
+        db.add(invocation)
+        db.flush()
+
+        result = AgentRunRepository(db).to_result(run, invocations=[invocation])
+
+        assert result.changeset_id is None
+        assert result.tool_invocations[0].changeset_id == "changeset-memory"
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
 
 
 def test_llm_summary_message_extracts_document_text_instead_of_insights():

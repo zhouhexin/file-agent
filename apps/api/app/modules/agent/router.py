@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.modules.agent.capabilities.service import load_agent_capabilities
 from app.modules.agent.repository import AgentRunRepository
 from app.modules.agent.state import AgentRunResult, ToolInvocationRecord
 from app.modules.agent.tool_registry import ToolRegistry
@@ -26,6 +27,13 @@ def list_agent_tools() -> dict:
     """返回白名单 Registry 暴露的 MVP Tool 目录。"""
 
     return {"tools": ToolRegistry().list_tools()}
+
+
+@router.get("/capabilities")
+def get_agent_capabilities() -> dict:
+    """返回前端新手引导和能力介绍使用的固定能力清单。"""
+
+    return load_agent_capabilities(detail_level="brief")
 
 
 @agent_runs_router.get("/{agent_run_id}", response_model=AgentRunResult)

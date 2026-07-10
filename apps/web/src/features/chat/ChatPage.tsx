@@ -1,5 +1,5 @@
-import { ChangeEvent, FormEvent, useEffect, useRef, useState } from 'react';
-import { LogOut, MessageSquare, Paperclip, Send, User as UserIcon } from 'lucide-react';
+import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { BookOpen, LogOut, MessageSquare, Paperclip, Send, User as UserIcon } from 'lucide-react';
 
 import {
   ApiError,
@@ -10,7 +10,7 @@ import {
   uploadFile,
 } from '../../api/client';
 import { formatError } from '../../api/errors';
-import type { User } from '../../types';
+import type { ConversationHistoryMessage, User } from '../../types';
 import { AttachmentRail } from './AttachmentRail';
 import { ChatTurnView } from './ChatTurnView';
 import { canPreviewInBrowser } from './presentation';
@@ -46,9 +46,42 @@ type ChatPageProps = {
   token: string;
   user: User;
   onLogout: () => void;
+  onOpenOnboarding: () => void;
+  initialDraft?: string;
 };
 
-export function ChatPage({ token, user, onLogout }: ChatPageProps) {
+const HISTORY_PAGE_SIZE = 10;
+
+function historyMessagesToTurns(messages: ConversationHistoryMessage[]): ChatTurn[] {
+  // 后端已保证分页消息按时间正序返回，前端只负责转换为聊天展示结构。
+  return messages.map((historyMessage) => ({
+    id: historyMessage.id,
+    userText: historyMessage.content,
+    attachments: historyMessage.attachments,
+    response: historyMessage.agent_run
+      ? {
+          message: {
+            id: historyMessage.id,
+            conversation_id: historyMessage.conversation_id,
+            user_id: historyMessage.user_id,
+            role: historyMessage.role,
+            content: historyMessage.content,
+            attachments: historyMessage.attachments.map((file) => ({ document_id: file.document_id })),
+          },
+          agent_run: historyMessage.agent_run,
+        }
+      : undefined,
+    status: 'completed',
+  }));
+}
+
+export function ChatPage({
+  token,
+  user,
+  onLogout,
+  onOpenOnboarding,
+  initialDraft,
+}: ChatPageProps) {
   // ChatPage 管理对话工作台状态；具体展示交给 features/chat 下的展示组件。
   const [message, setMessage] = useState('');
   const [draftAttachments, setDraftAttachments] = useState<ChatAttachment[]>([]);
@@ -57,10 +90,29 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
+  const [loadingMoreHistory, setLoadingMoreHistory] = useState(false);
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const previewUrls = useRef<Set<string>>(new Set());
+  const messageListRef = useRef<HTMLDivElement | null>(null);
   const hasTurns = chatTurns.length > 0;
   const primaryConversationId = getWebConversationId(user.id);
   const [conversationId, setConversationId] = useState(primaryConversationId);
+
+  const scrollMessageListToBottom = useCallback(() => {
+    requestAnimationFrame(() => {
+      const messageList = messageListRef.current;
+      if (messageList) {
+        messageList.scrollTop = messageList.scrollHeight;
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    // 引导页跳转过来时携带示例问题，直接填入输入框。
+    if (initialDraft) {
+      setMessage(initialDraft);
+    }
+  }, [initialDraft]);
 
   useEffect(() => {
     // 页面卸载时统一释放仍在展示的图片预览 object URL。
@@ -75,11 +127,12 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
     // 工作台启动时恢复当前用户自己的 Web 会话；新 ID 没有历史时兼容读取旧版 web-chat。
     let cancelled = false;
     setHistoryLoading(true);
+    setHasMoreHistory(false);
     setConversationId(primaryConversationId);
-    getConversationDetail(token, primaryConversationId)
+    getConversationDetail(token, primaryConversationId, { limit: HISTORY_PAGE_SIZE })
       .catch((err) => {
         if (err instanceof ApiError && err.status === 404) {
-          return getConversationDetail(token, getLegacyWebConversationId())
+          return getConversationDetail(token, getLegacyWebConversationId(), { limit: HISTORY_PAGE_SIZE })
             .then((conversation) => {
               setConversationId(conversation.id);
               return conversation;
@@ -99,27 +152,12 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
         }
         if (!conversation) {
           setChatTurns([]);
+          setHasMoreHistory(false);
           return;
         }
-        setChatTurns(conversation.messages.map((historyMessage) => ({
-          id: historyMessage.id,
-          userText: historyMessage.content,
-          attachments: historyMessage.attachments,
-          response: historyMessage.agent_run
-            ? {
-                message: {
-                  id: historyMessage.id,
-                  conversation_id: historyMessage.conversation_id,
-                  user_id: historyMessage.user_id,
-                  role: historyMessage.role,
-                  content: historyMessage.content,
-                  attachments: historyMessage.attachments.map((file) => ({ document_id: file.document_id })),
-                },
-                agent_run: historyMessage.agent_run,
-              }
-            : undefined,
-          status: 'completed',
-        })));
+        setChatTurns(historyMessagesToTurns(conversation.messages));
+        setHasMoreHistory(conversation.pagination.has_more);
+        scrollMessageListToBottom();
       })
       .catch((err) => {
         if (cancelled) {
@@ -138,7 +176,55 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
     return () => {
       cancelled = true;
     };
-  }, [primaryConversationId, token]);
+  }, [primaryConversationId, scrollMessageListToBottom, token]);
+
+  const loadOlderHistory = useCallback(async () => {
+    const beforeMessageId = chatTurns[0]?.id;
+    const messageList = messageListRef.current;
+    if (!beforeMessageId || !hasMoreHistory || loadingMoreHistory || historyLoading) {
+      return;
+    }
+
+    const previousHeight = messageList?.scrollHeight ?? 0;
+    const previousTop = messageList?.scrollTop ?? 0;
+    setLoadingMoreHistory(true);
+    setError('');
+    try {
+      const conversation = await getConversationDetail(token, conversationId, {
+        limit: HISTORY_PAGE_SIZE,
+        beforeMessageId,
+      });
+      const olderTurns = historyMessagesToTurns(conversation.messages);
+      setChatTurns((current) => {
+        const existingIds = new Set(current.map((turn) => turn.id));
+        return [
+          ...olderTurns.filter((turn) => !existingIds.has(turn.id)),
+          ...current,
+        ];
+      });
+      setHasMoreHistory(conversation.pagination.has_more);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setLoadingMoreHistory(false);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const nextMessageList = messageListRef.current;
+          if (nextMessageList) {
+            nextMessageList.scrollTop = nextMessageList.scrollHeight - previousHeight + previousTop;
+          }
+        });
+      });
+    }
+  }, [chatTurns, conversationId, hasMoreHistory, historyLoading, loadingMoreHistory, token]);
+
+  function handleMessageListScroll() {
+    const messageList = messageListRef.current;
+    if (!messageList || messageList.scrollTop > 80) {
+      return;
+    }
+    void loadOlderHistory();
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -157,6 +243,7 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
         status: 'sending',
       },
     ]);
+    scrollMessageListToBottom();
     setMessage('');
     setDraftAttachments([]);
 
@@ -170,6 +257,7 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
       setChatTurns((current) => current.map((turn) => (
         turn.id === turnId ? { ...turn, response: result, status: 'completed' } : turn
       )));
+      scrollMessageListToBottom();
     } catch (err) {
       setChatTurns((current) => current.map((turn) => (
         turn.id === turnId ? { ...turn, status: 'failed' } : turn
@@ -278,21 +366,50 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
         <div className="user-box">
           <UserIcon size={18} />
           <span>{user.display_name || user.username}</span>
-          <button className="icon-button" type="button" onClick={onLogout} title="退出登录">
-            <LogOut size={18} />
-          </button>
         </div>
       </header>
 
       <section className={hasTurns ? 'workspace conversation-mode' : 'workspace empty-mode'}>
+        <aside className="chat-sidebar" aria-label="聊天功能菜单">
+          <button
+            className="sidebar-menu-item"
+            type="button"
+            onClick={onOpenOnboarding}
+          >
+            <BookOpen size={16} />
+            <span>功能介绍</span>
+          </button>
+          {/*<button*/}
+          {/*  className="sidebar-menu-item"*/}
+          {/*  type="button"*/}
+          {/*  onClick={onLogout}*/}
+          {/*>*/}
+          {/*  <LogOut size={18} />*/}
+          {/*  <span>退出登录</span>*/}
+          {/*</button>*/}
+        </aside>
         <div className="chat-column">
-          {!hasTurns ? (
+          {historyLoading && !hasTurns ? (
+            <div className="chat-initial-loading" aria-label="正在加载对话">
+              <div className="chat-loading-spinner" />
+            </div>
+          ) : !hasTurns ? (
             <div className="empty-chat-heading">
               <h2>有什么我能帮你的吗？</h2>
               <p>上传图片或文件后，直接用自然语言描述你要完成的工作。</p>
             </div>
           ) : (
-            <div className="message-list">
+            <div
+              ref={messageListRef}
+              className="message-list"
+              onScroll={handleMessageListScroll}
+            >
+              {loadingMoreHistory ? (
+                <div className="chat-history-loading" aria-live="polite">
+                  <span className="chat-loading-spinner chat-loading-spinner-small" />
+                  <span>正在加载更早的消息</span>
+                </div>
+              ) : null}
               {chatTurns.map((turn) => (
                 <ChatTurnView
                   key={turn.id}
@@ -314,6 +431,8 @@ export function ChatPage({ token, user, onLogout }: ChatPageProps) {
             <textarea
               value={message}
               onChange={(event) => setMessage(event.target.value)}
+              disabled={historyLoading}
+              placeholder={historyLoading ? '正在加载对话...' : ''}
               rows={1}
               required
             />

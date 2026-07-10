@@ -1,4 +1,12 @@
-import type { ChangeSetResponse, ConversationDetailResponse, SendMessageResponse, TokenResponse, UploadedFile, User } from '../types';
+import type {
+  AgentCapabilityCatalog,
+  ChangeSetResponse,
+  ConversationDetailResponse,
+  SendMessageResponse,
+  TokenResponse,
+  UploadedFile,
+  User,
+} from '../types';
 
 // API 地址集中管理，后续部署时只需要调整 VITE_API_BASE_URL。
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000/api';
@@ -41,6 +49,13 @@ export async function getCurrentUser(token: string): Promise<User> {
   return request<User>('/auth/me', { token });
 }
 
+export async function getAgentCapabilities(
+  token: string,
+): Promise<AgentCapabilityCatalog> {
+  // 功能介绍页使用固定能力清单，避免前端和 Agent 能力说明出现两套文案。
+  return request<AgentCapabilityCatalog>('/agent/capabilities', { token });
+}
+
 export async function sendAgentMessage(
   token: string,
   conversationId: string,
@@ -57,9 +72,21 @@ export async function sendAgentMessage(
   });
 }
 
-export async function getConversationDetail(token: string, conversationId: string): Promise<ConversationDetailResponse> {
+export async function getConversationDetail(
+  token: string,
+  conversationId: string,
+  options: { limit?: number; beforeMessageId?: string } = {},
+): Promise<ConversationDetailResponse> {
   // 页面刷新后通过会话详情接口恢复历史消息、附件和对应 AgentRun。
-  return request<ConversationDetailResponse>(`/conversations/${conversationId}`, { token });
+  const params = new URLSearchParams();
+  if (options.limit) {
+    params.set('limit', String(options.limit));
+  }
+  if (options.beforeMessageId) {
+    params.set('before_message_id', options.beforeMessageId);
+  }
+  const query = params.toString();
+  return request<ConversationDetailResponse>(`/conversations/${conversationId}${query ? `?${query}` : ''}`, { token });
 }
 
 export async function fetchUploadedFileBlob(token: string, documentId: string): Promise<Blob> {

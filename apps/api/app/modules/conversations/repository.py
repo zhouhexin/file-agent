@@ -8,8 +8,9 @@ from __future__ import annotations
 import re
 from uuid import uuid4
 
-from sqlalchemy.orm import Session
 from fastapi import HTTPException
+from sqlalchemy import or_
+from sqlalchemy.orm import Session
 
 from app.db.models import AgentRun, Conversation, Document, Message
 from app.modules.agent.repository import AgentRunRepository
@@ -18,6 +19,7 @@ from app.modules.conversations.schemas import (
     ConversationDetailResponse,
     ConversationHistoryMessage,
     ConversationMessage,
+    ConversationPagination,
     MessageAttachment,
 )
 
@@ -265,15 +267,20 @@ class ConversationRepository:
             raise HTTPException(status_code=403, detail="Conversation belongs to another user")
         return conversation
 
-    def get_detail(self, conversation_id: str, user_id: str) -> ConversationDetailResponse:
+    def get_detail(
+        self,
+        conversation_id: str,
+        user_id: str,
+        limit: int = 10,
+        before_message_id: str | None = None,
+    ) -> ConversationDetailResponse:
         """组装会话详情，包含消息、附件摘要和每条消息对应的 AgentRun。"""
 
         conversation = self.get_conversation_for_user(conversation_id=conversation_id, user_id=user_id)
-        messages = (
-            self.db.query(Message)
-            .filter(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.asc(), Message.id.asc())
-            .all()
+        messages, has_more = self._load_message_page(
+            conversation_id=conversation_id,
+            limit=limit,
+            before_message_id=before_message_id,
         )
         document_map = self._load_document_map(messages=messages, user_id=user_id)
         agent_run_map = self._load_agent_run_map(messages=messages)
@@ -302,7 +309,49 @@ class ConversationRepository:
                 )
                 for message in messages
             ],
+            pagination=ConversationPagination(
+                has_more=has_more,
+                oldest_message_id=messages[0].id if messages else None,
+                limit=limit,
+            ),
         )
+
+    def _load_message_page(
+        self,
+        *,
+        conversation_id: str,
+        limit: int,
+        before_message_id: str | None,
+    ) -> tuple[list[Message], bool]:
+        """读取一页消息。
+
+        数据库查询用倒序拿最近记录，返回前再恢复时间正序，前端可直接追加渲染。
+        """
+
+        query = self.db.query(Message).filter(Message.conversation_id == conversation_id)
+        if before_message_id:
+            before_message = (
+                self.db.query(Message)
+                .filter(Message.conversation_id == conversation_id, Message.id == before_message_id)
+                .one_or_none()
+            )
+            if before_message is None:
+                raise HTTPException(status_code=404, detail="Message not found")
+            query = query.filter(
+                or_(
+                    Message.created_at < before_message.created_at,
+                    (Message.created_at == before_message.created_at) & (Message.id < before_message.id),
+                )
+            )
+        rows = (
+            query.order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(limit + 1)
+            .all()
+        )
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        page.reverse()
+        return page, has_more
 
     def _load_document_map(self, *, messages: list[Message], user_id: str) -> dict[str, Document]:
         """批量加载历史消息引用的文档，避免逐条消息查询。"""

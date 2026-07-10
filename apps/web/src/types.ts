@@ -94,6 +94,11 @@ export type ConversationDetailResponse = {
   title: string;
   status: string;
   messages: ConversationHistoryMessage[];
+  pagination: {
+    has_more: boolean;
+    oldest_message_id: string | null;
+    limit: number;
+  };
 };
 
 export type SendMessageResponse = {
@@ -133,4 +138,17 @@ export type DocumentResult = {
     code?: string;
     message?: string;
   }>;
+};
+
+export type AgentCapability = {
+  id: string;
+  name: string;
+  description: string;
+  examples: string[];
+};
+
+export type AgentCapabilityCatalog = {
+  ok: boolean;
+  version: string;
+  capabilities: AgentCapability[];
 };

@@ -7,6 +7,9 @@ import { DocumentResultCard } from './DocumentResultCard';
 import type { ChatAttachment } from './presentation';
 import { findAttachmentByDocumentId, hasFileMutation } from './presentation';
 
+const CHANGESET_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const changeSetItemsCache = new Map<string, Promise<ChangeItem[]>>();
+
 type AgentRunReceiptProps = {
   token?: string;
   state?: 'running' | 'failed';
@@ -46,25 +49,29 @@ export function AgentRunReceipt({
 
   useEffect(() => {
     let cancelled = false;
-    if (!token || !agentRun?.changeset_id) {
+    const changesetId = agentRun?.changeset_id ?? '';
+    if (!token || results.length === 0 || !isPersistedChangeSetId(changesetId)) {
       setChangeItems(null);
       return;
     }
-    getChangeSet(token, agentRun.changeset_id)
-      .then((changeset) => {
-        if (!cancelled) {
-          setChangeItems(changeset.items);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setChangeItems(null);
-        }
-      });
+    const timeoutId = window.setTimeout(() => {
+      getCachedChangeSetItems(token, changesetId)
+        .then((items) => {
+          if (!cancelled) {
+            setChangeItems(items);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setChangeItems(null);
+          }
+        });
+    }, 0);
     return () => {
       cancelled = true;
+      window.clearTimeout(timeoutId);
     };
-  }, [agentRun?.changeset_id, token]);
+  }, [agentRun?.changeset_id, results.length, token]);
 
   if (state === 'running') {
     return (
@@ -137,4 +144,25 @@ export function AgentRunReceipt({
       ) : null}
     </section>
   );
+}
+
+function isPersistedChangeSetId(changesetId: string): boolean {
+  // 后端真实 ChangeSet 使用 UUID；changeset-memory 等旧占位值不能触发详情请求。
+  return CHANGESET_ID_PATTERN.test(changesetId);
+}
+
+function getCachedChangeSetItems(token: string, changesetId: string): Promise<ChangeItem[]> {
+  // 历史消息中可能重复引用同一个 ChangeSet，缓存 Promise 可减少进入聊天页时的重复请求。
+  const cached = changeSetItemsCache.get(changesetId);
+  if (cached) {
+    return cached;
+  }
+  const promise = getChangeSet(token, changesetId)
+    .then((changeset) => changeset.items)
+    .catch((error) => {
+      changeSetItemsCache.delete(changesetId);
+      throw error;
+    });
+  changeSetItemsCache.set(changesetId, promise);
+  return promise;
 }
