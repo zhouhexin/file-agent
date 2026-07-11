@@ -132,6 +132,39 @@ def test_managed_file_list_tool_filters_extension_and_filename(monkeypatch, tmp_
         clear_overrides()
 
 
+def test_managed_file_list_tool_filters_keyword_in_filename_or_relative_path(monkeypatch, tmp_path):
+    """年份等关键字应同时匹配文件名和相对路径，支持“党办 2026”组合条件。"""
+
+    managed_root = tmp_path / "downloads"
+    party_2026_dir = managed_root / "党办" / "2026"
+    party_2025_dir = managed_root / "党办" / "2025"
+    office_dir = managed_root / "教务处"
+    party_2026_dir.mkdir(parents=True)
+    party_2025_dir.mkdir(parents=True)
+    office_dir.mkdir(parents=True)
+    (party_2026_dir / "通知.pdf").write_text("notice", encoding="utf-8")
+    (party_2025_dir / "通知.pdf").write_text("old notice", encoding="utf-8")
+    (managed_root / "党办2026工作计划.docx").write_text("plan", encoding="utf-8")
+    (office_dir / "2026通知.pdf").write_text("other", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
+    client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        result = ToolRegistry(db=db, user_id="user-1").invoke(
+            "managed-file-list",
+            {"path_prefix": "党办", "filename_contains": "2026"},
+        )
+
+        assert result.status == "COMPLETED"
+        assert [file["relative_path"] for file in result.output_json["files"]] == [
+            "党办/2026/通知.pdf",
+        ]
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def test_managed_file_list_tool_treats_unknown_root_as_single_configured_subdirectory(monkeypatch, tmp_path):
     """只有一个 env 受管根时，未配置 root_key 应按该根下子目录解析。"""
 

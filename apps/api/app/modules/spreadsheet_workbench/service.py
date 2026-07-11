@@ -12,6 +12,7 @@ from typing import Any
 import openpyxl
 from openpyxl.cell.cell import Cell
 
+from app.modules.spreadsheet_analysis.conversion import prepared_spreadsheet_path
 from app.modules.spreadsheet_analysis.profiler import (
     SUPPORTED_SPREADSHEET_SUFFIXES,
     profile_workbook,
@@ -51,7 +52,7 @@ class SpreadsheetWorkbenchService:
                 filename=filename,
                 file_type=suffix,
                 code="UNSUPPORTED_FILE_TYPE",
-                message="当前表格工作台仅支持 .xlsx、.xlsm、.csv 和 .tsv 文件。",
+                message="当前表格工作台仅支持 .xls、.xlsx、.xlsm、.csv 和 .tsv 文件。",
             )
 
         try:
@@ -105,7 +106,7 @@ class SpreadsheetWorkbenchService:
                 filename=filename,
                 file_type=suffix,
                 code="UNSUPPORTED_FILE_TYPE",
-                message="当前表格校验仅支持 .xlsx、.xlsm、.csv 和 .tsv 文件。",
+                message="当前表格校验仅支持 .xls、.xlsx、.xlsm、.csv 和 .tsv 文件。",
             )
 
         profile_result = self.profile(
@@ -130,7 +131,7 @@ class SpreadsheetWorkbenchService:
             if isinstance(item, dict)
         ]
 
-        if suffix in {".xlsx", ".xlsm"}:
+        if suffix in {".xls", ".xlsx", ".xlsm"}:
             try:
                 formula_errors.extend(_scan_excel_formula_errors(file_path=file_path))
             except Exception as exc:
@@ -170,31 +171,32 @@ class SpreadsheetWorkbenchService:
 def _scan_excel_formula_errors(*, file_path: Path) -> list[FormulaError]:
     """用 data_only=False 读取公式文本，避免保存时丢失公式。"""
 
-    workbook = openpyxl.load_workbook(
-        filename=file_path,
-        read_only=True,
-        data_only=False,
-        keep_links=True,
-    )
-    try:
-        errors: list[FormulaError] = []
-        for worksheet in workbook.worksheets:
-            for row in worksheet.iter_rows():
-                for cell in row:
-                    error = _formula_error_from_cell(cell)
-                    if error is None:
-                        continue
-                    errors.append(
-                        FormulaError(
-                            sheet_name=worksheet.title,
-                            cell=cell.coordinate,
-                            error=error,
-                            formula=str(cell.value or ""),
+    with prepared_spreadsheet_path(file_path=file_path) as readable_path:
+        workbook = openpyxl.load_workbook(
+            filename=readable_path,
+            read_only=True,
+            data_only=False,
+            keep_links=True,
+        )
+        try:
+            errors: list[FormulaError] = []
+            for worksheet in workbook.worksheets:
+                for row in worksheet.iter_rows():
+                    for cell in row:
+                        error = _formula_error_from_cell(cell)
+                        if error is None:
+                            continue
+                        errors.append(
+                            FormulaError(
+                                sheet_name=worksheet.title,
+                                cell=cell.coordinate,
+                                error=error,
+                                formula=str(cell.value or ""),
+                            )
                         )
-                    )
-        return errors
-    finally:
-        workbook.close()
+            return errors
+        finally:
+            workbook.close()
 
 
 def _formula_error_from_cell(cell: Cell) -> str | None:

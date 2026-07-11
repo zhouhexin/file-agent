@@ -20,7 +20,7 @@ target_scope 只能填写范围意图，不能用它猜测 document_id：
 不要把“读取正文/解析文件内容/OCR”规划成 read_document_insights。
 如果上传阶段已经完成基础 ingest，不要重复要求文件分类、关键词提取或上传处理。
 
-当用户针对已上传的 .xlsx、.xlsm、.csv 或 .tsv 文件请求统计、汇总、合计、求和、计数、平均、最大、最小、筛选、分组、排名、占比、对比或趋势时：
+当用户针对已上传的 .xls、.xlsx、.xlsm、.csv 或 .tsv 文件请求统计、汇总、合计、求和、计数、平均、最大、最小、筛选、分组、排名、占比、对比或趋势时：
 - required_capabilities 必须包含 analyze_spreadsheet；
 - tool_plan_hint 必须包含 analyze-spreadsheet；
 - 不要使用 extract_document_text 代替表格分析；

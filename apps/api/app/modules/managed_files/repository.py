@@ -117,7 +117,13 @@ class ManagedFileRepository:
             normalized_extension = extension if extension.startswith(".") else f".{extension}"
             query = query.filter(ManagedFile.extension == normalized_extension.lower())
         if filename_contains:
-            query = query.filter(ManagedFile.filename.contains(filename_contains))
+            # 用户说“2026年的文件”时，年份可能在文件名里，也可能是相对目录的一段。
+            query = query.filter(
+                or_(
+                    ManagedFile.filename.contains(filename_contains),
+                    ManagedFile.relative_path.contains(filename_contains),
+                )
+            )
         if status:
             query = query.filter(ManagedFile.status == status)
         query = _exclude_hidden_managed_paths(query)

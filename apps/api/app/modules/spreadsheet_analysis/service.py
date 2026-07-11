@@ -44,7 +44,7 @@ class SpreadsheetAnalysisService:
         if suffix not in SUPPORTED_SPREADSHEET_SUFFIXES:
             return _failed(
                 code="UNSUPPORTED_FILE_TYPE",
-                message="当前表格分析仅支持 .xlsx、.xlsm、.csv 和 .tsv 文件。",
+                message="当前表格分析仅支持 .xls、.xlsx、.xlsm、.csv 和 .tsv 文件。",
             )
 
         try:

@@ -54,7 +54,7 @@ SPREADSHEET_ANALYSIS_HINTS = {"analyze_spreadsheet", "analyze-spreadsheet"}
 SPREADSHEET_PROFILE_HINTS = {"profile_spreadsheet", "profile-spreadsheet"}
 SPREADSHEET_VALIDATE_HINTS = {"validate_spreadsheet", "validate-spreadsheet"}
 MANAGED_FILE_LIST_HINTS = {"managed_file_list", "managed-file-list"}
-SPREADSHEET_SUFFIXES = {".xlsx", ".xlsm", ".csv", ".tsv"}
+SPREADSHEET_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".csv", ".tsv"}
 MANAGED_EXTENSION_ALIASES = {
     "pdf": "pdf",
     ".pdf": "pdf",
@@ -174,11 +174,11 @@ class DeterministicPlanner:
         managed_extension = _managed_extension_from_list_request(message)
         managed_filename_contains = _managed_filename_contains_from_list_request(message)
         managed_root_key = _managed_root_key_from_list_request(message)
+        managed_path_prefix = _managed_path_prefix_from_list_request(
+            message=message,
+            root_key=managed_root_key,
+        )
         if managed_root_key:
-            managed_path_prefix = _managed_path_prefix_from_list_request(
-                message=message,
-                root_key=managed_root_key,
-            )
             return _managed_file_list_plan(
                 user_goal=message,
                 root_key=managed_root_key,
@@ -188,12 +188,14 @@ class DeterministicPlanner:
             )
         if _has_managed_file_list_filter_intent(
             message=message,
+            path_prefix=managed_path_prefix,
             extension=managed_extension,
             filename_contains=managed_filename_contains,
-        ):
+        ) and not attachments:
             return _managed_file_list_plan(
                 user_goal=message,
                 root_key=None,
+                path_prefix=managed_path_prefix,
                 extension=managed_extension,
                 filename_contains=managed_filename_contains,
             )
@@ -1116,6 +1118,7 @@ def _has_capability_help_intent(*, message: str, lowered: str) -> bool:
         "系统有什么功能",
         "可以帮我做什么",
         "你可以实现什么功能",
+        "系统有哪些功能",
     ]
     english_patterns = ["what can you do", "capabilities", "what are your features"]
     return any(pattern in message for pattern in chinese_patterns) or any(
@@ -1181,7 +1184,12 @@ def _managed_extension_from_list_request(message: str) -> str | None:
 def _managed_filename_contains_from_list_request(message: str) -> str | None:
     """从“文件名包含 xxx”这类表达中提取文件名关键字。"""
 
+    year = _managed_year_from_list_request(message)
+    if year:
+        return year
+
     patterns = [
+        r"(?:关于|有关|相关|主题为|关键词为)\s*[“\"']?(?P<keyword>[^”\"'，。！？]+?)[”\"']?(?:的)?(?:[A-Za-z0-9.]+)?(?:文件|文档|材料)?(?:$|[，。！？\s])",
         r"(?:文件名|名称|名字)\s*(?:包含|含有|带有|里有|中有)\s*[“\"']?(?P<keyword>[^”\"'，。！？\s]+?)[”\"']?(?:的)?(?:[A-Za-z0-9.]+)?(?:文件|文档)?(?:$|[，。！？\s])",
         r"(?:包含|含有|带有)\s*[“\"']?(?P<keyword>[^”\"'，。！？\s]+?)[”\"']?\s*(?:的)?(?:[A-Za-z0-9.]+)?(?:文件|文档)(?:$|[，。！？\s])",
     ]
@@ -1192,18 +1200,22 @@ def _managed_filename_contains_from_list_request(message: str) -> str | None:
         keyword = _normalize_managed_filename_keyword(match.group("keyword"))
         if keyword:
             return keyword
+    directory_subject = _managed_directory_subject_keyword_from_list_request(message)
+    if directory_subject:
+        return directory_subject
     return None
 
 
 def _has_managed_file_list_filter_intent(
     *,
     message: str,
+    path_prefix: str | None,
     extension: str | None,
     filename_contains: str | None,
 ) -> bool:
     """判断无明确 root 时是否仍是受管文件元数据列表请求。"""
 
-    if not (extension or filename_contains):
+    if not (path_prefix or extension or filename_contains):
         return False
     return any(keyword in message for keyword in ["列出", "查看", "显示"]) and "文件" in message
 
@@ -1212,7 +1224,22 @@ def _managed_path_prefix_from_list_request(*, message: str, root_key: str | None
     """从“root_key 下某子目录中的文件”提取受管目录内的相对路径。"""
 
     if not root_key:
-        return None
+        if not any(keyword in message for keyword in ["列出", "查看", "显示"]) or "文件" not in message:
+            return None
+        tail = re.sub(r"^(?:列出|查看|显示)\s*", "", message).strip()
+        tail = _strip_managed_file_filter_words(tail)
+        tail = _strip_managed_year_filter_words(tail)
+        subject_prefix = _managed_directory_prefix_from_subject_tail(tail)
+        if subject_prefix:
+            return _normalize_managed_path_prefix(subject_prefix)
+        tail = _strip_managed_subject_filter_words(tail)
+        tail = re.sub(r"^(?:的)?(?:所有|全部)?\s*", "", tail)
+        tail = re.sub(
+            r"\s*(?:目录|文件夹)?(?:中|里|下|里面)?(?:的)?(?:所有|全部)?(?:文件|目录)\s*$",
+            "",
+            tail,
+        )
+        return _normalize_managed_path_prefix(tail)
 
     escaped_root = re.escape(root_key)
     slash_match = re.search(
@@ -1231,6 +1258,8 @@ def _managed_path_prefix_from_list_request(*, message: str, root_key: str | None
     tail = tail.strip()
     tail = re.sub(r"^(?:的)?(?:所有|全部)?\s*", "", tail)
     tail = _strip_managed_file_filter_words(tail)
+    tail = _strip_managed_year_filter_words(tail)
+    tail = _strip_managed_subject_filter_words(tail)
     tail = re.sub(r"(?:目录|文件夹)?(?:中|里|下|里面)(?:的)?$", "", tail).strip()
     tail = re.sub(r"(?:目录|文件夹)$", "", tail).strip()
     tail = re.sub(
@@ -1281,6 +1310,56 @@ def _strip_managed_file_filter_words(value: str) -> str:
     return stripped
 
 
+def _managed_year_from_list_request(message: str) -> str | None:
+    """提取受管文件列表请求中的年份过滤条件。"""
+
+    match = re.search(r"(?P<year>(?:19|20)\d{2})\s*年?", message)
+    if not match:
+        return None
+    return match.group("year")
+
+
+def _managed_directory_subject_keyword_from_list_request(message: str) -> str | None:
+    """提取“目录下 xxx 的相关文件”中的文件名关键字。"""
+
+    match = re.search(
+        r"(?:下|中|里|里面)\s*(?:(?:关于|有关)\s*[“\"']?(?P<marked>[^”\"'，。！？]+?)[”\"']?(?:的)?(?:相关)?|[“\"']?(?P<related>[^”\"'，。！？]+?)[”\"']?(?:的)?相关)(?:文件|文档|材料)(?:$|[，。！？\s])",
+        message,
+    )
+    if not match:
+        return None
+    return _normalize_managed_filename_keyword(match.group("marked") or match.group("related"))
+
+
+def _managed_directory_prefix_from_subject_tail(value: str) -> str | None:
+    """从“党办下科学发展观的相关文件”中提取目录前缀“党办”。"""
+
+    match = re.search(
+        r"^(?P<prefix>.+?)(?:下|中|里|里面)\s*(?:关于|有关)?\s*[“\"']?[^”\"'，。！？]+?[”\"']?(?:的)?(?:相关)?(?:文件|文档|材料)?$",
+        value,
+    )
+    if not match:
+        return None
+    return match.group("prefix").strip()
+
+
+def _strip_managed_year_filter_words(value: str) -> str:
+    """从目录片段中移除年份表达，避免“党办2026年”整体变成目录名。"""
+
+    return re.sub(r"(?:19|20)\d{2}\s*年?(?:的)?", "", value).strip()
+
+
+def _strip_managed_subject_filter_words(value: str) -> str:
+    """从目录片段中移除“关于 xxx 的文件”这类文件名关键字表达。"""
+
+    stripped = re.sub(
+        r"(?:中|里|下|里面)?(?:(?:关于|有关|主题为|关键词为)\s*[“\"']?[^”\"'，。！？]+?[”\"']?(?:的)?(?:相关)?(?:文件|文档|材料)?|[“\"']?[^”\"'，。！？]+?[”\"']?的相关(?:文件|文档|材料)?)$",
+        "",
+        value,
+    ).strip()
+    return stripped
+
+
 def _is_known_managed_file_extension(value: str) -> bool:
     """判断字符串是否是已知文件扩展名或别名。"""
 
@@ -1296,11 +1375,12 @@ def _normalize_managed_filename_keyword(value: str | None) -> str | None:
     if value is None:
         return None
     keyword = value.strip().strip("“”\"'").strip()
+    keyword = re.sub(r"(?:的)?相关$", "", keyword).strip()
     extension_words = "|".join(
         sorted((re.escape(item.lstrip(".")) for item in MANAGED_EXTENSION_ALIASES), key=len, reverse=True)
     )
     keyword = re.sub(
-        rf"(?:的)?(?:所有|全部)?(?:{extension_words})?(?:文件|文档|表格|图片)$",
+        rf"(?:的)?(?:相关)?(?:所有|全部)?(?:{extension_words})?(?:文件|文档|表格|图片|材料)$",
         "",
         keyword,
         flags=re.IGNORECASE,

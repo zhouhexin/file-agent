@@ -255,6 +255,41 @@ def test_extract_document_text_supports_doc_with_textutil(monkeypatch, tmp_path)
     assert "电子发票承诺书" in result["pages"][0]["text"]
 
 
+def test_extract_document_text_converts_xls_before_reading(monkeypatch, tmp_path):
+    """旧版 xls 必须先转换为派生 xlsx，再交给 openpyxl 读取。"""
+
+    xls_path = tmp_path / "奖学金汇总.xls"
+    xls_path.write_bytes(b"legacy-xls")
+
+    def fake_converter(*, source_path, output_dir):
+        """模拟 LibreOffice 生成 xlsx 派生件，避免测试依赖本机办公套件。"""
+
+        assert source_path == xls_path
+        converted_path = output_dir / "奖学金汇总.xlsx"
+        workbook = __import__("openpyxl").Workbook()
+        worksheet = workbook.active
+        worksheet.title = "汇总"
+        worksheet.append(["姓名", "等级"])
+        worksheet.append(["赵六", "一等奖"])
+        workbook.save(converted_path)
+        return converted_path
+
+    monkeypatch.setattr("app.modules.files.extractors.convert_xls_to_xlsx", fake_converter)
+
+    result = extract_document_text(
+        file_path=xls_path,
+        filename="奖学金汇总.xls",
+        content_type="application/vnd.ms-excel",
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "COMPLETED"
+    assert result["extractor"] == "excel-xls-converted"
+    assert result["pages"][0]["sheet_name"] == "汇总"
+    assert "赵六\t一等奖" in result["pages"][0]["text"]
+    assert result["pages"][0]["metadata"]["converted_from"] == ".xls"
+
+
 def test_extract_image_uses_injected_ocr_service(tmp_path):
     """图片解析应通过 OCR 服务写入统一页面文本。"""
 

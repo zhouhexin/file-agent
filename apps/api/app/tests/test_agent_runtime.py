@@ -275,6 +275,47 @@ def test_deterministic_planner_routes_managed_file_list_by_filename_and_extensio
     assert "path_prefix" not in plan.steps[0].input
 
 
+def test_deterministic_planner_routes_managed_file_list_by_directory_and_year():
+    """“党办2026年的文件”必须同时保留目录和年份两个过滤条件。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-managed-dir-year",
+        user_id="user-1",
+        message_id="msg-managed-dir-year",
+        message="列出党办2026年的文件",
+        attachments=[],
+    )
+
+    assert plan.intent == "LIST_MANAGED_FILES"
+    assert plan.steps[0].input["path_prefix"] == "党办"
+    assert plan.steps[0].input["filename_contains"] == "2026"
+    assert "root_key" not in plan.steps[0].input
+
+
+def test_deterministic_planner_routes_managed_file_list_by_directory_and_subject_keyword():
+    """“党办中关于科学发展观的文件”必须把关于后的内容作为文件名关键字。"""
+
+    messages = [
+        "列出党办中关于科学发展观的文件",
+        "列出党办下科学发展观的相关文件",
+        "列出党办下关于科学发展观的相关文件",
+    ]
+
+    for message in messages:
+        plan = DeterministicPlanner().plan(
+            conversation_id="conv-managed-dir-subject",
+            user_id="user-1",
+            message_id="msg-managed-dir-subject",
+            message=message,
+            attachments=[],
+        )
+
+        assert plan.intent == "LIST_MANAGED_FILES"
+        assert plan.steps[0].input["path_prefix"] == "党办"
+        assert plan.steps[0].input["filename_contains"] == "科学发展观"
+        assert "root_key" not in plan.steps[0].input
+
+
 def test_deterministic_planner_routes_managed_subdirectory_with_extension():
     """子目录和扩展名过滤必须可以同时存在。"""
 

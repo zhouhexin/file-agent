@@ -998,7 +998,7 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("managed-root-scan", "Create an async scan job for a managed logical root.", ManagedRootScanInput, True, False, ["filesystem_jobs", "filesystem_job_events"], _managed_root_scan_handler(db, user_id)),
         _tool(
             "analyze-spreadsheet",
-            "Analyze an uploaded XLSX/XLSM/CSV/TSV spreadsheet through a validated read-only query plan.",
+            "Analyze an uploaded XLS/XLSX/XLSM/CSV/TSV spreadsheet through a validated read-only query plan.",
             SpreadsheetAnalysisInput,
             False,
             False,

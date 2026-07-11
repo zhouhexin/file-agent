@@ -1,4 +1,4 @@
-"""从 XLSX/XLSM/CSV/TSV 原件构建受控工作簿 Profile。"""
+"""从 XLS/XLSX/XLSM/CSV/TSV 原件构建受控工作簿 Profile。"""
 
 from __future__ import annotations
 
@@ -10,12 +10,13 @@ from typing import Any, Iterable, Sequence
 
 import openpyxl
 
+from .conversion import prepared_spreadsheet_path
 from .schemas import ColumnProfile, ColumnType, SheetProfile, WorkbookProfile
 
 
 MAX_PROFILE_SAMPLE_ROWS = 100
 MAX_SAMPLE_VALUES_PER_COLUMN = 5
-SUPPORTED_SPREADSHEET_SUFFIXES = {".xlsx", ".xlsm", ".csv", ".tsv"}
+SUPPORTED_SPREADSHEET_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".csv", ".tsv"}
 
 
 def profile_workbook(
@@ -28,12 +29,13 @@ def profile_workbook(
     suffix = file_path.suffix.lower()
 
     if suffix not in SUPPORTED_SPREADSHEET_SUFFIXES:
-        raise ValueError("当前仅支持 .xlsx、.xlsm、.csv 和 .tsv 文件。")
+        raise ValueError("当前仅支持 .xls、.xlsx、.xlsm、.csv 和 .tsv 文件。")
 
     if suffix in {".csv", ".tsv"}:
         sheets = [_profile_delimited_text(file_path=file_path, suffix=suffix)]
     else:
-        sheets = _profile_excel(file_path=file_path)
+        with prepared_spreadsheet_path(file_path=file_path) as readable_path:
+            sheets = _profile_excel(file_path=readable_path)
 
     if not sheets:
         raise ValueError("工作簿中没有可分析的工作表。")

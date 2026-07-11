@@ -52,6 +52,39 @@ def test_workbench_profile_returns_safe_sheet_schema(tmp_path: Path) -> None:
     assert "file_path" not in result
 
 
+def test_workbench_profile_converts_xls_before_openpyxl(monkeypatch, tmp_path: Path) -> None:
+    """表格工作台读取 xls 时必须先转换为 xlsx，不能直接交给 openpyxl。"""
+
+    path = tmp_path / "科研成果.xls"
+    path.write_bytes(b"legacy-xls")
+
+    def fake_converter(*, source_path, output_dir, timeout_seconds=60):
+        """模拟转换器产出 openpyxl 可读取的 xlsx 文件。"""
+
+        assert source_path == path
+        converted_path = output_dir / "科研成果.xlsx"
+        workbook = openpyxl.Workbook()
+        worksheet = workbook.active
+        worksheet.title = "成果"
+        worksheet.append(["教师", "资助金额"])
+        worksheet.append(["张三", 100])
+        workbook.save(converted_path)
+        return converted_path
+
+    monkeypatch.setattr("app.modules.spreadsheet_analysis.conversion.convert_xls_to_xlsx", fake_converter)
+
+    result = SpreadsheetWorkbenchService().profile(
+        document_id="doc-xls",
+        filename=path.name,
+        file_path=path,
+    )
+
+    assert result["ok"] is True
+    assert result["file_type"] == ".xls"
+    assert result["sheets"][0]["sheet_name"] == "成果"
+    assert result["sheets"][0]["columns"][1]["name"] == "资助金额"
+
+
 def test_workbench_validate_detects_formula_error_literals(tmp_path: Path) -> None:
     """校验工具必须定位显式公式错误，返回 Sheet 和单元格。"""
 

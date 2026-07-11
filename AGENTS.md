@@ -577,6 +577,8 @@ FAILED
 
 分类匹配器的职责是候选召回，不是最终语义裁决。`recall_category_candidates` 必须基于文件名、标题、全文、别名、正向信号和负向信号生成 Top N 候选，并返回 `category_id`、`category_path`、`rule_score`、`matched_signals`、`negative_signals` 和 `candidate_reason`。`match_document_text` 仅作为 rule-only 兼容入口，把候选转换为 `SUGGESTED` 分类建议。默认情况下，LLM 只能从候选集合内选择分类，不得编造分类路径。
 
+路径、目录名、文件名、扩展名和文件元数据只能作为候选召回、弱信号和初始命名字段，不能单独作为最终分类依据。最终分类必须通过受控解析后的正文、OCR 文本、PDF 页文本、Word 段落、Excel 工作表/单元格、压缩包内子文件清单等内容证据确认；如果文件名与正文证据冲突，以正文和可定位证据为准。对 `通知`、`工作安排`、`审批表`、`会议纪要`、`日报表`、`制度汇编`、压缩包和扫描件等泛化文件名，必须读取内容后再确认业务主题、文种、日期、涉及单位和重命名建议。
+
 如业务上确实需要允许 LLM 自由生成分类路径，必须通过 `LLM_CLASSIFICATION_ALLOW_FREE_PATHS=true` 显式开启，并且自由路径只能保存为 `source=llm_free_path`、`status=NEEDS_REVIEW` 的待复核建议。自由路径不得自动写入正式 taxonomy，不得自动写入正式 `document_categories`，也不得覆盖人工确认结果；只有经过人工评审和 taxonomy v2 配置更新后，才能成为稳定分类节点。
 
 全文分类必须通过 `DocumentClassificationService` 执行。Graph 只传 `document_id`、`extraction_run_id`、文件名和必要 fallback 摘要，不得在 `AgentGraphState` 保存全文，也不得由 Graph 直接读取 `DocumentPage` 或直接调用底层 matcher。`DocumentClassificationService` 属于 `AgentRuntimeContext` 的运行时依赖，负责从 `document_pages.text_content` 读取完整正文并返回结构化分类建议。

@@ -11,6 +11,7 @@ from typing import Any, Iterable, Iterator, Sequence
 
 import openpyxl
 
+from .conversion import prepared_spreadsheet_path
 from .schemas import (
     Aggregation,
     ColumnProfile,
@@ -133,22 +134,23 @@ def iter_data_rows(*, file_path: Path, sheet: SheetProfile) -> Iterator[dict[str
                 yield mapped
         return
 
-    if suffix not in {".xlsx", ".xlsm"}:
-        raise ValueError("当前仅支持 .xlsx、.xlsm、.csv 和 .tsv 文件。")
+    if suffix not in {".xls", ".xlsx", ".xlsm"}:
+        raise ValueError("当前仅支持 .xls、.xlsx、.xlsm、.csv 和 .tsv 文件。")
 
-    workbook = openpyxl.load_workbook(
-        filename=file_path,
-        read_only=True,
-        data_only=True,
-    )
-    try:
-        worksheet = _open_selected_sheet(workbook=workbook, sheet_id=sheet.sheet_id)
-        for row in worksheet.iter_rows(min_row=sheet.header_row + 1, values_only=True):
-            mapped = _map_row_to_columns(row=row, columns=sheet.columns)
-            if _is_nonempty_mapped_row(mapped):
-                yield mapped
-    finally:
-        workbook.close()
+    with prepared_spreadsheet_path(file_path=file_path) as readable_path:
+        workbook = openpyxl.load_workbook(
+            filename=readable_path,
+            read_only=True,
+            data_only=True,
+        )
+        try:
+            worksheet = _open_selected_sheet(workbook=workbook, sheet_id=sheet.sheet_id)
+            for row in worksheet.iter_rows(min_row=sheet.header_row + 1, values_only=True):
+                mapped = _map_row_to_columns(row=row, columns=sheet.columns)
+                if _is_nonempty_mapped_row(mapped):
+                    yield mapped
+        finally:
+            workbook.close()
 
 
 def matches_filters(row: dict[str, Any], filters: list[SpreadsheetFilter]) -> bool:

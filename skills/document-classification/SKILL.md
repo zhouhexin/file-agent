@@ -22,9 +22,16 @@ External Skill references:
 
 ## Steps
 1. If there are enabled managed roots with `classification_mode=PATH_AS_CATEGORY`, load their existing `managed_files.category_path` values as dynamic category candidates.
-2. Score dynamic candidates by filename and full `document_pages.text_content`; use directory path segments as signals.
-3. If no managed path category source exists, fall back to the configured taxonomy v2 file.
-4. Verify evidence, save multiple labels, and mark low confidence for review.
+2. Treat path, directory name, filename, extension, and metadata only as candidate-recall signals; they can suggest likely categories, document type, date, source department, and rename fields, but cannot finalize classification by themselves.
+3. Read controlled document content before finalizing categories. Use parsed `document_pages.text_content`, OCR text, PDF page text, Word paragraphs, Excel sheet/cell text, or archive child-file manifests as the confirmation source.
+4. Score dynamic candidates by filename and full document content; use directory path segments as weak signals and content evidence as the deciding signal.
+5. If no managed path category source exists, fall back to the configured taxonomy v2 file.
+6. Verify evidence, save multiple labels, and mark low confidence for review.
+
+## Content Confirmation Rules
+Filename-based classification is candidate recall, not final judgment. Generic names such as `通知`, `工作安排`, `审批表`, `会议纪要`, `日报表`, `制度汇编`, scanned PDFs, and archives must be opened through approved parsing tools before business category, document type, date, related unit, and rename suggestions are confirmed.
+
+If filename/path signals conflict with body evidence, prefer the body evidence and include the conflict in the returned warning list. If body evidence cannot be produced for a non-obvious category, return `status=NEEDS_REVIEW` instead of forcing the filename-derived category.
 
 ## Managed Path Mode
 Managed Path Mode means: the already-organized server directory is treated as the classification source of truth. Parent directories become category paths, for example:
@@ -38,6 +45,8 @@ This mode only creates classification suggestions with `source=managed_path` and
 
 ## Evidence Rules
 Each applied or suggested category needs quote, page/sheet/cell, or metadata evidence.
+
+Content-confirmed categories should prefer `text_quote` evidence from page, paragraph, sheet, or cell locations. Metadata-only evidence is acceptable only for structural labels such as source department, file format, temporary file, archive, or unknown file; it is not enough for business-topic classification when the document content is available.
 
 ## ChangeSet Rules
 Record category additions, removals, and status changes.

@@ -12,6 +12,7 @@ from typing import Any, Dict, List
 
 from app.core.config import get_settings
 from app.modules.ocr.service import build_default_ocr_service
+from app.modules.spreadsheet_analysis.conversion import SpreadsheetConversionError, convert_xls_to_xlsx
 
 
 def extract_document_text(*, file_path: Path, filename: str, content_type: str, ocr_service: Any = None) -> Dict[str, Any]:
@@ -24,7 +25,9 @@ def extract_document_text(*, file_path: Path, filename: str, content_type: str, 
     if suffix == ".csv":
         text = _extract_csv_text(file_path)
         return _completed("csv", [{"page_number": 1, "sheet_name": None, "text": text, "metadata": {}}])
-    if suffix in {".xlsx", ".xls"}:
+    if suffix == ".xls":
+        return _extract_legacy_xls_text(file_path)
+    if suffix == ".xlsx":
         return _extract_excel_text(file_path)
     if suffix == ".doc" or content_type == "application/msword":
         return _extract_doc_text(file_path)
@@ -71,6 +74,32 @@ def _extract_excel_text(file_path: Path) -> Dict[str, Any]:
         )
     workbook.close()
     return _completed("excel", pages)
+
+
+def _extract_legacy_xls_text(file_path: Path) -> Dict[str, Any]:
+    """先把旧版 xls 转成临时 xlsx，再复用统一 Excel 读取逻辑。"""
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        try:
+            converted_path = convert_xls_to_xlsx(
+                source_path=file_path,
+                output_dir=Path(temp_dir),
+            )
+        except SpreadsheetConversionError as exc:
+            return _failed("excel-xls-converted", exc.code, exc.message)
+
+        result = _extract_excel_text(converted_path)
+
+    if not result.get("ok"):
+        result["extractor"] = "excel-xls-converted"
+        return result
+
+    result["extractor"] = "excel-xls-converted"
+    for page in result.get("pages", []):
+        metadata = page.setdefault("metadata", {})
+        metadata["converted_from"] = ".xls"
+        metadata["converter"] = "libreoffice"
+    return result
 
 
 def _extract_docx_text(file_path: Path) -> Dict[str, Any]:

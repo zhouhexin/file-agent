@@ -32,7 +32,7 @@ services:
     volumes:
       - ../data/uploads:/data/uploads
       - ../data/logs:/data/logs
-      - ../data/managed/student-affairs:/managed/student-affairs:ro
+      - E:/workdata:/managed/workdata:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -62,7 +62,7 @@ services:
     volumes:
       - ../data/uploads:/data/uploads
       - ../data/logs:/data/logs
-      - ../data/managed/student-affairs:/managed/student-affairs:ro
+      - E:/workdata:/managed/workdata:ro
     depends_on:
       postgres:
         condition: service_healthy
