@@ -85,11 +85,11 @@
     {
       "id": "managed_file_query",
       "name": "服务器受管目录文件列表",
-      "description": "列出或搜索服务器受管目录中的文件元数据，不读取正文、不暴露服务器真实路径。",
-      "examples": ["列出学工收件箱下的所有文件", "列出file_agent_spreadsheet_patch_files下的所有文件"],
-      "intents": ["LIST_MANAGED_FILES", "SEARCH_MANAGED_FILES"],
-      "capability_keys": ["managed_file_list", "managed-file-list", "managed_file_search", "managed-file-search"],
-      "tool_names": ["managed-file-list", "managed-file-search"]
+      "description": "列出、搜索或读取服务器受管目录中的文件；读取正文时会先生成当前用户快照，不修改受管目录原文件。",
+      "examples": ["列出学工收件箱下的所有文件", "列出file_agent_spreadsheet_patch_files下的所有文件", "读取党办下科学发展观的文件并总结内容", "实时列出服务器工作目录下的文件"],
+      "intents": ["LIST_MANAGED_FILES", "SEARCH_MANAGED_FILES", "READ_MANAGED_FILE", "SUMMARIZE_MANAGED_FILE"],
+      "capability_keys": ["managed_file_list", "managed-file-list", "managed_file_search", "managed-file-search", "managed_file_read", "managed-file-read-document", "mcp_filesystem_read"],
+      "tool_names": ["managed-file-list", "managed-file-search", "managed-file-read-document", "mcp-filesystem-list", "mcp-filesystem-search", "mcp-filesystem-info"]
     }
   ]
 }

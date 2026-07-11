@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import PurePosixPath
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -197,10 +197,76 @@ class ManagedFileSearchInput(StrictToolInput):
         return _normalize_path_prefix(value)
 
 
+class ManagedFileReadDocumentInput(StrictToolInput):
+    """读取并解析唯一受管文件的输入。"""
+
+    root_key: Optional[str] = None
+    relative_path: Optional[str] = None
+    path_prefix: Optional[str] = Field(
+        default=None,
+        description="受管根目录下的相对目录或文件路径前缀。",
+    )
+    extension: Optional[str] = None
+    filename_contains: Optional[str] = None
+    force_reprocess: bool = False
+
+    @field_validator("relative_path", "path_prefix")
+    @classmethod
+    def validate_managed_path(cls, value: Optional[str]) -> Optional[str]:
+        """校验并规范化受管目录内的相对路径。"""
+
+        return _normalize_path_prefix(value)
+
+
 class ManagedRootScanInput(StrictToolInput):
     """创建受管目录扫描任务的输入。"""
 
     root_key: str = Field(min_length=1)
+
+
+class MCPFilesystemListInput(StrictToolInput):
+    """实时列出 Filesystem MCP 受管目录的只读输入。"""
+
+    path_prefix: Optional[str] = None
+    sort_by: Literal["name", "size"] = "name"
+
+    @field_validator("path_prefix")
+    @classmethod
+    def validate_path_prefix(cls, value: Optional[str]) -> Optional[str]:
+        """校验并规范化 MCP 受管目录内的相对路径。"""
+
+        return _normalize_path_prefix(value)
+
+
+class MCPFilesystemSearchInput(StrictToolInput):
+    """实时搜索 Filesystem MCP 受管目录的只读输入。"""
+
+    query: str = Field(min_length=1, max_length=200)
+    path_prefix: Optional[str] = None
+    exclude_patterns: List[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("path_prefix")
+    @classmethod
+    def validate_path_prefix(cls, value: Optional[str]) -> Optional[str]:
+        """校验并规范化 MCP 受管目录内的相对路径。"""
+
+        return _normalize_path_prefix(value)
+
+
+class MCPFilesystemInfoInput(StrictToolInput):
+    """读取 Filesystem MCP 受管路径元数据的只读输入。"""
+
+    path: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        """校验并规范化 MCP 受管目录内的相对路径。"""
+
+        normalized = _normalize_path_prefix(value)
+        if normalized is None:
+            raise ValueError("path must identify a file or directory")
+        return normalized
 
 
 class DocumentLineageReadInput(StrictToolInput):

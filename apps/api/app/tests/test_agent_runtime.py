@@ -42,6 +42,21 @@ def test_get_agent_tools_returns_mvp_catalog():
     assert "managed-file-list" in tool_names
     assert "managed-file-search" in tool_names
     assert "managed-root-scan" in tool_names
+    assert "mcp-filesystem-list" in tool_names
+    assert "mcp-filesystem-search" in tool_names
+    assert "mcp-filesystem-info" in tool_names
+
+
+def test_mcp_filesystem_tool_returns_structured_error_when_disabled(monkeypatch):
+    """MCP 未启用时只读 Tool 必须结构化失败，不能触发真实子进程。"""
+
+    monkeypatch.setenv("MCP_FILESYSTEM_ENABLED", "false")
+    result = ToolRegistry().invoke("mcp-filesystem-list", {"path_prefix": "党办"})
+
+    assert result.status == "FAILED"
+    assert result.output_json["ok"] is False
+    assert result.output_json["tool_name"] == "mcp-filesystem-list"
+    assert result.output_json["error"]["code"] == "MCPFilesystemError"
 
 
 def test_capability_catalog_exposes_router_metadata():
@@ -176,6 +191,22 @@ def test_deterministic_planner_routes_managed_file_list_by_root_key():
     assert plan.steps[0].input["root_key"] == "file_agent_spreadsheet_patch_files"
 
 
+def test_deterministic_planner_routes_realtime_server_directory_to_mcp_filesystem():
+    """明确要求实时读取服务器工作目录时，应走 MCP 而不是数据库扫描链路。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-mcp-fs",
+        user_id="user-1",
+        message_id="msg-mcp-fs",
+        message="实时列出服务器工作目录下党办目录中的文件",
+        attachments=[],
+    )
+
+    assert plan.intent == "LIST_MCP_FILESYSTEM"
+    assert [step.tool_name for step in plan.steps] == ["mcp-filesystem-list"]
+    assert plan.steps[0].input["path_prefix"] == "党办"
+
+
 def test_deterministic_planner_routes_managed_file_list_by_subdirectory():
     """受管目录子目录查询必须生成 path_prefix，不能返回整个根目录。"""
 
@@ -193,19 +224,52 @@ def test_deterministic_planner_routes_managed_file_list_by_subdirectory():
     assert plan.slots["path_prefix"] == "deploy"
 
 
-def test_deterministic_planner_routes_nested_managed_file_subdirectory():
-    """受管目录嵌套子目录查询必须保留 POSIX 相对路径。"""
+def test_deterministic_planner_routes_managed_file_summary_to_read_document():
+    """总结受管目录文件时应读取并解析唯一文件，而不是只列文件名。"""
 
     plan = DeterministicPlanner().plan(
-        conversation_id="conv-managed-nested",
+        conversation_id="conv-managed-read",
         user_id="user-1",
-        message_id="msg-managed-nested",
-        message="查看file_agent_spreadsheet_patch_files下apps/api目录里的文件",
+        message_id="msg-managed-read",
+        message="读取党办下科学发展观的文件并总结内容",
         attachments=[],
     )
 
-    assert plan.intent == "LIST_MANAGED_FILES"
-    assert plan.steps[0].input["path_prefix"] == "apps/api"
+    assert plan.intent == "SUMMARIZE_MANAGED_FILE"
+    assert [step.tool_name for step in plan.steps] == ["managed-file-read-document"]
+    assert plan.steps[0].input["path_prefix"] == "党办"
+    assert plan.steps[0].input["filename_contains"] == "科学发展观"
+    assert plan.slots["requested_outputs"] == ["text", "summary", "receipt"]
+
+
+def test_deterministic_planner_routes_nested_managed_file_subdirectory():
+    """受管目录嵌套子目录查询必须保留 POSIX 相对路径。"""
+
+    messages = [
+        ("查看file_agent_spreadsheet_patch_files下apps/api目录里的文件", "apps/api"),
+        ("列出科学发展观下的文件", "科学发展观"),
+        ("列出科学发展观目录中的文件", "科学发展观"),
+        (
+            "列出file_agent_spreadsheet_patch_files下党办/2026/科学发展观目录中的文件",
+            "党办/2026/科学发展观",
+        ),
+        (
+            "列出file_agent_spreadsheet_patch_files下党办/2026/科学发展观/材料目录中的文件",
+            "党办/2026/科学发展观/材料",
+        ),
+    ]
+
+    for message, expected_prefix in messages:
+        plan = DeterministicPlanner().plan(
+            conversation_id="conv-managed-nested",
+            user_id="user-1",
+            message_id="msg-managed-nested",
+            message=message,
+            attachments=[],
+        )
+
+        assert plan.intent == "LIST_MANAGED_FILES"
+        assert plan.steps[0].input["path_prefix"] == expected_prefix
 
 
 def test_deterministic_planner_routes_managed_file_list_by_extension():

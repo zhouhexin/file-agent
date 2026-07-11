@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from app.db.models import ManagedFile, ManagedRoot
+from app.db.models import Document, DocumentPage, ManagedFile, ManagedRoot
 from app.modules.agent.tool_registry import ToolRegistry
 from app.tests.helpers import clear_overrides, client_with_database
 
@@ -62,10 +62,13 @@ def test_managed_file_list_tool_filters_path_prefix(monkeypatch, tmp_path):
 
     managed_root = tmp_path / "spreadsheet-patches"
     deploy_dir = managed_root / "deploy" / "nested"
+    deep_dir = managed_root / "党办" / "2026" / "科学发展观" / "材料"
     deploy_dir.mkdir(parents=True)
+    deep_dir.mkdir(parents=True)
     (managed_root / "README.md").write_text("root", encoding="utf-8")
     (managed_root / "deploy" / "a.ps1").write_text("deploy", encoding="utf-8")
     (deploy_dir / "b.txt").write_text("nested", encoding="utf-8")
+    (deep_dir / "通知.pdf").write_text("deep", encoding="utf-8")
     monkeypatch.setenv("MANAGED_ROOT_FILE_AGENT_SPREADSHEET_PATCH_FILES", str(managed_root))
     client, SessionLocal = client_with_database()
     db = SessionLocal()
@@ -85,6 +88,32 @@ def test_managed_file_list_tool_filters_path_prefix(monkeypatch, tmp_path):
             "deploy/nested/b.txt",
         ]
         assert result.output_json["query"]["path_prefix"] == "deploy"
+
+        deep_result = ToolRegistry(db=db, user_id="user-1").invoke(
+            "managed-file-list",
+            {
+                "root_key": "file_agent_spreadsheet_patch_files",
+                "path_prefix": "党办/2026/科学发展观",
+            },
+        )
+
+        assert [file["relative_path"] for file in deep_result.output_json["files"]] == [
+            "党办/2026/科学发展观/材料/通知.pdf",
+        ]
+        assert deep_result.output_json["query"]["path_prefix"] == "党办/2026/科学发展观"
+
+        leaf_result = ToolRegistry(db=db, user_id="user-1").invoke(
+            "managed-file-list",
+            {
+                "root_key": "file_agent_spreadsheet_patch_files",
+                "path_prefix": "科学发展观",
+            },
+        )
+
+        assert [file["relative_path"] for file in leaf_result.output_json["files"]] == [
+            "党办/2026/科学发展观/材料/通知.pdf",
+        ]
+        assert leaf_result.output_json["query"]["path_prefix"] == "科学发展观"
     finally:
         db.close()
         clear_overrides()
@@ -127,6 +156,46 @@ def test_managed_file_list_tool_filters_extension_and_filename(monkeypatch, tmp_
         assert [file["relative_path"] for file in invoice_pdf_result.output_json["files"]] == [
             "电子发票.pdf",
         ]
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_managed_file_read_document_tool_registers_snapshot_and_extracts_text(monkeypatch, tmp_path):
+    """managed-file-read-document 应定位唯一受管文件，登记当前用户快照并写入 document_pages。"""
+
+    managed_root = tmp_path / "downloads"
+    target_dir = managed_root / "党办" / "2026"
+    target_dir.mkdir(parents=True)
+    (target_dir / "科学发展观材料.txt").write_text("科学发展观 文件正文", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "storage"))
+    client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        result = ToolRegistry(db=db, user_id="user-1").invoke(
+            "managed-file-read-document",
+            {
+                "root_key": "downloads",
+                "path_prefix": "党办",
+                "filename_contains": "科学发展观",
+            },
+        )
+
+        assert result.status == "COMPLETED"
+        assert result.output_json["ok"] is True
+        assert result.output_json["status"] == "COMPLETED"
+        assert result.output_json["managed_file"]["relative_path"] == "党办/2026/科学发展观材料.txt"
+        assert result.output_json["pages"][0]["text_preview"] == "科学发展观 文件正文"
+
+        document = db.get(Document, result.output_json["document_id"])
+        assert document is not None
+        assert document.user_id == "user-1"
+        assert document.original_filename == "科学发展观材料.txt"
+        page = db.query(DocumentPage).one()
+        assert page.document_id == document.id
+        assert page.text_content == "科学发展观 文件正文"
     finally:
         db.close()
         clear_overrides()

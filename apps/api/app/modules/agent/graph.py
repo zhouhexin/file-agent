@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Dict, List
 
@@ -371,6 +372,7 @@ def _aggregate_tool_results(
         "capability_catalog": _capability_catalog_from_results(tool_results),
         "classification_taxonomy": _classification_taxonomy_from_results(tool_results),
         "managed_file_list": _managed_file_list_from_results(tool_results),
+        "mcp_filesystem_result": _mcp_filesystem_result_from_results(tool_results),
         "intent_summary": _intent_summary_from_results(tool_results),
     }
 
@@ -494,6 +496,13 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
         return {
             "status": "COMPLETED",
             "final_response": _build_managed_file_list_response(managed_file_list),
+        }
+
+    mcp_filesystem_result = result_summary.get("mcp_filesystem_result", {})
+    if mcp_filesystem_result:
+        return {
+            "status": "COMPLETED",
+            "final_response": _build_mcp_filesystem_response(mcp_filesystem_result),
         }
 
     intent_summary = result_summary.get("intent_summary", {})
@@ -647,15 +656,66 @@ def _managed_file_list_from_results(tool_results: List[Dict[str, Any]]) -> Dict[
     return {}
 
 
+def _mcp_filesystem_result_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """从 Tool 结果中提取 Filesystem MCP 只读结果。"""
+
+    for result in tool_results:
+        if result.get("ok") and str(result.get("tool_name") or "").startswith("mcp-filesystem-"):
+            return {
+                "tool_name": result.get("tool_name"),
+                "query": result.get("query") if isinstance(result.get("query"), dict) else {},
+                "result": result.get("result"),
+            }
+    return {}
+
+
+def _build_mcp_filesystem_response(payload: Dict[str, Any]) -> str:
+    """把 MCP 文件系统结果格式化为用户可读文本。"""
+
+    tool_name = str(payload.get("tool_name") or "mcp-filesystem")
+    query = payload.get("query") if isinstance(payload.get("query"), dict) else {}
+    path_prefix = str(query.get("path_prefix") or query.get("path") or "服务器工作目录")
+    result = payload.get("result")
+    if result in (None, "", [], {}):
+        return f"{path_prefix} 下暂未找到可展示的文件系统结果。"
+    return "\n".join(
+        [
+            f"{path_prefix} 的实时文件系统结果：",
+            _format_mcp_filesystem_result(result),
+            f"来源工具：{tool_name}",
+        ]
+    )
+
+
+def _format_mcp_filesystem_result(result: Any) -> str:
+    """稳定格式化 MCP 返回的文本、列表或结构化内容。"""
+
+    if isinstance(result, str):
+        return result
+    if isinstance(result, list):
+        lines: List[str] = []
+        for item in result[:50]:
+            if isinstance(item, dict) and "text" in item:
+                lines.append(str(item.get("text") or ""))
+            else:
+                lines.append(json.dumps(item, ensure_ascii=False))
+        return "\n".join(line for line in lines if line)
+    if isinstance(result, dict):
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    return str(result)
+
+
 def _build_managed_file_list_response(payload: Dict[str, Any]) -> str:
     """把受管目录文件列表格式化为用户可读文本。"""
 
     files = [item for item in payload.get("files", []) if isinstance(item, dict)]
     query = payload.get("query") if isinstance(payload.get("query"), dict) else {}
     root_key = str(query.get("root_key") or (files[0].get("root_key") if files else "") or "受管目录")
+    path_prefix = str(query.get("path_prefix") or "").strip("/")
+    scope_label = f"{root_key}/{path_prefix}" if path_prefix else root_key
     if not files:
-        return f"{root_key} 下暂未找到文件。请确认该受管目录已启用，并且已完成扫描。"
-    lines = [f"{root_key} 下共有 {len(files)} 个文件："]
+        return f"{scope_label} 下暂未找到文件。请确认该受管目录已启用，并且已完成扫描。"
+    lines = [f"{scope_label} 下共有 {len(files)} 个文件："]
     lines.extend(_format_managed_file_tree(files[:50]))
     if len(files) > 50:
         lines.append(f"仅展示前 50 个文件，其余 {len(files) - 50} 个可继续筛选查看。")

@@ -92,6 +92,38 @@ MANAGED_ROOT_STUDENT_AFFAIRS_CLASSIFICATION_MODE=PATH_AS_CATEGORY
 
 后续新上传文件归档时，只能把 `PATH_AS_CATEGORY` 目录作为目标分类库；`NONE` 目录不会被当成分类体系。
 
+## Filesystem MCP 只读实时查询
+
+受管目录索引适合常规查询。对于需要实时读取服务器目录状态的场景，可以启用
+Filesystem MCP 只读桥接。第一阶段只允许列目录、搜索文件和读取文件元信息，不读取正文，
+不执行创建、改名、移动、删除等写操作。
+
+部署模板已经在 API 镜像中安装 `@modelcontextprotocol/server-filesystem`，并预留以下环境变量：
+
+```text
+MCP_FILESYSTEM_ENABLED=false
+MCP_FILESYSTEM_ROOT=/managed/workdata
+MCP_FILESYSTEM_COMMAND=/usr/local/bin/mcp-server-filesystem
+MCP_FILESYSTEM_TIMEOUT_SECONDS=45
+MCP_FILESYSTEM_MAX_OUTPUT_CHARS=50000
+```
+
+启用时需要：
+
+1. 在 `deploy/docker-compose.production.yml` 中把目标宿主机目录只读挂载到
+   `MCP_FILESYSTEM_ROOT` 对应的容器路径。
+2. 在 `deploy/.env` 中设置 `MCP_FILESYSTEM_ENABLED=true`。
+3. 重新构建并启动 API 容器。
+
+可用下面命令确认容器内依赖是否可用：
+
+```powershell
+docker compose --env-file .\deploy\.env -f .\deploy\docker-compose.production.yml exec api sh -lc "mcp-server-filesystem --help >/dev/null && python -c 'import langchain_mcp_adapters; print(\"adapter ok\")'"
+```
+
+当前阶段不要把受管目录改成读写挂载。写操作必须等 OperationPlan 确认闭环和写入型
+MCP Tool 白名单完成后再开启。
+
 ## 公网访问必须额外完成的网络步骤
 
 部署脚本不能替你注册域名、设置 DNS 或修改路由器。公网 HTTPS 需要：

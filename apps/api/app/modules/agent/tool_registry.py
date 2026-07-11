@@ -6,15 +6,21 @@ Planner 输出永远不能直接调用 Tool handler，必须经过这里的 Regi
 
 from __future__ import annotations
 
+import hashlib
+import mimetypes
+import shutil
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Type
 
 from pydantic import BaseModel, ValidationError
 
+from app.core.config import get_settings
 from app.core.logging import log_event
-from app.db.models import Document, DocumentCategorySuggestion, DocumentClassificationRun, DocumentInsight
+from app.db.models import Document, DocumentCategorySuggestion, DocumentClassificationRun, DocumentInsight, FileObject
 from app.modules.agent.capabilities.service import load_agent_capabilities
+from app.modules.agent.mcp_filesystem_bridge import MCPFilesystemError, get_mcp_filesystem
 from app.modules.agent.state import ToolInvocationRecord
 from app.modules.agent.tool_schemas import (
     AgentCapabilitiesReadInput,
@@ -30,9 +36,13 @@ from app.modules.agent.tool_schemas import (
     IntentSummaryInput,
     JobStatusReadInput,
     ManagedFileListInput,
+    ManagedFileReadDocumentInput,
     ManagedFileSearchInput,
     ManagedRootListInput,
     ManagedRootScanInput,
+    MCPFilesystemInfoInput,
+    MCPFilesystemListInput,
+    MCPFilesystemSearchInput,
     OperationPlanCreateInput,
     SearchToolInput,
     SpreadsheetAnalysisInput,
@@ -588,6 +598,248 @@ def _managed_file_search_handler(db: Any) -> ToolHandler:
     return handler
 
 
+def _managed_file_read_document_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """创建读取受管文件正文的 Tool handler。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """定位唯一受管文件，复制为当前用户快照，再复用文档解析链路。"""
+
+        if db is None:
+            return {"ok": False, "status": "FAILED", "error": {"code": "DB_REQUIRED", "message": "读取受管文件需要数据库会话。"}}
+        if user_id is None:
+            return {"ok": False, "status": "FAILED", "error": {"code": "AUTH_REQUIRED", "message": "读取受管文件需要当前用户。"}}
+
+        scope = resolve_managed_file_query_scope(
+            root_key=getattr(tool_input, "root_key", None),
+            path_prefix=getattr(tool_input, "path_prefix", None) or getattr(tool_input, "relative_path", None),
+        )
+        sync_configured_managed_roots(db, root_key=scope.root_key, scan=True)
+        db.commit()
+        if scope.unresolved_root_key:
+            return {
+                "ok": False,
+                "status": "FAILED",
+                "error": {"code": "MANAGED_ROOT_NOT_FOUND", "message": "未找到对应的受管目录。"},
+            }
+
+        repository = ManagedFileRepository(db)
+        rows = repository.list_files(
+            root_key=scope.root_key,
+            root_keys=scope.configured_root_keys if scope.root_key is None else None,
+            path_prefix=scope.path_prefix,
+            extension=getattr(tool_input, "extension", None),
+            filename_contains=getattr(tool_input, "filename_contains", None),
+            status="ACTIVE",
+            limit=20,
+            offset=0,
+        )
+        relative_path = getattr(tool_input, "relative_path", None)
+        if relative_path:
+            rows = [(file, root) for file, root in rows if file.relative_path == relative_path]
+        if not rows:
+            return {
+                "ok": False,
+                "status": "FAILED",
+                "error": {"code": "MANAGED_FILE_NOT_FOUND", "message": "未找到匹配的受管文件。"},
+            }
+        if len(rows) > 1:
+            return {
+                "ok": False,
+                "status": "FAILED",
+                "error": {
+                    "code": "MANAGED_FILE_AMBIGUOUS",
+                    "message": "匹配到多个受管文件，请补充更具体的目录或文件名。",
+                    "candidates": [
+                        ManagedFileService.to_file_response(file=file, root=root).model_dump(mode="json")
+                        for file, root in rows[:10]
+                    ],
+                },
+            }
+
+        managed_file, root = rows[0]
+        source_path = (Path(root.container_path).resolve() / managed_file.relative_path).resolve()
+        root_path = Path(root.container_path).resolve()
+        if not _is_relative_to(source_path, root_path) or not source_path.is_file():
+            return {
+                "ok": False,
+                "status": "FAILED",
+                "error": {"code": "MANAGED_FILE_UNAVAILABLE", "message": "受管文件已不存在或路径越界。"},
+            }
+
+        document = _create_managed_file_snapshot_document(
+            db=db,
+            user_id=user_id,
+            source_path=source_path,
+            filename=managed_file.filename,
+        )
+        extraction_input = DocumentToolInput(
+            document_id=document.id,
+            force_reprocess=bool(getattr(tool_input, "force_reprocess", False)),
+        )
+        output = _extract_document_text_handler(db, user_id)(extraction_input)
+        output["managed_file"] = ManagedFileService.to_file_response(file=managed_file, root=root).model_dump(mode="json")
+        output["source"] = "managed-file-read-document"
+        return output
+
+    return handler
+
+
+def _mcp_filesystem_list_handler() -> ToolHandler:
+    """创建 Filesystem MCP 实时目录列举 handler。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """通过 MCP 列出受管目录，不触发数据库扫描。"""
+
+        try:
+            runner, bridge = get_mcp_filesystem()
+            path = bridge.resolve_relative_path(getattr(tool_input, "path_prefix", None))
+            result = bridge.call_sync(
+                runner,
+                "list_directory_with_sizes",
+                {
+                    "path": path,
+                    "sortBy": getattr(tool_input, "sort_by", "name"),
+                },
+            )
+            result["query"] = {
+                "path_prefix": getattr(tool_input, "path_prefix", None),
+                "sort_by": getattr(tool_input, "sort_by", "name"),
+            }
+            return result
+        except MCPFilesystemError as exc:
+            return _mcp_filesystem_error(tool_name="mcp-filesystem-list", error=exc)
+
+    return handler
+
+
+def _create_managed_file_snapshot_document(
+    *,
+    db: Any,
+    user_id: str,
+    source_path: Path,
+    filename: str,
+) -> Document:
+    """把受管文件复制为当前用户可解析的只读快照 Document。"""
+
+    content_hash = _sha256_file(source_path)
+    size_bytes = source_path.stat().st_size
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    document = Document(
+        user_id=user_id,
+        workspace_id=None,
+        original_filename=Path(filename).name,
+        content_type=content_type,
+        size_bytes=size_bytes,
+        sha256=content_hash,
+        status="USED_IN_MESSAGE",
+        ingest_status="UPLOADED",
+    )
+    db.add(document)
+    db.flush()
+
+    storage_root = Path(get_settings().file_storage_root).resolve()
+    storage_path = Path("managed-snapshots") / user_id / document.id / Path(filename).name
+    target_path = (storage_root / storage_path).resolve()
+    if not _is_relative_to(target_path, storage_root):
+        raise ValueError("managed snapshot storage path escaped storage root")
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_path, target_path)
+    db.add(
+        FileObject(
+            document_id=document.id,
+            storage_backend="local",
+            storage_path=storage_path.as_posix(),
+            size_bytes=size_bytes,
+            sha256=content_hash,
+        )
+    )
+    db.flush()
+    return document
+
+
+def _sha256_file(path: Path) -> str:
+    """流式计算文件 sha256，避免把大文件整体读入内存。"""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    """兼容不同 Python 版本的路径包含关系判断。"""
+
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _mcp_filesystem_search_handler() -> ToolHandler:
+    """创建 Filesystem MCP 实时文件搜索 handler。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """通过 MCP 搜索受管目录，不触发数据库扫描。"""
+
+        try:
+            runner, bridge = get_mcp_filesystem()
+            path = bridge.resolve_relative_path(getattr(tool_input, "path_prefix", None))
+            result = bridge.call_sync(
+                runner,
+                "search_files",
+                {
+                    "path": path,
+                    "pattern": getattr(tool_input, "query"),
+                    "excludePatterns": list(getattr(tool_input, "exclude_patterns", [])),
+                },
+            )
+            result["query"] = {
+                "query": getattr(tool_input, "query"),
+                "path_prefix": getattr(tool_input, "path_prefix", None),
+            }
+            return result
+        except MCPFilesystemError as exc:
+            return _mcp_filesystem_error(tool_name="mcp-filesystem-search", error=exc)
+
+    return handler
+
+
+def _mcp_filesystem_info_handler() -> ToolHandler:
+    """创建 Filesystem MCP 路径元数据读取 handler。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """通过 MCP 读取受管路径元数据。"""
+
+        try:
+            runner, bridge = get_mcp_filesystem()
+            path = bridge.resolve_relative_path(getattr(tool_input, "path"))
+            result = bridge.call_sync(runner, "get_file_info", {"path": path})
+            result["query"] = {"path": getattr(tool_input, "path")}
+            return result
+        except MCPFilesystemError as exc:
+            return _mcp_filesystem_error(tool_name="mcp-filesystem-info", error=exc)
+
+    return handler
+
+
+def _mcp_filesystem_error(*, tool_name: str, error: MCPFilesystemError) -> Dict[str, Any]:
+    """把 MCP 桥接异常转换成 Tool 结构化失败结果。"""
+
+    return {
+        "ok": False,
+        "status": "FAILED",
+        "tool_name": tool_name,
+        "error": {
+            "code": error.__class__.__name__,
+            "message": str(error),
+            "retryable": False,
+            "user_action_required": False,
+        },
+    }
+
+
 def _managed_root_scan_handler(db: Any, user_id: str | None) -> ToolHandler:
     """创建受管目录扫描任务 Tool handler。"""
 
@@ -995,7 +1247,11 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("managed-root-list", "List server managed logical roots.", ManagedRootListInput, True, False, ["managed_roots"], _managed_root_list_handler(db)),
         _tool("managed-file-list", "List server managed files by logical metadata filters.", ManagedFileListInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_list_handler(db)),
         _tool("managed-file-search", "Search server managed files by filename keyword.", ManagedFileSearchInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_search_handler(db)),
+        _tool("managed-file-read-document", "Read one server managed file by logical filters, snapshot it as a document, and extract text.", ManagedFileReadDocumentInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages"], _managed_file_read_document_handler(db, user_id)),
         _tool("managed-root-scan", "Create an async scan job for a managed logical root.", ManagedRootScanInput, True, False, ["filesystem_jobs", "filesystem_job_events"], _managed_root_scan_handler(db, user_id)),
+        _tool("mcp-filesystem-list", "List files and directories in the server managed filesystem root without database scan.", MCPFilesystemListInput, False, False, [], _mcp_filesystem_list_handler()),
+        _tool("mcp-filesystem-search", "Search files and directories in the server managed filesystem root without database scan.", MCPFilesystemSearchInput, False, False, [], _mcp_filesystem_search_handler()),
+        _tool("mcp-filesystem-info", "Read metadata for one server managed filesystem path without database scan.", MCPFilesystemInfoInput, False, False, [], _mcp_filesystem_info_handler()),
         _tool(
             "analyze-spreadsheet",
             "Analyze an uploaded XLS/XLSX/XLSM/CSV/TSV spreadsheet through a validated read-only query plan.",

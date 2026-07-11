@@ -29,6 +29,11 @@ services:
       FILE_STORAGE_ROOT: /data/uploads
       LOG_DIR: /data/logs
       APP_RUNTIME: api
+      MCP_FILESYSTEM_ENABLED: ${MCP_FILESYSTEM_ENABLED:-false}
+      MCP_FILESYSTEM_ROOT: ${MCP_FILESYSTEM_ROOT:-/managed/workdata}
+      MCP_FILESYSTEM_COMMAND: ${MCP_FILESYSTEM_COMMAND:-/usr/local/bin/mcp-server-filesystem}
+      MCP_FILESYSTEM_TIMEOUT_SECONDS: ${MCP_FILESYSTEM_TIMEOUT_SECONDS:-45}
+      MCP_FILESYSTEM_MAX_OUTPUT_CHARS: ${MCP_FILESYSTEM_MAX_OUTPUT_CHARS:-50000}
     volumes:
       - ../data/uploads:/data/uploads
       - ../data/logs:/data/logs

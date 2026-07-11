@@ -109,6 +109,8 @@ class ManagedFileRepository:
                 or_(
                     ManagedFile.relative_path == normalized_prefix,
                     ManagedFile.relative_path.like(f"{escaped_prefix}/%", escape="\\"),
+                    # 用户可能只说末级目录名，例如“科学发展观下的文件”，真实路径可能是“党办/2026/科学发展观/...”
+                    ManagedFile.relative_path.like(f"%/{escaped_prefix}/%", escape="\\"),
                 )
             )
         if category_path:

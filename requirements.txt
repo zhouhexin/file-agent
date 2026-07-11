@@ -2,6 +2,7 @@
 # python3 -m pip install -r requirements.txt
 fastapi>=0.128.0
 langgraph>=0.6.0
+langchain-mcp-adapters==0.3.0
 pydantic>=2.13.0
 SQLAlchemy>=2.0,<2.1
 uvicorn>=0.39.0

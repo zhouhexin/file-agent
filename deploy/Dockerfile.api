@@ -2,6 +2,8 @@
 
 FROM python:3.11-slim
 
+ARG MCP_FILESYSTEM_VERSION=2026.1.14
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/apps/api \
@@ -16,7 +18,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get install -y --no-install-recommends \
         libreoffice-writer \
         libreoffice-calc \
-        ca-certificates
+        ca-certificates \
+        nodejs \
+        npm \
+    && npm install -g "@modelcontextprotocol/server-filesystem@${MCP_FILESYSTEM_VERSION}" \
+    && npm cache clean --force \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
 

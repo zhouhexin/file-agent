@@ -54,6 +54,8 @@ SPREADSHEET_ANALYSIS_HINTS = {"analyze_spreadsheet", "analyze-spreadsheet"}
 SPREADSHEET_PROFILE_HINTS = {"profile_spreadsheet", "profile-spreadsheet"}
 SPREADSHEET_VALIDATE_HINTS = {"validate_spreadsheet", "validate-spreadsheet"}
 MANAGED_FILE_LIST_HINTS = {"managed_file_list", "managed-file-list"}
+MANAGED_FILE_READ_HINTS = {"managed_file_read", "managed-file-read-document", "read_managed_file"}
+MCP_FILESYSTEM_HINTS = {"mcp_filesystem_read", "mcp-filesystem-list", "mcp-filesystem-search", "mcp-filesystem-info"}
 SPREADSHEET_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".csv", ".tsv"}
 MANAGED_EXTENSION_ALIASES = {
     "pdf": "pdf",
@@ -171,6 +173,12 @@ class DeterministicPlanner:
         if _has_classification_taxonomy_intent(message=message, lowered=lowered):
             return _classification_taxonomy_plan(user_goal=message)
 
+        if _has_mcp_filesystem_list_intent(message=message, lowered=lowered):
+            return _mcp_filesystem_list_plan(
+                user_goal=message,
+                path_prefix=_mcp_filesystem_path_prefix_from_list_request(message),
+            )
+
         managed_extension = _managed_extension_from_list_request(message)
         managed_filename_contains = _managed_filename_contains_from_list_request(message)
         managed_root_key = _managed_root_key_from_list_request(message)
@@ -198,6 +206,18 @@ class DeterministicPlanner:
                 path_prefix=managed_path_prefix,
                 extension=managed_extension,
                 filename_contains=managed_filename_contains,
+            )
+
+        managed_read_filters = _managed_file_read_filters_from_request(message=message, lowered=lowered)
+        if managed_read_filters and not attachments:
+            return _managed_file_read_document_plan(
+                user_goal=message,
+                root_key=managed_read_filters.get("root_key"),
+                path_prefix=managed_read_filters.get("path_prefix"),
+                extension=managed_read_filters.get("extension"),
+                filename_contains=managed_read_filters.get("filename_contains"),
+                requested_outputs=_requested_outputs_for_message(message=message, lowered=lowered),
+                route_source="deterministic_planner",
             )
 
         needs_file_scope = (
@@ -443,6 +463,41 @@ def build_plan_from_user_intent(
         or requested_capabilities.intersection(CLASSIFICATION_TAXONOMY_HINTS)
     ):
         return _classification_taxonomy_plan(user_goal=intent_plan.user_goal or message)
+
+    if (
+        _has_mcp_filesystem_list_intent(message=message, lowered=lowered)
+        or intent_plan.intent == "LIST_MCP_FILESYSTEM"
+        or requested_capabilities.intersection(MCP_FILESYSTEM_HINTS)
+        or (capability_route is not None and capability_route.tool_name == "mcp-filesystem-list")
+    ):
+        return _mcp_filesystem_list_plan(
+            user_goal=intent_plan.user_goal or message,
+            path_prefix=intent_plan.managed_path_prefix or _mcp_filesystem_path_prefix_from_list_request(message),
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
+
+    managed_read_filters = _managed_file_read_filters_from_request(message=message, lowered=lowered)
+    if (
+        intent_plan.intent in {"READ_MANAGED_FILE", "SUMMARIZE_MANAGED_FILE", "ANSWER_MANAGED_FILE"}
+        or requested_capabilities.intersection(MANAGED_FILE_READ_HINTS)
+        or "managed-file-read-document" in intent_plan.tool_plan_hint
+        or (managed_read_filters and not document_ids)
+    ):
+        requested_outputs = _requested_outputs_for_intent(intent=intent_plan.intent, message=message)
+        return _managed_file_read_document_plan(
+            user_goal=intent_plan.user_goal or message,
+            root_key=intent_plan.managed_root_key or managed_read_filters.get("root_key"),
+            path_prefix=intent_plan.managed_path_prefix or managed_read_filters.get("path_prefix"),
+            extension=intent_plan.managed_extension or managed_read_filters.get("extension"),
+            filename_contains=intent_plan.managed_filename_contains or managed_read_filters.get("filename_contains"),
+            requested_outputs=requested_outputs,
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
+            llm_intent_plan=intent_plan.model_dump(),
+            route_source="capability_router" if capability_route else "llm_planner",
+        )
 
     managed_root_key = intent_plan.managed_root_key or _managed_root_key_from_list_request(message)
     managed_path_prefix = intent_plan.managed_path_prefix or _managed_path_prefix_from_list_request(
@@ -901,6 +956,107 @@ def _managed_file_list_plan(
     )
 
 
+def _mcp_filesystem_list_plan(
+    *,
+    user_goal: str,
+    path_prefix: str | None = None,
+    response_style: str = "concise",
+    clarification_question: str | None = None,
+    llm_intent_plan: Dict[str, Any] | None = None,
+) -> PlannerOutput:
+    """生成实时 Filesystem MCP 目录列举计划。"""
+
+    input_json: Dict[str, Any] = {"sort_by": "name"}
+    if path_prefix:
+        input_json["path_prefix"] = path_prefix
+    return PlannerOutput(
+        intent="LIST_MCP_FILESYSTEM",
+        user_goal=user_goal,
+        slots={
+            "document_ids": [],
+            "path_prefix": path_prefix,
+            "requested_outputs": ["mcp_filesystem"],
+            "response_style": response_style,
+            "clarification_question": clarification_question,
+            "llm_intent_plan": llm_intent_plan or {},
+            "route_source": "mcp_filesystem",
+        },
+        selected_skills=["managed-file-query"],
+        steps=[
+            {
+                "step_id": "step-1",
+                "skill": "managed-file-query",
+                "tool_name": "mcp-filesystem-list",
+                "input": input_json,
+                "requires_confirmation": False,
+                "risk_level": "low",
+                "expected_outputs": ["mcp_filesystem"],
+                "writes": [],
+            }
+        ],
+        evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+        confirmation_policy={"operation_plan_required": False},
+    )
+
+
+def _managed_file_read_document_plan(
+    *,
+    user_goal: str,
+    root_key: str | None,
+    path_prefix: str | None = None,
+    extension: str | None = None,
+    filename_contains: str | None = None,
+    requested_outputs: List[str] | None = None,
+    response_style: str = "concise",
+    clarification_question: str | None = None,
+    llm_intent_plan: Dict[str, Any] | None = None,
+    route_source: str = "legacy_planner",
+) -> PlannerOutput:
+    """生成读取并解析唯一受管文件的计划。"""
+
+    outputs = requested_outputs or ["text", "receipt"]
+    input_json: Dict[str, Any] = {}
+    if root_key:
+        input_json["root_key"] = root_key
+    if path_prefix:
+        input_json["path_prefix"] = path_prefix
+    if extension:
+        input_json["extension"] = extension
+    if filename_contains:
+        input_json["filename_contains"] = filename_contains
+    return PlannerOutput(
+        intent="SUMMARIZE_MANAGED_FILE" if "summary" in outputs else "READ_MANAGED_FILE",
+        user_goal=user_goal,
+        slots={
+            "document_ids": [],
+            "root_key": root_key,
+            "path_prefix": path_prefix,
+            "extension": extension,
+            "filename_contains": filename_contains,
+            "requested_outputs": outputs,
+            "response_style": response_style,
+            "clarification_question": clarification_question,
+            "llm_intent_plan": llm_intent_plan or {},
+            "route_source": route_source,
+        },
+        selected_skills=["managed-file-query", "document-text-extract", "document-reading"],
+        steps=[
+            {
+                "step_id": "step-1",
+                "skill": "managed-file-query",
+                "tool_name": "managed-file-read-document",
+                "input": input_json,
+                "requires_confirmation": False,
+                "risk_level": "low",
+                "expected_outputs": ["document_pages", "extraction_run"],
+                "writes": ["documents", "file_objects", "document_extraction_runs", "document_pages"],
+            }
+        ],
+        evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+        confirmation_policy={"operation_plan_required": False},
+    )
+
+
 def _classify_files_plan(
     *,
     user_goal: str,
@@ -1170,6 +1326,44 @@ def _managed_root_key_from_list_request(message: str) -> str | None:
     return None
 
 
+def _has_mcp_filesystem_list_intent(*, message: str, lowered: str) -> bool:
+    """判断用户是否明确要求实时读取服务器工作目录。"""
+
+    if not any(keyword in message for keyword in ["列出", "查看", "显示"]):
+        return False
+    if "文件" not in message and "目录" not in message:
+        return False
+    return (
+        "实时" in message
+        or "服务器工作目录" in message
+        or "服务器当前目录" in message
+        or "当前服务器目录" in message
+        or "filesystem mcp" in lowered
+    )
+
+
+def _mcp_filesystem_path_prefix_from_list_request(message: str) -> str | None:
+    """从实时服务器目录请求中提取 MCP 受管根内相对路径。"""
+
+    tail = re.sub(r"^(?:实时)?(?:列出|查看|显示)\s*", "", message).strip()
+    tail = re.sub(r"^(?:服务器工作目录|服务器当前目录|当前服务器目录|工作目录|当前目录)", "", tail).strip()
+    tail = re.sub(r"^(?:目录下|下|中的|里的|里面的|内|目录中|目录里)\s*", "", tail)
+    tail = _strip_managed_file_filter_words(tail)
+    tail = _strip_managed_year_filter_words(tail)
+    subject_prefix = _managed_directory_prefix_from_subject_tail(tail)
+    if subject_prefix:
+        return _normalize_managed_path_prefix(subject_prefix)
+    tail = _strip_managed_subject_filter_words(tail)
+    tail = re.sub(r"^(?:的)?(?:所有|全部)?\s*", "", tail)
+    tail = re.sub(
+        r"\s*(?:目录|文件夹)?(?:中|里|下|里面)?(?:的)?(?:所有|全部)?(?:文件|目录)\s*$",
+        "",
+        tail,
+    )
+    tail = re.sub(r"(?:目录|文件夹)$", "", tail).strip()
+    return _normalize_managed_path_prefix(tail)
+
+
 def _managed_extension_from_list_request(message: str) -> str | None:
     """从受管目录列表请求中提取文件扩展名过滤条件。"""
 
@@ -1220,6 +1414,84 @@ def _has_managed_file_list_filter_intent(
     return any(keyword in message for keyword in ["列出", "查看", "显示"]) and "文件" in message
 
 
+def _managed_file_read_filters_from_request(*, message: str, lowered: str) -> Dict[str, str] | None:
+    """从“读取某目录下某文件并总结”中提取受管文件定位条件。"""
+
+    if not _has_managed_file_read_intent(message=message, lowered=lowered):
+        return None
+
+    root_key = _managed_root_key_from_read_request(message)
+    path_prefix = None
+    filename_contains = _managed_filename_contains_from_list_request(message)
+    directory_match = re.search(
+        r"(?:读取|解析|总结|讲解|概括)\s*(?P<prefix>[^，。！？]+?)\s*(?:目录下|下|中|里|里面)\s*(?P<keyword>[^，。！？]+?)(?:的)?(?:相关)?(?:文件|文档|材料)",
+        message,
+    )
+    if directory_match:
+        prefix = directory_match.group("prefix").strip()
+        keyword = directory_match.group("keyword").strip()
+        if root_key and prefix == root_key:
+            path_prefix = None
+        else:
+            path_prefix = _normalize_managed_path_prefix(prefix)
+        filename_contains = _normalize_managed_filename_keyword(keyword) or filename_contains
+    elif root_key:
+        path_prefix = _managed_path_prefix_from_read_request(message=message, root_key=root_key)
+
+    extension = _managed_extension_from_list_request(message)
+    if not any([root_key, path_prefix, filename_contains, extension]):
+        return None
+    filters: Dict[str, str] = {}
+    if root_key:
+        filters["root_key"] = root_key
+    if path_prefix:
+        filters["path_prefix"] = path_prefix
+    if extension:
+        filters["extension"] = extension
+    if filename_contains:
+        filters["filename_contains"] = filename_contains
+    return filters
+
+
+def _has_managed_file_read_intent(*, message: str, lowered: str) -> bool:
+    """判断用户是否想读取受管目录里的文件正文。"""
+
+    if "文件" not in message and "文档" not in message and "材料" not in message:
+        return False
+    if not (
+        any(keyword in message for keyword in ["读取", "解析", "总结", "讲解", "概括", "内容"])
+        or any(keyword in lowered for keyword in ["read", "summarize", "summary", "parse"])
+    ):
+        return False
+    return any(keyword in message for keyword in ["下", "目录", "中", "里", "里面"]) or bool(
+        _managed_root_key_from_read_request(message)
+    )
+
+
+def _managed_root_key_from_read_request(message: str) -> str | None:
+    """从读取受管文件请求中提取 ASCII root_key。"""
+
+    match = re.search(
+        r"(?:读取|解析|总结|讲解|概括)\s*([A-Za-z0-9_-]+)\s*(?:目录下|下|中的|里的|里面的)",
+        message,
+    )
+    return match.group(1) if match else None
+
+
+def _managed_path_prefix_from_read_request(*, message: str, root_key: str) -> str | None:
+    """从 root_key 后面的读取请求中提取可选子目录。"""
+
+    root_match = re.search(re.escape(root_key), message)
+    if not root_match:
+        return None
+    tail = message[root_match.end() :].strip()
+    tail = re.sub(r"^(?:目录下|下|中的|里的|里面的|内|目录中|目录里)\s*", "", tail)
+    tail = _strip_managed_file_filter_words(tail)
+    tail = _strip_managed_subject_filter_words(tail)
+    tail = re.sub(r"(?:并)?(?:总结|讲解|概括|说明|读取|解析)?(?:内容|正文)?$", "", tail).strip()
+    return _normalize_managed_path_prefix(tail)
+
+
 def _managed_path_prefix_from_list_request(*, message: str, root_key: str | None) -> str | None:
     """从“root_key 下某子目录中的文件”提取受管目录内的相对路径。"""
 
@@ -1239,6 +1511,7 @@ def _managed_path_prefix_from_list_request(*, message: str, root_key: str | None
             "",
             tail,
         )
+        tail = re.sub(r"(?:目录|文件夹)$", "", tail).strip()
         return _normalize_managed_path_prefix(tail)
 
     escaped_root = re.escape(root_key)
@@ -1282,7 +1555,7 @@ def _normalize_managed_path_prefix(value: str | None) -> str | None:
         return None
     if _is_known_managed_file_extension(normalized):
         return None
-    if _managed_filename_contains_from_list_request(normalized):
+    if _looks_like_managed_filename_filter_expression(normalized):
         return None
     if any(part in {"", ".", ".."} for part in normalized.split("/")):
         return None
@@ -1308,6 +1581,17 @@ def _strip_managed_file_filter_words(value: str) -> str:
         stripped,
     ).strip()
     return stripped
+
+
+def _looks_like_managed_filename_filter_expression(value: str) -> bool:
+    """判断路径片段是否其实是显式文件名过滤表达，而不是合法多级目录。"""
+
+    return bool(
+        re.search(
+            r"^(?:文件名|名称|名字)\s*(?:包含|含有|带有|里有|中有)|^(?:包含|含有|带有)",
+            value,
+        )
+    )
 
 
 def _managed_year_from_list_request(message: str) -> str | None:
@@ -1340,13 +1624,15 @@ def _managed_directory_prefix_from_subject_tail(value: str) -> str | None:
     )
     if not match:
         return None
-    return match.group("prefix").strip()
+    prefix = match.group("prefix").strip()
+    return re.sub(r"(?:目录|文件夹)$", "", prefix).strip()
 
 
 def _strip_managed_year_filter_words(value: str) -> str:
     """从目录片段中移除年份表达，避免“党办2026年”整体变成目录名。"""
 
-    return re.sub(r"(?:19|20)\d{2}\s*年?(?:的)?", "", value).strip()
+    # 如果年份本身是 POSIX 路径段，例如“党办/2026/材料”，必须保留。
+    return re.sub(r"(?<!/)(?:19|20)\d{2}\s*年?(?:的)?(?!/)", "", value).strip()
 
 
 def _strip_managed_subject_filter_words(value: str) -> str:
