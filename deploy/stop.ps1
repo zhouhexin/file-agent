@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 $DeployDir = $PSScriptRoot
 $ProjectRoot = (Resolve-Path (Join-Path $DeployDir "..")).Path
 $ComposeFile = Join-Path $DeployDir "docker-compose.production.yml"

@@ -1700,6 +1700,84 @@ def test_summary_request_uses_document_summary_service():
     assert summary_service.calls[0]["document_results"][0]["document_id"] == "doc-summary-service"
 
 
+def test_managed_file_batch_read_results_feed_document_summary_service():
+    """受管文件批量读取结果应展开为多个正文结果供总结服务消费。"""
+
+    class FakeRegistry:
+        """测试用 Registry，模拟受管文件批量读取输出。"""
+
+        def invoke(self, tool_name, input_json):
+            """返回两个解析结果，模拟一次 Tool 处理多个命中文件。"""
+
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "status": "COMPLETED",
+                    "extraction_results": [
+                        {
+                            "ok": True,
+                            "document_id": "doc-managed-1",
+                            "extraction_run_id": "run-managed-1",
+                            "status": "COMPLETED",
+                            "extractor": "plain-text",
+                            "pages": [{"page_number": 1, "text_preview": "第一份", "char_count": 3}],
+                            "error": None,
+                        },
+                        {
+                            "ok": True,
+                            "document_id": "doc-managed-2",
+                            "extraction_run_id": "run-managed-2",
+                            "status": "COMPLETED",
+                            "extractor": "plain-text",
+                            "pages": [{"page_number": 1, "text_preview": "第二份", "char_count": 3}],
+                            "error": None,
+                        },
+                    ],
+                },
+                status="COMPLETED",
+            )
+
+    class FakeSummaryService:
+        """测试用总结服务，记录收到的批量结果。"""
+
+        def __init__(self):
+            """初始化调用记录。"""
+
+            self.calls = []
+
+        def summarize_documents(self, *, document_results, tool_results, user_message):
+            """返回固定总结文本。"""
+
+            self.calls.append({"document_results": document_results, "tool_results": tool_results})
+            return "已汇总 2 个受管文件。"
+
+    summary_service = FakeSummaryService()
+    service = AgentRuntimeService(
+        registry_factory=lambda db, user_id: FakeRegistry(),
+        document_summary_service=summary_service,
+    )
+
+    result = service.run_message(
+        conversation_id="conv-managed-batch-summary",
+        user_id="user-1",
+        message_id="msg-managed-batch-summary",
+        message="读取党办下科学发展观的文件并总结内容",
+        attachments=[],
+    )
+
+    assert result.final_response == "已汇总 2 个受管文件。"
+    assert [item["document_id"] for item in summary_service.calls[0]["document_results"]] == [
+        "doc-managed-1",
+        "doc-managed-2",
+    ]
+    assert [item["document_id"] for item in summary_service.calls[0]["tool_results"]] == [
+        "doc-managed-1",
+        "doc-managed-2",
+    ]
+
+
 def test_document_question_uses_text_extraction_and_llm_reader():
     """针对附件的问答请求必须先提取全文，再交给 LLM 文档阅读服务回答。"""
 

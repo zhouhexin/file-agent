@@ -623,6 +623,7 @@ def _managed_file_read_document_handler(db: Any, user_id: str | None) -> ToolHan
             }
 
         repository = ManagedFileRepository(db)
+        max_batch_size = 20
         rows = repository.list_files(
             root_key=scope.root_key,
             root_keys=scope.configured_root_keys if scope.root_key is None else None,
@@ -630,7 +631,7 @@ def _managed_file_read_document_handler(db: Any, user_id: str | None) -> ToolHan
             extension=getattr(tool_input, "extension", None),
             filename_contains=getattr(tool_input, "filename_contains", None),
             status="ACTIVE",
-            limit=20,
+            limit=max_batch_size + 1,
             offset=0,
         )
         relative_path = getattr(tool_input, "relative_path", None)
@@ -642,44 +643,41 @@ def _managed_file_read_document_handler(db: Any, user_id: str | None) -> ToolHan
                 "status": "FAILED",
                 "error": {"code": "MANAGED_FILE_NOT_FOUND", "message": "未找到匹配的受管文件。"},
             }
-        if len(rows) > 1:
+        if len(rows) > max_batch_size:
             return {
                 "ok": False,
                 "status": "FAILED",
                 "error": {
-                    "code": "MANAGED_FILE_AMBIGUOUS",
-                    "message": "匹配到多个受管文件，请补充更具体的目录或文件名。",
+                    "code": "MANAGED_FILE_BATCH_TOO_LARGE",
+                    "message": f"匹配到超过 {max_batch_size} 个受管文件，请补充更具体的目录或文件名。",
                     "candidates": [
                         ManagedFileService.to_file_response(file=file, root=root).model_dump(mode="json")
-                        for file, root in rows[:10]
+                        for file, root in rows[:max_batch_size]
                     ],
                 },
             }
 
-        managed_file, root = rows[0]
-        source_path = (Path(root.container_path).resolve() / managed_file.relative_path).resolve()
-        root_path = Path(root.container_path).resolve()
-        if not _is_relative_to(source_path, root_path) or not source_path.is_file():
-            return {
-                "ok": False,
-                "status": "FAILED",
-                "error": {"code": "MANAGED_FILE_UNAVAILABLE", "message": "受管文件已不存在或路径越界。"},
-            }
-
-        document = _create_managed_file_snapshot_document(
-            db=db,
-            user_id=user_id,
-            source_path=source_path,
-            filename=managed_file.filename,
-        )
-        extraction_input = DocumentToolInput(
-            document_id=document.id,
-            force_reprocess=bool(getattr(tool_input, "force_reprocess", False)),
-        )
-        output = _extract_document_text_handler(db, user_id)(extraction_input)
-        output["managed_file"] = ManagedFileService.to_file_response(file=managed_file, root=root).model_dump(mode="json")
-        output["source"] = "managed-file-read-document"
-        return output
+        extraction_results = [
+            _snapshot_and_extract_managed_file(
+                db=db,
+                user_id=user_id,
+                managed_file=managed_file,
+                root=root,
+                force_reprocess=bool(getattr(tool_input, "force_reprocess", False)),
+            )
+            for managed_file, root in rows
+        ]
+        if len(extraction_results) == 1:
+            return extraction_results[0]
+        completed_count = len([item for item in extraction_results if item.get("status") == "COMPLETED"])
+        return {
+            "ok": completed_count > 0,
+            "status": "COMPLETED" if completed_count == len(extraction_results) else "PARTIAL",
+            "matched_count": len(extraction_results),
+            "completed_count": completed_count,
+            "extraction_results": extraction_results,
+            "source": "managed-file-read-document",
+        }
 
     return handler
 
@@ -755,6 +753,59 @@ def _create_managed_file_snapshot_document(
     )
     db.flush()
     return document
+
+
+def _snapshot_and_extract_managed_file(
+    *,
+    db: Any,
+    user_id: str,
+    managed_file: Any,
+    root: Any,
+    force_reprocess: bool,
+) -> Dict[str, Any]:
+    """把一个受管文件快照为 Document 并执行正文解析。"""
+
+    source_path = (Path(root.container_path).resolve() / managed_file.relative_path).resolve()
+    root_path = Path(root.container_path).resolve()
+    managed_payload = ManagedFileService.to_file_response(file=managed_file, root=root).model_dump(mode="json")
+    if not _is_relative_to(source_path, root_path) or not source_path.is_file():
+        return {
+            "ok": False,
+            "document_id": f"managed-file-unavailable-{managed_file.id}",
+            "extraction_run_id": f"failed-managed-{managed_file.id}",
+            "status": "FAILED",
+            "extractor": "unknown",
+            "reused": False,
+            "read_quality": "FAILED",
+            "read_profile": {
+                "file_type": "unknown",
+                "page_count": 0,
+                "sheet_count": 0,
+                "char_count": 0,
+                "has_text": False,
+                "requires_ocr": False,
+                "ocr_used": False,
+            },
+            "pages": [],
+            "error": {"code": "MANAGED_FILE_UNAVAILABLE", "message": "受管文件已不存在或路径越界。"},
+            "managed_file": managed_payload,
+            "source": "managed-file-read-document",
+        }
+
+    document = _create_managed_file_snapshot_document(
+        db=db,
+        user_id=user_id,
+        source_path=source_path,
+        filename=managed_file.filename,
+    )
+    extraction_input = DocumentToolInput(
+        document_id=document.id,
+        force_reprocess=force_reprocess,
+    )
+    output = _extract_document_text_handler(db, user_id)(extraction_input)
+    output["managed_file"] = managed_payload
+    output["source"] = "managed-file-read-document"
+    return output
 
 
 def _sha256_file(path: Path) -> str:

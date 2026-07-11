@@ -201,6 +201,44 @@ def test_managed_file_read_document_tool_registers_snapshot_and_extracts_text(mo
         clear_overrides()
 
 
+def test_managed_file_read_document_tool_reads_multiple_matches(monkeypatch, tmp_path):
+    """managed-file-read-document 多命中时应批量快照和解析，不要求用户二次确认。"""
+
+    managed_root = tmp_path / "downloads"
+    target_dir = managed_root / "党办"
+    target_dir.mkdir(parents=True)
+    (target_dir / "科学发展观材料1.txt").write_text("第一份正文", encoding="utf-8")
+    (target_dir / "科学发展观材料2.txt").write_text("第二份正文", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "storage"))
+    client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        result = ToolRegistry(db=db, user_id="user-1").invoke(
+            "managed-file-read-document",
+            {
+                "root_key": "downloads",
+                "path_prefix": "党办",
+                "filename_contains": "科学发展观",
+            },
+        )
+
+        assert result.status == "COMPLETED"
+        assert result.output_json["ok"] is True
+        assert result.output_json["status"] == "COMPLETED"
+        assert result.output_json["matched_count"] == 2
+        assert [item["managed_file"]["relative_path"] for item in result.output_json["extraction_results"]] == [
+            "党办/科学发展观材料1.txt",
+            "党办/科学发展观材料2.txt",
+        ]
+        assert db.query(Document).count() == 2
+        assert db.query(DocumentPage).count() == 2
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def test_managed_file_list_tool_filters_keyword_in_filename_or_relative_path(monkeypatch, tmp_path):
     """年份等关键字应同时匹配文件名和相对路径，支持“党办 2026”组合条件。"""
 

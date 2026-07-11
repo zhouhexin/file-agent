@@ -521,11 +521,19 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
 def _extraction_results_from_results(tool_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """从 Tool 结果中提取 extract-document-text 返回的解析结果。"""
 
-    return [
-        result
-        for result in tool_results
-        if result.get("extraction_run_id") and result.get("status") in {"COMPLETED", "FAILED"}
-    ]
+    extraction_results: List[Dict[str, Any]] = []
+    for result in tool_results:
+        batch_results = result.get("extraction_results")
+        if isinstance(batch_results, list):
+            extraction_results.extend(
+                item
+                for item in batch_results
+                if isinstance(item, dict) and item.get("extraction_run_id") and item.get("status") in {"COMPLETED", "FAILED"}
+            )
+            continue
+        if result.get("extraction_run_id") and result.get("status") in {"COMPLETED", "FAILED"}:
+            extraction_results.append(result)
+    return extraction_results
 
 
 def _build_extraction_response(extraction_results: List[Dict[str, Any]]) -> str:
