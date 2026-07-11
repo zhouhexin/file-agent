@@ -69,6 +69,18 @@ export AUTO_CREATE_TABLES=false
 /opt/homebrew/anaconda3/envs/py311/bin/python -m alembic -c apps/api/alembic.ini upgrade head
 ```
 
+Docker 生产环境中必须从容器内的仓库根目录 `/app` 显式指定 Alembic 配置文件；直接执行 `alembic upgrade head` 会因为找不到 `script_location` 失败：
+
+```bash
+docker compose -f deploy/docker-compose.production.yml exec -w /app api python -m alembic -c apps/api/alembic.ini upgrade head
+```
+
+如果已经在 `deploy/` 目录内执行 compose 命令，则使用：
+
+```bash
+docker compose exec -w /app api python -m alembic -c apps/api/alembic.ini upgrade head
+```
+
 当前 `.env` 中 `AUTO_CREATE_TABLES=false`，应通过 Alembic migration 管理数据库结构。
 
 ## 4. 启动后端服务

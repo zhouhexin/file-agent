@@ -84,8 +84,8 @@ def test_upsert_managed_root_skips_update_when_config_is_unchanged():
         db.close()
 
 
-def test_managed_file_relative_path_is_unique_per_root():
-    """同一逻辑目录内 relative_path 必须唯一，避免重复扫描重复入库。"""
+def test_managed_file_relative_path_hash_is_unique_per_root():
+    """同一逻辑目录内路径哈希必须唯一，避免把超长路径放进唯一索引。"""
 
     db = _session()
     try:
@@ -97,6 +97,7 @@ def test_managed_file_relative_path_is_unique_per_root():
                 ManagedFile(
                     root_id=root.id,
                     relative_path="2026/a.pdf",
+                    relative_path_hash="hash-a",
                     filename="a.pdf",
                     extension=".pdf",
                     size_bytes=10,

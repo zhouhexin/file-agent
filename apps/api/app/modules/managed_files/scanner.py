@@ -50,6 +50,7 @@ class ManagedFileScanner:
                     errors += 1
                     continue
                 stat = resolved.stat()
+                relative_path_hash = _path_hash(relative_path)
                 fingerprint = _fingerprint(relative_path=relative_path, size_bytes=stat.st_size, modified_at=stat.st_mtime)
                 category_path = _category_path_for(root=root, relative_path=relative_path)
                 existing = existing_by_path.get(relative_path)
@@ -57,6 +58,7 @@ class ManagedFileScanner:
                     existing = ManagedFile(
                         root_id=root.id,
                         relative_path=relative_path,
+                        relative_path_hash=relative_path_hash,
                         category_path=category_path,
                         filename=resolved.name,
                         extension=resolved.suffix.lower(),
@@ -69,6 +71,7 @@ class ManagedFileScanner:
                     self.db.add(existing)
                 else:
                     existing.filename = resolved.name
+                    existing.relative_path_hash = relative_path_hash
                     existing.category_path = category_path
                     existing.extension = resolved.suffix.lower()
                     existing.size_bytes = stat.st_size
@@ -101,6 +104,12 @@ def _fingerprint(*, relative_path: str, size_bytes: int, modified_at: float) -> 
 
     payload = f"{relative_path}\0{size_bytes}\0{int(modified_at)}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _path_hash(relative_path: str) -> str:
+    """生成相对路径唯一性哈希，避免把长路径放进唯一索引。"""
+
+    return hashlib.sha256(relative_path.encode("utf-8")).hexdigest()
 
 
 def _is_hidden_relative_path(relative_path: str) -> bool:

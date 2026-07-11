@@ -431,18 +431,19 @@ class ManagedFile(Base):
 
     __tablename__ = "managed_files"
     __table_args__ = (
-        UniqueConstraint("root_id", "relative_path", name="uq_managed_files_root_relative_path"),
+        UniqueConstraint("root_id", "relative_path_hash", name="uq_managed_files_root_relative_path_hash"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     root_id: Mapped[str] = mapped_column(String(36), ForeignKey("managed_roots.id", ondelete="CASCADE"), nullable=False, index=True)
-    relative_path: Mapped[str] = mapped_column(String(1000), nullable=False)
-    category_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True, index=True)
-    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    relative_path_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    category_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True, index=True)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
     extension: Mapped[str] = mapped_column(String(40), nullable=False, default="")
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     modified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    fingerprint: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="ACTIVE", index=True)
     last_seen_scan_run_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

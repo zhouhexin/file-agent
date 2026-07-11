@@ -56,7 +56,9 @@ def test_scanner_fingerprint_is_fixed_length_for_deep_paths(tmp_path):
 
         stored = db.query(ManagedFile).one()
         assert len(stored.fingerprint) == 64
+        assert len(stored.relative_path_hash) == 64
         assert "/" not in stored.fingerprint
+        assert "/" not in stored.relative_path_hash
         assert stored.relative_path.startswith("人事处/")
     finally:
         db.close()
