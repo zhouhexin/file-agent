@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from mimetypes import guess_type
+from pathlib import Path
 
 from fastapi import HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.db.models import FilesystemJob, ManagedFile, ManagedRoot, User
 from app.modules.managed_files.jobs import FilesystemJobQueue
+from app.modules.managed_files.path_policy import PathPolicyError, resolve_managed_relative_path
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
 from app.modules.managed_files.scanner import ManagedFileScanner
 from app.modules.managed_files.schemas import (
@@ -145,6 +149,35 @@ class ManagedFileService:
             )
             for row_root_key, display_name, category_path, file_count in self.repository.list_category_paths(root_key=root_key)
         ]
+
+    def get_preview_response(
+        self,
+        *,
+        current_user: User,
+        root_key: str,
+        relative_path: str,
+    ) -> FileResponse:
+        """返回受管文件内容供浏览器预览或下载，路径必须保持在受管根目录内。"""
+
+        _require_role(current_user, {"user", "ops", "admin"})
+        roots = sync_configured_managed_roots(self.db, root_key=root_key, scan=False)
+        self.db.commit()
+        root = roots[0] if roots else self.repository.get_root_by_key(root_key.strip().lower())
+        if root is None or not root.enabled:
+            raise HTTPException(status_code=404, detail="Managed root not found")
+        try:
+            file_path = resolve_managed_relative_path(
+                root_path=Path(root.container_path),
+                relative_path=relative_path,
+            )
+        except PathPolicyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        media_type = guess_type(file_path.name)[0] or "application/octet-stream"
+        return FileResponse(
+            path=file_path,
+            media_type=media_type,
+            filename=file_path.name,
+        )
 
     @staticmethod
     def to_root_response(root: ManagedRoot) -> ManagedRootResponse:

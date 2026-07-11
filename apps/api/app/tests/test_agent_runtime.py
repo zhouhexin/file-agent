@@ -586,7 +586,46 @@ def test_response_consumes_aggregated_result_summary_without_rescanning_tool_res
 
     assert result["status"] == "COMPLETED"
     assert "downloads 下共有 1 个文件" in result["final_response"]
-    assert "docs/a.pdf" in result["final_response"]
+    assert "docs/" in result["final_response"]
+    assert "  a.pdf（2.0 KB）" in result["final_response"]
+
+
+def test_response_formats_managed_files_as_directory_tree():
+    """受管文件搜索结果应按目录树展示，避免长路径平铺成难读列表。"""
+
+    state = {
+        "result_summary": {
+            "managed_file_list": {
+                "query": {"root_key": "downloads"},
+                "files": [
+                    {
+                        "root_key": "downloads",
+                        "relative_path": "人事处/2021/通知.pdf",
+                        "filename": "通知.pdf",
+                        "size_bytes": 2048,
+                        "category_path": None,
+                    },
+                    {
+                        "root_key": "downloads",
+                        "relative_path": "人事处/2021/汇总.xlsx",
+                        "filename": "汇总.xlsx",
+                        "size_bytes": 4096,
+                        "category_path": None,
+                    },
+                ],
+            }
+        },
+        "tool_results": [],
+        "document_results": [],
+    }
+
+    result = response(state, None)
+
+    assert "downloads 下共有 2 个文件" in result["final_response"]
+    assert "人事处/" in result["final_response"]
+    assert "  2021/" in result["final_response"]
+    assert "    通知.pdf（2.0 KB）" in result["final_response"]
+    assert "    汇总.xlsx（4.0 KB）" in result["final_response"]
 
 
 def test_local_web_origin_is_allowed_for_api_requests():

@@ -1,19 +1,21 @@
+// 聊天工作台是文件智能体主入口，文件打开动作必须经过后端受控接口。
 import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { BookOpen, LogOut, MessageSquare, Paperclip, Send, User as UserIcon } from 'lucide-react';
 
 import {
   ApiError,
   deleteUploadedFile,
+  fetchManagedFileBlob,
   fetchUploadedFileBlob,
   getConversationDetail,
   sendAgentMessage,
   uploadFile,
 } from '../../api/client';
 import { formatError } from '../../api/errors';
-import type { ConversationHistoryMessage, User } from '../../types';
+import type { ConversationHistoryMessage, ManagedFileResult, User } from '../../types';
 import { AttachmentRail } from './AttachmentRail';
 import { ChatTurnView } from './ChatTurnView';
-import { canPreviewInBrowser } from './presentation';
+import { canPreviewFileInfo, canPreviewInBrowser } from './presentation';
 import type { ChatAttachment, ChatTurn } from './presentation';
 
 function getWebConversationId(userId: string): string {
@@ -356,6 +358,36 @@ export function ChatPage({
     }
   }
 
+  async function openManagedFile(file: ManagedFileResult) {
+    // 受管文件复用 Blob 预览流程；后端只接受 root_key + relative_path，不暴露真实路径。
+    setError('');
+    if (file.status === 'MISSING') {
+      setError('文件已不存在，无法预览。');
+      return;
+    }
+    try {
+      const blob = await fetchManagedFileBlob(token, file.root_key, file.relative_path);
+      const objectUrl = URL.createObjectURL(blob);
+      previewUrls.current.add(objectUrl);
+      if (canPreviewFileInfo(file.filename, blob.type || 'application/octet-stream')) {
+        window.open(objectUrl, '_blank', 'noopener,noreferrer');
+      } else {
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = file.filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      }
+      window.setTimeout(() => {
+        URL.revokeObjectURL(objectUrl);
+        previewUrls.current.delete(objectUrl);
+      }, 60_000);
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -416,6 +448,7 @@ export function ChatPage({
                   token={token}
                   turn={turn}
                   onOpenAttachment={openAttachment}
+                  onOpenManagedFile={openManagedFile}
                 />
               ))}
             </div>

@@ -789,6 +789,76 @@
   white-space: pre-line;
 }
 
+/* 受管文件按目录树展示，点击文件时仍走后端授权预览接口。 */
+.managed-file-tree-card {
+  width: min(760px, 100%);
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.managed-file-tree-summary {
+  border-bottom: 1px solid #e6ebf2;
+  color: #1f2933;
+  font-size: 14px;
+  padding: 12px 14px;
+}
+
+.managed-file-tree {
+  display: grid;
+  padding: 8px 0;
+}
+
+.managed-file-tree-group {
+  display: grid;
+}
+
+.managed-file-tree-row {
+  display: flex;
+  width: 100%;
+  min-height: 32px;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: #334155;
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 14px;
+  text-align: left;
+}
+
+.managed-file-tree-folder {
+  color: #475569;
+  font-weight: 600;
+}
+
+.managed-file-tree-file {
+  cursor: pointer;
+}
+
+.managed-file-tree-file:hover:not(:disabled) {
+  background: #f4f7fb;
+}
+
+.managed-file-tree-file:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.managed-file-tree-file span {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.managed-file-tree-file em {
+  color: #64748b;
+  font-style: normal;
+  white-space: nowrap;
+}
+
 @media (max-width: 640px) {
   .agent-run-summary {
     align-items: flex-start;

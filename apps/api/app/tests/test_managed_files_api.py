@@ -163,6 +163,46 @@ def test_managed_files_query_returns_logical_metadata_only(monkeypatch, tmp_path
     clear_overrides()
 
 
+def test_managed_file_preview_returns_safe_text_blob(monkeypatch, tmp_path):
+    """搜索结果预览只能通过 root_key + relative_path 读取安全文本文件。"""
+
+    managed_root = tmp_path / "student-affairs"
+    file_dir = managed_root / "2026"
+    file_dir.mkdir(parents=True)
+    (file_dir / "notice.txt").write_text("第一行通知\n第二行要求", encoding="utf-8")
+    monkeypatch.setenv("MANAGED_ROOT_STUDENT_AFFAIRS", str(managed_root))
+    client, _ = client_with_database()
+    _, token = _register_and_login(client, "managed-preview-reader")
+
+    response = client.get(
+        "/api/managed-files/preview?root_key=student_affairs&relative_path=2026/notice.txt",
+        headers=_auth_header(token),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.text == "第一行通知\n第二行要求"
+    clear_overrides()
+
+
+def test_managed_file_preview_rejects_path_escape(monkeypatch, tmp_path):
+    """受管文件预览必须复用路径策略，不能读取根目录外文件。"""
+
+    managed_root = tmp_path / "student-affairs"
+    managed_root.mkdir()
+    monkeypatch.setenv("MANAGED_ROOT_STUDENT_AFFAIRS", str(managed_root))
+    client, _ = client_with_database()
+    _, token = _register_and_login(client, "managed-preview-escape")
+
+    response = client.get(
+        "/api/managed-files/preview?root_key=student_affairs&relative_path=../secret.txt",
+        headers=_auth_header(token),
+    )
+
+    assert response.status_code == 400
+    clear_overrides()
+
+
 def test_user_query_auto_reads_env_managed_root_without_admin_registration(monkeypatch, tmp_path):
     """普通用户查询 env 受管目录时，系统应自动登记和扫描，不需要 Admin 预操作。"""
 

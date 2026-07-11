@@ -1,3 +1,4 @@
+// 前端 API 客户端只封装受控 HTTP 接口，不绕过后端 Tool、权限和路径策略。
 import type {
   AgentCapabilityCatalog,
   ChangeSetResponse,
@@ -100,6 +101,30 @@ export async function fetchUploadedFileBlob(token: string, documentId: string): 
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
     const message = data?.detail ?? data?.error?.message ?? '文件打开失败';
+    throw new ApiError(response.status, String(message));
+  }
+  return response.blob();
+}
+
+export async function fetchManagedFileBlob(
+  token: string,
+  rootKey: string,
+  relativePath: string,
+): Promise<Blob> {
+  // 受管文件只通过 root_key + relative_path 读取，避免前端接触容器绝对路径。
+  const params = new URLSearchParams({
+    root_key: rootKey,
+    relative_path: relativePath,
+  });
+  const response = await fetch(`${API_BASE_URL}/managed-files/preview?${params.toString()}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const message = data?.detail ?? data?.error?.message ?? '文件预览失败';
     throw new ApiError(response.status, String(message));
   }
   return response.blob();

@@ -1,3 +1,4 @@
+// 聊天页展示工具只负责前端呈现规则，不承担文件权限或后端路径校验。
 import type { ChangeItem, UploadedFile } from '../../types';
 
 export type ChatAttachment = UploadedFile & {
@@ -59,14 +60,19 @@ export function formatUploadStatus(file: UploadedFile): string {
 
 export function canPreviewInBrowser(file: UploadedFile): boolean {
   // 浏览器原生支持图片、PDF 和常见纯文本预览；Office 文件先走下载。
-  const filename = file.filename.toLowerCase();
-  if (file.content_type.startsWith('image/')) {
+  return canPreviewFileInfo(file.filename, file.content_type);
+}
+
+export function canPreviewFileInfo(filenameValue: string, contentType: string): boolean {
+  // 上传附件和受管文件预览共用同一套浏览器能力判断。
+  const filename = filenameValue.toLowerCase();
+  if (contentType.startsWith('image/')) {
     return true;
   }
-  if (file.content_type === 'application/pdf' || filename.endsWith('.pdf')) {
+  if (contentType === 'application/pdf' || filename.endsWith('.pdf')) {
     return true;
   }
-  if (file.content_type.startsWith('text/')) {
+  if (contentType.startsWith('text/')) {
     return true;
   }
   return ['.txt', '.md', '.csv', '.json'].some((suffix) => filename.endsWith(suffix));

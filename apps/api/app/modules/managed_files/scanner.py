@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -98,7 +99,8 @@ class ManagedFileScanner:
 def _fingerprint(*, relative_path: str, size_bytes: int, modified_at: float) -> str:
     """生成 P0 轻量 fingerprint，后续可升级为内容 hash。"""
 
-    return f"{relative_path}:{size_bytes}:{int(modified_at)}"
+    payload = f"{relative_path}\0{size_bytes}\0{int(modified_at)}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _is_hidden_relative_path(relative_path: str) -> bool:

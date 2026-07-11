@@ -1,15 +1,18 @@
+// 单轮对话视图负责串联用户消息、附件和 AgentRun 回执，不直接读取文件内容。
 import { Bot } from 'lucide-react';
 import { AgentRunReceipt } from './AgentRunReceipt';
 import { AttachmentRail } from './AttachmentRail';
 import type { ChatAttachment, ChatTurn } from './presentation';
+import type { ManagedFileResult } from '../../types';
 
 type ChatTurnViewProps = {
   token: string;
   turn: ChatTurn;
   onOpenAttachment: (file: ChatAttachment) => void;
+  onOpenManagedFile: (file: ManagedFileResult) => void;
 };
 
-export function ChatTurnView({ token, turn, onOpenAttachment }: ChatTurnViewProps) {
+export function ChatTurnView({ token, turn, onOpenAttachment, onOpenManagedFile }: ChatTurnViewProps) {
   // 文件任务按"附件上下文 -> 用户指令 -> 助手结果"展示，减少阅读跳跃。
   const shouldShowUserAttachments = turn.attachments.length > 0 && !isInferredContextFileRequest(turn.userText);
 
@@ -45,6 +48,7 @@ export function ChatTurnView({ token, turn, onOpenAttachment }: ChatTurnViewProp
               attachments={turn.attachments}
               token={token}
               onOpenAttachment={onOpenAttachment}
+              onOpenManagedFile={onOpenManagedFile}
             />
           ) : null}
         </div>

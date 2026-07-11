@@ -67,6 +67,19 @@ export type ToolInvocation = {
   operation_plan_id: string | null;
 };
 
+// 受管文件结果只包含逻辑 root 与相对路径，前端不能接触服务器绝对路径。
+export type ManagedFileResult = {
+  root_key: string;
+  display_name: string;
+  relative_path: string;
+  category_path: string | null;
+  filename: string;
+  extension: string;
+  size_bytes: number;
+  modified_at: string | null;
+  status: string;
+};
+
 export type UploadedFile = {
   document_id: string;
   filename: string;

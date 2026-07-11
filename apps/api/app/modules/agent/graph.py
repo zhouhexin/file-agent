@@ -656,16 +656,59 @@ def _build_managed_file_list_response(payload: Dict[str, Any]) -> str:
     if not files:
         return f"{root_key} 下暂未找到文件。请确认该受管目录已启用，并且已完成扫描。"
     lines = [f"{root_key} 下共有 {len(files)} 个文件："]
-    for index, file in enumerate(files[:50], start=1):
-        filename = file.get("filename") or file.get("relative_path") or "未知文件"
-        relative_path = file.get("relative_path") or filename
-        size_bytes = int(file.get("size_bytes") or 0)
-        category_path = file.get("category_path")
-        suffix = f"；分类：{category_path}" if category_path else ""
-        lines.append(f"{index}. {relative_path}（{_format_size(size_bytes)}{suffix}）")
+    lines.extend(_format_managed_file_tree(files[:50]))
     if len(files) > 50:
         lines.append(f"仅展示前 50 个文件，其余 {len(files) - 50} 个可继续筛选查看。")
     return "\n".join(lines)
+
+
+def _format_managed_file_tree(files: List[Dict[str, Any]]) -> List[str]:
+    """把受管文件相对路径压缩成目录树文本，避免深层路径平铺难读。"""
+
+    tree: Dict[str, Any] = {}
+    file_metadata: Dict[tuple[str, ...], Dict[str, Any]] = {}
+    for file in files:
+        filename = str(file.get("filename") or file.get("relative_path") or "未知文件")
+        relative_path = str(file.get("relative_path") or filename)
+        parts = [part for part in relative_path.replace("\\", "/").split("/") if part]
+        if not parts:
+            parts = [filename]
+        cursor = tree
+        for directory in parts[:-1]:
+            cursor = cursor.setdefault(directory, {})
+        cursor.setdefault("__files__", []).append(parts[-1])
+        file_metadata[tuple(parts)] = file
+    return _render_managed_file_tree(tree=tree, file_metadata=file_metadata, prefix=(), depth=0)
+
+
+def _render_managed_file_tree(
+    *,
+    tree: Dict[str, Any],
+    file_metadata: Dict[tuple[str, ...], Dict[str, Any]],
+    prefix: tuple[str, ...],
+    depth: int,
+) -> List[str]:
+    """递归渲染目录树；目录和文件都按名称稳定排序。"""
+
+    lines: List[str] = []
+    indent = "  " * depth
+    for directory in sorted(key for key in tree if key != "__files__"):
+        lines.append(f"{indent}{directory}/")
+        lines.extend(
+            _render_managed_file_tree(
+                tree=tree[directory],
+                file_metadata=file_metadata,
+                prefix=(*prefix, directory),
+                depth=depth + 1,
+            )
+        )
+    for filename in sorted(tree.get("__files__", [])):
+        metadata = file_metadata.get((*prefix, filename), {})
+        size_bytes = int(metadata.get("size_bytes") or 0)
+        category_path = metadata.get("category_path")
+        suffix = f"；分类：{category_path}" if category_path else ""
+        lines.append(f"{indent}{filename}（{_format_size(size_bytes)}{suffix}）")
+    return lines
 
 
 def _build_classification_taxonomy_response(taxonomy: Dict[str, Any]) -> str:

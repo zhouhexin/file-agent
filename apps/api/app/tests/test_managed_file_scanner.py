@@ -37,6 +37,32 @@ def test_scanner_records_file_metadata_and_marks_missing(tmp_path):
         clear_overrides()
 
 
+def test_scanner_fingerprint_is_fixed_length_for_deep_paths(tmp_path):
+    """fingerprint 不能保存完整路径，深层中文目录也必须稳定落库。"""
+
+    inbox = tmp_path / "student-affairs"
+    deep_dir = inbox / "人事处" / "人才工程科（24年9月前原师资科）" / "2021年" / "人才工作" / "寒假工作"
+    deep_dir.mkdir(parents=True)
+    (deep_dir / "附件6.正确认识和规范使用高校人才称号的自查情况及整改措施.doc").write_bytes(b"doc")
+
+    client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        root = ManagedRoot(root_key="student_affairs", display_name="学工收件箱", container_path=str(inbox))
+        db.add(root)
+        db.commit()
+
+        ManagedFileScanner(db).scan_root(root)
+
+        stored = db.query(ManagedFile).one()
+        assert len(stored.fingerprint) == 64
+        assert "/" not in stored.fingerprint
+        assert stored.relative_path.startswith("人事处/")
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def test_scanner_derives_category_path_only_for_path_classified_root(tmp_path):
     """只有 PATH_AS_CATEGORY 目录会把父目录写成分类路径。"""
 
