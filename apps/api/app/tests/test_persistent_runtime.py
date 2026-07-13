@@ -789,6 +789,168 @@ def test_persist_changeset_skips_missing_document_ids():
         app.dependency_overrides.clear()
 
 
+def test_persist_changeset_keeps_managed_file_failure_without_document():
+    """受管快照创建前失败时应以 managed_file_id 生成失败 ChangeItem。"""
+
+    client = _client_with_database()
+    _auth_header(client, username="managed-failure-without-document-user")
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(User.username == "managed-failure-without-document-user").one()
+        message = ConversationRepository(db).create_user_message(
+            conversation_id="managed-failure-without-document-conv",
+            user_id=user.id,
+            content="读取受管文件",
+            attachments=[],
+        )
+        run = AgentRun(
+            conversation_id=message.conversation_id,
+            message_id=message.id,
+            user_id=user.id,
+            intent="READ_MANAGED_FILE",
+            status="COMPLETED",
+        )
+        db.add(run)
+        db.flush()
+
+        changeset = persist_changeset_from_document_results(
+            db=db,
+            run=run,
+            document_results=[
+                {
+                    "document_id": "",
+                    "filename": "损坏文件.txt",
+                    "source_kind": "managed_file",
+                    "managed_file_id": "managed-file-id",
+                    "root_key": "downloads",
+                    "relative_path": "党办/损坏文件.txt",
+                    "snapshot_status": "FAILED",
+                    "extraction_status": "FAILED",
+                    "errors": [{"code": "SNAPSHOT_FAILED", "message": "复制失败"}],
+                    "categories": [],
+                }
+            ],
+        )
+
+        assert changeset is not None
+        assert changeset.status == "FAILED"
+        item = db.query(ChangeItem).one()
+        assert item.change_type == "DOCUMENT_PROCESSING_FAILED"
+        assert item.target_document_id is None
+        assert item.target_id == "managed-file-id"
+        assert item.after_value_json["relative_path"] == "党办/损坏文件.txt"
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_managed_file_snapshot_reuse_persists_changeset_items(monkeypatch, tmp_path):
+    """受管文件首次读取和重复读取必须分别记录快照创建与复用 ChangeItem。"""
+
+    from app.db.models import ManagedFileSnapshot
+
+    managed_root = tmp_path / "downloads"
+    managed_root.mkdir()
+    (managed_root / "制度.txt").write_text("受管文件制度正文", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
+    client = _client_with_database()
+    headers = _auth_header(client, username="managed-snapshot-changeset-user")
+
+    first_response = client.post(
+        "/api/conversations/managed-snapshot-conv/messages",
+        headers=headers,
+        json={"content": "读取downloads下制度文件内容", "attachments": []},
+    )
+    second_response = client.post(
+        "/api/conversations/managed-snapshot-conv/messages",
+        headers=headers,
+        json={"content": "再次读取downloads下制度文件内容", "attachments": []},
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    first_run = first_response.json()["agent_run"]
+    second_run = second_response.json()["agent_run"]
+    assert first_run["document_results"][0]["snapshot_status"] == "CREATED"
+    assert second_run["document_results"][0]["snapshot_status"] == "REUSED"
+    assert first_run["document_results"][0]["document_id"] == second_run["document_results"][0]["document_id"]
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        assert db.query(DocumentExtractionRun).count() == 1
+        assert db.query(DocumentPage).count() == 1
+        assert db.query(ManagedFileSnapshot).count() == 1
+        first_types = {
+            item.change_type
+            for item in db.query(ChangeItem).filter(ChangeItem.changeset_id == first_run["changeset_id"]).all()
+        }
+        second_types = {
+            item.change_type
+            for item in db.query(ChangeItem).filter(ChangeItem.changeset_id == second_run["changeset_id"]).all()
+        }
+        assert {
+            "MANAGED_FILE_SNAPSHOT_CREATED",
+            "TEXT_EXTRACTED",
+            "DOCUMENT_PAGES_CREATED",
+        }.issubset(first_types)
+        assert {
+            "MANAGED_FILE_SNAPSHOT_REUSED",
+            "TEXT_REUSED",
+            "DOCUMENT_PAGES_REUSED",
+        }.issubset(second_types)
+        for item in db.query(ChangeItem).all():
+            assert str(managed_root) not in str(item.after_value_json)
+            assert str(managed_root) not in str(item.evidence_json)
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_managed_file_partial_batch_persists_partial_changeset(monkeypatch, tmp_path):
+    """受管文件批量部分失败时必须生成 PARTIAL ChangeSet 和逐文件明细。"""
+
+    managed_root = tmp_path / "downloads"
+    managed_root.mkdir()
+    (managed_root / "材料.txt").write_text("正常正文", encoding="utf-8")
+    (managed_root / "材料.bin").write_bytes(b"unsupported")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
+    client = _client_with_database()
+    headers = _auth_header(client, username="managed-partial-changeset-user")
+
+    response = client.post(
+        "/api/conversations/managed-partial-conv/messages",
+        headers=headers,
+        json={"content": "读取downloads下材料文件内容", "attachments": []},
+    )
+
+    assert response.status_code == 200
+    agent_run = response.json()["agent_run"]
+    assert agent_run["tool_invocations"][0]["status"] == "PARTIAL"
+    assert [item["extraction_status"] for item in agent_run["document_results"]] == ["FAILED", "COMPLETED"]
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        changeset = db.get(ChangeSet, agent_run["changeset_id"])
+        assert changeset is not None
+        assert changeset.status == "PARTIAL"
+        change_types = [
+            item.change_type
+            for item in db.query(ChangeItem)
+            .filter(ChangeItem.changeset_id == changeset.id)
+            .order_by(ChangeItem.created_at.asc())
+            .all()
+        ]
+        assert change_types.count("MANAGED_FILE_SNAPSHOT_CREATED") == 2
+        assert "DOCUMENT_PROCESSING_FAILED" in change_types
+        assert "TEXT_EXTRACTED" in change_types
+        assert "DOCUMENT_PAGES_CREATED" in change_types
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
 def test_get_changeset_returns_items_for_owner():
     """当前用户可以查询自己 AgentRun 生成的 ChangeSet 明细。"""
 

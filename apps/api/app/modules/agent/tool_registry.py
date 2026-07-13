@@ -6,19 +6,14 @@ Planner 输出永远不能直接调用 Tool handler，必须经过这里的 Regi
 
 from __future__ import annotations
 
-import hashlib
-import mimetypes
-import shutil
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Type
 
 from pydantic import BaseModel, ValidationError
 
-from app.core.config import get_settings
 from app.core.logging import log_event
-from app.db.models import Document, DocumentCategorySuggestion, DocumentClassificationRun, DocumentInsight, FileObject
+from app.db.models import Document, DocumentCategorySuggestion, DocumentClassificationRun, DocumentInsight
 from app.modules.agent.capabilities.service import load_agent_capabilities
 from app.modules.agent.mcp_filesystem_bridge import MCPFilesystemError, get_mcp_filesystem
 from app.modules.agent.state import ToolInvocationRecord
@@ -59,6 +54,7 @@ from app.modules.managed_files.service import (
     resolve_managed_file_query_scope,
     sync_configured_managed_roots,
 )
+from app.modules.managed_files.snapshot_service import ManagedFileSnapshotService
 from app.modules.skills.managed_file_query_feedback import (
     SKILL_ID as MANAGED_FILE_QUERY_SKILL_ID,
     record_managed_file_query_feedback_sample,
@@ -203,6 +199,8 @@ def _tool_invocation_status(output: Dict[str, Any]) -> str:
 
     if output.get("ok") is False or output.get("status") == "FAILED":
         return "FAILED"
+    if output.get("status") == "PARTIAL":
+        return "PARTIAL"
     return "COMPLETED"
 
 
@@ -657,24 +655,44 @@ def _managed_file_read_document_handler(db: Any, user_id: str | None) -> ToolHan
                 },
             }
 
-        extraction_results = [
-            _snapshot_and_extract_managed_file(
-                db=db,
-                user_id=user_id,
-                managed_file=managed_file,
-                root=root,
-                force_reprocess=bool(getattr(tool_input, "force_reprocess", False)),
-            )
-            for managed_file, root in rows
-        ]
+        snapshot_service = ManagedFileSnapshotService(db=db, user_id=user_id)
+        extraction_results = []
+        for managed_file, root in rows:
+            try:
+                with db.begin_nested():
+                    result = _snapshot_and_extract_managed_file(
+                        db=db,
+                        user_id=user_id,
+                        managed_file=managed_file,
+                        root=root,
+                        force_reprocess=bool(getattr(tool_input, "force_reprocess", False)),
+                        snapshot_service=snapshot_service,
+                    )
+            except Exception as exc:
+                result = _failed_managed_file_snapshot_output(
+                    managed_file=managed_file,
+                    root=root,
+                    error_code=exc.__class__.__name__,
+                    error_message=str(exc) or "受管文件快照处理失败。",
+                )
+            extraction_results.append(result)
         if len(extraction_results) == 1:
             return extraction_results[0]
         completed_count = len([item for item in extraction_results if item.get("status") == "COMPLETED"])
+        failed_count = len(extraction_results) - completed_count
+        batch_status = (
+            "COMPLETED"
+            if failed_count == 0
+            else "FAILED"
+            if completed_count == 0
+            else "PARTIAL"
+        )
         return {
             "ok": completed_count > 0,
-            "status": "COMPLETED" if completed_count == len(extraction_results) else "PARTIAL",
+            "status": batch_status,
             "matched_count": len(extraction_results),
             "completed_count": completed_count,
+            "failed_count": failed_count,
             "extraction_results": extraction_results,
             "source": "managed-file-read-document",
         }
@@ -710,51 +728,6 @@ def _mcp_filesystem_list_handler() -> ToolHandler:
     return handler
 
 
-def _create_managed_file_snapshot_document(
-    *,
-    db: Any,
-    user_id: str,
-    source_path: Path,
-    filename: str,
-) -> Document:
-    """把受管文件复制为当前用户可解析的只读快照 Document。"""
-
-    content_hash = _sha256_file(source_path)
-    size_bytes = source_path.stat().st_size
-    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    document = Document(
-        user_id=user_id,
-        workspace_id=None,
-        original_filename=Path(filename).name,
-        content_type=content_type,
-        size_bytes=size_bytes,
-        sha256=content_hash,
-        status="USED_IN_MESSAGE",
-        ingest_status="UPLOADED",
-    )
-    db.add(document)
-    db.flush()
-
-    storage_root = Path(get_settings().file_storage_root).resolve()
-    storage_path = Path("managed-snapshots") / user_id / document.id / Path(filename).name
-    target_path = (storage_root / storage_path).resolve()
-    if not _is_relative_to(target_path, storage_root):
-        raise ValueError("managed snapshot storage path escaped storage root")
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source_path, target_path)
-    db.add(
-        FileObject(
-            document_id=document.id,
-            storage_backend="local",
-            storage_path=storage_path.as_posix(),
-            size_bytes=size_bytes,
-            sha256=content_hash,
-        )
-    )
-    db.flush()
-    return document
-
-
 def _snapshot_and_extract_managed_file(
     *,
     db: Any,
@@ -762,70 +735,56 @@ def _snapshot_and_extract_managed_file(
     managed_file: Any,
     root: Any,
     force_reprocess: bool,
+    snapshot_service: ManagedFileSnapshotService,
 ) -> Dict[str, Any]:
-    """把一个受管文件快照为 Document 并执行正文解析。"""
+    """创建或复用一个受管文件快照，并执行正文解析。"""
 
-    source_path = (Path(root.container_path).resolve() / managed_file.relative_path).resolve()
-    root_path = Path(root.container_path).resolve()
     managed_payload = ManagedFileService.to_file_response(file=managed_file, root=root).model_dump(mode="json")
-    if not _is_relative_to(source_path, root_path) or not source_path.is_file():
-        return {
-            "ok": False,
-            "document_id": f"managed-file-unavailable-{managed_file.id}",
-            "extraction_run_id": f"failed-managed-{managed_file.id}",
-            "status": "FAILED",
-            "extractor": "unknown",
-            "reused": False,
-            "read_quality": "FAILED",
-            "read_profile": {
-                "file_type": "unknown",
-                "page_count": 0,
-                "sheet_count": 0,
-                "char_count": 0,
-                "has_text": False,
-                "requires_ocr": False,
-                "ocr_used": False,
-            },
-            "pages": [],
-            "error": {"code": "MANAGED_FILE_UNAVAILABLE", "message": "受管文件已不存在或路径越界。"},
-            "managed_file": managed_payload,
-            "source": "managed-file-read-document",
-        }
-
-    document = _create_managed_file_snapshot_document(
-        db=db,
-        user_id=user_id,
-        source_path=source_path,
-        filename=managed_file.filename,
-    )
+    resolution = snapshot_service.resolve(managed_file=managed_file, root=root)
     extraction_input = DocumentToolInput(
-        document_id=document.id,
+        document_id=resolution.document.id,
         force_reprocess=force_reprocess,
     )
-    output = _extract_document_text_handler(db, user_id)(extraction_input)
+    try:
+        output = _extract_document_text_handler(db, user_id)(extraction_input)
+    except Exception:
+        if resolution.snapshot_status == "CREATED":
+            snapshot_service.cleanup_created_snapshot(document=resolution.document)
+        raise
     output["managed_file"] = managed_payload
     output["source"] = "managed-file-read-document"
+    output["source_kind"] = "managed_file"
+    output["managed_file_id"] = managed_file.id
+    output["root_key"] = root.root_key
+    output["relative_path"] = managed_file.relative_path
+    output["snapshot_id"] = resolution.snapshot.id
+    output["snapshot_status"] = resolution.snapshot_status
+    output["source_sha256"] = resolution.source_sha256
     return output
 
 
-def _sha256_file(path: Path) -> str:
-    """流式计算文件 sha256，避免把大文件整体读入内存。"""
+def _failed_managed_file_snapshot_output(
+    *,
+    managed_file: Any,
+    root: Any,
+    error_code: str,
+    error_message: str,
+) -> Dict[str, Any]:
+    """构造不影响同批其他文件的受管快照失败结果。"""
 
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _is_relative_to(path: Path, root: Path) -> bool:
-    """兼容不同 Python 版本的路径包含关系判断。"""
-
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
+    output = _failed_extraction_output(
+        document_id="",
+        error={"code": error_code, "message": error_message},
+    )
+    output["extraction_run_id"] = f"failed-managed-{managed_file.id}"
+    output["managed_file"] = ManagedFileService.to_file_response(file=managed_file, root=root).model_dump(mode="json")
+    output["source"] = "managed-file-read-document"
+    output["source_kind"] = "managed_file"
+    output["managed_file_id"] = managed_file.id
+    output["root_key"] = root.root_key
+    output["relative_path"] = managed_file.relative_path
+    output["snapshot_status"] = "FAILED"
+    return output
 
 
 def _mcp_filesystem_search_handler() -> ToolHandler:

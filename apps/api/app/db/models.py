@@ -450,6 +450,42 @@ class ManagedFile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class ManagedFileSnapshot(Base):
+    """用户读取受管文件时生成的不可变内容快照关系。"""
+
+    __tablename__ = "managed_file_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "managed_file_id",
+            "source_sha256",
+            name="uq_managed_file_snapshots_user_file_sha256",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    managed_file_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("managed_files.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    document_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    source_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_modified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="ACTIVE", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class FilesystemJob(Base):
     """文件系统异步任务表。
 

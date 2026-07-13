@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from app.db.models import Document, DocumentPage, ManagedFile, ManagedRoot
+from app.db.models import Document, DocumentExtractionRun, DocumentPage, FileObject, ManagedFile, ManagedRoot
 from app.modules.agent.tool_registry import ToolRegistry
 from app.tests.helpers import clear_overrides, client_with_database
 
@@ -201,6 +201,83 @@ def test_managed_file_read_document_tool_registers_snapshot_and_extracts_text(mo
         clear_overrides()
 
 
+def test_managed_file_read_document_tool_reuses_unchanged_snapshot(monkeypatch, tmp_path):
+    """同一用户重复读取内容未变的受管文件时，不应重复复制、建 Document 或解析。"""
+
+    from app.db.models import ManagedFileSnapshot
+
+    managed_root = tmp_path / "downloads"
+    target_dir = managed_root / "党办"
+    target_dir.mkdir(parents=True)
+    (target_dir / "制度.txt").write_text("制度正文", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
+    client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        registry = ToolRegistry(db=db, user_id="user-1")
+        first = registry.invoke(
+            "managed-file-read-document",
+            {"root_key": "downloads", "path_prefix": "党办", "filename_contains": "制度"},
+        )
+        second = registry.invoke(
+            "managed-file-read-document",
+            {"root_key": "downloads", "path_prefix": "党办", "filename_contains": "制度"},
+        )
+
+        assert first.output_json["snapshot_status"] == "CREATED"
+        assert second.output_json["snapshot_status"] == "REUSED"
+        assert second.output_json["document_id"] == first.output_json["document_id"]
+        assert second.output_json["extraction_run_id"] == first.output_json["extraction_run_id"]
+        assert second.output_json["reused"] is True
+        assert db.query(Document).count() == 1
+        assert db.query(FileObject).count() == 1
+        assert db.query(DocumentExtractionRun).count() == 1
+        assert db.query(DocumentPage).count() == 1
+        assert db.query(ManagedFileSnapshot).count() == 1
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_managed_file_read_document_tool_creates_new_snapshot_when_content_changes(monkeypatch, tmp_path):
+    """同一路径文件内容变化后应创建新快照，并保留旧 Document 与解析结果。"""
+
+    from app.db.models import ManagedFileSnapshot
+
+    managed_root = tmp_path / "downloads"
+    target_dir = managed_root / "党办"
+    target_dir.mkdir(parents=True)
+    source_file = target_dir / "制度.txt"
+    source_file.write_text("第一版本", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
+    client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        registry = ToolRegistry(db=db, user_id="user-1")
+        first = registry.invoke(
+            "managed-file-read-document",
+            {"root_key": "downloads", "path_prefix": "党办", "filename_contains": "制度"},
+        )
+        source_file.write_text("第二版本", encoding="utf-8")
+        second = registry.invoke(
+            "managed-file-read-document",
+            {"root_key": "downloads", "path_prefix": "党办", "filename_contains": "制度"},
+        )
+
+        assert first.output_json["document_id"] != second.output_json["document_id"]
+        assert first.output_json["source_sha256"] != second.output_json["source_sha256"]
+        assert second.output_json["snapshot_status"] == "CREATED"
+        assert db.query(Document).count() == 2
+        assert db.query(DocumentExtractionRun).count() == 2
+        assert db.query(DocumentPage).count() == 2
+        assert db.query(ManagedFileSnapshot).count() == 2
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def test_managed_file_read_document_tool_reads_multiple_matches(monkeypatch, tmp_path):
     """managed-file-read-document 多命中时应批量快照和解析，不要求用户二次确认。"""
 
@@ -234,6 +311,79 @@ def test_managed_file_read_document_tool_reads_multiple_matches(monkeypatch, tmp
         ]
         assert db.query(Document).count() == 2
         assert db.query(DocumentPage).count() == 2
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_managed_file_read_document_tool_isolates_partial_batch_failures(monkeypatch, tmp_path):
+    """批量读取中单个文件解析失败时，其余文件应继续完成并返回 PARTIAL。"""
+
+    managed_root = tmp_path / "downloads"
+    target_dir = managed_root / "党办"
+    target_dir.mkdir(parents=True)
+    (target_dir / "材料.txt").write_text("正常正文", encoding="utf-8")
+    (target_dir / "材料.bin").write_bytes(b"unsupported")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
+    client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        result = ToolRegistry(db=db, user_id="user-1").invoke(
+            "managed-file-read-document",
+            {"root_key": "downloads", "path_prefix": "党办", "filename_contains": "材料"},
+        )
+
+        assert result.status == "PARTIAL"
+        assert result.output_json["status"] == "PARTIAL"
+        assert result.output_json["matched_count"] == 2
+        assert result.output_json["completed_count"] == 1
+        assert result.output_json["failed_count"] == 1
+        assert [item["status"] for item in result.output_json["extraction_results"]] == ["FAILED", "COMPLETED"]
+        assert db.query(Document).count() == 2
+        assert db.query(DocumentPage).count() == 1
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_managed_file_read_document_tool_cleans_snapshot_after_unexpected_failure(monkeypatch, tmp_path):
+    """单文件解析抛异常时应回滚该文件数据库记录并清理已复制快照。"""
+
+    from app.modules.agent import tool_registry as tool_registry_module
+
+    managed_root = tmp_path / "downloads"
+    managed_root.mkdir()
+    (managed_root / "异常.txt").write_text("触发异常", encoding="utf-8")
+    (managed_root / "正常.txt").write_text("正常正文", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
+    original_extract = tool_registry_module.extract_document_text
+
+    def fake_extract_document_text(*, file_path, filename, content_type):
+        """对指定文件抛异常，其他文件继续使用真实解析器。"""
+
+        if filename == "异常.txt":
+            raise RuntimeError("模拟解析器异常")
+        return original_extract(file_path=file_path, filename=filename, content_type=content_type)
+
+    monkeypatch.setattr(tool_registry_module, "extract_document_text", fake_extract_document_text)
+    client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        result = ToolRegistry(db=db, user_id="user-1").invoke(
+            "managed-file-read-document",
+            {"root_key": "downloads", "extension": "txt"},
+        )
+
+        assert result.status == "PARTIAL"
+        assert result.output_json["completed_count"] == 1
+        assert result.output_json["failed_count"] == 1
+        assert db.query(Document).count() == 1
+        assert db.query(FileObject).count() == 1
+        snapshot_files = [path for path in (tmp_path / "storage").rglob("*") if path.is_file()]
+        assert len(snapshot_files) == 1
+        assert snapshot_files[0].name == "正常.txt"
     finally:
         db.close()
         clear_overrides()

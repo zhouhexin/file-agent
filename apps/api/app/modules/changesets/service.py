@@ -44,7 +44,7 @@ def persist_changeset_from_document_results(
 
     repository = ChangeSetRepository(db)
     item_count = _count_change_items(valid_document_results)
-    status = "FAILED" if item_count == 0 else "COMPLETED"
+    status = _changeset_status(valid_document_results=valid_document_results, item_count=item_count)
     try:
         changeset = repository.create_or_reset(
             run=run,
@@ -91,19 +91,27 @@ def _filter_existing_document_results(
 
     document_ids = [str(result.get("document_id") or "") for result in document_results]
     document_ids = [document_id for document_id in document_ids if document_id]
-    if not document_ids:
-        return []
-
-    existing_document_ids = {
-        row[0]
-        for row in db.query(Document.id)
-        .filter(Document.id.in_(document_ids))
-        .all()
-    }
+    existing_document_ids = (
+        {
+            row[0]
+            for row in db.query(Document.id)
+            .filter(Document.id.in_(document_ids))
+            .all()
+        }
+        if document_ids
+        else set()
+    )
     valid_results: list[dict[str, Any]] = []
     for result in document_results:
         document_id = str(result.get("document_id") or "")
         if document_id in existing_document_ids:
+            valid_results.append(result)
+            continue
+        if (
+            result.get("source_kind") == "managed_file"
+            and result.get("extraction_status") == "FAILED"
+            and result.get("managed_file_id")
+        ):
             valid_results.append(result)
             continue
         log_event(
@@ -129,22 +137,51 @@ def _append_items_for_result(
     """按单个文件结果生成 ChangeItem。"""
 
     document_id = str(result.get("document_id") or "")
-    if not document_id:
-        return
+    target_document_id = document_id or None
+    is_managed_file = result.get("source_kind") == "managed_file"
+    result_source = "managed-file-read-document" if is_managed_file else "extract-document-text"
+    managed_file_id = str(result.get("managed_file_id") or "") or None
+    snapshot_status = str(result.get("snapshot_status") or "")
+    if is_managed_file and snapshot_status in {"CREATED", "REUSED"}:
+        repository.create_item(
+            changeset_id=changeset_id,
+            target_type="managed_file_snapshot",
+            target_id=str(result.get("snapshot_id") or managed_file_id or "") or None,
+            target_document_id=target_document_id,
+            change_type=(
+                "MANAGED_FILE_SNAPSHOT_REUSED"
+                if snapshot_status == "REUSED"
+                else "MANAGED_FILE_SNAPSHOT_CREATED"
+            ),
+            after_value={
+                "filename": result.get("filename") or "",
+                "root_key": result.get("root_key") or "",
+                "relative_path": result.get("relative_path") or "",
+                "source_sha256": result.get("source_sha256") or "",
+            },
+            source=result_source,
+        )
+
     if result.get("extraction_status") == "FAILED":
         repository.create_item(
             changeset_id=changeset_id,
-            target_type="document",
-            target_document_id=document_id,
+            target_type="document" if target_document_id else "managed_file",
+            target_id=managed_file_id,
+            target_document_id=target_document_id,
             change_type="DOCUMENT_PROCESSING_FAILED",
             after_value={
                 "filename": result.get("filename") or "",
                 "errors": result.get("errors") or [],
+                "root_key": result.get("root_key") or "",
+                "relative_path": result.get("relative_path") or "",
             },
-            source="extract-document-text",
+            source=result_source,
             evidence={"warnings": result.get("warnings") or []},
             execution_status="FAILED",
         )
+        return
+
+    if not target_document_id:
         return
 
     text_change_type = "TEXT_REUSED" if result.get("text_reused") else "TEXT_EXTRACTED"
@@ -162,7 +199,7 @@ def _append_items_for_result(
                 "char_count": int(result.get("char_count") or 0),
                 "extractor": result.get("extractor") or "",
             },
-            source="extract-document-text",
+            source=result_source,
         )
 
     if int(result.get("page_count") or 0) > 0:
@@ -175,7 +212,7 @@ def _append_items_for_result(
                 "filename": result.get("filename") or "",
                 "page_count": int(result.get("page_count") or 0),
             },
-            source="extract-document-text",
+            source=result_source,
         )
 
     for category in [item for item in result.get("categories", []) if isinstance(item, dict)]:
@@ -206,6 +243,8 @@ def _count_change_items(document_results: list[dict[str, Any]]) -> int:
 
     total = 0
     for result in document_results:
+        if result.get("source_kind") == "managed_file" and result.get("snapshot_status") in {"CREATED", "REUSED"}:
+            total += 1
         if result.get("extraction_status") == "FAILED":
             total += 1
             continue
@@ -215,6 +254,21 @@ def _count_change_items(document_results: list[dict[str, Any]]) -> int:
             total += 1
         total += len([item for item in result.get("categories", []) if isinstance(item, dict)])
     return total
+
+
+def _changeset_status(*, valid_document_results: list[dict[str, Any]], item_count: int) -> str:
+    """根据逐文件成功/失败组合确定 ChangeSet 状态。"""
+
+    if item_count == 0:
+        return "FAILED"
+    failed_count = len(
+        [result for result in valid_document_results if result.get("extraction_status") == "FAILED"]
+    )
+    if failed_count == len(valid_document_results):
+        return "FAILED"
+    if failed_count > 0:
+        return "PARTIAL"
+    return "COMPLETED"
 
 
 def _workspace_id_from_results(document_results: list[dict[str, Any]]) -> str | None:

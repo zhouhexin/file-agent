@@ -841,6 +841,7 @@ def _document_results_from_extraction_results(
     for result in extraction_results:
         document_id = str(result.get("document_id") or "")
         document_context = document_lookup.get(document_id, {})
+        managed_file = result.get("managed_file") if isinstance(result.get("managed_file"), dict) else {}
         pages = [page for page in result.get("pages", []) if isinstance(page, dict)]
         char_count = sum(int(page.get("char_count", 0) or 0) for page in pages)
         text_preview = "\n".join(str(page.get("text_preview") or "") for page in pages)
@@ -858,7 +859,7 @@ def _document_results_from_extraction_results(
         document_results.append(
             {
                 "document_id": document_id,
-                "filename": document_context.get("filename") or document_id,
+                "filename": document_context.get("filename") or managed_file.get("filename") or document_id,
                 "extraction_status": result.get("status"),
                 "extractor": result.get("extractor"),
                 "read_quality": result.get("read_quality"),
@@ -867,6 +868,13 @@ def _document_results_from_extraction_results(
                 "char_count": char_count,
                 "text_reused": bool(result.get("reused")),
                 "classification_reused": bool(result.get("reused")),
+                "source_kind": result.get("source_kind"),
+                "managed_file_id": result.get("managed_file_id"),
+                "root_key": result.get("root_key"),
+                "relative_path": result.get("relative_path"),
+                "snapshot_id": result.get("snapshot_id"),
+                "snapshot_status": result.get("snapshot_status"),
+                "source_sha256": result.get("source_sha256"),
                 "categories": categories,
                 "warnings": [],
                 "errors": [error] if error else [],
