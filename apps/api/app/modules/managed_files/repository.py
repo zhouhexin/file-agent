@@ -42,9 +42,14 @@ class ManagedFileRepository:
         container_path: str,
         classification_mode: str,
         created_by: str | None,
+        allow_rename: bool = False,
     ) -> ManagedRoot:
         """创建或更新受管目录配置。"""
 
+        read_only = not allow_rename
+        allowed_operations = ["scan", "list", "search"]
+        if allow_rename:
+            allowed_operations.append("rename")
         root = self.get_root_by_key(root_key)
         if root is None:
             root = ManagedRoot(
@@ -53,8 +58,8 @@ class ManagedFileRepository:
                 container_path=container_path,
                 classification_mode=classification_mode,
                 enabled=True,
-                read_only=True,
-                allowed_operations_json=["scan", "list", "search"],
+                read_only=read_only,
+                allowed_operations_json=allowed_operations,
                 created_by=created_by,
             )
             self.db.add(root)
@@ -64,14 +69,16 @@ class ManagedFileRepository:
                 or root.container_path != container_path
                 or root.classification_mode != classification_mode
                 or root.enabled is not True
-                or root.read_only is not True
+                or root.read_only is not read_only
+                or list(root.allowed_operations_json or []) != allowed_operations
             )
             if changed:
                 root.display_name = display_name
                 root.container_path = container_path
                 root.classification_mode = classification_mode
                 root.enabled = True
-                root.read_only = True
+                root.read_only = read_only
+                root.allowed_operations_json = allowed_operations
                 root.updated_at = utcnow()
         self.db.flush()
         return root

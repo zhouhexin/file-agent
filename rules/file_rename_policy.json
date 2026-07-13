@@ -1,0 +1,26 @@
+{
+  "policy_key": "school_official_document",
+  "version": "1.0",
+  "separator": "_",
+  "templates": [
+    {
+      "key": "official_document",
+      "template": "{year}_{document_number}_{title}{extension}",
+      "required_fields": ["year", "document_number", "title"]
+    },
+    {
+      "key": "ordinary_material",
+      "template": "{year}_{title}{extension}",
+      "required_fields": ["year", "title"],
+      "when": "document_number_missing"
+    }
+  ],
+  "missing_field_strategy": "NEEDS_REVIEW",
+  "conflict_strategy": "ERROR",
+  "include_hidden": false,
+  "rename_directories": false,
+  "preserve_extension": true,
+  "lowercase_extension": true,
+  "max_filename_bytes": 240,
+  "noise_terms": ["扫描件", "副本", "最终版"]
+}

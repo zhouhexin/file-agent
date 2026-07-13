@@ -40,6 +40,12 @@ target_scope 只能填写范围意图，不能用它猜测 document_id：
 - 如果用户指定 PDF、DOCX、XLSX、CSV、图片等文件类型，写入 managed_extension，例如 pdf、docx、xlsx、csv、png；
 - 如果用户指定“文件名包含/名称里有”某个词，写入 managed_filename_contains；
 - 不要把受管目录文件查询理解为用户上传附件处理。
+当用户要求为服务器受管目录中的文件生成重命名建议时：
+- intent 使用 SUGGEST_RENAME；
+- required_capabilities 必须包含 suggest_rename；
+- tool_plan_hint 必须包含 generate-rename-suggestions；
+- managed_root_key、managed_path_prefix、managed_extension 和 managed_filename_contains 按上述受管目录规则填写；
+- 这里只生成待确认 OperationPlan，不能把请求理解为已经执行改名。
 
 当需要解析原文时，required_capabilities 必须包含 extract_document_text，tool_plan_hint 必须包含 extract-document-text。
 当只需要读取基础洞察时，required_capabilities 必须包含 read_document_insights，tool_plan_hint 必须包含 read-document-insights。

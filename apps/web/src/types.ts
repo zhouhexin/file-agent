@@ -57,6 +57,38 @@ export type ChangeSetResponse = {
   items: ChangeItem[];
 };
 
+export type OperationPlanItem = {
+  document_id: string;
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  rename_metadata: Record<string, unknown>;
+  execution_status: string;
+};
+
+export type OperationPlanResponse = {
+  id: string;
+  conversation_id: string;
+  user_id: string;
+  operation_type: string;
+  status: string;
+  requires_confirmation: boolean;
+  risk_level: string;
+  reason: string;
+  items: OperationPlanItem[];
+  skipped_items: Array<Record<string, unknown>>;
+  created_at: string;
+  updated_at: string;
+  confirmed_at: string | null;
+  executed_at: string | null;
+};
+
+export type OperationConfirmResponse = {
+  id: string;
+  status: string;
+  changeset_id: string | null;
+  result: Record<string, unknown>;
+};
+
 export type ToolInvocation = {
   id: string;
   tool_name: string;

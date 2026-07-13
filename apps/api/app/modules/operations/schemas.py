@@ -14,6 +14,7 @@ class OperationPlanItem(BaseModel):
     document_id: str = Field(min_length=1)
     before: dict[str, Any] = Field(default_factory=dict)
     after: dict[str, Any] = Field(default_factory=dict)
+    rename_metadata: dict[str, Any] = Field(default_factory=dict)
     execution_status: str = "PLANNED"
 
 
@@ -39,6 +40,7 @@ class OperationPlanResponse(BaseModel):
     risk_level: str
     reason: str
     items: list[OperationPlanItem]
+    skipped_items: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     confirmed_at: datetime | None
@@ -57,3 +59,4 @@ class OperationConfirmResponse(BaseModel):
     id: str
     status: str
     changeset_id: str | None = None
+    result: dict[str, Any] = Field(default_factory=dict)

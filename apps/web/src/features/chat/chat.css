@@ -859,6 +859,141 @@
   white-space: nowrap;
 }
 
+.operation-plan-card {
+  display: grid;
+  gap: 16px;
+  width: min(100%, 720px);
+  padding: 18px;
+  border: 1px solid #dbe3ef;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 10px 28px rgb(30 64 175 / 0.06);
+}
+
+.operation-plan-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.operation-plan-header > div {
+  display: grid;
+  gap: 5px;
+}
+
+.operation-plan-header strong,
+.operation-plan-complete {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #17233d;
+}
+
+.operation-plan-header span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.operation-plan-status {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.operation-plan-status--executed {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.operation-plan-status--failed,
+.operation-plan-status--partial {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.operation-plan-items {
+  display: grid;
+  gap: 8px;
+}
+
+.operation-plan-item {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #e5eaf1;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.operation-plan-item > span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.operation-plan-item > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.operation-plan-item del,
+.operation-plan-item strong {
+  overflow-wrap: anywhere;
+}
+
+.operation-plan-item del {
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.operation-plan-item strong {
+  color: #1e3a8a;
+  font-size: 14px;
+}
+
+.operation-plan-review,
+.operation-plan-complete {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #92400e;
+  font-size: 13px;
+}
+
+.operation-plan-complete {
+  color: #047857;
+}
+
+.operation-plan-confirm {
+  justify-self: start;
+  min-height: 40px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 8px;
+  background: #2563eb;
+  color: #ffffff;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+}
+
+.operation-plan-confirm:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.operation-plan-error {
+  margin: 0;
+  color: #b91c1c;
+  font-size: 13px;
+}
+
 @media (max-width: 640px) {
   .agent-run-summary {
     align-items: flex-start;

@@ -225,7 +225,7 @@ def _deterministic_preflight_plan(
         message=state["message"],
         attachments=state.get("attachments", []),
     )
-    if plan.intent in {"LIST_MANAGED_FILES", "CAPABILITY_HELP", "LIST_CLASSIFICATION_TAXONOMY"}:
+    if plan.intent in {"LIST_MANAGED_FILES", "SUGGEST_RENAME", "CAPABILITY_HELP", "LIST_CLASSIFICATION_TAXONOMY"}:
         return plan
     return None
 
@@ -257,8 +257,13 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
             operation_plan_id = operation_plan_id or "operation-plan-pending"
             continue
         try:
+            tool_input = dict(step["input"])
+            if step["tool_name"] == "generate-rename-suggestions":
+                # 运行标识来自受信任 State，不能由 LLM 直接提供。
+                tool_input["conversation_id"] = state["conversation_id"]
+                tool_input["agent_run_id"] = state["agent_run_id"]
             # 调用工具注册表执行工具
-            invocation = registry.invoke(step["tool_name"], step["input"])
+            invocation = registry.invoke(step["tool_name"], tool_input)
         except Exception as exc:
             if step["tool_name"] not in {
                 "extract-document-text",
@@ -373,6 +378,7 @@ def _aggregate_tool_results(
         "classification_taxonomy": _classification_taxonomy_from_results(tool_results),
         "managed_file_list": _managed_file_list_from_results(tool_results),
         "mcp_filesystem_result": _mcp_filesystem_result_from_results(tool_results),
+        "rename_plan": _rename_plan_from_results(tool_results),
         "intent_summary": _intent_summary_from_results(tool_results),
     }
 
@@ -426,6 +432,13 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
         return {
             "status": "COMPLETED",
             "final_response": format_spreadsheet_analysis_response(analysis_results),
+        }
+
+    rename_plan = result_summary.get("rename_plan", {})
+    if rename_plan:
+        return {
+            "status": "COMPLETED" if rename_plan.get("ok") else "NEEDS_REVIEW",
+            "final_response": _build_rename_plan_response(rename_plan),
         }
 
     document_results = result_summary.get("document_results", [])
@@ -675,6 +688,35 @@ def _mcp_filesystem_result_from_results(tool_results: List[Dict[str, Any]]) -> D
                 "result": result.get("result"),
             }
     return {}
+
+
+def _rename_plan_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """提取文件重命名建议与待确认计划。"""
+
+    for result in tool_results:
+        if result.get("kind") == "rename_plan":
+            return result
+    return {}
+
+
+def _build_rename_plan_response(payload: Dict[str, Any]) -> str:
+    """生成重命名建议回执；明确提示确认前原文件未修改。"""
+
+    if not payload.get("ok"):
+        error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+        return str(error.get("message") or "暂时无法生成文件重命名建议。")
+    matched_count = int(payload.get("matched_count") or 0)
+    ready_count = int(payload.get("ready_count") or 0)
+    review_count = int(payload.get("needs_review_count") or 0)
+    lines = [
+        f"已检查 {matched_count} 个文件，生成 {ready_count} 个可执行的重命名建议。",
+        "当前仅生成操作计划，原文件尚未修改。",
+    ]
+    if review_count:
+        lines.append(f"另有 {review_count} 个文件缺少必要字段或存在冲突，已跳过并标记为待复核。")
+    if ready_count:
+        lines.append("请核对下方计划，确认后才会执行重命名。")
+    return "\n".join(lines)
 
 
 def _build_mcp_filesystem_response(payload: Dict[str, Any]) -> str:

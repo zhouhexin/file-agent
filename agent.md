@@ -699,7 +699,7 @@ OperationPlan 必须展示：
 - 当前是否已执行。
 - 用户确认方式。
 
-当前阶段 OperationPlan 先实现最小确认闭环：API 可以创建、查询和确认计划，确认后记录 `operation_confirmations` 并把计划状态推进到 `EXECUTED`；不得在该阶段执行真实改名、移动、删除或覆盖，也不得伪造文件变更 ChangeSet。
+当前阶段 OperationPlan 已支持受管目录文件的 Native 重命名闭环：只有部署配置显式允许重命名的受管根目录，才能生成包含正文提取证据的 `RENAME_FILES` 计划；普通用户可以确认自己创建的计划，确认后逐文件执行并写入 `FILENAME_CHANGED` 或失败 ChangeItem。`NEEDS_REVIEW` 项必须跳过。移动、删除、覆盖和上传原件改名仍不得真实执行，也不得伪造文件变更 ChangeSet。
 
 ## 13. Skills 与 Rules
 

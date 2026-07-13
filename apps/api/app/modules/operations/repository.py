@@ -25,12 +25,14 @@ class OperationPlanRepository:
         risk_level: str,
         reason: str,
         plan_json: dict,
+        agent_run_id: str | None = None,
     ) -> OperationPlan:
         """创建等待用户确认的高风险操作计划。"""
 
         plan = OperationPlan(
             workspace_id=workspace_id,
             conversation_id=conversation_id,
+            agent_run_id=agent_run_id,
             user_id=user_id,
             operation_type=operation_type,
             status="WAITING_CONFIRMATION",
@@ -52,10 +54,7 @@ class OperationPlanRepository:
         )
 
     def confirm_plan(self, *, plan: OperationPlan, user_id: str, confirmation_text: str) -> OperationConfirmation:
-        """记录确认文本，并把计划推进到已执行状态。
-
-        当前阶段不执行真实文件动作，只打通确认闭环。
-        """
+        """记录确认文本，并把计划推进到执行中。"""
 
         confirmation = OperationConfirmation(
             operation_plan_id=plan.id,
@@ -64,9 +63,8 @@ class OperationPlanRepository:
         )
         self.db.add(confirmation)
         now = utcnow()
-        plan.status = "EXECUTED"
+        plan.status = "EXECUTING"
         plan.confirmed_at = now
-        plan.executed_at = now
         plan.updated_at = now
         self.db.flush()
         return confirmation

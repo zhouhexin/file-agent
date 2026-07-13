@@ -1,6 +1,6 @@
 """OperationPlan 最小闭环测试。
 
-这些测试只验证计划、查询和确认的安全边界；当前阶段不执行真实文件移动、删除或改名。
+这些测试只验证通用计划、查询和确认的安全边界；真实文件重命名由独立测试覆盖。
 """
 
 from app.db.models import OperationConfirmation, OperationPlan
@@ -28,14 +28,14 @@ def _auth_header(token: str) -> dict[str, str]:
 
 
 def _create_plan(client, token: str, conversation_id: str = "op-conv"):
-    """创建一个高风险重命名计划。"""
+    """创建一个尚未接入真实执行器的高风险移动计划。"""
 
     return client.post(
         "/api/operations/plans",
         headers=_auth_header(token),
         json={
             "conversation_id": conversation_id,
-            "operation_type": "RENAME_FILES",
+            "operation_type": "MOVE_FILES",
             "risk_level": "medium",
             "reason": "生成标准化文件名建议",
             "items": [
@@ -60,7 +60,7 @@ def test_create_operation_plan_persists_waiting_confirmation():
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "WAITING_CONFIRMATION"
-    assert data["operation_type"] == "RENAME_FILES"
+    assert data["operation_type"] == "MOVE_FILES"
     assert data["requires_confirmation"] is True
     assert data["risk_level"] == "medium"
     assert data["items"][0]["execution_status"] == "PLANNED"
@@ -75,6 +75,29 @@ def test_create_operation_plan_persists_waiting_confirmation():
     finally:
         db.close()
         clear_overrides()
+
+
+def test_direct_rename_plan_creation_is_rejected():
+    """重命名计划必须由受控建议 Tool 生成，不能提交任意 before/after。"""
+
+    client, _ = client_with_database()
+    _, token = _register_and_login(client, "operation-direct-rename")
+    response = client.post(
+        "/api/operations/plans",
+        headers=_auth_header(token),
+        json={
+            "conversation_id": "direct-rename-conversation",
+            "operation_type": "RENAME_FILES",
+            "items": [{
+                "document_id": "document-1",
+                "before": {"filename": "旧文件名.pdf"},
+                "after": {"filename": "新文件名.pdf"},
+            }],
+        },
+    )
+
+    assert response.status_code == 400
+    clear_overrides()
 
 
 def test_get_operation_plan_returns_owned_plan():

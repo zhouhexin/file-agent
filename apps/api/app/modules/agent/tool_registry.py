@@ -28,6 +28,7 @@ from app.modules.agent.tool_schemas import (
     DocumentToolInput,
     EvidenceAnswerInput,
     FeedbackRecordInput,
+    GenerateRenameSuggestionsInput,
     IntentSummaryInput,
     JobStatusReadInput,
     ManagedFileListInput,
@@ -47,6 +48,7 @@ from app.modules.agent.tool_schemas import (
 from app.modules.classification.taxonomy_service import read_default_taxonomy_catalog
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text
+from app.modules.file_rename.suggestion_service import RenameSuggestionService
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
 from app.modules.managed_files.service import (
@@ -592,6 +594,29 @@ def _managed_file_search_handler(db: Any) -> ToolHandler:
                 for file, root in rows
             ],
         }
+
+    return handler
+
+
+def _generate_rename_suggestions_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """创建受管文件重命名建议 Tool handler。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """读取正文并生成待确认计划，不在此阶段修改源文件。"""
+
+        if db is None:
+            return {"ok": False, "status": "FAILED", "error": {"code": "DB_REQUIRED", "message": "生成重命名计划需要数据库会话。"}}
+        if user_id is None:
+            return {"ok": False, "status": "FAILED", "error": {"code": "AUTH_REQUIRED", "message": "生成重命名计划需要当前用户。"}}
+        return RenameSuggestionService(db=db, user_id=user_id).generate_plan(
+            conversation_id=str(getattr(tool_input, "conversation_id")),
+            agent_run_id=str(getattr(tool_input, "agent_run_id")),
+            root_key=getattr(tool_input, "root_key", None),
+            path_prefix=getattr(tool_input, "path_prefix", None),
+            extension=getattr(tool_input, "extension", None),
+            filename_contains=getattr(tool_input, "filename_contains", None),
+            limit=int(getattr(tool_input, "limit", 20)),
+        )
 
     return handler
 
@@ -1258,6 +1283,7 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("managed-file-list", "List server managed files by logical metadata filters.", ManagedFileListInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_list_handler(db)),
         _tool("managed-file-search", "Search server managed files by filename keyword.", ManagedFileSearchInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_search_handler(db)),
         _tool("managed-file-read-document", "Read one server managed file by logical filters, snapshot it as a document, and extract text.", ManagedFileReadDocumentInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages"], _managed_file_read_document_handler(db, user_id)),
+        _tool("generate-rename-suggestions", "Generate controlled rename suggestions for managed files and persist an OperationPlan without changing source files.", GenerateRenameSuggestionsInput, True, False, ["document_pages", "operation_plans"], _generate_rename_suggestions_handler(db, user_id)),
         _tool("managed-root-scan", "Create an async scan job for a managed logical root.", ManagedRootScanInput, True, False, ["filesystem_jobs", "filesystem_job_events"], _managed_root_scan_handler(db, user_id)),
         _tool("mcp-filesystem-list", "List files and directories in the server managed filesystem root without database scan.", MCPFilesystemListInput, False, False, [], _mcp_filesystem_list_handler()),
         _tool("mcp-filesystem-search", "Search files and directories in the server managed filesystem root without database scan.", MCPFilesystemSearchInput, False, False, [], _mcp_filesystem_search_handler()),

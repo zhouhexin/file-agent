@@ -169,6 +169,9 @@ FastAPI API + LangGraph
 
 Neo4j 和 Graphiti 是增强项。第一版要预留边界，但不强制完整接入。
 
+Docling 结构化解析结果与 Neo4j 文件知识图谱结合的分类增强方案已记录在
+`docs/docling-neo4j-classification-enhancement-plan.md`。该方案属于后续增强阶段，需在统一解析接口、证据持久化和基础分类链路稳定后再启动。
+
 ## 5. 推荐目录结构
 
 ```text

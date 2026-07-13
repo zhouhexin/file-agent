@@ -218,6 +218,25 @@ class ManagedFileReadDocumentInput(StrictToolInput):
         return _normalize_path_prefix(value)
 
 
+class GenerateRenameSuggestionsInput(StrictToolInput):
+    """生成受管文件重命名建议并持久化 OperationPlan。"""
+
+    root_key: Optional[str] = None
+    path_prefix: Optional[str] = None
+    extension: Optional[str] = None
+    filename_contains: Optional[str] = None
+    limit: int = Field(default=20, ge=1, le=50)
+    conversation_id: str = Field(min_length=1)
+    agent_run_id: str = Field(min_length=1)
+
+    @field_validator("path_prefix")
+    @classmethod
+    def validate_path_prefix(cls, value: Optional[str]) -> Optional[str]:
+        """校验受管目录内的相对路径。"""
+
+        return _normalize_path_prefix(value)
+
+
 class ManagedRootScanInput(StrictToolInput):
     """创建受管目录扫描任务的输入。"""
 

@@ -90,6 +90,16 @@ MANAGED_ROOT_STUDENT_AFFAIRS_CLASSIFICATION_MODE=PATH_AS_CATEGORY
 奖学金/国家励志奖学金
 ```
 
+受管目录默认只读。要启用“生成计划 -> 用户确认 -> Native 重命名”，必须同时显式配置：
+
+```text
+MANAGED_ROOT_WORKDATA_ALLOW_RENAME=true
+MANAGED_ROOT_VOLUME_MODE=rw
+```
+
+未设置 `ALLOW_RENAME=true` 时，即使容器挂载可写，后端也会拒绝生成可执行重命名项。
+启用前应备份宿主机目录；上传原件不受该开关影响，仍禁止直接改名。
+
 后续新上传文件归档时，只能把 `PATH_AS_CATEGORY` 目录作为目标分类库；`NONE` 目录不会被当成分类体系。
 
 ## Filesystem MCP 只读实时查询
@@ -121,8 +131,8 @@ MCP_FILESYSTEM_MAX_OUTPUT_CHARS=50000
 docker compose --env-file .\deploy\.env -f .\deploy\docker-compose.production.yml exec api sh -lc "mcp-server-filesystem --help >/dev/null && python -c 'import langchain_mcp_adapters; print(\"adapter ok\")'"
 ```
 
-当前阶段不要把受管目录改成读写挂载。写操作必须等 OperationPlan 确认闭环和写入型
-MCP Tool 白名单完成后再开启。
+Filesystem MCP 当前仍只用于实时只读查询。受管文件重命名由后端 Native Tool 执行，
+只有显式启用 `MANAGED_ROOT_<KEY>_ALLOW_RENAME=true` 且用户确认 OperationPlan 后才允许写入。
 
 ## 公网访问必须额外完成的网络步骤
 

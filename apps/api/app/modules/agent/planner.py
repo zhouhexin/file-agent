@@ -55,6 +55,7 @@ SPREADSHEET_PROFILE_HINTS = {"profile_spreadsheet", "profile-spreadsheet"}
 SPREADSHEET_VALIDATE_HINTS = {"validate_spreadsheet", "validate-spreadsheet"}
 MANAGED_FILE_LIST_HINTS = {"managed_file_list", "managed-file-list"}
 MANAGED_FILE_READ_HINTS = {"managed_file_read", "managed-file-read-document", "read_managed_file"}
+MANAGED_FILE_RENAME_HINTS = {"suggest_rename", "generate-rename-suggestions", "file_rename"}
 MCP_FILESYSTEM_HINTS = {"mcp_filesystem_read", "mcp-filesystem-list", "mcp-filesystem-search", "mcp-filesystem-info"}
 SPREADSHEET_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".csv", ".tsv"}
 MANAGED_EXTENSION_ALIASES = {
@@ -177,6 +178,20 @@ class DeterministicPlanner:
             return _mcp_filesystem_list_plan(
                 user_goal=message,
                 path_prefix=_mcp_filesystem_path_prefix_from_list_request(message),
+            )
+
+        managed_rename_filters = _managed_file_rename_filters_from_request(
+            message=message,
+            lowered=lowered,
+        )
+        if managed_rename_filters and not attachments:
+            return _managed_file_rename_plan(
+                user_goal=message,
+                root_key=managed_rename_filters.get("root_key"),
+                path_prefix=managed_rename_filters.get("path_prefix"),
+                extension=managed_rename_filters.get("extension"),
+                filename_contains=managed_rename_filters.get("filename_contains"),
+                route_source="deterministic_planner",
             )
 
         managed_extension = _managed_extension_from_list_request(message)
@@ -476,6 +491,31 @@ def build_plan_from_user_intent(
             response_style=intent_plan.response_style,
             clarification_question=intent_plan.clarification_question,
             llm_intent_plan=intent_plan.model_dump(),
+        )
+
+    managed_rename_filters = _managed_file_rename_filters_from_request(
+        message=message,
+        lowered=lowered,
+    )
+    if (
+        intent_plan.intent == "SUGGEST_RENAME"
+        or requested_capabilities.intersection(MANAGED_FILE_RENAME_HINTS)
+        or "generate-rename-suggestions" in intent_plan.tool_plan_hint
+        or (managed_rename_filters and not document_ids)
+    ):
+        return _managed_file_rename_plan(
+            user_goal=intent_plan.user_goal or message,
+            root_key=intent_plan.managed_root_key or managed_rename_filters.get("root_key"),
+            path_prefix=intent_plan.managed_path_prefix or managed_rename_filters.get("path_prefix"),
+            extension=intent_plan.managed_extension or managed_rename_filters.get("extension"),
+            filename_contains=(
+                intent_plan.managed_filename_contains
+                or managed_rename_filters.get("filename_contains")
+            ),
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
+            llm_intent_plan=intent_plan.model_dump(),
+            route_source="capability_router" if capability_route else "llm_planner",
         )
 
     managed_read_filters = _managed_file_read_filters_from_request(message=message, lowered=lowered)
@@ -953,6 +993,62 @@ def _managed_file_list_plan(
         ],
         evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
         confirmation_policy={"operation_plan_required": False},
+    )
+
+
+def _managed_file_rename_plan(
+    *,
+    user_goal: str,
+    root_key: str | None,
+    path_prefix: str | None = None,
+    extension: str | None = None,
+    filename_contains: str | None = None,
+    response_style: str = "concise",
+    clarification_question: str | None = None,
+    llm_intent_plan: Dict[str, Any] | None = None,
+    route_source: str = "legacy_planner",
+) -> PlannerOutput:
+    """生成受管文件重命名建议计划；此阶段不直接修改文件。"""
+
+    input_json: Dict[str, Any] = {}
+    if root_key:
+        input_json["root_key"] = root_key
+    if path_prefix:
+        input_json["path_prefix"] = path_prefix
+    if extension:
+        input_json["extension"] = extension
+    if filename_contains:
+        input_json["filename_contains"] = filename_contains
+    return PlannerOutput(
+        intent="SUGGEST_RENAME",
+        user_goal=user_goal,
+        slots={
+            "document_ids": [],
+            "root_key": root_key,
+            "path_prefix": path_prefix,
+            "extension": extension,
+            "filename_contains": filename_contains,
+            "requested_outputs": ["rename_suggestions", "operation_plan"],
+            "response_style": response_style,
+            "clarification_question": clarification_question,
+            "llm_intent_plan": llm_intent_plan or {},
+            "route_source": route_source,
+        },
+        selected_skills=["file-rename", "operation-plan"],
+        steps=[
+            {
+                "step_id": "step-rename-suggestions",
+                "skill": "file-rename",
+                "tool_name": "generate-rename-suggestions",
+                "input": input_json,
+                "requires_confirmation": False,
+                "risk_level": "low",
+                "expected_outputs": ["rename_suggestions", "operation_plan"],
+                "writes": ["document_pages", "operation_plans"],
+            }
+        ],
+        evidence_policy={"require_page_or_cell": True, "allow_no_evidence_answer": True},
+        confirmation_policy={"operation_plan_required": True},
     )
 
 
@@ -1451,6 +1547,56 @@ def _managed_file_read_filters_from_request(*, message: str, lowered: str) -> Di
     if filename_contains:
         filters["filename_contains"] = filename_contains
     return filters
+
+
+def _managed_file_rename_filters_from_request(*, message: str, lowered: str) -> Dict[str, str] | None:
+    """提取受管目录重命名请求的逻辑目录与文件过滤条件。"""
+
+    if not (
+        any(keyword in message for keyword in ["重命名", "改名", "文件名建议", "命名建议"])
+        or any(keyword in lowered for keyword in ["rename", "filename suggestion"])
+    ):
+        return None
+    if "文件" not in message and "文档" not in message and "材料" not in message:
+        return None
+
+    root_key = _managed_root_key_from_list_request(message)
+    path_prefix = _managed_path_prefix_from_rename_request(message=message, root_key=root_key)
+    filters: Dict[str, str] = {}
+    if root_key:
+        filters["root_key"] = root_key
+    if path_prefix:
+        filters["path_prefix"] = path_prefix
+    extension = _managed_extension_from_list_request(message)
+    filename_contains = _managed_filename_contains_from_list_request(message)
+    if extension:
+        filters["extension"] = extension
+    if filename_contains:
+        filters["filename_contains"] = filename_contains
+    return filters
+
+
+def _managed_path_prefix_from_rename_request(*, message: str, root_key: str | None) -> str | None:
+    """从重命名表达中提取受管根目录内的子目录。"""
+
+    if root_key:
+        return _managed_path_prefix_from_list_request(message=message, root_key=root_key)
+
+    rename_position = max(message.rfind("重命名"), message.rfind("改名"))
+    tail = message[rename_position + (3 if message[rename_position:].startswith("重命名") else 2) :] if rename_position >= 0 else message
+    match = re.search(
+        r"(?P<prefix>[^，。！？]+?)(?:目录下|文件夹下|下|中|里)(?:的)?(?:所有|全部)?(?:文件|文档|材料)",
+        tail,
+    )
+    if not match:
+        match = re.search(
+            r"(?:把|将)?(?P<prefix>[^，。！？]+?)(?:目录下|文件夹下|下|中|里)(?:的)?(?:所有|全部)?(?:文件|文档|材料).*(?:重命名|改名)",
+            message,
+        )
+    if not match:
+        return None
+    prefix = re.sub(r"^(?:把|将|对|给)\s*", "", match.group("prefix").strip())
+    return _normalize_managed_path_prefix(prefix)
 
 
 def _has_managed_file_read_intent(*, message: str, lowered: str) -> bool:

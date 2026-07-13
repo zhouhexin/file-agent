@@ -48,7 +48,7 @@ def confirm_operation_plan(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> OperationConfirmResponse:
-    """确认高风险操作计划；当前阶段只推进状态，不执行文件动作。"""
+    """确认高风险操作计划；受支持的重命名计划会执行 Native 文件动作。"""
 
     return OperationPlanService(db).confirm_plan(
         plan_id=plan_id,

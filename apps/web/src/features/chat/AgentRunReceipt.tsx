@@ -2,9 +2,10 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle2, FileText, Folder } from 'lucide-react';
 
-import { getChangeSet } from '../../api/client';
-import type { AgentRun, ChangeItem, ManagedFileResult, ToolInvocation } from '../../types';
+import { getChangeSet, getOperationPlan } from '../../api/client';
+import type { AgentRun, ChangeItem, ManagedFileResult, OperationPlanResponse, ToolInvocation } from '../../types';
 import { DocumentResultCard } from './DocumentResultCard';
+import { OperationPlanCard } from './OperationPlanCard';
 import type { ChatAttachment } from './presentation';
 import { findAttachmentByDocumentId, formatFileSize, hasFileMutation } from './presentation';
 
@@ -30,6 +31,7 @@ export function AgentRunReceipt({
 }: AgentRunReceiptProps) {
   // ChangeSet 只用于判断是否存在真实文件操作，不替代 AgentRun 的结构化结果展示。
   const [changeItems, setChangeItems] = useState<ChangeItem[] | null>(null);
+  const [operationPlan, setOperationPlan] = useState<OperationPlanResponse | null>(null);
   const results = agentRun?.document_results ?? [];
   const successCount = results.filter((item) => item.extraction_status === 'COMPLETED').length;
   const failedCount = results.filter((item) => item.extraction_status === 'FAILED').length;
@@ -76,6 +78,25 @@ export function AgentRunReceipt({
     };
   }, [agentRun?.changeset_id, results.length, token]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const planId = agentRun?.operation_plan_id ?? '';
+    if (!token || !isPersistedOperationPlanId(planId)) {
+      setOperationPlan(null);
+      return;
+    }
+    getOperationPlan(token, planId)
+      .then((plan) => {
+        if (!cancelled) setOperationPlan(plan);
+      })
+      .catch(() => {
+        if (!cancelled) setOperationPlan(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agentRun?.operation_plan_id, token]);
+
   if (state === 'running') {
     return (
       <section className="agent-run-receipt">
@@ -103,6 +124,22 @@ export function AgentRunReceipt({
   }
 
   const managedFileResult = getManagedFileResult(agentRun.tool_invocations);
+  const hasOperationPlan = isPersistedOperationPlanId(agentRun.operation_plan_id ?? '');
+
+  if (operationPlan && token) {
+    return (
+      <OperationPlanCard
+        plan={operationPlan}
+        token={token}
+        onConfirmed={async () => {
+          setOperationPlan(await getOperationPlan(token, operationPlan.id));
+        }}
+      />
+    );
+  }
+  if (hasOperationPlan) {
+    return agentRun.final_response ? <p className="agent-chat-response">{agentRun.final_response}</p> : null;
+  }
 
   if (agentRun.intent === 'SUMMARIZE_DOCUMENTS' || agentRun.intent === 'ANSWER_DOCUMENTS') {
     return agentRun.final_response ? (
@@ -294,6 +331,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isPersistedChangeSetId(changesetId: string): boolean {
   // 后端真实 ChangeSet 使用 UUID；changeset-memory 等旧占位值不能触发详情请求。
   return CHANGESET_ID_PATTERN.test(changesetId);
+}
+
+function isPersistedOperationPlanId(planId: string): boolean {
+  // 仅真实 UUID 才访问详情接口，避免 operation-plan-pending 等占位值触发 404。
+  return CHANGESET_ID_PATTERN.test(planId);
 }
 
 function getCachedChangeSetItems(token: string, changesetId: string): Promise<ChangeItem[]> {

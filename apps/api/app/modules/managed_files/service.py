@@ -60,6 +60,7 @@ class ManagedFileService:
             container_path=container_path,
             classification_mode=request.classification_mode,
             created_by=current_user.id,
+            allow_rename=_configured_allow_rename(request.root_key),
         )
         self.db.commit()
         self.db.refresh(root)
@@ -307,6 +308,7 @@ def sync_configured_managed_roots(
             display_name=configured_root_key,
             container_path=container_path,
             classification_mode=_configured_classification_mode(configured_root_key),
+            allow_rename=_configured_allow_rename(configured_root_key),
         )
         root = repository.upsert_root(
             root_key=configured_root_key,
@@ -314,6 +316,7 @@ def sync_configured_managed_roots(
             container_path=container_path,
             classification_mode=_configured_classification_mode(configured_root_key),
             created_by=created_by,
+            allow_rename=_configured_allow_rename(configured_root_key),
         )
         roots.append(root)
         if scan and (config_changed or not _has_active_managed_files(db, root_id=root.id)):
@@ -328,15 +331,18 @@ def _root_config_changed(
     display_name: str,
     container_path: str,
     classification_mode: str,
+    allow_rename: bool,
 ) -> bool:
     """判断 env 配置是否相对数据库索引发生变化。"""
 
+    expected_read_only = not allow_rename
     return (
         root.display_name != display_name
         or root.container_path != container_path
         or root.classification_mode != classification_mode
         or root.enabled is not True
-        or root.read_only is not True
+        or root.read_only is not expected_read_only
+        or ("rename" in set(root.allowed_operations_json or [])) is not allow_rename
     )
 
 
@@ -358,7 +364,7 @@ def _configured_root_keys(*, root_key: str | None = None) -> list[str]:
         return [root_key] if _configured_container_path(root_key) is not None else []
 
     prefix = "MANAGED_ROOT_"
-    ignored_suffixes = {"_CLASSIFICATION_MODE", "_NAME", "_DISPLAY_NAME"}
+    ignored_suffixes = {"_CLASSIFICATION_MODE", "_NAME", "_DISPLAY_NAME", "_ALLOW_RENAME"}
     keys: list[str] = []
     for env_key in os.environ:
         if not env_key.startswith(prefix):
@@ -377,6 +383,13 @@ def _configured_classification_mode(root_key: str) -> str:
     if value not in {"NONE", "PATH_AS_CATEGORY"}:
         return "NONE"
     return value
+
+
+def _configured_allow_rename(root_key: str) -> bool:
+    """读取受管目录重命名开关；只有显式 true 才允许写操作。"""
+
+    env_key = f"MANAGED_ROOT_{root_key.upper()}_ALLOW_RENAME"
+    return os.getenv(env_key, "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _require_role(current_user: User, allowed_roles: set[str]) -> None:

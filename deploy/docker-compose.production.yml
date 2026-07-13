@@ -37,7 +37,7 @@ services:
     volumes:
       - ../data/uploads:/data/uploads
       - ../data/logs:/data/logs
-      - E:/workdata:/managed/workdata:ro
+      - E:/workdata:/managed/workdata:${MANAGED_ROOT_VOLUME_MODE:-ro}
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,7 +67,7 @@ services:
     volumes:
       - ../data/uploads:/data/uploads
       - ../data/logs:/data/logs
-      - E:/workdata:/managed/workdata:ro
+      - E:/workdata:/managed/workdata:${MANAGED_ROOT_VOLUME_MODE:-ro}
     depends_on:
       postgres:
         condition: service_healthy

@@ -3,6 +3,8 @@ import type {
   AgentCapabilityCatalog,
   ChangeSetResponse,
   ConversationDetailResponse,
+  OperationConfirmResponse,
+  OperationPlanResponse,
   SendMessageResponse,
   TokenResponse,
   UploadedFile,
@@ -192,4 +194,23 @@ export async function getChangeSet(
 ): Promise<ChangeSetResponse> {
   // 结果回执用 ChangeSet 判断是否存在真实文件改名、移动、删除等写操作。
   return request(`/changesets/${changesetId}`, { token });
+}
+
+export async function getOperationPlan(
+  token: string,
+  planId: string,
+): Promise<OperationPlanResponse> {
+  // OperationPlan 由后端按当前用户校验归属，前端只展示安全的逻辑路径。
+  return request(`/operations/plans/${planId}`, { token });
+}
+
+export async function confirmOperationPlan(
+  token: string,
+  planId: string,
+): Promise<OperationConfirmResponse> {
+  // 高风险文件操作必须通过独立确认接口，不能复用普通消息发送。
+  return request(`/operations/plans/${planId}/confirm`, {
+    token,
+    body: { confirmation: '确认执行' },
+  });
 }
