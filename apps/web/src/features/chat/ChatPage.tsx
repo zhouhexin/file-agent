@@ -1,5 +1,5 @@
 // 聊天工作台是文件智能体主入口，文件打开动作必须经过后端受控接口。
-import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { ChangeEvent, FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { BookOpen, LogOut, MessageSquare, Paperclip, Send, User as UserIcon } from 'lucide-react';
 
 import {
@@ -230,9 +230,15 @@ export function ChatPage({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (submitting || uploading || historyLoading) {
+      return;
+    }
+    const currentMessage = message.trim();
+    if (!currentMessage) {
+      return;
+    }
     setError('');
     setSubmitting(true);
-    const currentMessage = message.trim();
     const attachmentsForTurn = draftAttachments;
     const turnId = createClientId();
 
@@ -268,6 +274,18 @@ export function ChatPage({
     } finally {
       setSubmitting(false);
     }
+  }
+
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    // 中文输入法合成期间的 Enter 只用于确认候选词，不能触发消息发送。
+    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) {
+      return;
+    }
+    event.preventDefault();
+    if (submitting || uploading || historyLoading || !message.trim()) {
+      return;
+    }
+    event.currentTarget.form?.requestSubmit();
   }
 
   async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
@@ -464,6 +482,7 @@ export function ChatPage({
             <textarea
               value={message}
               onChange={(event) => setMessage(event.target.value)}
+              onKeyDown={handleComposerKeyDown}
               disabled={historyLoading}
               placeholder={historyLoading ? '正在加载对话...' : ''}
               rows={1}

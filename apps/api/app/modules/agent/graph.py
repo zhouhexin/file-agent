@@ -225,7 +225,13 @@ def _deterministic_preflight_plan(
         message=state["message"],
         attachments=state.get("attachments", []),
     )
-    if plan.intent in {"LIST_MANAGED_FILES", "SUGGEST_RENAME", "CAPABILITY_HELP", "LIST_CLASSIFICATION_TAXONOMY"}:
+    if plan.intent in {
+        "LIST_MANAGED_FILES",
+        "SUGGEST_RENAME",
+        "RESOLVE_RENAME_REVIEW",
+        "CAPABILITY_HELP",
+        "LIST_CLASSIFICATION_TAXONOMY",
+    }:
         return plan
     return None
 
@@ -258,10 +264,13 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
             continue
         try:
             tool_input = dict(step["input"])
-            if step["tool_name"] == "generate-rename-suggestions":
+            if step["tool_name"] in {"generate-rename-suggestions", "resolve-rename-reviews"}:
                 # 运行标识来自受信任 State，不能由 LLM 直接提供。
                 tool_input["conversation_id"] = state["conversation_id"]
                 tool_input["agent_run_id"] = state["agent_run_id"]
+            if step["tool_name"] == "resolve-rename-reviews":
+                # 用户确认文本必须来自原始消息，不能采用 LLM 改写后的内容。
+                tool_input["message"] = state["message"]
             # 调用工具注册表执行工具
             invocation = registry.invoke(step["tool_name"], tool_input)
         except Exception as exc:
@@ -379,6 +388,7 @@ def _aggregate_tool_results(
         "managed_file_list": _managed_file_list_from_results(tool_results),
         "mcp_filesystem_result": _mcp_filesystem_result_from_results(tool_results),
         "rename_plan": _rename_plan_from_results(tool_results),
+        "rename_review_resolution": _rename_review_resolution_from_results(tool_results),
         "intent_summary": _intent_summary_from_results(tool_results),
     }
 
@@ -439,6 +449,17 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
         return {
             "status": "COMPLETED" if rename_plan.get("ok") else "NEEDS_REVIEW",
             "final_response": _build_rename_plan_response(rename_plan),
+        }
+
+    rename_review_resolution = result_summary.get("rename_review_resolution", {})
+    if rename_review_resolution:
+        return {
+            "status": (
+                "COMPLETED"
+                if rename_review_resolution.get("status") in {"EXECUTED", "COMPLETED"}
+                else "NEEDS_REVIEW"
+            ),
+            "final_response": _build_rename_review_resolution_response(rename_review_resolution),
         }
 
     document_results = result_summary.get("document_results", [])
@@ -699,6 +720,15 @@ def _rename_plan_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, A
     return {}
 
 
+def _rename_review_resolution_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """提取用户更正名称后的逐文件执行结果。"""
+
+    for result in tool_results:
+        if result.get("kind") == "rename_review_resolution":
+            return result
+    return {}
+
+
 def _build_rename_plan_response(payload: Dict[str, Any]) -> str:
     """生成重命名建议回执；明确提示确认前原文件未修改。"""
 
@@ -713,9 +743,65 @@ def _build_rename_plan_response(payload: Dict[str, Any]) -> str:
         "当前仅生成操作计划，原文件尚未修改。",
     ]
     if review_count:
-        lines.append(f"另有 {review_count} 个文件缺少必要字段或存在冲突，已跳过并标记为待复核。")
+        lines.append("以下文件缺少重命名所需信息（年份或正文标题），暂未处理。")
     if ready_count:
         lines.append("请核对下方计划，确认后才会执行重命名。")
+    suggestions = [
+        item for item in payload.get("suggestions", []) if isinstance(item, dict)
+    ]
+    for index, suggestion in enumerate(suggestions[:20], start=1):
+        original_name = str(suggestion.get("filename") or "未知文件")
+        proposed_name = suggestion.get("proposed_filename")
+        if proposed_name:
+            lines.append(f"{index}. {original_name} -> {proposed_name}")
+            continue
+        lines.append(f"{index}. {original_name}")
+    if review_count:
+        lines.extend([
+            "如需改名，请回复：文件原文件名更正为新文件名",
+            "不需要改名请回复“不需要”。",
+        ])
+    return "\n".join(lines)
+
+
+def _build_rename_review_resolution_response(payload: Dict[str, Any]) -> str:
+    """生成用户更正后的成功、失败和重名候选回执。"""
+
+    if payload.get("dismissed_count"):
+        return f"已跳过 {int(payload.get('dismissed_count') or 0)} 个待复核文件，不会修改原文件。"
+    error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    lines: List[str] = []
+    completed = [item for item in payload.get("completed_items", []) if isinstance(item, dict)]
+    if completed:
+        lines.append(f"已完成 {len(completed)} 个文件重命名：")
+        for index, item in enumerate(completed, start=1):
+            lines.append(
+                f"{index}. {item.get('before_relative_path') or '未知文件'} -> "
+                f"{item.get('after_relative_path') or '未知文件'}"
+            )
+    ambiguous = [item for item in payload.get("ambiguous_items", []) if isinstance(item, dict)]
+    for item in ambiguous:
+        source = str(item.get("source") or "该文件名")
+        candidates = [candidate for candidate in item.get("candidates", []) if isinstance(candidate, dict)]
+        lines.append(f"“{source}”匹配到多个待复核文件，请使用完整相对路径确认：")
+        for index, candidate in enumerate(candidates, start=1):
+            lines.append(f"{index}. {candidate.get('relative_path') or candidate.get('filename') or '未知文件'}")
+        if candidates:
+            example = candidates[0].get("relative_path") or candidates[0].get("filename")
+            lines.append(f"例如：文件{example}更正为新文件名")
+    failed = [item for item in payload.get("failed_items", []) if isinstance(item, dict)]
+    if failed:
+        lines.append(f"另有 {len(failed)} 个文件未完成：")
+        for item in failed:
+            source = item.get("before_relative_path") or item.get("source") or "未知文件"
+            error_code = str(item.get("error_code") or "")
+            if error_code in {"TARGET_ALREADY_EXISTS", "TARGET_ALREADY_INDEXED", "DUPLICATE_TARGET"}:
+                message = "目标文件名重复，请确认并提供其他名称"
+            else:
+                message = item.get("error_message") or error_code or "处理失败"
+            lines.append(f"- {source}：{message}")
+    if not lines:
+        lines.append(str(error.get("message") or "没有找到可处理的待复核文件。"))
     return "\n".join(lines)
 
 

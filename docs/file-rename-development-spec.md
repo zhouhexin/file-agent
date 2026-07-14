@@ -349,7 +349,7 @@ Docling 或解析器提供的一级标题
 ```json
 {
   "policy_key": "school_official_document",
-  "version": "1.0",
+  "version": "1.2",
   "separator": "_",
   "templates": [
     {
@@ -365,7 +365,8 @@ Docling 或解析器提供的一级标题
     }
   ],
   "missing_field_strategy": "NEEDS_REVIEW",
-  "conflict_strategy": "ERROR",
+  "conflict_strategy": "VERSION_SUFFIX",
+  "duplicate_title_strategy": "FULL_DATE_THEN_VERSION",
   "include_hidden": false,
   "rename_directories": false,
   "preserve_extension": true,
@@ -381,6 +382,7 @@ Docling 或解析器提供的一级标题
 - 配置无效时关闭真实执行并记录错误，不使用不完整规则继续运行。
 - policy version 写入 OperationPlan，确认执行时使用计划中的版本核对。
 - 后续修改规则不能悄悄改变已经等待确认的计划结果。
+- `FULL_DATE_THEN_VERSION` 表示同目录同标题文件先以 `YYYYMMDD` 区分，日期仍相同时再追加中文版本号。
 
 ## 8. Planner 与 Tool 改造
 
@@ -608,6 +610,7 @@ F2_EXPECTED_VERSION=<固定测试版本>
 
 - 批量建议逐文件隔离。
 - 受管文件快照和 document_pages 复用。
+- 旧版 `.xls` 采用 `xlrd>=2.0.1 -> LibreOffice 可选转换 -> 结构化文件名回退`；当前部署不强制安装 LibreOffice，后续出现 xlrd 兼容性缺口时再启用。
 - READY 项创建真实 OperationPlan。
 - 计划 before/after、SHA-256 和证据完整。
 - 隐藏文件和目录被拒绝。
@@ -618,6 +621,7 @@ F2_EXPECTED_VERSION=<固定测试版本>
 - 第二次迭代验证 Native 和 F2 preview 输出同一结构。
 - 第二次迭代验证 Native 和 F2 execute 输出同一结构。
 - 目标冲突不覆盖文件。
+- 自动建议冲突由后端在 OperationPlan 创建前分配中文版本后缀；F2 不得自行修改目标名。
 - 源文件缺失、变化和路径越界被拒绝。
 - 部分失败返回 PARTIAL。
 - 数据库失败触发文件名补偿。

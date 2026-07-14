@@ -168,6 +168,9 @@ class DeterministicPlanner:
         """根据用户消息和附件上下文生成声明式计划。"""
         lowered = message.lower()
 
+        if _has_rename_review_resolution_intent(message):
+            return _rename_review_resolution_plan(user_goal=message)
+
         if _has_capability_help_intent(message=message, lowered=lowered):
             return _capability_help_plan(user_goal=message)
 
@@ -465,6 +468,13 @@ def build_plan_from_user_intent(
     )
     resolved_scope = _resolved_scope_from_attachments(attachments)
 
+    if _has_rename_review_resolution_intent(message) or intent_plan.intent == "RESOLVE_RENAME_REVIEW":
+        return _rename_review_resolution_plan(
+            user_goal=intent_plan.user_goal or message,
+            response_style=intent_plan.response_style,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
+
     if (
         _has_capability_help_intent(message=message, lowered=lowered)
         or intent_plan.intent == "CAPABILITY_HELP"
@@ -496,7 +506,7 @@ def build_plan_from_user_intent(
     managed_rename_filters = _managed_file_rename_filters_from_request(
         message=message,
         lowered=lowered,
-    )
+    ) or {}
     if (
         intent_plan.intent == "SUGGEST_RENAME"
         or requested_capabilities.intersection(MANAGED_FILE_RENAME_HINTS)
@@ -1052,6 +1062,54 @@ def _managed_file_rename_plan(
     )
 
 
+def _rename_review_resolution_plan(
+    *,
+    user_goal: str,
+    response_style: str = "concise",
+    llm_intent_plan: Dict[str, Any] | None = None,
+) -> PlannerOutput:
+    """生成待复核重命名项的更正或放弃计划。"""
+
+    return PlannerOutput(
+        intent="RESOLVE_RENAME_REVIEW",
+        user_goal=user_goal,
+        slots={
+            "document_ids": [],
+            "requested_outputs": ["rename_review_resolution"],
+            "response_style": response_style,
+            "llm_intent_plan": llm_intent_plan or {},
+            "route_source": "deterministic_confirmation_boundary",
+        },
+        selected_skills=["file-rename", "operation-plan", "confirmed-file-action"],
+        steps=[
+            {
+                "step_id": "step-resolve-rename-review",
+                "skill": "file-rename",
+                "tool_name": "resolve-rename-reviews",
+                "input": {"message": user_goal},
+                "requires_confirmation": False,
+                "risk_level": "medium",
+                "expected_outputs": ["rename_results", "operation_plan", "changeset"],
+                "writes": ["operation_plans", "operation_confirmations", "change_sets", "change_items"],
+            }
+        ],
+        evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+        confirmation_policy={
+            "operation_plan_required": True,
+            "explicit_correction_is_confirmation": True,
+        },
+    )
+
+
+def _has_rename_review_resolution_intent(message: str) -> bool:
+    """识别明确的文件名更正或放弃表达，不由 LLM 猜测执行确认。"""
+
+    normalized = message.strip().rstrip("。！!")
+    if normalized in {"不需要", "不需要改名", "无需改名", "不用改名"}:
+        return True
+    return bool(re.search(r"文件\s*.+?\s*更正为\s*.+", message, flags=re.DOTALL))
+
+
 def _mcp_filesystem_list_plan(
     *,
     user_goal: str,
@@ -1557,23 +1615,57 @@ def _managed_file_rename_filters_from_request(*, message: str, lowered: str) -> 
         or any(keyword in lowered for keyword in ["rename", "filename suggestion"])
     ):
         return None
-    if "文件" not in message and "文档" not in message and "材料" not in message:
+    explicit_reference = _managed_file_reference_from_rename_request(message)
+    if (
+        "文件" not in message
+        and "文档" not in message
+        and "材料" not in message
+        and explicit_reference is None
+    ):
         return None
 
     root_key = _managed_root_key_from_list_request(message)
-    path_prefix = _managed_path_prefix_from_rename_request(message=message, root_key=root_key)
+    path_prefix = (
+        explicit_reference.get("path_prefix")
+        if explicit_reference
+        else _managed_path_prefix_from_rename_request(message=message, root_key=root_key)
+    )
     filters: Dict[str, str] = {}
     if root_key:
         filters["root_key"] = root_key
     if path_prefix:
         filters["path_prefix"] = path_prefix
     extension = _managed_extension_from_list_request(message)
-    filename_contains = _managed_filename_contains_from_list_request(message)
+    filename_contains = (
+        explicit_reference.get("filename")
+        if explicit_reference
+        else _managed_filename_contains_from_list_request(message)
+    )
     if extension:
         filters["extension"] = extension
     if filename_contains:
         filters["filename_contains"] = filename_contains
     return filters
+
+
+def _managed_file_reference_from_rename_request(message: str) -> Dict[str, str] | None:
+    """提取“目录下具体文件名进行重命名”中的目录和完整文件名。"""
+
+    match = re.search(
+        r"(?:对|把|将)?\s*(?P<prefix>[^，。！？]+?)\s*"
+        r"(?:目录下|文件夹下|下|中|里)\s*"
+        r"(?P<filename>[^/\\，。！？]+?\.[A-Za-z0-9]{1,10})\s*"
+        r"(?:进行)?\s*(?:重命名|改名)",
+        message,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    path_prefix = _normalize_managed_path_prefix(match.group("prefix"))
+    filename = match.group("filename").strip()
+    if not path_prefix or not filename:
+        return None
+    return {"path_prefix": path_prefix, "filename": filename}
 
 
 def _managed_path_prefix_from_rename_request(*, message: str, root_key: str | None) -> str | None:

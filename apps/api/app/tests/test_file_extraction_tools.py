@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import subprocess
+import sys
+from types import SimpleNamespace
 from io import BytesIO
 
 from fastapi.testclient import TestClient
 
 from app.core import config
-from app.db.models import DocumentExtractionRun, DocumentPage
+from app.db.models import Document, DocumentElement, DocumentExtractionRun, DocumentPage
 from app.modules.files.extractors import extract_document_text
+from app.modules.files.extraction_repository import FileExtractionRepository
+from app.modules.files.docling_parser import try_parse_with_docling
 from app.modules.agent.tool_registry import ToolRegistry
 from app.tests.helpers import clear_overrides, client_with_database
 
@@ -39,6 +43,51 @@ class FakeOcrService:
             "blocks": [],
             "warnings": [],
         }
+
+
+class _FakeValue:
+    """模拟 Docling 枚举值。"""
+
+    def __init__(self, value: str):
+        self.value = value
+
+
+class _FakeBBox:
+    """模拟 Docling 边界框模型。"""
+
+    def model_dump(self, mode: str = "json") -> dict:
+        assert mode == "json"
+        return {"l": 10, "t": 20, "r": 100, "b": 40, "coord_origin": "TOPLEFT"}
+
+
+class _FakeProvenance:
+    page_no = 1
+    bbox = _FakeBBox()
+
+
+class _FakeDoclingItem:
+    """模拟一个带位置的 Docling 标题元素。"""
+
+    text = "关于做好测试工作的通知"
+    label = _FakeValue("title")
+    content_layer = _FakeValue("body")
+    prov = [_FakeProvenance()]
+    parent = None
+
+
+class _FakeDoclingDocument:
+    """模拟最小 DoclingDocument。"""
+
+    def iterate_items(self):
+        yield _FakeDoclingItem(), 1
+
+
+class _FakeDoclingConverter:
+    """模拟本地 Docling converter。"""
+
+    def convert(self, file_path):
+        assert file_path.name == "notice.pdf"
+        return type("Conversion", (), {"document": _FakeDoclingDocument()})()
 
 
 def _auth_header(client: TestClient, username: str) -> dict[str, str]:
@@ -255,11 +304,235 @@ def test_extract_document_text_supports_doc_with_textutil(monkeypatch, tmp_path)
     assert "电子发票承诺书" in result["pages"][0]["text"]
 
 
-def test_extract_document_text_converts_xls_before_reading(monkeypatch, tmp_path):
-    """旧版 xls 必须先转换为派生 xlsx，再交给 openpyxl 读取。"""
+def test_extract_document_text_prefers_docling_for_pdf(monkeypatch, tmp_path):
+    """默认开启 Docling 时，PDF 应优先返回结构化页面和元素。"""
+
+    monkeypatch.setenv("DOCLING_ENABLED", "true")
+    config.get_settings.cache_clear()
+    pdf_path = tmp_path / "notice.pdf"
+    pdf_path.write_bytes(b"fake-pdf")
+    monkeypatch.setattr(
+        "app.modules.files.extractors.try_parse_with_docling",
+        lambda **kwargs: {
+            "ok": True,
+            "extractor": "docling",
+            "pages": [
+                {
+                    "page_number": 1,
+                    "sheet_name": None,
+                    "text": "关于做好测试工作的通知",
+                    "metadata": {"structured": True},
+                }
+            ],
+            "elements": [
+                {
+                    "element_index": 0,
+                    "label": "title",
+                    "text": "关于做好测试工作的通知",
+                    "page_number": 1,
+                    "bbox": {"l": 10, "t": 20, "r": 100, "b": 40},
+                    "content_layer": "body",
+                    "parent_ref": None,
+                    "metadata": {},
+                }
+            ],
+            "warnings": [],
+        },
+    )
+
+    result = extract_document_text(
+        file_path=pdf_path,
+        filename="notice.pdf",
+        content_type="application/pdf",
+    )
+
+    assert result["ok"] is True
+    assert result["extractor"] == "docling"
+    assert result["elements"][0]["label"] == "title"
+    assert result["pages"][0]["metadata"]["structured"] is True
+
+
+def test_extract_document_text_falls_back_when_docling_fails(monkeypatch, tmp_path):
+    """Docling 不可用或转换失败时必须继续使用现有 PDF 解析器。"""
+
+    monkeypatch.setenv("DOCLING_ENABLED", "true")
+    config.get_settings.cache_clear()
+    pdf_path = tmp_path / "fallback.pdf"
+    pdf_path.write_bytes(b"fake-pdf")
+    monkeypatch.setattr(
+        "app.modules.files.extractors.try_parse_with_docling",
+        lambda **kwargs: {
+            "ok": False,
+            "error": {"code": "DOCLING_NOT_AVAILABLE", "message": "未安装 Docling"},
+        },
+    )
+    monkeypatch.setattr(
+        "app.modules.files.extractors._extract_pdf_native_pages",
+        lambda file_path: [
+            {
+                "page_number": 1,
+                "sheet_name": None,
+                "text": "现有解析器正文",
+                "metadata": {"page_index": 0},
+            }
+        ],
+    )
+
+    result = extract_document_text(
+        file_path=pdf_path,
+        filename="fallback.pdf",
+        content_type="application/pdf",
+    )
+
+    assert result["ok"] is True
+    assert result["extractor"] == "pdf"
+    assert result["pages"][0]["text"] == "现有解析器正文"
+    assert result["warnings"][0]["code"] == "DOCLING_NOT_AVAILABLE"
+
+
+def test_docling_adapter_serializes_document_elements(monkeypatch, tmp_path):
+    """Docling 适配器应输出项目稳定的页面、标签和位置结构。"""
+
+    pdf_path = tmp_path / "notice.pdf"
+    pdf_path.write_bytes(b"fake-pdf")
+    monkeypatch.setattr(
+        "app.modules.files.docling_parser._build_converter",
+        lambda ocr_enabled: _FakeDoclingConverter(),
+    )
+
+    result = try_parse_with_docling(
+        file_path=pdf_path,
+        filename=pdf_path.name,
+        content_type="application/pdf",
+    )
+
+    assert result["ok"] is True
+    assert result["elements"][0]["label"] == "title"
+    assert result["elements"][0]["page_number"] == 1
+    assert result["elements"][0]["bbox"]["t"] == 20
+    assert result["pages"][0]["text"] == "关于做好测试工作的通知"
+
+
+def test_extraction_repository_persists_structured_elements(tmp_path, monkeypatch):
+    """结构化元素必须和解析运行一起写入并可按配置指纹复用。"""
+
+    monkeypatch.chdir(tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth_header(client, "structured-owner")
+    document_id = _upload_text(client, headers, filename="structured.txt")
+    db = SessionLocal()
+    try:
+        document = db.get(Document, document_id)
+        assert document is not None
+        repository = FileExtractionRepository(db, document.user_id)
+        run = repository.create_extraction_run(
+            document_id=document.id,
+            extractor="docling@2.50.0",
+            parser_name="docling",
+            parser_version="2.50.0",
+            parser_config_hash="a" * 64,
+        )
+        repository.complete_extraction_run(
+            run=run,
+            pages=[{"page_number": 1, "text": "结构化正文", "metadata": {}}],
+            elements=[
+                {
+                    "element_index": 0,
+                    "label": "title",
+                    "text": "结构化标题",
+                    "page_number": 1,
+                    "bbox": {"l": 1, "t": 2, "r": 3, "b": 4},
+                    "content_layer": "body",
+                    "metadata": {"hierarchy_level": 1},
+                }
+            ],
+        )
+
+        reusable = repository.get_latest_successful_extraction(
+            document_id=document.id,
+            parser_config_hash="a" * 64,
+        )
+
+        assert reusable is not None
+        assert reusable["run"].parser_name == "docling"
+        assert reusable["elements"][0].label == "title"
+        assert reusable["elements"][0].bbox_json["t"] == 2
+        assert db.query(DocumentElement).count() == 1
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_extract_document_text_reads_xls_with_xlrd_first(monkeypatch, tmp_path):
+    """标准旧版 xls 应优先使用 xlrd 直接读取，不依赖 LibreOffice。"""
 
     xls_path = tmp_path / "奖学金汇总.xls"
     xls_path.write_bytes(b"legacy-xls")
+
+    class FakeCell:
+        def __init__(self, value, cell_type=1):
+            self.value = value
+            self.ctype = cell_type
+
+    class FakeSheet:
+        name = "汇总"
+        rows = [
+            [FakeCell("姓名"), FakeCell("等级"), FakeCell("人数")],
+            [FakeCell("赵六"), FakeCell("一等奖"), FakeCell(1.0, 2)],
+        ]
+        nrows = len(rows)
+        ncols = len(rows[0])
+
+        def cell(self, row_index, column_index):
+            return self.rows[row_index][column_index]
+
+    class FakeWorkbook:
+        datemode = 0
+
+        def sheets(self):
+            return [FakeSheet()]
+
+        def release_resources(self):
+            return None
+
+    fake_xlrd = SimpleNamespace(
+        XL_CELL_EMPTY=0,
+        XL_CELL_TEXT=1,
+        XL_CELL_NUMBER=2,
+        XL_CELL_DATE=3,
+        XL_CELL_BOOLEAN=4,
+        XL_CELL_ERROR=5,
+        open_workbook=lambda *_args, **_kwargs: FakeWorkbook(),
+    )
+    monkeypatch.setitem(sys.modules, "xlrd", fake_xlrd)
+    monkeypatch.setattr(
+        "app.modules.files.extractors.convert_xls_to_xlsx",
+        lambda **_: (_ for _ in ()).throw(AssertionError("xlrd 成功时不应调用 LibreOffice")),
+    )
+
+    result = extract_document_text(
+        file_path=xls_path,
+        filename="奖学金汇总.xls",
+        content_type="application/vnd.ms-excel",
+    )
+
+    assert result["ok"] is True
+    assert result["extractor"] == "excel-xls-xlrd"
+    assert result["pages"][0]["sheet_name"] == "汇总"
+    assert "赵六\t一等奖\t1" in result["pages"][0]["text"]
+    assert result["pages"][0]["metadata"]["reader"] == "xlrd"
+
+
+def test_extract_document_text_converts_xls_when_xlrd_fails(monkeypatch, tmp_path):
+    """xlrd 无法读取时才使用 LibreOffice 派生 xlsx 兜底。"""
+
+    xls_path = tmp_path / "奖学金汇总.xls"
+    xls_path.write_bytes(b"legacy-xls")
+    monkeypatch.setitem(
+        sys.modules,
+        "xlrd",
+        SimpleNamespace(open_workbook=lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("invalid BIFF"))),
+    )
 
     def fake_converter(*, source_path, output_dir):
         """模拟 LibreOffice 生成 xlsx 派生件，避免测试依赖本机办公套件。"""

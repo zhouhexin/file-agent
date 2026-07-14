@@ -34,7 +34,9 @@ cd apps/web && npm install && npm run dev
 如果在项目根目录直接执行 `python -m uvicorn app.main:app ...` 且没有设置 `PYTHONPATH=apps/api`，会报 `ModuleNotFoundError: No module named 'app'`。
 上传文件默认保存到 `FILE_STORAGE_ROOT=./storage/uploads`。
 服务端结构化日志默认保存到 `LOG_DIR=./logs`，按天生成 `file-agent-YYYY-MM-DD.log`，启动时会删除超过 `LOG_RETENTION_DAYS=7` 天的日志。
-旧版 `.xls` 解析依赖本机 LibreOffice/`soffice` 做临时 `.xlsx` 转换；未安装时系统会返回结构化失败，不覆盖原件。
+旧版 `.xls` 默认由 `xlrd>=2.0.1` 直接只读解析；只有 xlrd 无法处理非标准或损坏文件时才尝试本机 LibreOffice/`soffice` 转换。当前部署不强制安装 LibreOffice，转换器缺失时返回结构化失败或在重命名场景使用受控文件名回退，始终不覆盖原件。
+PDF、DOCX 默认启用本地 Docling 结构化解析，并把文档元素和位置写入 `document_elements`；Docling 不可用时自动回退现有解析器，扫描件仍由现有 OCR 链路处理。
+受管文件确认重命名默认使用 `FILE_RENAME_EXECUTOR=native`。可选 F2 v2.2.2 执行器只负责批量执行 OperationPlan 已固定的文件名映射；启用前必须通过离线包部署并校验二进制版本和 SHA-256，具体配置见 `docs/runbook.md`。
 默认不启用真实 LLM 调用；如需让对话阶段使用大模型理解用户需求，请在 `.env` 中配置 `LLM_ENABLED=true`、`LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_CHAT_MODEL`。当前 LLM 客户端使用 OpenAI-compatible Chat Completions 接口。
 分类判定默认仍为 `LLM_CLASSIFICATION_MODE=rule_only`。如需让 LLM 在候选分类内做语义判定，可设置 `LLM_CLASSIFICATION_MODE=hybrid`；如需允许 LLM 自由提出新分类路径，还必须显式设置 `LLM_CLASSIFICATION_ALLOW_FREE_PATHS=true`，该类结果只会以 `NEEDS_REVIEW` 保存，不会自动写入正式分类目录。
 

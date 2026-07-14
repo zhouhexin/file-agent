@@ -117,6 +117,7 @@ class Document(Base):
     insights: Mapped[List["DocumentInsight"]] = relationship(back_populates="document")
     extraction_runs: Mapped[List["DocumentExtractionRun"]] = relationship(back_populates="document")
     pages: Mapped[List["DocumentPage"]] = relationship(back_populates="document")
+    elements: Mapped[List["DocumentElement"]] = relationship(back_populates="document")
 
 
 class FileObject(Base):
@@ -161,12 +162,16 @@ class DocumentExtractionRun(Base):
     document_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="RUNNING")
     extractor: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    parser_name: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    parser_version: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    parser_config_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
     document: Mapped[Document] = relationship(back_populates="extraction_runs")
     pages: Mapped[List["DocumentPage"]] = relationship(back_populates="extraction_run")
+    elements: Mapped[List["DocumentElement"]] = relationship(back_populates="extraction_run")
 
 
 class DocumentPage(Base):
@@ -185,6 +190,36 @@ class DocumentPage(Base):
 
     document: Mapped[Document] = relationship(back_populates="pages")
     extraction_run: Mapped[DocumentExtractionRun] = relationship(back_populates="pages")
+
+
+class DocumentElement(Base):
+    """Docling 等结构化解析器生成的可定位文档元素。"""
+
+    __tablename__ = "document_elements"
+    __table_args__ = (
+        UniqueConstraint("extraction_run_id", "element_index", name="uq_document_elements_run_index"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    document_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False, index=True)
+    extraction_run_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("document_extraction_runs.id"),
+        nullable=False,
+        index=True,
+    )
+    element_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    label: Mapped[str] = mapped_column(String(80), nullable=False, default="text")
+    text_content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    page_number: Mapped[Optional[int]] = mapped_column(nullable=True)
+    bbox_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    content_layer: Mapped[str] = mapped_column(String(80), nullable=False, default="body")
+    parent_ref: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    document: Mapped[Document] = relationship(back_populates="elements")
+    extraction_run: Mapped[DocumentExtractionRun] = relationship(back_populates="elements")
 
 
 class DocumentClassificationRun(Base):
@@ -482,6 +517,56 @@ class ManagedFileSnapshot(Base):
     source_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     source_modified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="ACTIVE", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class FileRenameReviewItem(Base):
+    """缺少自动重命名信息、等待用户更正名称的受管文件。"""
+
+    __tablename__ = "file_rename_review_items"
+    __table_args__ = (
+        UniqueConstraint("agent_run_id", "managed_file_id", name="uq_file_rename_review_run_file"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    conversation_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    agent_run_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    managed_file_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("managed_files.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    document_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    root_key: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    original_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    original_filename: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="NEEDS_REVIEW", index=True)
+    review_context_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    decision_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 

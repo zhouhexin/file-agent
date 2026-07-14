@@ -139,11 +139,23 @@ OCR_ENABLED=true
 OCR_PADDLE_MODEL_SOURCE=BOS
 OCR_LLM_ENABLED=false
 OCR_LLM_FALLBACK_QUALITY_THRESHOLD=0.68
+DOCLING_ENABLED=true
+DOCLING_FORMATS=pdf,docx
+DOCLING_OCR_ENABLED=false
 ```
 
 当前客户端调用 OpenAI-compatible `/chat/completions` 接口，并要求模型返回符合 `UserIntentPlan` 的 JSON 对象。上传阶段的 deterministic ingest 不依赖 LLM；对话阶段启用 LLM 后，会先理解用户需求，再通过白名单 Tool 读取 `document_insights` 或执行后续受控工具。
 
 OCR 第一阶段使用本地 PaddleOCR 作为默认 Provider。图片文件会直接进入 OCR；PDF 原生文本为空时会先渲染页面，再进入 OCR，并把识别文本写入 `document_pages.text_content`。`OCR_PADDLE_MODEL_SOURCE` 默认是 `BOS`，服务会在加载 PaddleOCR 前设置 `PADDLE_PDX_MODEL_SOURCE=BOS`，让 PaddleOCR 使用百度 BOS 模型下载源。如需启用 LLM OCR 兜底，必须显式设置 `OCR_LLM_ENABLED=true` 且 `LLM_ENABLED=true`；系统会在本地 OCR 质量低于 `OCR_LLM_FALLBACK_QUALITY_THRESHOLD` 时按页调用多模态模型，不默认外发整份文件。
+
+PDF、DOCX 默认使用 Docling 进行本地结构化解析，并将标题、章节、正文、页眉页脚和位置元素写入 `document_elements`。`DOCLING_OCR_ENABLED=false` 时，扫描件继续使用上述 PaddleOCR/LLM OCR 链路；Docling 缺失、转换失败或正文为空时自动回退现有 PyMuPDF/python-docx 解析器。首次启用或升级 Docling 后，解析器配置指纹会变化，相关文件下一次读取时会生成新的解析运行，旧解析结果继续保留用于历史审计。
+
+升级到结构化解析版本后执行：
+
+```bash
+cd apps/api
+/opt/homebrew/anaconda3/envs/py311/bin/python -m alembic -c alembic.ini upgrade head
+```
 
 分类 LLM 判定由 `LLM_CLASSIFICATION_MODE` 单独控制：
 
@@ -360,7 +372,7 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python scripts/conver
 
 ```text
 read-original-file：读取当前用户上传原始文件的安全元信息，不返回本地路径或二进制内容
-extract-document-text：解析 txt/md/csv/xls/xlsx/doc/docx/pdf/image，并将文本写入 document_pages；旧版 `.xls` 会先通过 LibreOffice 转成临时 `.xlsx` 再读取，不覆盖原件
+extract-document-text：解析 txt/md/csv/xls/xlsx/doc/docx/pdf/image，并将文本写入 document_pages；旧版 `.xls` 优先通过 xlrd 直接读取，失败后才尝试 LibreOffice 临时转换，不覆盖原件
 ```
 
 PDF、Excel、doc/docx 和图片 OCR 依赖：
@@ -372,10 +384,11 @@ python-docx
 Pillow
 paddleocr
 textutil 或 LibreOffice
-LibreOffice（用于旧版 .xls 转 .xlsx；macOS 可安装 LibreOffice.app，Linux 可安装 libreoffice/soffice）
+xlrd>=2.0.1（默认直接读取旧版 .xls）
+LibreOffice（可选兜底；后续遇到 xlrd 无法处理的非标准、损坏或伪装 .xls 时再安装）
 ```
 
-图片 OCR 和扫描 PDF OCR 默认使用 PaddleOCR CPU Provider；旧版 `.doc` 在 macOS 可使用系统 `textutil`，服务器环境建议安装 LibreOffice；旧版 `.xls` 依赖 LibreOffice headless 转换。如果缺少依赖或 OCR/转换引擎不可用，Tool 会返回结构化错误，不会读取任意路径。
+图片 OCR 和扫描 PDF OCR 默认使用 PaddleOCR CPU Provider；旧版 `.doc` 在 macOS 可使用系统 `textutil`，服务器环境可按需安装 LibreOffice；旧版 `.xls` 默认使用 xlrd，LibreOffice 只作为可选 headless 转换兜底。如果缺少依赖或 OCR/转换引擎不可用，Tool 会返回结构化错误，不会读取任意路径。
 
 当前对话触发解析已支持多个附件顺序执行。单个文件 Tool 异常会记录为该文件的失败 `document_results.errors`，后续文件继续处理；并发执行、LangGraph map/reduce、步骤级重试和恢复后续单独实现。
 
@@ -402,16 +415,82 @@ curl -X POST http://127.0.0.1:8000/api/conversations/conv-1/messages \
 
 当前期望返回 HTTP `422`，因为附件缺少 `document_id`。
 
-## 7. 当前限制
+## 7. 受管文件重命名执行器
+
+受管文件重命名必须先生成 `RENAME_FILES` OperationPlan，再由计划创建者确认。默认执行器为：
+
+```text
+FILE_RENAME_EXECUTOR=native
+FILE_RENAME_MAX_BATCH_SIZE=20
+FILE_RENAME_EXECUTION_TIMEOUT_SECONDS=60
+```
+
+F2 v2.2.2 是可选批量执行器。F2 不提取年份、文号或标题，只执行后端已经确认的同目录
+`before -> after` 映射。切换前需要把对应平台的 F2 二进制放入离线部署包，核对发布资产
+SHA-256，并配置：
+
+```text
+FILE_RENAME_EXECUTOR=f2
+F2_BINARY_PATH=/absolute/deployment/path/f2
+F2_EXPECTED_VERSION=2.2.2
+F2_FALLBACK_TO_NATIVE=false
+F2_STDOUT_MAX_BYTES=1048576
+```
+
+启动 API 前执行：
+
+```bash
+"$F2_BINARY_PATH" --version
+sha256sum "$F2_BINARY_PATH"
+```
+
+macOS 可使用 `shasum -a 256 "$F2_BINARY_PATH"`。版本或哈希不符合离线包清单时不得启用。
+配置为 F2 后，二进制缺失、版本不一致、超时、非 JSON 输出或 dry-run 与 OperationPlan
+不一致都会拒绝执行。回退时显式改为 `FILE_RENAME_EXECUTOR=native` 并重启 API。
+
+自动提取缺少年份或正文标题时，文件会进入 `file_rename_review_items`，不会进入原执行批次。
+用户可在聊天回执中点击文件查看内容，并使用以下格式更正：
+
+```text
+文件原文件名更正为新文件名
+```
+
+该消息视为当前更正的执行确认，但服务仍会先创建 `RENAME_FILES` OperationPlan 和
+OperationConfirmation，再执行并写入 ChangeSet。原文件名重复时应改用回执返回的完整相对路径；
+目标名称冲突只失败当前项，不阻塞同一消息中的其他文件。回复“不需要”会关闭当前会话的待复核项。
+
+自动生成建议时使用 `VERSION_SUFFIX` 冲突策略。基础目标名称视为第一版；如果已经存在，则在扩展名前
+生成 `_第二版`，后续依次生成 `_第三版`、`_第四版`。冲突检查同时覆盖真实文件系统、
+`managed_files` 索引和同一批次内已经预留的目标名称。该版本名称必须先写入 OperationPlan，
+F2 不得使用自身的冲突修复参数再次修改目标名称。用户手工明确指定的目标名称仍采用冲突提示，
+避免即时确认链路擅自改变用户输入。
+
+旧版 `.xls` 默认使用 `xlrd>=2.0.1` 直接读取，不要求安装 LibreOffice。只有 xlrd 无法读取时才尝试
+LibreOffice 转换；当前阶段允许不安装该可选兜底。如果直接读取、转换或表格正文解析失败，但文件名同时包含可验证年份和
+可清理标题，重命名服务允许使用表格文件名回退生成待确认建议，并继续保留失败的 ExtractionRun。
+文件名回退只适用于 `.xls/.xlsx/.xlsm/.csv/.tsv`，可清理前导“附件”、括号日期、末尾提交单位加
+八位日期、`new` 标记和“摸底统计表”中的“摸底”。该回退不能伪造正文证据，也不能用于分类结论。
+
+只有设置 `RUN_F2_INTEGRATION_TESTS=true` 时，测试套件才会调用本机真实 F2：
+
+```bash
+RUN_F2_INTEGRATION_TESTS=true \
+F2_BINARY_PATH=/absolute/path/f2 \
+PYTHONPATH=apps/api \
+/opt/homebrew/anaconda3/envs/py311/bin/python -m pytest \
+  apps/api/app/tests/test_rename_executors.py -k real_f2 -q
+```
+
+## 8. 当前限制
 
 - 当前已接入 OpenAI-compatible LLM 意图理解；默认 `LLM_ENABLED=false` 时仍使用 `DeterministicPlanner`。
 - 当前已持久化 user、default workspace、message、AgentRun、ToolInvocation、Document、document_insights、document_extraction_runs、document_pages、document_classification_runs、document_category_suggestions、document_category_feedback、change_sets、change_items、operation_plans 和 operation_confirmations。
-- OperationPlan 当前是最小确认闭环：创建计划、查询计划、确认计划和记录确认文本；确认后暂不执行真实文件改名、移动或删除，也暂不生成确认执行 ChangeSet。
+- OperationPlan 已支持受管目录文件重命名的创建、查询、确认、Native/F2 执行和 ChangeSet 审计；移动、删除、覆盖及上传原件改名仍未开放真实执行。
 - 当前已支持读取当前用户自己的原始文件元信息和解析文本内容；其他多数 Tool handler 仍是结构化占位实现。
 - 当前已有最小 JWT 鉴权，但没有 refresh token、复杂 RBAC、ACL 或 admin 权限体系。
 - 当前前端已有最小注册、登录、Chat、文件上传和附件删除流程，没有会话列表、admin 页面或正式视觉设计。
 
-## 8. 维护规则
+## 9. 维护规则
 
 以下任一内容发生变化时，必须同步更新本文和 `README.md`：
 

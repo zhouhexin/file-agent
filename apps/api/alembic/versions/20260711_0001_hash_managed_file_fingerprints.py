@@ -18,15 +18,23 @@ def upgrade() -> None:
     """扩展线上兼容性，并把历史可变长 fingerprint 转成 SHA-256。"""
 
     connection = op.get_bind()
-    rows = connection.execute(sa.text("select id, fingerprint from managed_files")).mappings()
-    for row in rows:
-        value = str(row["fingerprint"] or "")
-        if len(value) == 64 and _is_hex(value):
-            continue
+    if connection.dialect.name == "postgresql":
+        # 生产库可能包含大量受管文件；集合式更新避免逐行执行造成远程数据库往返阻塞。
         connection.execute(
-            sa.text("update managed_files set fingerprint = :fingerprint where id = :id"),
-            {"id": row["id"], "fingerprint": hashlib.sha256(value.encode("utf-8")).hexdigest()},
+            sa.text(
+                """
+                update managed_files
+                set fingerprint = encode(
+                    sha256(convert_to(coalesce(fingerprint, ''), 'UTF8')),
+                    'hex'
+                )
+                where length(fingerprint) <> 64
+                   or fingerprint !~ '^[0-9A-Fa-f]{64}$'
+                """
+            )
         )
+    else:
+        _hash_fingerprints_in_batches(connection)
     op.alter_column(
         "managed_files",
         "fingerprint",
@@ -56,3 +64,29 @@ def _is_hex(value: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _hash_fingerprints_in_batches(connection: sa.Connection, batch_size: int = 500) -> None:
+    """为非 PostgreSQL 测试环境分批转换，避免保持游标时逐行更新。"""
+
+    rows = connection.execute(
+        sa.text("select id, fingerprint from managed_files")
+    ).mappings().all()
+    update_statement = sa.text(
+        "update managed_files set fingerprint = :fingerprint where id = :id"
+    )
+    for offset in range(0, len(rows), batch_size):
+        batch = rows[offset : offset + batch_size]
+        parameters = []
+        for row in batch:
+            value = str(row["fingerprint"] or "")
+            if len(value) == 64 and _is_hex(value):
+                continue
+            parameters.append(
+                {
+                    "id": row["id"],
+                    "fingerprint": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+                }
+            )
+        if parameters:
+            connection.execute(update_statement, parameters)

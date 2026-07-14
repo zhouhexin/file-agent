@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import shutil
 import subprocess
 import tempfile
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from app.core.config import get_settings
+from app.modules.files.docling_parser import docling_runtime_version, try_parse_with_docling
 from app.modules.ocr.service import build_default_ocr_service
 from app.modules.spreadsheet_analysis.conversion import SpreadsheetConversionError, convert_xls_to_xlsx
 
@@ -19,6 +21,23 @@ def extract_document_text(*, file_path: Path, filename: str, content_type: str, 
     """按文件类型解析文本内容，并返回统一结构。"""
 
     suffix = Path(filename).suffix.lower()
+    parser_config_hash = extraction_config_hash(filename=filename)
+    docling_failure = _try_docling_first(
+        file_path=file_path,
+        filename=filename,
+        content_type=content_type,
+        suffix=suffix,
+    )
+    if docling_failure.get("ok"):
+        return _completed(
+            docling_failure["extractor"],
+            docling_failure["pages"],
+            elements=docling_failure.get("elements", []),
+            warnings=docling_failure.get("warnings", []),
+            parser_name="docling",
+            parser_version=docling_runtime_version(),
+            parser_config_hash=parser_config_hash or "",
+        )
     if suffix in {".txt", ".md"} or content_type.startswith("text/"):
         text = file_path.read_text(encoding="utf-8", errors="ignore")
         return _completed("plain-text", [{"page_number": 1, "sheet_name": None, "text": text, "metadata": {}}])
@@ -32,12 +51,78 @@ def extract_document_text(*, file_path: Path, filename: str, content_type: str, 
     if suffix == ".doc" or content_type == "application/msword":
         return _extract_doc_text(file_path)
     if suffix == ".docx" or content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-        return _extract_docx_text(file_path)
+        return _apply_parser_metadata(
+            _append_parser_warning(_extract_docx_text(file_path), docling_failure),
+            parser_config_hash=parser_config_hash,
+        )
     if suffix == ".pdf" or content_type == "application/pdf":
-        return _extract_pdf_text(file_path, ocr_service=ocr_service)
+        return _apply_parser_metadata(
+            _append_parser_warning(_extract_pdf_text(file_path, ocr_service=ocr_service), docling_failure),
+            parser_config_hash=parser_config_hash,
+        )
     if content_type.startswith("image/") or suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"}:
         return _extract_image_text(file_path, ocr_service=ocr_service)
     return _failed("unsupported", "UNSUPPORTED_FILE_TYPE", f"暂不支持解析该文件类型：{filename}")
+
+
+def _try_docling_first(*, file_path: Path, filename: str, content_type: str, suffix: str) -> Dict[str, Any]:
+    """对配置格式优先调用 Docling，其余格式返回未启用占位。"""
+
+    settings = get_settings()
+    normalized_suffix = suffix.lstrip(".")
+    if not settings.docling_enabled or normalized_suffix not in set(settings.docling_formats):
+        return {"ok": False, "skipped": True}
+    return try_parse_with_docling(
+        file_path=file_path,
+        filename=filename,
+        content_type=content_type,
+        ocr_enabled=settings.docling_ocr_enabled,
+    )
+
+
+def extraction_config_hash(*, filename: str) -> str | None:
+    """返回影响结构化解析复用的稳定配置指纹。"""
+
+    settings = get_settings()
+    suffix = Path(filename).suffix.lower().lstrip(".")
+    if not settings.docling_enabled or suffix not in set(settings.docling_formats):
+        return None
+    identity = "|".join(
+        [
+            "docling-preferred",
+            docling_runtime_version(),
+            f"ocr={int(settings.docling_ocr_enabled)}",
+            f"format={suffix}",
+        ]
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _append_parser_warning(result: Dict[str, Any], docling_result: Dict[str, Any]) -> Dict[str, Any]:
+    """把 Docling 回退原因附加到现有解析结果，不改变原结果状态。"""
+
+    error = docling_result.get("error") or {}
+    if not error:
+        return result
+    result["warnings"] = [
+        *result.get("warnings", []),
+        {
+            "code": str(error.get("code") or "DOCLING_FALLBACK"),
+            "message": str(error.get("message") or "Docling 未生成可用结果，已使用现有解析器。"),
+        },
+    ]
+    return result
+
+
+def _apply_parser_metadata(result: Dict[str, Any], *, parser_config_hash: str | None) -> Dict[str, Any]:
+    """标记结构化优先策略下实际使用的回退解析器。"""
+
+    if parser_config_hash is None:
+        return result
+    result["parser_name"] = str(result.get("extractor") or "legacy")
+    result["parser_version"] = ""
+    result["parser_config_hash"] = parser_config_hash
+    return result
 
 
 def _extract_csv_text(file_path: Path) -> str:
@@ -77,7 +162,11 @@ def _extract_excel_text(file_path: Path) -> Dict[str, Any]:
 
 
 def _extract_legacy_xls_text(file_path: Path) -> Dict[str, Any]:
-    """先把旧版 xls 转成临时 xlsx，再复用统一 Excel 读取逻辑。"""
+    """优先使用 xlrd 读取旧版 xls，失败后再尝试 LibreOffice 转换。"""
+
+    direct_result = _extract_xls_text_with_xlrd(file_path)
+    if direct_result.get("ok"):
+        return direct_result
 
     with tempfile.TemporaryDirectory() as temp_dir:
         try:
@@ -86,7 +175,17 @@ def _extract_legacy_xls_text(file_path: Path) -> Dict[str, Any]:
                 output_dir=Path(temp_dir),
             )
         except SpreadsheetConversionError as exc:
-            return _failed("excel-xls-converted", exc.code, exc.message)
+            direct_error = direct_result.get("error") or {}
+            return _failed(
+                "excel-xls",
+                "XLS_READ_FAILED",
+                "；".join(
+                    [
+                        str(direct_error.get("message") or "xlrd 无法读取旧版 xls 文件"),
+                        exc.message,
+                    ]
+                ),
+            )
 
         result = _extract_excel_text(converted_path)
 
@@ -100,6 +199,66 @@ def _extract_legacy_xls_text(file_path: Path) -> Dict[str, Any]:
         metadata["converted_from"] = ".xls"
         metadata["converter"] = "libreoffice"
     return result
+
+
+def _extract_xls_text_with_xlrd(file_path: Path) -> Dict[str, Any]:
+    """使用 xlrd 直接读取 BIFF xls，不执行宏或外部链接。"""
+
+    try:
+        import xlrd
+    except ImportError:
+        return _failed("excel-xls-xlrd", "XLS_READER_NOT_AVAILABLE", "缺少 xlrd，无法直接读取旧版 xls 文件。")
+
+    try:
+        workbook = xlrd.open_workbook(str(file_path), on_demand=True)
+        pages: List[Dict[str, Any]] = []
+        for sheet_index, sheet in enumerate(workbook.sheets(), start=1):
+            lines: List[str] = []
+            for row_index in range(sheet.nrows):
+                values = [
+                    _format_xlrd_cell(
+                        cell=sheet.cell(row_index, column_index),
+                        workbook=workbook,
+                        xlrd_module=xlrd,
+                    )
+                    for column_index in range(sheet.ncols)
+                ]
+                if any(value for value in values):
+                    lines.append("\t".join(values))
+            pages.append(
+                {
+                    "page_number": sheet_index,
+                    "sheet_name": sheet.name,
+                    "text": "\n".join(lines),
+                    "metadata": {
+                        "sheet_index": sheet_index,
+                        "reader": "xlrd",
+                        "source_format": ".xls",
+                    },
+                }
+            )
+        workbook.release_resources()
+    except Exception as exc:
+        return _failed("excel-xls-xlrd", "XLS_DIRECT_READ_FAILED", f"xlrd 读取 xls 失败：{exc}")
+    return _completed("excel-xls-xlrd", pages)
+
+
+def _format_xlrd_cell(*, cell: Any, workbook: Any, xlrd_module: Any) -> str:
+    """把 xlrd 单元格转换为稳定文本，避免整数显示为浮点数。"""
+
+    value = cell.value
+    if cell.ctype == xlrd_module.XL_CELL_EMPTY:
+        return ""
+    if cell.ctype == xlrd_module.XL_CELL_DATE:
+        converted = xlrd_module.xldate_as_datetime(value, workbook.datemode)
+        return converted.date().isoformat() if converted.time().isoformat() == "00:00:00" else converted.isoformat(sep=" ")
+    if cell.ctype == xlrd_module.XL_CELL_NUMBER and isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if cell.ctype == xlrd_module.XL_CELL_BOOLEAN:
+        return "TRUE" if bool(value) else "FALSE"
+    if cell.ctype == xlrd_module.XL_CELL_ERROR:
+        return f"#ERROR({value})"
+    return str(value)
 
 
 def _extract_docx_text(file_path: Path) -> Dict[str, Any]:
@@ -354,7 +513,16 @@ def _ocr_enabled() -> bool:
     return get_settings().ocr_enabled
 
 
-def _completed(extractor: str, pages: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _completed(
+    extractor: str,
+    pages: List[Dict[str, Any]],
+    *,
+    elements: List[Dict[str, Any]] | None = None,
+    warnings: List[Dict[str, Any]] | None = None,
+    parser_name: str = "",
+    parser_version: str = "",
+    parser_config_hash: str = "",
+) -> Dict[str, Any]:
     """构造解析成功结果。"""
 
     read_profile = _build_read_profile(extractor=extractor, pages=pages)
@@ -376,6 +544,11 @@ def _completed(extractor: str, pages: List[Dict[str, Any]]) -> Dict[str, Any]:
         "read_quality": read_quality,
         "read_profile": read_profile,
         "pages": profiled_pages,
+        "elements": elements or [],
+        "warnings": warnings or [],
+        "parser_name": parser_name,
+        "parser_version": parser_version,
+        "parser_config_hash": parser_config_hash,
     }
 
 

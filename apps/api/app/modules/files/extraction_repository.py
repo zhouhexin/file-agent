@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import Document, DocumentExtractionRun, DocumentPage, FileObject, utcnow
+from app.db.models import Document, DocumentElement, DocumentExtractionRun, DocumentPage, FileObject, utcnow
 
 
 class FileExtractionRepository:
@@ -80,20 +80,45 @@ class FileExtractionRepository:
             return _error("FILE_NOT_FOUND_ON_DISK", "本地文件不存在。")
         return {"ok": True, "document": document, "file_object": file_object, "file_path": file_path}
 
-    def create_extraction_run(self, *, document_id: str, extractor: str) -> DocumentExtractionRun:
+    def create_extraction_run(
+        self,
+        *,
+        document_id: str,
+        extractor: str,
+        parser_name: str = "",
+        parser_version: str = "",
+        parser_config_hash: str = "",
+    ) -> DocumentExtractionRun:
         """创建 RUNNING 状态的解析运行记录。"""
 
-        run = DocumentExtractionRun(document_id=document_id, status="RUNNING", extractor=extractor)
+        run = DocumentExtractionRun(
+            document_id=document_id,
+            status="RUNNING",
+            extractor=extractor,
+            parser_name=parser_name,
+            parser_version=parser_version,
+            parser_config_hash=parser_config_hash,
+        )
         self.db.add(run)
         self.db.flush()
         return run
 
-    def get_latest_successful_extraction(self, *, document_id: str) -> Dict[str, Any] | None:
+    def get_latest_successful_extraction(
+        self,
+        *,
+        document_id: str,
+        parser_config_hash: str | None = None,
+    ) -> Dict[str, Any] | None:
         """读取同一文件最近一次成功解析结果，用于避免重复解析和重复写页。"""
 
+        query = self.db.query(DocumentExtractionRun).filter(
+            DocumentExtractionRun.document_id == document_id,
+            DocumentExtractionRun.status == "COMPLETED",
+        )
+        if parser_config_hash is not None:
+            query = query.filter(DocumentExtractionRun.parser_config_hash == parser_config_hash)
         run = (
-            self.db.query(DocumentExtractionRun)
-            .filter(DocumentExtractionRun.document_id == document_id, DocumentExtractionRun.status == "COMPLETED")
+            query
             .order_by(DocumentExtractionRun.updated_at.desc())
             .first()
         )
@@ -107,13 +132,20 @@ class FileExtractionRepository:
         )
         if not pages:
             return None
-        return {"run": run, "pages": pages}
+        elements = (
+            self.db.query(DocumentElement)
+            .filter(DocumentElement.extraction_run_id == run.id)
+            .order_by(DocumentElement.element_index.asc())
+            .all()
+        )
+        return {"run": run, "pages": pages, "elements": elements}
 
     def complete_extraction_run(
         self,
         *,
         run: DocumentExtractionRun,
         pages: List[Dict[str, Any]],
+        elements: List[Dict[str, Any]] | None = None,
     ) -> None:
         """写入页面文本并标记解析完成。"""
 
@@ -126,6 +158,21 @@ class FileExtractionRepository:
                     sheet_name=page.get("sheet_name"),
                     text_content=page.get("text", ""),
                     metadata_json=page.get("metadata", {}),
+                )
+            )
+        for element in elements or []:
+            self.db.add(
+                DocumentElement(
+                    document_id=run.document_id,
+                    extraction_run_id=run.id,
+                    element_index=int(element.get("element_index") or 0),
+                    label=str(element.get("label") or "text"),
+                    text_content=str(element.get("text") or element.get("text_content") or ""),
+                    page_number=element.get("page_number"),
+                    bbox_json=element.get("bbox") or element.get("bbox_json") or {},
+                    content_layer=str(element.get("content_layer") or "body"),
+                    parent_ref=element.get("parent_ref"),
+                    metadata_json=element.get("metadata") or element.get("metadata_json") or {},
                 )
             )
         run.status = "COMPLETED"

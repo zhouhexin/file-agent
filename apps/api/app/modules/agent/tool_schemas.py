@@ -237,6 +237,14 @@ class GenerateRenameSuggestionsInput(StrictToolInput):
         return _normalize_path_prefix(value)
 
 
+class ResolveRenameReviewsInput(StrictToolInput):
+    """处理重命名待复核项的用户更正或放弃消息。"""
+
+    message: str = Field(min_length=1, max_length=4000)
+    conversation_id: str = Field(min_length=1)
+    agent_run_id: str = Field(min_length=1)
+
+
 class ManagedRootScanInput(StrictToolInput):
     """创建受管目录扫描任务的输入。"""
 

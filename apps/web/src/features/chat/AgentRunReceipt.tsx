@@ -6,6 +6,7 @@ import { getChangeSet, getOperationPlan } from '../../api/client';
 import type { AgentRun, ChangeItem, ManagedFileResult, OperationPlanResponse, ToolInvocation } from '../../types';
 import { DocumentResultCard } from './DocumentResultCard';
 import { OperationPlanCard } from './OperationPlanCard';
+import { RenameSuggestionReceipt, type RenamePlanResult } from './RenameSuggestionReceipt';
 import type { ChatAttachment } from './presentation';
 import { findAttachmentByDocumentId, formatFileSize, hasFileMutation } from './presentation';
 
@@ -124,8 +125,31 @@ export function AgentRunReceipt({
   }
 
   const managedFileResult = getManagedFileResult(agentRun.tool_invocations);
-  const hasOperationPlan = isPersistedOperationPlanId(agentRun.operation_plan_id ?? '');
+  const renamePlanResult = getRenamePlanResult(agentRun.tool_invocations);
 
+  if (agentRun.intent === 'RESOLVE_RENAME_REVIEW') {
+    return agentRun.final_response ? <p className="agent-chat-response">{agentRun.final_response}</p> : null;
+  }
+  if (agentRun.intent === 'SUGGEST_RENAME') {
+    return (
+      <>
+        {operationPlan && token ? (
+          <OperationPlanCard
+            plan={operationPlan}
+            token={token}
+            onConfirmed={async () => {
+              setOperationPlan(await getOperationPlan(token, operationPlan.id));
+            }}
+          />
+        ) : null}
+        {renamePlanResult ? (
+          <RenameSuggestionReceipt result={renamePlanResult} onOpenManagedFile={onOpenManagedFile} />
+        ) : agentRun.final_response ? (
+          <p className="agent-chat-response">{agentRun.final_response}</p>
+        ) : null}
+      </>
+    );
+  }
   if (operationPlan && token) {
     return (
       <OperationPlanCard
@@ -136,9 +160,6 @@ export function AgentRunReceipt({
         }}
       />
     );
-  }
-  if (hasOperationPlan) {
-    return agentRun.final_response ? <p className="agent-chat-response">{agentRun.final_response}</p> : null;
   }
 
   if (agentRun.intent === 'SUMMARIZE_DOCUMENTS' || agentRun.intent === 'ANSWER_DOCUMENTS') {
@@ -336,6 +357,15 @@ function isPersistedChangeSetId(changesetId: string): boolean {
 function isPersistedOperationPlanId(planId: string): boolean {
   // 仅真实 UUID 才访问详情接口，避免 operation-plan-pending 等占位值触发 404。
   return CHANGESET_ID_PATTERN.test(planId);
+}
+
+function getRenamePlanResult(invocations: ToolInvocation[]): RenamePlanResult | null {
+  // 重命名 UI 只消费对应 Tool 的结构化结果，避免误展示分类卡片。
+  const invocation = invocations.find((item) => item.tool_name === 'generate-rename-suggestions');
+  if (!invocation || invocation.output_json.kind !== 'rename_plan') {
+    return null;
+  }
+  return invocation.output_json as RenamePlanResult;
 }
 
 function getCachedChangeSetItems(token: string, changesetId: string): Promise<ChangeItem[]> {

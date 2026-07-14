@@ -122,7 +122,7 @@ MVP 推荐实现：
 - 数据库：PostgreSQL + pgvector。
 - 文件存储：第一版本地 `storage/`，通过 StorageService 抽象。
 - 异步任务：第一版 FastAPI BackgroundTasks，后续 Redis + Celery/RQ。
-- 文档解析：`python-docx`、`openpyxl`、`pdfplumber` 或 `PyMuPDF`，TXT/MD/CSV 直接读取；旧版 `.doc` 通过 macOS `textutil` 或服务器 LibreOffice 转换后抽取正文。
+- 文档解析：PDF、DOCX 默认优先使用本地 Docling 生成结构化文档元素，并保留 `python-docx`、`PyMuPDF` 作为失败回退；TXT/MD/CSV 直接读取，XLSX 使用 `openpyxl`，旧版 `.doc` 通过 macOS `textutil` 或服务器 LibreOffice 转换后抽取正文。扫描件 OCR 默认仍由现有 PaddleOCR/LLM OCR 兜底负责，避免与 Docling 重复 OCR。
 - 大模型与 embedding：OpenAI 兼容接口，默认外部联网和外部检索关闭。
 - Python 包管理：使用用户当前已经配置好的 Python 环境；可以用 `pyproject.toml` 记录依赖和工具配置，但不得强制切换到 `uv`、Poetry、Conda 或新建虚拟环境，除非用户后续明确要求。
 - 测试：pytest；LLM 和 embedding 测试必须使用 deterministic fake。
@@ -540,6 +540,7 @@ POST /api/feedback
 - 上传文件先进入 `storage/quarantine/` 或等价隔离区。
 - 安全扫描和 MIME 检测通过后进入 `storage/originals/`。
 - 原始文件永远不被 OCR、预览、摘要、分类或 Skill 覆盖。
+- Docling 等结构化解析器生成的标题、章节、正文、页眉页脚、页码和位置元素必须持久化到 `document_elements`，并通过 `extraction_run_id` 关联 `document_pages`；结构化元素属于 Persistent Stores，不得写入 `AgentGraphState`。解析复用必须同时校验文件内容版本、解析器版本和配置指纹，Docling 不可用或结果为空时必须回退现有解析器。
 - OCR、预览、缩略图、抽取文本、导出结果都是派生件。
 - 每个派生件都必须可追溯到 `DocumentVersion`。
 - 原件改名、移动、复制、导出、删除必须通过确认后的 OperationPlan。
@@ -699,7 +700,9 @@ OperationPlan 必须展示：
 - 当前是否已执行。
 - 用户确认方式。
 
-当前阶段 OperationPlan 已支持受管目录文件的 Native 重命名闭环：只有部署配置显式允许重命名的受管根目录，才能生成包含正文提取证据的 `RENAME_FILES` 计划；普通用户可以确认自己创建的计划，确认后逐文件执行并写入 `FILENAME_CHANGED` 或失败 ChangeItem。`NEEDS_REVIEW` 项必须跳过。移动、删除、覆盖和上传原件改名仍不得真实执行，也不得伪造文件变更 ChangeSet。
+当前阶段 OperationPlan 已支持受管目录文件的 Native/F2 重命名闭环：只有部署配置显式允许重命名的受管根目录，才能生成包含正文提取证据的 `RENAME_FILES` 计划；普通用户可以确认自己创建的计划，确认后按统一批次执行器协议执行并写入 `FILENAME_CHANGED` 或失败 ChangeItem。默认执行器必须是 `native`。自动建议发生目标名称冲突时，基础名称视为第一版，后续名称必须在扩展名前依次追加 `_第二版`、`_第三版` 等中文版本后缀；文件系统、`managed_files` 索引和同一批次待执行目标都必须参与冲突判断，仍不得覆盖既有文件。F2 只能作为固定版本、离线部署的受控 Adapter，必须先 dry-run 并与 OperationPlan 完全比对，禁止由 F2 自行修复冲突、覆盖、处理隐藏文件、目录改名、跨目录移动和全局 undo；版本后缀必须由后端在 OperationPlan 创建前确定。F2 不参与正文理解、年份/文号/标题提取或目标名称生成。执行器对象属于 `AgentRuntimeContext`/请求级运行依赖，不得进入 `AgentGraphState`。自动提取为 `NEEDS_REVIEW` 的项目必须跳过原批次，并持久化为当前用户、当前会话的待复核项。用户按“文件原文件名更正为新文件名”明确提供名称时，该消息可视为本次更正的执行确认，但后端仍必须先创建 `RENAME_FILES` OperationPlan 和 OperationConfirmation，再调用确认执行 Tool 并写 ChangeSet；不得直接绕过计划修改文件。用户手工更正时，原文件名匹配多个待复核项或手工目标名称重复必须列出候选或冲突提示，冲突项不得阻塞同一消息中其他唯一文件。用户回复“不需要”时只关闭待复核项，不修改文件。移动、删除、覆盖和上传原件改名仍不得真实执行，也不得伪造文件变更 ChangeSet。
+
+旧版 `.xls` 必须优先使用 `xlrd>=2.0.1` 直接只读解析，失败后才允许尝试可选 LibreOffice 转换；当前部署不强制安装 LibreOffice，后续出现实际兼容性缺口时再启用。表格正文解析失败时，只允许 `.xls/.xlsx/.xlsm/.csv/.tsv` 使用高结构化文件名回退生成重命名建议；解析失败仍必须落库，文件名回退只能用于命名，不得作为正文、分类或事实证据。
 
 ## 13. Skills 与 Rules
 

@@ -40,6 +40,7 @@ from app.modules.agent.tool_schemas import (
     MCPFilesystemListInput,
     MCPFilesystemSearchInput,
     OperationPlanCreateInput,
+    ResolveRenameReviewsInput,
     SearchToolInput,
     SpreadsheetAnalysisInput,
     SpreadsheetDocumentInput,
@@ -47,8 +48,9 @@ from app.modules.agent.tool_schemas import (
 )
 from app.modules.classification.taxonomy_service import read_default_taxonomy_catalog
 from app.modules.files.extraction_repository import FileExtractionRepository
-from app.modules.files.extractors import extract_document_text
+from app.modules.files.extractors import extract_document_text, extraction_config_hash
 from app.modules.file_rename.suggestion_service import RenameSuggestionService
+from app.modules.file_rename.review_service import RenameReviewService
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
 from app.modules.managed_files.service import (
@@ -621,6 +623,25 @@ def _generate_rename_suggestions_handler(db: Any, user_id: str | None) -> ToolHa
     return handler
 
 
+def _resolve_rename_reviews_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """创建重命名待复核项处理 Tool handler。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """把用户明确更正视为确认，并通过 OperationPlan 立即执行。"""
+
+        if db is None:
+            return {"ok": False, "status": "FAILED", "error": {"code": "DB_REQUIRED", "message": "处理重命名更正需要数据库会话。"}}
+        if user_id is None:
+            return {"ok": False, "status": "FAILED", "error": {"code": "AUTH_REQUIRED", "message": "处理重命名更正需要当前用户。"}}
+        return RenameReviewService(db=db, user_id=user_id).resolve_message(
+            conversation_id=str(getattr(tool_input, "conversation_id")),
+            agent_run_id=str(getattr(tool_input, "agent_run_id")),
+            message=str(getattr(tool_input, "message")),
+        )
+
+    return handler
+
+
 def _managed_file_read_document_handler(db: Any, user_id: str | None) -> ToolHandler:
     """创建读取受管文件正文的 Tool handler。"""
 
@@ -958,7 +979,15 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
             return _failed_extraction_output(document_id=document_id, error=error)
 
         force_reprocess = bool(getattr(tool_input, "force_reprocess", False))
-        reusable = None if force_reprocess else repository.get_latest_successful_extraction(document_id=document.id)
+        expected_parser_config_hash = extraction_config_hash(filename=document.original_filename)
+        reusable = (
+            None
+            if force_reprocess
+            else repository.get_latest_successful_extraction(
+                document_id=document.id,
+                parser_config_hash=expected_parser_config_hash,
+            )
+        )
         if reusable is not None:
             run = reusable["run"]
             log_event(
@@ -979,6 +1008,7 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
                 "reused": True,
                 "read_quality": _read_quality_from_persisted_pages(pages=reusable["pages"]),
                 "read_profile": _read_profile_from_persisted_pages(extractor=run.extractor, pages=reusable["pages"]),
+                "structured_element_count": len(reusable.get("elements", [])),
                 "pages": [
                     {
                         "page_number": page.page_number,
@@ -1011,14 +1041,34 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
             filename=document.original_filename,
             content_type=document.content_type,
         )
-        run = repository.create_extraction_run(document_id=document.id, extractor=extraction["extractor"])
+        run = repository.create_extraction_run(
+            document_id=document.id,
+            extractor=extraction["extractor"],
+            parser_name=extraction.get("parser_name", ""),
+            parser_version=extraction.get("parser_version", ""),
+            parser_config_hash=extraction.get("parser_config_hash", ""),
+        )
         if extraction["ok"]:
-            repository.complete_extraction_run(run=run, pages=extraction["pages"])
+            repository.complete_extraction_run(
+                run=run,
+                pages=extraction["pages"],
+                elements=extraction.get("elements", []),
+            )
         else:
             repository.fail_extraction_run(run=run, error_message=extraction["error"]["message"])
         extraction_status = "COMPLETED" if extraction["ok"] else "FAILED"
         event_name = "file.extract.completed" if extraction["ok"] else "file.extract.failed"
         error = extraction.get("error") or {}
+        for warning in extraction.get("warnings", []):
+            log_event(
+                "file.parse.fallback",
+                level="WARNING",
+                document_id=document.id,
+                status="COMPLETED" if extraction["ok"] else "FAILED",
+                error_code=warning.get("code"),
+                message=warning.get("message"),
+                extractor=extraction["extractor"],
+            )
         log_event(
             event_name,
             level="ERROR" if not extraction["ok"] else "INFO",
@@ -1049,6 +1099,8 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
             "reused": False,
             "read_quality": extraction.get("read_quality"),
             "read_profile": extraction.get("read_profile"),
+            "structured_element_count": len(extraction.get("elements", [])),
+            "warnings": extraction.get("warnings", []),
             "pages": [
                 {
                     "page_number": page.get("page_number"),
@@ -1284,6 +1336,7 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("managed-file-search", "Search server managed files by filename keyword.", ManagedFileSearchInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_search_handler(db)),
         _tool("managed-file-read-document", "Read one server managed file by logical filters, snapshot it as a document, and extract text.", ManagedFileReadDocumentInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages"], _managed_file_read_document_handler(db, user_id)),
         _tool("generate-rename-suggestions", "Generate controlled rename suggestions for managed files and persist an OperationPlan without changing source files.", GenerateRenameSuggestionsInput, True, False, ["document_pages", "operation_plans"], _generate_rename_suggestions_handler(db, user_id)),
+        _tool("resolve-rename-reviews", "Resolve pending rename reviews from explicit user corrections and immediately execute a confirmed OperationPlan.", ResolveRenameReviewsInput, True, False, ["operation_plans", "operation_confirmations", "change_sets", "change_items"], _resolve_rename_reviews_handler(db, user_id)),
         _tool("managed-root-scan", "Create an async scan job for a managed logical root.", ManagedRootScanInput, True, False, ["filesystem_jobs", "filesystem_job_events"], _managed_root_scan_handler(db, user_id)),
         _tool("mcp-filesystem-list", "List files and directories in the server managed filesystem root without database scan.", MCPFilesystemListInput, False, False, [], _mcp_filesystem_list_handler()),
         _tool("mcp-filesystem-search", "Search files and directories in the server managed filesystem root without database scan.", MCPFilesystemSearchInput, False, False, [], _mcp_filesystem_search_handler()),

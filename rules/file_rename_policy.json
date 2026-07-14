@@ -1,6 +1,6 @@
 {
   "policy_key": "school_official_document",
-  "version": "1.0",
+  "version": "1.2",
   "separator": "_",
   "templates": [
     {
@@ -16,7 +16,8 @@
     }
   ],
   "missing_field_strategy": "NEEDS_REVIEW",
-  "conflict_strategy": "ERROR",
+  "conflict_strategy": "VERSION_SUFFIX",
+  "duplicate_title_strategy": "FULL_DATE_THEN_VERSION",
   "include_hidden": false,
   "rename_directories": false,
   "preserve_extension": true,

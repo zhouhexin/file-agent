@@ -21,6 +21,12 @@ DEFAULT_LOG_DIR = "./logs"
 DEFAULT_LOG_RETENTION_DAYS = 7
 DEFAULT_OCR_LLM_FALLBACK_QUALITY_THRESHOLD = 0.68
 DEFAULT_OCR_PADDLE_MODEL_SOURCE = "BOS"
+DEFAULT_DOCLING_FORMATS = ("pdf", "docx")
+DEFAULT_FILE_RENAME_EXECUTOR = "native"
+DEFAULT_FILE_RENAME_MAX_BATCH_SIZE = 20
+DEFAULT_FILE_RENAME_EXECUTION_TIMEOUT_SECONDS = 60
+DEFAULT_F2_EXPECTED_VERSION = "2.2.2"
+DEFAULT_F2_STDOUT_MAX_BYTES = 1024 * 1024
 
 
 class Settings(BaseModel):
@@ -47,6 +53,16 @@ class Settings(BaseModel):
     ocr_paddle_model_source: str = DEFAULT_OCR_PADDLE_MODEL_SOURCE
     ocr_llm_enabled: bool = False
     ocr_llm_fallback_quality_threshold: float = DEFAULT_OCR_LLM_FALLBACK_QUALITY_THRESHOLD
+    docling_enabled: bool = True
+    docling_formats: tuple[str, ...] = DEFAULT_DOCLING_FORMATS
+    docling_ocr_enabled: bool = False
+    file_rename_executor: str = DEFAULT_FILE_RENAME_EXECUTOR
+    file_rename_max_batch_size: int = DEFAULT_FILE_RENAME_MAX_BATCH_SIZE
+    file_rename_execution_timeout_seconds: int = DEFAULT_FILE_RENAME_EXECUTION_TIMEOUT_SECONDS
+    f2_binary_path: str = "f2"
+    f2_expected_version: str = DEFAULT_F2_EXPECTED_VERSION
+    f2_fallback_to_native: bool = False
+    f2_stdout_max_bytes: int = DEFAULT_F2_STDOUT_MAX_BYTES
 
 
 def find_dotenv_file() -> Path | None:
@@ -131,4 +147,25 @@ def get_settings() -> Settings:
                 str(DEFAULT_OCR_LLM_FALLBACK_QUALITY_THRESHOLD),
             )
         ),
+        docling_enabled=os.getenv("DOCLING_ENABLED", "true").lower() == "true",
+        docling_formats=tuple(
+            item.strip().lower().lstrip(".")
+            for item in os.getenv("DOCLING_FORMATS", ",".join(DEFAULT_DOCLING_FORMATS)).split(",")
+            if item.strip()
+        ),
+        docling_ocr_enabled=os.getenv("DOCLING_OCR_ENABLED", "false").lower() == "true",
+        file_rename_executor=os.getenv("FILE_RENAME_EXECUTOR", DEFAULT_FILE_RENAME_EXECUTOR),
+        file_rename_max_batch_size=int(
+            os.getenv("FILE_RENAME_MAX_BATCH_SIZE", str(DEFAULT_FILE_RENAME_MAX_BATCH_SIZE))
+        ),
+        file_rename_execution_timeout_seconds=int(
+            os.getenv(
+                "FILE_RENAME_EXECUTION_TIMEOUT_SECONDS",
+                str(DEFAULT_FILE_RENAME_EXECUTION_TIMEOUT_SECONDS),
+            )
+        ),
+        f2_binary_path=os.getenv("F2_BINARY_PATH", "f2"),
+        f2_expected_version=os.getenv("F2_EXPECTED_VERSION", DEFAULT_F2_EXPECTED_VERSION),
+        f2_fallback_to_native=os.getenv("F2_FALLBACK_TO_NATIVE", "false").lower() == "true",
+        f2_stdout_max_bytes=int(os.getenv("F2_STDOUT_MAX_BYTES", str(DEFAULT_F2_STDOUT_MAX_BYTES))),
     )

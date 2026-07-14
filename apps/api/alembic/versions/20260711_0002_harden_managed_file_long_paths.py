@@ -32,16 +32,24 @@ def upgrade() -> None:
     if "relative_path_hash" not in columns:
         op.add_column("managed_files", sa.Column("relative_path_hash", sa.String(length=64), nullable=True))
 
-    rows = connection.execute(sa.text("select id, relative_path from managed_files")).mappings()
-    for row in rows:
-        relative_path = str(row["relative_path"] or "")
+    if connection.dialect.name == "postgresql":
+        # 生产库使用集合式更新，避免大量文件逐条远程往返导致迁移长时间阻塞。
         connection.execute(
-            sa.text("update managed_files set relative_path_hash = :relative_path_hash where id = :id"),
-            {
-                "id": row["id"],
-                "relative_path_hash": hashlib.sha256(relative_path.encode("utf-8")).hexdigest(),
-            },
+            sa.text(
+                """
+                update managed_files
+                set relative_path_hash = encode(
+                    sha256(convert_to(coalesce(relative_path, ''), 'UTF8')),
+                    'hex'
+                )
+                where relative_path_hash is null
+                   or length(relative_path_hash) <> 64
+                   or relative_path_hash !~ '^[0-9A-Fa-f]{64}$'
+                """
+            )
         )
+    else:
+        _hash_relative_paths_in_batches(connection)
 
     op.alter_column("managed_files", "relative_path", existing_type=sa.String(length=1000), type_=sa.Text(), existing_nullable=False)
     op.alter_column("managed_files", "category_path", existing_type=sa.String(length=1000), type_=sa.Text(), existing_nullable=True)
@@ -76,3 +84,40 @@ def downgrade() -> None:
     op.drop_column("managed_files", "relative_path_hash")
     if "uq_managed_files_root_relative_path" not in unique_constraints:
         op.create_unique_constraint("uq_managed_files_root_relative_path", "managed_files", ["root_id", "relative_path"])
+
+
+def _hash_relative_paths_in_batches(connection: sa.Connection, batch_size: int = 500) -> None:
+    """为非 PostgreSQL 测试环境分批生成相对路径哈希。"""
+
+    rows = connection.execute(
+        sa.text("select id, relative_path, relative_path_hash from managed_files")
+    ).mappings().all()
+    update_statement = sa.text(
+        "update managed_files set relative_path_hash = :relative_path_hash where id = :id"
+    )
+    for offset in range(0, len(rows), batch_size):
+        batch = rows[offset : offset + batch_size]
+        parameters = []
+        for row in batch:
+            current_hash = str(row["relative_path_hash"] or "")
+            if len(current_hash) == 64 and _is_hex(current_hash):
+                continue
+            relative_path = str(row["relative_path"] or "")
+            parameters.append(
+                {
+                    "id": row["id"],
+                    "relative_path_hash": hashlib.sha256(relative_path.encode("utf-8")).hexdigest(),
+                }
+            )
+        if parameters:
+            connection.execute(update_statement, parameters)
+
+
+def _is_hex(value: str) -> bool:
+    """判断值是否已经是十六进制摘要。"""
+
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True

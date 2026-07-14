@@ -12,13 +12,17 @@ from app.db.models import ManagedFile, ManagedRoot, User
 from app.modules.file_rename.filename_builder import FilenameBuildError, FilenameBuilder
 from app.modules.file_rename.metadata_extractor import FilenameMetadataExtractor
 from app.modules.file_rename.policy_loader import load_rename_policy
+from app.modules.file_rename.review_service import RenameReviewService
 from app.modules.file_rename.schemas import RenameFieldResult, RenameFieldStatus, RenameSuggestion
 from app.modules.files.extraction_repository import FileExtractionRepository
-from app.modules.files.extractors import extract_document_text
+from app.modules.files.extractors import extract_document_text, extraction_config_hash
 from app.modules.managed_files.repository import ManagedFileRepository
 from app.modules.managed_files.service import resolve_managed_file_query_scope, sync_configured_managed_roots
 from app.modules.managed_files.snapshot_service import ManagedFileSnapshotService
 from app.modules.operations.repository import OperationPlanRepository
+
+
+_SPREADSHEET_RENAME_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".csv", ".tsv"}
 
 
 class RenameSuggestionService:
@@ -67,14 +71,43 @@ class RenameSuggestionService:
 
         suggestions: list[RenameSuggestion] = []
         extraction_results: list[dict[str, Any]] = []
+        prepared_suggestions: list[tuple[RenameSuggestion, ManagedFile, ManagedRoot]] = []
         for managed_file, root in rows:
             suggestion, extraction_result = self._suggest_one(managed_file=managed_file, root=root)
-            suggestions.append(suggestion)
+            suggestion = suggestion.model_copy(
+                update={
+                    "extension": managed_file.extension,
+                    "size_bytes": managed_file.size_bytes,
+                    "managed_status": managed_file.status,
+                }
+            )
+            prepared_suggestions.append((suggestion, managed_file, root))
             if extraction_result:
                 extraction_results.append(extraction_result)
 
+        prepared_suggestions = self._apply_duplicate_title_dates(prepared_suggestions)
+        reserved_targets: set[tuple[str, str]] = set()
+        reserved_logical_targets: set[tuple[str, str]] = set()
+        for suggestion, managed_file, root in prepared_suggestions:
+            suggestion = self._resolve_target_conflict(
+                suggestion=suggestion,
+                managed_file=managed_file,
+                root=root,
+                reserved_targets=reserved_targets,
+                reserved_logical_targets=reserved_logical_targets,
+            )
+            suggestions.append(suggestion)
+
         ready = [item for item in suggestions if item.status == "READY"]
         skipped = [item for item in suggestions if item.status != "READY"]
+        review_service = RenameReviewService(self.db, self.user_id)
+        for suggestion in skipped:
+            review_item = review_service.persist_suggestion(
+                conversation_id=conversation_id,
+                agent_run_id=agent_run_id,
+                suggestion=suggestion,
+            )
+            suggestion.review_id = review_item.id
         plan = None
         if ready:
             plan = OperationPlanRepository(self.db).create_plan(
@@ -139,12 +172,67 @@ class RenameSuggestionService:
             )
 
         try:
-            extraction_result, pages, source_sha256, document_id = self._extract_managed_file(
-                managed_file=managed_file,
-                root=root,
+            (
+                extraction_result,
+                pages,
+                elements,
+                source_sha256,
+                document_id,
+                metadata_filename,
+            ) = self._extract_managed_file(
+                managed_file=managed_file, root=root
             )
             if extraction_result.get("status") != "COMPLETED":
                 error = extraction_result.get("error") or {}
+                filename_metadata = self.metadata_extractor.extract(
+                    filename=metadata_filename,
+                    pages=[],
+                    elements=[],
+                )
+                if (
+                    Path(managed_file.filename).suffix.lower() in _SPREADSHEET_RENAME_SUFFIXES
+                    and filename_metadata.can_build_filename
+                ):
+                    proposed_filename, template_key = self.filename_builder.build(
+                        original_filename=managed_file.filename,
+                        metadata=filename_metadata,
+                        policy=self.policy,
+                    )
+                    proposed_relative_path = (
+                        Path(managed_file.relative_path).parent / proposed_filename
+                    ).as_posix()
+                    conflict = self._target_conflict(
+                        managed_file=managed_file,
+                        root=root,
+                        proposed_relative_path=proposed_relative_path,
+                    )
+                    return (
+                        RenameSuggestion(
+                            managed_file_id=managed_file.id,
+                            document_id=document_id,
+                            root_key=root.root_key,
+                            relative_path=managed_file.relative_path,
+                            filename=managed_file.filename,
+                            proposed_relative_path=proposed_relative_path,
+                            proposed_filename=proposed_filename,
+                            source_sha256=source_sha256,
+                            document_date=filename_metadata.document_date,
+                            year=filename_metadata.year,
+                            document_number=filename_metadata.document_number,
+                            title=filename_metadata.title,
+                            policy_key=self.policy.policy_key,
+                            policy_version=self.policy.version,
+                            template_key=template_key,
+                            status="CONFLICT" if conflict else "READY",
+                            warnings=["表格正文解析失败，已使用结构化文件名生成待确认建议。"],
+                            errors=(
+                                [{"code": "TARGET_ALREADY_EXISTS", "message": "目标文件名已存在。"}]
+                                if conflict
+                                else []
+                            ),
+                        ),
+                        extraction_result,
+                    )
                 return (
                     RenameSuggestion(
                         managed_file_id=managed_file.id,
@@ -166,7 +254,11 @@ class RenameSuggestionService:
                     ),
                     extraction_result,
                 )
-            metadata = self.metadata_extractor.extract(filename=managed_file.filename, pages=pages)
+            metadata = self.metadata_extractor.extract(
+                filename=metadata_filename,
+                pages=pages,
+                elements=elements,
+            )
             if not metadata.can_build_filename:
                 return (
                     RenameSuggestion(
@@ -207,6 +299,7 @@ class RenameSuggestionService:
                     proposed_relative_path=proposed_relative_path,
                     proposed_filename=proposed_filename,
                     source_sha256=source_sha256,
+                    document_date=metadata.document_date,
                     year=metadata.year,
                     document_number=metadata.document_number,
                     title=metadata.title,
@@ -241,15 +334,19 @@ class RenameSuggestionService:
         *,
         managed_file: ManagedFile,
         root: ManagedRoot,
-    ) -> tuple[dict[str, Any], list[Any], str, str]:
-        """创建或复用当前用户快照，并返回完整页面正文。"""
+    ) -> tuple[dict[str, Any], list[Any], list[Any], str, str, str]:
+        """创建或复用当前用户快照，并返回完整页面正文和结构化元素。"""
 
         resolution = ManagedFileSnapshotService(self.db, self.user_id).resolve(
             managed_file=managed_file,
             root=root,
         )
         repository = FileExtractionRepository(self.db, self.user_id)
-        reusable = repository.get_latest_successful_extraction(document_id=resolution.document.id)
+        parser_config_hash = extraction_config_hash(filename=resolution.document.original_filename)
+        reusable = repository.get_latest_successful_extraction(
+            document_id=resolution.document.id,
+            parser_config_hash=parser_config_hash,
+        )
         if reusable is None:
             resolved = repository.resolve_original_file_for_document(resolution.document)
             if not resolved.get("ok"):
@@ -262,21 +359,60 @@ class RenameSuggestionService:
                         error=error,
                     ),
                     [],
+                    [],
                     resolution.source_sha256,
                     resolution.document.id,
+                    resolution.document.original_filename,
                 )
-            extraction = extract_document_text(
-                file_path=resolved["file_path"],
-                filename=resolution.document.original_filename,
-                content_type=resolution.document.content_type,
-            )
+            try:
+                extraction = extract_document_text(
+                    file_path=resolved["file_path"],
+                    filename=resolution.document.original_filename,
+                    content_type=resolution.document.content_type,
+                )
+            except Exception as exc:
+                # 单个损坏文件不能中断整个重命名批次；异常需落入解析运行和逐文件回执。
+                run = repository.create_extraction_run(
+                    document_id=resolution.document.id,
+                    extractor="file-rename",
+                    parser_config_hash=parser_config_hash or "",
+                )
+                repository.fail_extraction_run(run=run, error_message=str(exc))
+                return (
+                    _failed_extraction_result(
+                        document_id=resolution.document.id,
+                        managed_file=managed_file,
+                        root=root,
+                        error={
+                            "code": "DOCUMENT_EXTRACTION_EXCEPTION",
+                            "message": f"文件解析异常：{exc}",
+                        },
+                        extraction_run_id=run.id,
+                        extractor=run.extractor,
+                    ),
+                    [],
+                    [],
+                    resolution.source_sha256,
+                    resolution.document.id,
+                    resolution.document.original_filename,
+                )
             run = repository.create_extraction_run(
                 document_id=resolution.document.id,
                 extractor=extraction["extractor"],
+                parser_name=extraction.get("parser_name", ""),
+                parser_version=extraction.get("parser_version", ""),
+                parser_config_hash=extraction.get("parser_config_hash", ""),
             )
             if extraction.get("ok"):
-                repository.complete_extraction_run(run=run, pages=extraction.get("pages", []))
-                reusable = repository.get_latest_successful_extraction(document_id=resolution.document.id)
+                repository.complete_extraction_run(
+                    run=run,
+                    pages=extraction.get("pages", []),
+                    elements=extraction.get("elements", []),
+                )
+                reusable = repository.get_latest_successful_extraction(
+                    document_id=resolution.document.id,
+                    parser_config_hash=parser_config_hash,
+                )
             else:
                 repository.fail_extraction_run(
                     run=run,
@@ -292,11 +428,14 @@ class RenameSuggestionService:
                         extractor=run.extractor,
                     ),
                     [],
+                    [],
                     resolution.source_sha256,
                     resolution.document.id,
+                    resolution.document.original_filename,
                 )
         run = reusable["run"]
         pages = reusable["pages"]
+        elements = reusable.get("elements", [])
         result = {
             "ok": True,
             "document_id": resolution.document.id,
@@ -328,8 +467,17 @@ class RenameSuggestionService:
             "root_key": root.root_key,
             "relative_path": managed_file.relative_path,
             "source_sha256": resolution.source_sha256,
+            "structured_element_count": len(elements),
+            "source_filename": resolution.document.original_filename,
         }
-        return result, pages, resolution.source_sha256, resolution.document.id
+        return (
+            result,
+            pages,
+            elements,
+            resolution.source_sha256,
+            resolution.document.id,
+            resolution.document.original_filename,
+        )
 
     def _target_conflict(
         self,
@@ -357,6 +505,212 @@ class RenameSuggestionService:
             is not None
         )
 
+    def _apply_duplicate_title_dates(
+        self,
+        items: list[tuple[RenameSuggestion, ManagedFile, ManagedRoot]],
+    ) -> list[tuple[RenameSuggestion, ManagedFile, ManagedRoot]]:
+        """同目录同基础名称使用完整日期区分，扩展名不参与标题分组。"""
+
+        if self.policy.duplicate_title_strategy != "FULL_DATE_THEN_VERSION":
+            return items
+        groups: dict[tuple[str, str], list[int]] = {}
+        for index, (suggestion, _, root) in enumerate(items):
+            if suggestion.status not in {"READY", "CONFLICT"} or not suggestion.proposed_relative_path:
+                continue
+            target = Path(suggestion.proposed_relative_path)
+            logical_path = (target.parent / target.stem).as_posix().casefold()
+            groups.setdefault((root.id, logical_path), []).append(index)
+
+        updated = list(items)
+        for indexes in groups.values():
+            if len(indexes) < 2:
+                continue
+            group = [items[index] for index in indexes]
+            if not all(_resolved_full_date(suggestion.document_date) for suggestion, _, _ in group):
+                continue
+            for index in indexes:
+                suggestion, managed_file, root = updated[index]
+                document_date = str(suggestion.document_date.value)
+                target = Path(str(suggestion.proposed_relative_path))
+                dated_filename = _replace_year_prefix_with_date(
+                    filename=target.name,
+                    year=str(suggestion.year.value or ""),
+                    document_date=document_date,
+                    separator=self.policy.separator,
+                )
+                dated_relative_path = (target.parent / dated_filename).as_posix()
+                updated[index] = (
+                    suggestion.model_copy(
+                        update={
+                            "proposed_filename": dated_filename,
+                            "proposed_relative_path": dated_relative_path,
+                            "warnings": [
+                                *suggestion.warnings,
+                                "检测到同目录同标题文件，已使用精确到日的日期区分。",
+                            ],
+                        }
+                    ),
+                    managed_file,
+                    root,
+                )
+        return updated
+
+    def _resolve_target_conflict(
+        self,
+        *,
+        suggestion: RenameSuggestion,
+        managed_file: ManagedFile,
+        root: ManagedRoot,
+        reserved_targets: set[tuple[str, str]],
+        reserved_logical_targets: set[tuple[str, str]],
+    ) -> RenameSuggestion:
+        """按策略处理文件系统、索引和本批次内的目标名称冲突。"""
+
+        proposed_relative_path = suggestion.proposed_relative_path
+        if not proposed_relative_path or suggestion.status not in {"READY", "CONFLICT"}:
+            return suggestion
+        target_key = (root.id, proposed_relative_path)
+        logical_target_key = (root.id, _logical_target_path(proposed_relative_path))
+        has_conflict = (
+            target_key in reserved_targets
+            or logical_target_key in reserved_logical_targets
+            or self._target_conflict(
+                managed_file=managed_file,
+                root=root,
+                proposed_relative_path=proposed_relative_path,
+            )
+        )
+        if not has_conflict:
+            reserved_targets.add(target_key)
+            reserved_logical_targets.add(logical_target_key)
+            return suggestion.model_copy(update={"status": "READY", "errors": []})
+        if self.policy.conflict_strategy != "VERSION_SUFFIX":
+            return suggestion.model_copy(
+                update={
+                    "status": "CONFLICT",
+                    "errors": [{"code": "TARGET_ALREADY_EXISTS", "message": "目标文件名已存在。"}],
+                }
+            )
+
+        original_target = Path(proposed_relative_path)
+        for version in range(2, 1001):
+            versioned_filename = _append_version_suffix(
+                original_target.name,
+                version=version,
+                max_bytes=self.policy.max_filename_bytes,
+            )
+            versioned_relative_path = (original_target.parent / versioned_filename).as_posix()
+            versioned_key = (root.id, versioned_relative_path)
+            versioned_logical_key = (root.id, _logical_target_path(versioned_relative_path))
+            if versioned_key in reserved_targets:
+                continue
+            if versioned_logical_key in reserved_logical_targets:
+                continue
+            if self._target_conflict(
+                managed_file=managed_file,
+                root=root,
+                proposed_relative_path=versioned_relative_path,
+            ):
+                continue
+            reserved_targets.add(versioned_key)
+            reserved_logical_targets.add(versioned_logical_key)
+            return suggestion.model_copy(
+                update={
+                    "proposed_relative_path": versioned_relative_path,
+                    "proposed_filename": versioned_filename,
+                    "status": "READY",
+                    "warnings": [
+                        *suggestion.warnings,
+                        f"基础目标名称已存在，已按版本规则生成第{_chinese_number(version)}版。",
+                    ],
+                    "errors": [],
+                }
+            )
+        return suggestion.model_copy(
+            update={
+                "status": "CONFLICT",
+                "errors": [{"code": "VERSION_SUFFIX_EXHAUSTED", "message": "目标文件版本号已达到上限。"}],
+            }
+        )
+
+
+def _append_version_suffix(filename: str, *, version: int, max_bytes: int) -> str:
+    """在扩展名前追加中文版本号，并在需要时安全截断原名称。"""
+
+    extension = Path(filename).suffix
+    stem = filename[: -len(extension)] if extension else filename
+    version_suffix = f"_第{_chinese_number(version)}版"
+    reserved_bytes = len(f"{version_suffix}{extension}".encode("utf-8"))
+    available_bytes = max_bytes - reserved_bytes
+    if available_bytes <= 0:
+        raise ValueError("文件名长度限制不足以保存版本后缀。")
+    encoded_stem = stem.encode("utf-8")[:available_bytes]
+    while encoded_stem:
+        try:
+            safe_stem = encoded_stem.decode("utf-8").rstrip(" ._-")
+            return f"{safe_stem}{version_suffix}{extension}"
+        except UnicodeDecodeError:
+            encoded_stem = encoded_stem[:-1]
+    raise ValueError("原文件名无法在长度限制内追加版本后缀。")
+
+
+def _resolved_full_date(field: RenameFieldResult) -> bool:
+    """判断日期字段是否已经解析为 YYYYMMDD。"""
+
+    return (
+        field.status == RenameFieldStatus.RESOLVED
+        and bool(field.value)
+        and len(str(field.value)) == 8
+        and str(field.value).isdigit()
+    )
+
+
+def _replace_year_prefix_with_date(
+    *,
+    filename: str,
+    year: str,
+    document_date: str,
+    separator: str,
+) -> str:
+    """将模板生成的年份前缀提升为完整日期，不改变标题和扩展名。"""
+
+    extension = Path(filename).suffix
+    stem = filename[: -len(extension)] if extension else filename
+    year_prefix = f"{year}{separator}" if year else ""
+    if year_prefix and stem.startswith(year_prefix):
+        stem = f"{document_date}{separator}{stem[len(year_prefix):]}"
+    else:
+        stem = f"{document_date}{separator}{stem}"
+    return f"{stem}{extension}"
+
+
+def _logical_target_path(relative_path: str) -> str:
+    """生成忽略扩展名的逻辑目标键，避免同名跨格式文件难以区分。"""
+
+    target = Path(relative_path)
+    return (target.parent / target.stem).as_posix().casefold()
+
+
+def _chinese_number(value: int) -> str:
+    """把 1 到 999 的版本号转换为简体中文数字。"""
+
+    if value <= 0 or value >= 1000:
+        return str(value)
+    digits = "零一二三四五六七八九"
+    if value < 10:
+        return digits[value]
+    if value < 20:
+        return f"十{digits[value % 10] if value % 10 else ''}"
+    if value < 100:
+        tens, ones = divmod(value, 10)
+        return f"{digits[tens]}十{digits[ones] if ones else ''}"
+    hundreds, remainder = divmod(value, 100)
+    if remainder == 0:
+        return f"{digits[hundreds]}百"
+    if remainder < 10:
+        return f"{digits[hundreds]}百零{digits[remainder]}"
+    return f"{digits[hundreds]}百{_chinese_number(remainder)}"
+
 
 def _operation_plan_item(suggestion: RenameSuggestion) -> dict[str, Any]:
     """把 READY 建议转换成受控 OperationPlan item。"""
@@ -378,6 +732,7 @@ def _operation_plan_item(suggestion: RenameSuggestion) -> dict[str, Any]:
             "policy_key": suggestion.policy_key,
             "policy_version": suggestion.policy_version,
             "template_key": suggestion.template_key,
+            "document_date": suggestion.document_date.model_dump(mode="json"),
             "year": suggestion.year.model_dump(mode="json"),
             "document_number": suggestion.document_number.model_dump(mode="json"),
             "title": suggestion.title.model_dump(mode="json"),
@@ -433,4 +788,3 @@ def _error(code: str, message: str) -> dict[str, Any]:
         "suggestions": [],
         "extraction_results": [],
     }
-

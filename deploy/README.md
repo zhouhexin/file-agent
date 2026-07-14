@@ -90,7 +90,7 @@ MANAGED_ROOT_STUDENT_AFFAIRS_CLASSIFICATION_MODE=PATH_AS_CATEGORY
 奖学金/国家励志奖学金
 ```
 
-受管目录默认只读。要启用“生成计划 -> 用户确认 -> Native 重命名”，必须同时显式配置：
+受管目录默认只读。要启用“生成计划 -> 用户确认 -> 受控重命名”，必须同时显式配置：
 
 ```text
 MANAGED_ROOT_WORKDATA_ALLOW_RENAME=true
@@ -99,6 +99,29 @@ MANAGED_ROOT_VOLUME_MODE=rw
 
 未设置 `ALLOW_RENAME=true` 时，即使容器挂载可写，后端也会拒绝生成可执行重命名项。
 启用前应备份宿主机目录；上传原件不受该开关影响，仍禁止直接改名。
+
+重命名执行器默认使用 Python 内置 Native 实现：
+
+```text
+FILE_RENAME_EXECUTOR=native
+FILE_RENAME_MAX_BATCH_SIZE=20
+FILE_RENAME_EXECUTION_TIMEOUT_SECONDS=60
+```
+
+F2 是可选批量执行器，不负责读取正文或生成文件名。离线部署包需要预先携带固定版本
+F2 v2.2.2，并设置：
+
+```text
+FILE_RENAME_EXECUTOR=f2
+F2_BINARY_PATH=/opt/file-agent/bin/f2
+F2_EXPECTED_VERSION=2.2.2
+F2_FALLBACK_TO_NATIVE=false
+F2_STDOUT_MAX_BYTES=1048576
+```
+
+部署前必须在目标服务器执行 `f2 --version` 并按离线包清单校验 SHA-256。配置为
+`f2` 时，二进制缺失或版本不匹配会拒绝执行，不会在用户不知情时改用 Native。需要回退时应
+显式把 `FILE_RENAME_EXECUTOR` 改为 `native` 后重启 API。运行时不得联网下载 F2。
 
 后续新上传文件归档时，只能把 `PATH_AS_CATEGORY` 目录作为目标分类库；`NONE` 目录不会被当成分类体系。
 
@@ -131,8 +154,14 @@ MCP_FILESYSTEM_MAX_OUTPUT_CHARS=50000
 docker compose --env-file .\deploy\.env -f .\deploy\docker-compose.production.yml exec api sh -lc "mcp-server-filesystem --help >/dev/null && python -c 'import langchain_mcp_adapters; print(\"adapter ok\")'"
 ```
 
-Filesystem MCP 当前仍只用于实时只读查询。受管文件重命名由后端 Native Tool 执行，
+Filesystem MCP 当前仍只用于实时只读查询。受管文件重命名由后端受控 Tool 执行，
 只有显式启用 `MANAGED_ROOT_<KEY>_ALLOW_RENAME=true` 且用户确认 OperationPlan 后才允许写入。
+
+## 旧版 XLS 依赖
+
+API Python 依赖已经包含 `xlrd>=2.0.1`，标准旧版 `.xls` 默认直接只读解析，不要求服务器安装
+LibreOffice。仅当实际业务文件存在 xlrd 无法处理的非标准、损坏或伪装格式时，再把 LibreOffice
+作为可选转换兜底加入服务器或镜像；当前离线部署包无需为此额外携带 LibreOffice。
 
 ## 公网访问必须额外完成的网络步骤
 
@@ -214,6 +243,23 @@ docker compose --env-file .\deploy\.env -f .\deploy\docker-compose.production.ym
 - zip 包必须来自受信任来源；
 - 该脚本不会自动清理项目目录里“离线包已经删除、但旧目录仍残留”的顶层无关文件；
 - 如果更新包修改了 `deploy/docker-compose.production.yml` 中的 volume mount，仍需人工确认宿主机目录和权限。
+- Docling 属于新增的重量级 Python 依赖。完全断网环境首次构建前，需要在联网机器预先构建包含 Docling 依赖和模型缓存的 API 镜像并随更新包导入；仅携带源码 zip 无法替代 pip 包和模型文件下载。已有完整 Docker 构建缓存时可以继续使用 `update.ps1` 重建。
+- 本次新增 `xlrd>=2.0.1`。完全断网且没有可复用 API 镜像层时，需要在联网机器把对应平台的 xlrd wheel 放入离线 wheelhouse，或预先构建并导入包含 xlrd 的 API 镜像；只更新源码和 `requirements.txt` 不会凭空安装缺失包。
+
+本版本默认配置为：
+
+```text
+DOCLING_ENABLED=true
+DOCLING_FORMATS=pdf,docx
+DOCLING_OCR_ENABLED=false
+```
+
+更新后必须执行数据库迁移，创建 `document_elements` 并增加解析器版本字段：
+
+```powershell
+docker compose --env-file .\deploy\.env -f .\deploy\docker-compose.production.yml exec api `
+  python -m alembic -c apps/api/alembic.ini upgrade head
+```
 
 停止应用（不删除数据）：
 
