@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from app.core import config
-from app.db.models import Document, DocumentInsight, FileObject
+from app.db.models import Document, DocumentInsight, FileObject, ManagedFileSnapshot, User
+from app.modules.agent.tool_registry import ToolRegistry
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -63,8 +64,8 @@ def test_upload_file_creates_document_and_file_object(monkeypatch, tmp_path):
         config.get_settings.cache_clear()
 
 
-def test_upload_duplicate_file_reuses_existing_document(monkeypatch, tmp_path):
-    """同一用户重复上传相同文件时，应复用已有 Document 和处理结果。"""
+def test_upload_same_content_with_different_filename_creates_distinct_draft(monkeypatch, tmp_path):
+    """同一内容但文件名不同的上传必须保留独立草稿生命周期，只复用物理对象。"""
 
     monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
     config.get_settings.cache_clear()
@@ -84,14 +85,112 @@ def test_upload_duplicate_file_reuses_existing_document(monkeypatch, tmp_path):
 
     assert first_response.status_code == 200
     assert second_response.status_code == 200
+    assert second_response.json()["document_id"] != first_response.json()["document_id"]
+    assert second_response.json()["filename"] == "second.txt"
+    assert second_response.json()["status"] == "UPLOADED"
+    assert second_response.json()["deduplicated"] is True
+
+    db = SessionLocal()
+    try:
+        assert db.query(Document).count() == 2
+        assert db.query(FileObject).count() == 2
+        assert db.query(DocumentInsight).count() == 2
+        file_objects = db.query(FileObject).order_by(FileObject.created_at.asc()).all()
+        assert file_objects[0].storage_path == file_objects[1].storage_path
+    finally:
+        db.close()
+        clear_overrides()
+        config.get_settings.cache_clear()
+
+
+def test_exact_duplicate_unsent_upload_reuses_same_draft(monkeypatch, tmp_path):
+    """完全相同且尚未发送的同名上传可以幂等复用同一个草稿 Document。"""
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
+    config.get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    auth_header = _auth_header(client, username="exact-dedupe-owner")
+
+    first_response = client.post(
+        "/api/files/upload",
+        headers=auth_header,
+        files={"file": ("same.txt", b"same-content", "text/plain")},
+    )
+    second_response = client.post(
+        "/api/files/upload",
+        headers=auth_header,
+        files={"file": ("same.txt", b"same-content", "text/plain")},
+    )
+
+    assert second_response.status_code == 200
     assert second_response.json()["document_id"] == first_response.json()["document_id"]
+    assert second_response.json()["status"] == "UPLOADED"
     assert second_response.json()["deduplicated"] is True
 
     db = SessionLocal()
     try:
         assert db.query(Document).count() == 1
         assert db.query(FileObject).count() == 1
-        assert db.query(DocumentInsight).count() == 1
+    finally:
+        db.close()
+        clear_overrides()
+        config.get_settings.cache_clear()
+
+
+def test_upload_matching_managed_snapshot_creates_deletable_draft(monkeypatch, tmp_path):
+    """受管快照内容命中去重时也必须新建可删除草稿，不能返回已锁定快照 Document。"""
+
+    managed_root = tmp_path / "managed"
+    managed_root.mkdir()
+    managed_source = managed_root / "制度.txt"
+    managed_source.write_text("制度正文", encoding="utf-8")
+    storage_root = tmp_path / "storage"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(storage_root))
+    config.get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    auth_header = _auth_header(client, username="managed-snapshot-upload-owner")
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.username == "managed-snapshot-upload-owner").one()
+        snapshot_result = ToolRegistry(db=db, user_id=user.id).invoke(
+            "managed-file-read-document",
+            {"root_key": "downloads", "filename_contains": "制度"},
+        )
+        assert snapshot_result.output_json["status"] == "COMPLETED"
+        snapshot_document_id = snapshot_result.output_json["document_id"]
+        snapshot_file_object = db.query(FileObject).filter_by(document_id=snapshot_document_id).one()
+        snapshot_path = storage_root / snapshot_file_object.storage_path
+        db.commit()
+    finally:
+        db.close()
+
+    upload_response = client.post(
+        "/api/files/upload",
+        headers=auth_header,
+        files={"file": ("待发送制度.txt", "制度正文".encode(), "text/plain")},
+    )
+
+    assert upload_response.status_code == 200
+    draft_document_id = upload_response.json()["document_id"]
+    assert draft_document_id != snapshot_document_id
+    assert upload_response.json()["filename"] == "待发送制度.txt"
+    assert upload_response.json()["status"] == "UPLOADED"
+    assert upload_response.json()["deduplicated"] is True
+
+    delete_response = client.delete(f"/api/files/{draft_document_id}", headers=auth_header)
+
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {"deleted": True}
+    db = SessionLocal()
+    try:
+        assert db.get(Document, draft_document_id) is None
+        assert db.get(Document, snapshot_document_id) is not None
+        assert db.query(ManagedFileSnapshot).filter_by(document_id=snapshot_document_id).count() == 1
+        assert snapshot_path.exists()
+        assert snapshot_path.read_text(encoding="utf-8") == "制度正文"
     finally:
         db.close()
         clear_overrides()

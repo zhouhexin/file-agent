@@ -5,6 +5,8 @@ from pathlib import Path
 
 from app.db.models import (
     ChangeItem,
+    Document,
+    FileObject,
     FileRenameReviewItem,
     ManagedFile,
     OperationConfirmation,
@@ -279,6 +281,196 @@ def test_deterministic_planner_routes_managed_rename_request():
     assert plan.steps[0].tool_name == "generate-rename-suggestions"
     assert plan.steps[0].input["path_prefix"] == "党办"
     assert plan.confirmation_policy["operation_plan_required"] is True
+
+
+def test_deterministic_planner_keeps_uploaded_document_scope_for_rename():
+    """带上传附件的重命名请求必须保留 document_id，不能降级为分类或扫描受管目录。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conversation-upload-rename",
+        user_id="user-upload-rename",
+        message_id="message-upload-rename",
+        message="按年份和正文标题重命名这个文件",
+        attachments=[{"document_id": "document-upload-1"}],
+    )
+
+    assert plan.intent == "SUGGEST_RENAME"
+    assert plan.slots["document_ids"] == ["document-upload-1"]
+    assert plan.steps[0].tool_name == "generate-rename-suggestions"
+    assert plan.steps[0].input == {"document_ids": ["document-upload-1"]}
+    assert plan.selected_skills == ["file-rename", "operation-plan"]
+
+
+def test_deterministic_planner_routes_attachment_wording_to_uploaded_rename():
+    """只说“附件”而未出现“文件”时也应使用后端附件范围生成重命名计划。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conversation-upload-attachment",
+        user_id="user-upload-attachment",
+        message_id="message-upload-attachment",
+        message="重命名这个附件",
+        attachments=[{"document_id": "document-upload-attachment"}],
+    )
+
+    assert plan.intent == "SUGGEST_RENAME"
+    assert plan.steps[0].input == {"document_ids": ["document-upload-attachment"]}
+
+
+def test_llm_rename_without_backend_file_scope_does_not_scan_all_managed_files():
+    """LLM 只给重命名意图但没有附件或受管过滤条件时，必须请求范围而非全目录扫描。"""
+
+    plan = build_plan_from_user_intent(
+        intent_plan=UserIntentPlan(
+            intent="SUGGEST_RENAME",
+            user_goal="重命名文件",
+            referenced_document_ids=["llm-invented-document"],
+        ),
+        message="重命名文件",
+        attachments=[],
+    )
+
+    assert plan.intent == "MISSING_FILE_SCOPE"
+    assert plan.steps[0].tool_name == "intent-summary"
+
+
+def test_llm_planner_keeps_uploaded_document_scope_for_rename():
+    """LLM 结构化意图命中附件重命名时也必须生成临时文件计划，不得丢弃附件范围。"""
+
+    plan = build_plan_from_user_intent(
+        intent_plan=UserIntentPlan(
+            intent="SUGGEST_RENAME",
+            user_goal="重命名刚上传的文件",
+            referenced_document_ids=["document-upload-2"],
+            required_capabilities=["suggest_rename"],
+            tool_plan_hint=["generate-rename-suggestions"],
+        ),
+        message="重命名刚上传的文件",
+        attachments=[{"document_id": "document-upload-2"}],
+    )
+
+    assert plan.intent == "SUGGEST_RENAME"
+    assert plan.slots["document_ids"] == ["document-upload-2"]
+    assert plan.steps[0].input == {"document_ids": ["document-upload-2"]}
+
+
+def test_llm_planner_cannot_replace_backend_attachment_scope_for_rename():
+    """LLM 自报的文档标识与后端附件不一致时，文件动作必须采用后端确定范围。"""
+
+    plan = build_plan_from_user_intent(
+        intent_plan=UserIntentPlan(
+            intent="SUGGEST_RENAME",
+            user_goal="重命名这个附件",
+            referenced_document_ids=["llm-invented-document"],
+            required_capabilities=["suggest_rename"],
+        ),
+        message="重命名这个附件",
+        attachments=[{"document_id": "backend-resolved-document"}],
+    )
+
+    assert plan.slots["document_ids"] == ["backend-resolved-document"]
+    assert plan.steps[0].input == {"document_ids": ["backend-resolved-document"]}
+
+
+def test_uploaded_attachment_rename_confirms_into_private_temporary_path(monkeypatch, tmp_path):
+    """上传附件确认后只改临时存储名称；共享物理对象必须写时复制并保留其他用户文件。"""
+
+    storage_root = tmp_path / "storage"
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(storage_root))
+    client, SessionLocal = client_with_database()
+    _, source_token = _register_and_login(client, "uploaded-rename-shared-source")
+    _, target_token = _register_and_login(client, "uploaded-rename-target")
+    content = "2026年春季学生活动总结\n本学期组织了多项活动。".encode()
+
+    source_upload = client.post(
+        "/api/files/upload",
+        headers=_auth_header(source_token),
+        files={"file": ("共享源文件.txt", content, "text/plain")},
+    )
+    target_upload = client.post(
+        "/api/files/upload",
+        headers=_auth_header(target_token),
+        files={"file": ("扫描件.txt", content, "text/plain")},
+    )
+    source_document_id = source_upload.json()["document_id"]
+    target_document_id = target_upload.json()["document_id"]
+
+    db = SessionLocal()
+    try:
+        source_object = db.query(FileObject).filter_by(document_id=source_document_id).one()
+        target_object = db.query(FileObject).filter_by(document_id=target_document_id).one()
+        assert source_object.storage_path == target_object.storage_path
+        shared_path = storage_root / source_object.storage_path
+    finally:
+        db.close()
+
+    message_response = client.post(
+        "/api/conversations/uploaded-rename-conversation/messages",
+        headers=_auth_header(target_token),
+        json={
+            "content": "按年份和正文标题重命名这个文件",
+            "attachments": [{"document_id": target_document_id}],
+        },
+    )
+
+    assert message_response.status_code == 200
+    run = message_response.json()["agent_run"]
+    assert run["intent"] == "SUGGEST_RENAME"
+    assert run["document_results"][0]["categories"] == []
+    plan_id = run["operation_plan_id"]
+    assert plan_id
+    plan_response = client.get(
+        f"/api/operations/plans/{plan_id}",
+        headers=_auth_header(target_token),
+    )
+    plan = plan_response.json()
+    assert plan["operation_type"] == "RENAME_UPLOADED_FILES"
+    assert plan["status"] == "WAITING_CONFIRMATION"
+    assert plan["items"][0]["before"]["filename"] == "扫描件.txt"
+    assert plan["items"][0]["after"]["filename"] == "2026_春季学生活动总结.txt"
+    assert shared_path.exists()
+
+    confirm_response = client.post(
+        f"/api/operations/plans/{plan_id}/confirm",
+        headers=_auth_header(target_token),
+        json={"confirmation": "确认执行"},
+    )
+
+    assert confirm_response.status_code == 200
+    confirmed = confirm_response.json()
+    assert confirmed["status"] == "EXECUTED"
+    assert confirmed["changeset_id"]
+    assert confirmed["result"]["completed_count"] == 1
+
+    db = SessionLocal()
+    try:
+        source_document = db.get(Document, source_document_id)
+        target_document = db.get(Document, target_document_id)
+        source_object = db.query(FileObject).filter_by(document_id=source_document_id).one()
+        target_object = db.query(FileObject).filter_by(document_id=target_document_id).one()
+        assert source_document.original_filename == "共享源文件.txt"
+        assert target_document.original_filename == "2026_春季学生活动总结.txt"
+        assert source_object.storage_path != target_object.storage_path
+        assert shared_path.exists()
+        target_path = storage_root / target_object.storage_path
+        assert target_path.name == "2026_春季学生活动总结.txt"
+        assert target_path.read_bytes() == content
+        change_item = (
+            db.query(ChangeItem)
+            .filter_by(target_document_id=target_document_id, change_type="FILENAME_CHANGED")
+            .one()
+        )
+        assert change_item.before_value_json["filename"] == "扫描件.txt"
+        assert change_item.after_value_json["filename"] == "2026_春季学生活动总结.txt"
+    finally:
+        db.close()
+
+    source_content = client.get(
+        f"/api/files/{source_document_id}/content",
+        headers=_auth_header(source_token),
+    )
+    assert source_content.status_code == 200
+    assert source_content.content == content
+    clear_overrides()
 
 
 def test_planner_targets_exact_managed_filename_for_rename():

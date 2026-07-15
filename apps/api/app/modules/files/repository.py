@@ -106,15 +106,31 @@ class FileRepository:
             .count()
         )
 
-    def get_existing_document_by_hash(self, *, user_id: str, workspace_id: str | None, sha256: str) -> Document | None:
-        """按用户、工作区和 sha256 查找已有文件。"""
+    def get_reusable_draft_document(
+        self,
+        *,
+        user_id: str,
+        workspace_id: str | None,
+        sha256: str,
+        original_filename: str,
+    ) -> Document | None:
+        """查找可幂等复用的同名未发送草稿。
 
-        query = self.db.query(Document).filter(Document.user_id == user_id, Document.sha256 == sha256)
+        Document 承担文件名和消息生命周期，不能因为内容哈希相同就复用已经进入消息的
+        Document 或受管文件快照；跨文档去重只能发生在 FileObject 物理对象层。
+        """
+
+        query = self.db.query(Document).filter(
+            Document.user_id == user_id,
+            Document.sha256 == sha256,
+            Document.original_filename == original_filename,
+            Document.status == "UPLOADED",
+        )
         if workspace_id is None:
             query = query.filter(Document.workspace_id.is_(None))
         else:
             query = query.filter(Document.workspace_id == workspace_id)
-        return query.order_by(Document.created_at.asc()).first()
+        return query.order_by(Document.created_at.desc()).first()
 
     def create_or_update_insight(
         self,

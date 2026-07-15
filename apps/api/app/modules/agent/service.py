@@ -26,6 +26,7 @@ from app.modules.llm.client import OpenAICompatibleLLMClient
 from app.modules.llm.document_summary import LLMDocumentSummaryService
 from app.modules.llm.service import LLMIntentService
 from app.modules.changesets.service import persist_changeset_from_document_results
+from app.modules.knowledge_graph.classification_context import build_graph_classification_context
 
 class AgentRuntimeService:
     """协调 Planner、Tool Registry 和 LangGraph 执行。"""
@@ -170,6 +171,7 @@ class AgentRuntimeService:
 
         settings = get_settings()
         llm_judge = _build_classification_judge(settings)
+        graph_context = build_graph_classification_context(settings)
         return AgentRuntimeContext(
             planner=planner or DeterministicPlanner(),
             registry=self.registry_factory(db, user_id),
@@ -179,6 +181,8 @@ class AgentRuntimeService:
                 db=db,
                 llm_judge=llm_judge,
                 mode=settings.llm_classification_mode,
+                graph_context=graph_context,
+                graph_top_k=settings.graph_classification_top_k,
             ),
             document_summary_service=self.document_summary_service
             or _build_document_summary_service(settings=settings, db=db),

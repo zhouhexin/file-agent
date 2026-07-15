@@ -21,6 +21,8 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.api
+      args:
+        INSTALL_GRAPH_DEPENDENCIES: ${INSTALL_GRAPH_DEPENDENCIES:-false}
     restart: unless-stopped
     env_file: [.env]
     environment:
@@ -54,6 +56,8 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.api
+      args:
+        INSTALL_GRAPH_DEPENDENCIES: ${INSTALL_GRAPH_DEPENDENCIES:-false}
     restart: unless-stopped
     env_file: [.env]
     environment:

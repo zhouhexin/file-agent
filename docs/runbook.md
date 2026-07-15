@@ -241,7 +241,14 @@ curl http://127.0.0.1:8000/api/health
 期望返回：
 
 ```json
-{"status":"ok"}
+{
+  "status": "ok",
+  "knowledge_graph": {
+    "status": "disabled",
+    "reason": "GRAPH_DISABLED",
+    "graphrag_package": "not_installed"
+  }
+}
 ```
 
 查看 MVP Tool 白名单：
@@ -481,16 +488,88 @@ PYTHONPATH=apps/api \
   apps/api/app/tests/test_rename_executors.py -k real_f2 -q
 ```
 
-## 8. 当前限制
+### 7.1 上传附件临时重命名
+
+聊天消息携带上传附件并要求重命名时，Planner 会把后端已解析的 `document_ids` 交给
+`generate-rename-suggestions`，生成 `RENAME_UPLOADED_FILES` OperationPlan。确认前不会修改文件；
+确认后只更新该 Document 的 `original_filename`，并把本地 FileObject 放入：
+
+```text
+FILE_STORAGE_ROOT/<user_id>/<document_id>/<new_basename>
+```
+
+目标目录和路径完全由后端计算，OperationPlan 只保存 basename。当前阶段不生成分类建议、不选择
+受管目录，也不执行正式归档。若物理内容被其他 Document 或受管快照共享，执行器会写时复制到
+当前 Document 私有目录，其他引用不变。成功和失败都写入 `confirmed-file-action` ToolInvocation、
+ChangeSet 和逐文件结果。
+
+上传去重分为两个层级：完全相同且尚未发送的同名草稿可以幂等复用同一 Document；不同文件名、
+已进入消息或受管快照只复用底层 FileObject，并创建新的 `UPLOADED` Document。因此用户在发送消息前
+删除新草稿时，不会再误命中受管快照的 `USED_IN_MESSAGE` 状态，也不会删除仍被其他 Document 引用的
+物理内容。
+
+## 8. Neo4j 图谱增强分类
+
+图谱分类默认关闭。PostgreSQL、taxonomy v2 和受管目录扫描结果仍是事实源；Neo4j 只保存可重建的
+分类层级、目录映射和可信分类关系。普通 `SUGGESTED` 建议不会同步为可信关系。
+
+本地或非 Docker 环境安装可选依赖：
+
+```bash
+/opt/homebrew/anaconda3/envs/py311/bin/python -m pip install -r requirements-graph.txt
+```
+
+服务器构建镜像时配置：
+
+```text
+INSTALL_GRAPH_DEPENDENCIES=true
+```
+
+Neo4j 服务可以由独立主机或独立部署栈提供；当前生产 compose 不强制创建 Neo4j 容器。连接配置：
+
+```text
+GRAPH_CLASSIFICATION_ENABLED=false
+NEO4J_URI=bolt://127.0.0.1:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=<password>
+NEO4J_DATABASE=neo4j
+NEO4J_QUERY_TIMEOUT_SECONDS=3
+NEO4J_SYNC_ENABLED=false
+GRAPH_CLASSIFICATION_MAX_HOPS=1
+GRAPH_CLASSIFICATION_TOP_K=8
+```
+
+首次上线顺序：
+
+1. 保持 `GRAPH_CLASSIFICATION_ENABLED=false` 发布 API。
+2. 安装图谱依赖并验证 Neo4j 网络连接。
+3. 临时设置 `NEO4J_SYNC_ENABLED=true`，重启一次 API，等待 taxonomy、受管目录和可信分类投影完成。
+4. 访问 `GET /api/health`，确认 `knowledge_graph.status=ok` 且 `graphrag_package=available`。
+5. 设置 `GRAPH_CLASSIFICATION_ENABLED=true`，完成分类 smoke test。
+6. 投影稳定后可以关闭启动同步；taxonomy、目录或反馈变化后再执行同步。
+
+如果 Neo4j 查询超时或不可用，分类服务会记录 `classification.graph_query.degraded`，并自动回退到现有
+规则/LLM 分类，不中断上传、解析、OCR 和其他文件。立即回滚只需要：
+
+```text
+GRAPH_CLASSIFICATION_ENABLED=false
+NEO4J_SYNC_ENABLED=false
+```
+
+当前第一版本不把全文写入 Neo4j，不启用向量索引、自动 schema、自由构图或 Text2Cypher。
+`neo4j-graphrag-python` 已通过受控 Adapter 预留固定 VectorCypher Retriever，向量召回在第二阶段启用。
+
+## 9. 当前限制
 
 - 当前已接入 OpenAI-compatible LLM 意图理解；默认 `LLM_ENABLED=false` 时仍使用 `DeterministicPlanner`。
 - 当前已持久化 user、default workspace、message、AgentRun、ToolInvocation、Document、document_insights、document_extraction_runs、document_pages、document_classification_runs、document_category_suggestions、document_category_feedback、change_sets、change_items、operation_plans 和 operation_confirmations。
-- OperationPlan 已支持受管目录文件重命名的创建、查询、确认、Native/F2 执行和 ChangeSet 审计；移动、删除、覆盖及上传原件改名仍未开放真实执行。
+- OperationPlan 已支持受管目录文件重命名的 Native/F2 闭环，以及上传附件在私有临时存储中的确认改名和 ChangeSet 审计；附件分类后写入受管目录尚未实现，移动、删除和覆盖也未开放真实执行。
+- 没有白名单执行器的 OperationPlan 不能确认，计划保持 `WAITING_CONFIRMATION`，不会伪造 `EXECUTED`。
 - 当前已支持读取当前用户自己的原始文件元信息和解析文本内容；其他多数 Tool handler 仍是结构化占位实现。
 - 当前已有最小 JWT 鉴权，但没有 refresh token、复杂 RBAC、ACL 或 admin 权限体系。
 - 当前前端已有最小注册、登录、Chat、文件上传和附件删除流程，没有会话列表、admin 页面或正式视觉设计。
 
-## 9. 维护规则
+## 10. 维护规则
 
 以下任一内容发生变化时，必须同步更新本文和 `README.md`：
 

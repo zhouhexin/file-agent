@@ -110,3 +110,49 @@ def test_settings_defaults_paddleocr_model_source_to_baidu_bos(monkeypatch, tmp_
     settings = config.get_settings()
 
     assert settings.ocr_paddle_model_source == "BOS"
+
+
+def test_settings_defaults_graph_classification_to_disabled(monkeypatch, tmp_path):
+    """图谱分类必须默认关闭，未部署 Neo4j 时不能影响后端启动。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.delenv("GRAPH_CLASSIFICATION_ENABLED", raising=False)
+    monkeypatch.delenv("NEO4J_SYNC_ENABLED", raising=False)
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.graph_classification_enabled is False
+    assert settings.neo4j_sync_enabled is False
+    assert settings.graph_classification_max_hops == 1
+    assert settings.graph_classification_top_k == 8
+
+
+def test_settings_loads_graph_classification_options(monkeypatch, tmp_path):
+    """图谱连接和候选限制必须通过显式配置启用。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.setenv("GRAPH_CLASSIFICATION_ENABLED", "true")
+    monkeypatch.setenv("NEO4J_URI", "bolt://neo4j.internal:7687")
+    monkeypatch.setenv("NEO4J_USERNAME", "file_agent")
+    monkeypatch.setenv("NEO4J_PASSWORD", "secret")
+    monkeypatch.setenv("NEO4J_DATABASE", "file_agent")
+    monkeypatch.setenv("NEO4J_QUERY_TIMEOUT_SECONDS", "4")
+    monkeypatch.setenv("NEO4J_SYNC_ENABLED", "true")
+    monkeypatch.setenv("GRAPH_CLASSIFICATION_MAX_HOPS", "2")
+    monkeypatch.setenv("GRAPH_CLASSIFICATION_TOP_K", "6")
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.graph_classification_enabled is True
+    assert settings.neo4j_uri == "bolt://neo4j.internal:7687"
+    assert settings.neo4j_username == "file_agent"
+    assert settings.neo4j_password == "secret"
+    assert settings.neo4j_database == "file_agent"
+    assert settings.neo4j_query_timeout_seconds == 4
+    assert settings.neo4j_sync_enabled is True
+    assert settings.graph_classification_max_hops == 2
+    assert settings.graph_classification_top_k == 6

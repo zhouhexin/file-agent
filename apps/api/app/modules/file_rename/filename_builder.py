@@ -66,6 +66,34 @@ class FilenameBuilder:
         return filename, template.key
 
 
+def validate_target_filename(
+    *,
+    original_filename: str,
+    target_filename: str,
+    max_bytes: int = 240,
+) -> str:
+    """校验确认阶段的目标 basename，并强制保留原扩展名。
+
+    该函数只返回安全文件名，不解析或接受目录；执行服务必须自行把它放入后端确定的
+    Document 私有临时目录，不能采用 Planner 或 OperationPlan 提供的路径。
+    """
+
+    normalized = str(target_filename)
+    if not normalized or normalized != normalized.strip():
+        raise FilenameBuildError("目标文件名不能为空或包含首尾空白。")
+    if normalized in {".", ".."} or Path(normalized).name != normalized:
+        raise FilenameBuildError("目标文件名只能是 basename。")
+    if _FORBIDDEN_FILENAME_CHARACTERS.search(normalized):
+        raise FilenameBuildError("目标文件名包含非法字符。")
+    if len(normalized.encode("utf-8")) > max_bytes:
+        raise FilenameBuildError("目标文件名超过长度限制。")
+    original_suffix = Path(original_filename).suffix.lower()
+    target_suffix = Path(normalized).suffix.lower()
+    if original_suffix != target_suffix:
+        raise FilenameBuildError("重命名必须保留原文件扩展名。")
+    return normalized
+
+
 def _sanitize_component(value: str) -> str:
     """清理单个模板字段中的非法字符。"""
 
@@ -107,4 +135,3 @@ def _truncate_filename(filename: str, *, max_bytes: int) -> str:
         except UnicodeDecodeError:
             encoded = encoded[:-1]
     raise FilenameBuildError("文件名长度限制过小。")
-

@@ -15,6 +15,7 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState('');
   const waiting = plan.status === 'WAITING_CONFIRMATION' || plan.status === 'PLANNED';
+  const uploadedTemporaryRename = plan.operation_type === 'RENAME_UPLOADED_FILES';
 
   async function handleConfirm() {
     setConfirming(true);
@@ -33,13 +34,20 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
     <section className="operation-plan-card">
       <header className="operation-plan-header">
         <div>
-          <strong><FilePenLine size={18} />文件重命名计划</strong>
+          <strong>
+            <FilePenLine size={18} />
+            {uploadedTemporaryRename ? '上传附件临时重命名计划' : '文件重命名计划'}
+          </strong>
           <span>{plan.items.length} 个可执行 · {plan.skipped_items.length} 个待复核</span>
         </div>
         <em className={`operation-plan-status operation-plan-status--${plan.status.toLowerCase()}`}>
           {formatPlanStatus(plan.status)}
         </em>
       </header>
+
+      {uploadedTemporaryRename ? (
+        <p>本次只修改附件在临时存储中的文件名，不执行分类或写入受管目录。</p>
+      ) : null}
 
       <div className="operation-plan-items">
         {plan.items.map((item, index) => (
@@ -48,6 +56,7 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
             <div>
               <del>{readString(item.before, 'filename')}</del>
               <strong>{readString(item.after, 'filename')}</strong>
+              <small>状态：{formatItemStatus(item.execution_status)}</small>
             </div>
           </div>
         ))}
@@ -83,5 +92,13 @@ function formatPlanStatus(status: string): string {
   if (status === 'EXECUTED') return '已执行';
   if (status === 'PARTIAL') return '部分完成';
   if (status === 'FAILED') return '执行失败';
+  return status;
+}
+
+function formatItemStatus(status: string): string {
+  // 逐文件状态来自确认执行后的 OperationPlan，不根据计划总状态猜测。
+  if (status === 'PLANNED') return '等待确认';
+  if (status === 'COMPLETED') return '已完成';
+  if (status === 'FAILED') return '失败';
   return status;
 }

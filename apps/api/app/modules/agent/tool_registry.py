@@ -50,6 +50,7 @@ from app.modules.classification.taxonomy_service import read_default_taxonomy_ca
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text, extraction_config_hash
 from app.modules.file_rename.suggestion_service import RenameSuggestionService
+from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
 from app.modules.file_rename.review_service import RenameReviewService
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
@@ -601,7 +602,7 @@ def _managed_file_search_handler(db: Any) -> ToolHandler:
 
 
 def _generate_rename_suggestions_handler(db: Any, user_id: str | None) -> ToolHandler:
-    """创建受管文件重命名建议 Tool handler。"""
+    """创建上传附件或受管文件重命名建议 Tool handler。"""
 
     def handler(tool_input: BaseModel) -> Dict[str, Any]:
         """读取正文并生成待确认计划，不在此阶段修改源文件。"""
@@ -610,6 +611,14 @@ def _generate_rename_suggestions_handler(db: Any, user_id: str | None) -> ToolHa
             return {"ok": False, "status": "FAILED", "error": {"code": "DB_REQUIRED", "message": "生成重命名计划需要数据库会话。"}}
         if user_id is None:
             return {"ok": False, "status": "FAILED", "error": {"code": "AUTH_REQUIRED", "message": "生成重命名计划需要当前用户。"}}
+        document_ids = list(getattr(tool_input, "document_ids", []) or [])
+        if document_ids:
+            return UploadedRenameSuggestionService(db=db, user_id=user_id).generate_plan(
+                conversation_id=str(getattr(tool_input, "conversation_id")),
+                agent_run_id=str(getattr(tool_input, "agent_run_id")),
+                document_ids=document_ids,
+                limit=int(getattr(tool_input, "limit", 20)),
+            )
         return RenameSuggestionService(db=db, user_id=user_id).generate_plan(
             conversation_id=str(getattr(tool_input, "conversation_id")),
             agent_run_id=str(getattr(tool_input, "agent_run_id")),
@@ -1335,7 +1344,7 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("managed-file-list", "List server managed files by logical metadata filters.", ManagedFileListInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_list_handler(db)),
         _tool("managed-file-search", "Search server managed files by filename keyword.", ManagedFileSearchInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_search_handler(db)),
         _tool("managed-file-read-document", "Read one server managed file by logical filters, snapshot it as a document, and extract text.", ManagedFileReadDocumentInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages"], _managed_file_read_document_handler(db, user_id)),
-        _tool("generate-rename-suggestions", "Generate controlled rename suggestions for managed files and persist an OperationPlan without changing source files.", GenerateRenameSuggestionsInput, True, False, ["document_pages", "operation_plans"], _generate_rename_suggestions_handler(db, user_id)),
+        _tool("generate-rename-suggestions", "Generate controlled rename suggestions for uploaded attachments or managed files and persist an OperationPlan without changing source files.", GenerateRenameSuggestionsInput, True, False, ["document_pages", "operation_plans"], _generate_rename_suggestions_handler(db, user_id)),
         _tool("resolve-rename-reviews", "Resolve pending rename reviews from explicit user corrections and immediately execute a confirmed OperationPlan.", ResolveRenameReviewsInput, True, False, ["operation_plans", "operation_confirmations", "change_sets", "change_items"], _resolve_rename_reviews_handler(db, user_id)),
         _tool("managed-root-scan", "Create an async scan job for a managed logical root.", ManagedRootScanInput, True, False, ["filesystem_jobs", "filesystem_job_events"], _managed_root_scan_handler(db, user_id)),
         _tool("mcp-filesystem-list", "List files and directories in the server managed filesystem root without database scan.", MCPFilesystemListInput, False, False, [], _mcp_filesystem_list_handler()),

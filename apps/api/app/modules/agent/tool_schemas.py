@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ToolInputValidationError(ValueError):
@@ -219,8 +219,9 @@ class ManagedFileReadDocumentInput(StrictToolInput):
 
 
 class GenerateRenameSuggestionsInput(StrictToolInput):
-    """生成受管文件重命名建议并持久化 OperationPlan。"""
+    """为上传附件或受管文件生成重命名建议并持久化 OperationPlan。"""
 
+    document_ids: List[str] = Field(default_factory=list, max_length=50)
     root_key: Optional[str] = None
     path_prefix: Optional[str] = None
     extension: Optional[str] = None
@@ -235,6 +236,26 @@ class GenerateRenameSuggestionsInput(StrictToolInput):
         """校验受管目录内的相对路径。"""
 
         return _normalize_path_prefix(value)
+
+    @field_validator("document_ids")
+    @classmethod
+    def validate_document_ids(cls, value: List[str]) -> List[str]:
+        """拒绝空标识并保持附件顺序去重，避免扩大重命名范围。"""
+
+        normalized = [str(item).strip() for item in value]
+        if any(not item for item in normalized):
+            raise ValueError("document_ids must not contain empty values")
+        return list(dict.fromkeys(normalized))
+
+    @model_validator(mode="after")
+    def validate_single_scope(self) -> "GenerateRenameSuggestionsInput":
+        """附件范围与受管目录过滤条件不能混用，防止跨边界扫描。"""
+
+        if self.document_ids and any(
+            [self.root_key, self.path_prefix, self.extension, self.filename_contains]
+        ):
+            raise ValueError("document_ids cannot be combined with managed-file filters")
+        return self
 
 
 class ResolveRenameReviewsInput(StrictToolInput):

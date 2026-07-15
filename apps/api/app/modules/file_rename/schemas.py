@@ -179,3 +179,30 @@ class RenameBatchResult(BaseModel):
     failed_count: int
     duration_ms: int = 0
     items: list[RenameExecutionItem]
+
+
+class UploadedRenameExecutionItem(BaseModel):
+    """一个上传附件在临时存储中的重命名执行结果。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    document_id: str
+    before_filename: str
+    after_filename: str
+    status: str
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+class UploadedRenameBatchResult(BaseModel):
+    """上传附件临时存储重命名的逐文件批次结果。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    executor: str = "temporary-storage"
+    status: str
+    matched_count: int
+    completed_count: int
+    failed_count: int
+    duration_ms: int = 0
+    items: list[UploadedRenameExecutionItem]

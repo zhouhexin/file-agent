@@ -33,10 +33,11 @@ class FileUploadService:
         content_type = file.content_type or "application/octet-stream"
         sha256 = hashlib.sha256(content).hexdigest()
         storage_root = Path(get_settings().file_storage_root)
-        existing_document = self.repository.get_existing_document_by_hash(
+        existing_document = self.repository.get_reusable_draft_document(
             user_id=current_user.id,
             workspace_id=current_user.default_workspace_id,
             sha256=sha256,
+            original_filename=filename,
         )
         if existing_document is not None:
             return self._to_upload_response(existing_document, deduplicated=True)

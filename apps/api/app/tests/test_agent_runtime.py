@@ -1182,7 +1182,16 @@ def test_initial_state_does_not_include_runtime_dependencies():
         planner_mode="deterministic",
     )
 
-    for key in ["planner", "registry", "context_loader", "llm_intent_service", "prefer_explicit_planner"]:
+    for key in [
+        "planner",
+        "registry",
+        "context_loader",
+        "llm_intent_service",
+        "graph_context",
+        "neo4j_driver",
+        "graph_repository",
+        "prefer_explicit_planner",
+    ]:
         assert key not in state
     assert state["planner_mode"] == "deterministic"
     assert state["result_summary"] == {}
@@ -1206,7 +1215,15 @@ def test_safe_snapshot_excludes_runtime_dependencies():
         }
     )
 
-    for key in ["planner", "registry", "context_loader", "llm_intent_service"]:
+    for key in [
+        "planner",
+        "registry",
+        "context_loader",
+        "llm_intent_service",
+        "graph_context",
+        "neo4j_driver",
+        "graph_repository",
+    ]:
         assert key not in snapshot
     assert snapshot["planner_mode"] == "llm"
     assert snapshot["result_summary"] == {"managed_file_list": {"files": []}}

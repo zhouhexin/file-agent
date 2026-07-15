@@ -6,11 +6,24 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 
 TAXONOMY_KEY = "managed_path_categories"
 TAXONOMY_VERSION = "managed-path-v1"
+
+
+def managed_category_id(*, root_key: str, category_path: str) -> str:
+    """为动态目录分类生成稳定 ID，避免目录显示名称成为长期外键。"""
+
+    normalized = "/".join(
+        part.strip()
+        for part in str(category_path or "").replace("\\", "/").split("/")
+        if part.strip()
+    )
+    digest = hashlib.sha256(f"{root_key}\0{normalized}".encode("utf-8")).hexdigest()[:24]
+    return f"managed.{digest}"
 
 
 def match_managed_path_categories(
@@ -41,11 +54,15 @@ def match_managed_path_categories(
         candidates.append(
             {
                 "name": "/".join(parts),
+                "category_id": managed_category_id(root_key=root_key, category_path="/".join(parts)),
                 "category_path": parts,
                 "confidence": round(min(0.92, max(0.45, score)), 2),
                 "status": "SUGGESTED",
                 "source": "managed_path",
                 "evidence": signals,
+                "rule_score": round(min(1.0, score), 4),
+                "matched_signals": signals,
+                "negative_signals": [],
                 "taxonomy_key": TAXONOMY_KEY,
                 "taxonomy_version": TAXONOMY_VERSION,
                 "managed_root_key": root_key,

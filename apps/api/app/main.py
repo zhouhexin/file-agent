@@ -6,7 +6,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.database import init_database
+from app.core.config import get_settings
+from app.core.database import SessionLocal, init_database
 from app.core.logging import cleanup_old_logs, log_context, log_event, new_request_id
 from app.modules.agent.router import agent_runs_router, router as agent_router
 from app.modules.auth.router import router as auth_router
@@ -15,6 +16,9 @@ from app.modules.conversations.router import router as conversations_router
 from app.modules.files.router import router as files_router
 from app.modules.managed_files.router import router as managed_files_router
 from app.modules.operations.router import router as operations_router
+from app.modules.knowledge_graph.classification_context import close_graph_resources
+from app.modules.knowledge_graph.health import graph_health
+from app.modules.knowledge_graph.projection_service import sync_graph_projection_if_enabled
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -25,7 +29,14 @@ async def lifespan(app: FastAPI):
 
     init_database()
     cleanup_old_logs()
-    yield
+    settings = get_settings()
+    if settings.neo4j_sync_enabled:
+        with SessionLocal() as db:
+            sync_graph_projection_if_enabled(db=db, settings=settings)
+    try:
+        yield
+    finally:
+        close_graph_resources()
 
 
 # 这里故意保持应用入口很薄，具体业务边界交给各模块路由维护，
@@ -96,7 +107,11 @@ app.include_router(operations_router)
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
+def health() -> dict[str, object]:
     """返回最小健康检查结果，用于本地和部署后的冒烟验证。"""
 
-    return {"status": "ok"}
+    settings = get_settings()
+    return {
+        "status": "ok",
+        "knowledge_graph": graph_health(settings),
+    }

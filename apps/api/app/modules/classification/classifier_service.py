@@ -13,17 +13,31 @@ from app.modules.classification.loader import load_default_taxonomy
 from app.modules.classification.managed_path import match_managed_path_categories
 from app.modules.classification.matcher import match_document_text
 from app.modules.managed_files.repository import ManagedFileRepository
+from app.modules.knowledge_graph.candidate_retriever import retrieve_graph_candidates
+from app.modules.knowledge_graph.classification_context import NoOpGraphClassificationContext
+from app.modules.knowledge_graph.reranker import GraphClassificationReranker
+from app.modules.knowledge_graph.schemas import GraphClassificationResult
 
 
 class DocumentClassificationService:
     """从 DocumentPage 读取全文并生成 rule-only 分类建议。"""
 
-    def __init__(self, db: Session | None = None, llm_judge: Any = None, mode: str = "rule_only") -> None:
+    def __init__(
+        self,
+        db: Session | None = None,
+        llm_judge: Any = None,
+        mode: str = "rule_only",
+        graph_context: Any = None,
+        graph_top_k: int = 8,
+    ) -> None:
         """保存请求级数据库会话；无数据库时仅支持 fallback_text。"""
 
         self.db = db
         self.llm_judge = llm_judge
         self.mode = mode
+        self.graph_context = graph_context or NoOpGraphClassificationContext()
+        self.graph_top_k = max(1, min(20, graph_top_k))
+        self.graph_reranker = GraphClassificationReranker()
 
     def classify(
         self,
@@ -47,6 +61,15 @@ class DocumentClassificationService:
             categories = self._classify_with_available_taxonomy(
                 filename=filename,
                 classification_text=classification_text,
+            )
+            graph_result = self._load_graph_candidates(
+                document_id=document_id,
+                categories=categories,
+            )
+            categories = self.graph_reranker.rerank(
+                categories=categories,
+                graph_result=graph_result,
+                limit=self.graph_top_k,
             )
             categories = self._judge_categories(
                 filename=filename,
@@ -88,7 +111,50 @@ class DocumentClassificationService:
             "extraction_run_id": extraction_run_id,
             "categories": categories,
             "text_source": "document_pages" if full_text else "fallback",
+            "graph_status": graph_result.status,
+            "graph_warnings": [] if graph_result.status == "DISABLED" else list(graph_result.warnings),
         }
+
+    def _load_graph_candidates(
+        self,
+        *,
+        document_id: str,
+        categories: list[dict[str, Any]],
+    ) -> GraphClassificationResult:
+        """加载只包含候选 ID 的图谱上下文，异常时关闭式降级。"""
+
+        start = time.perf_counter()
+        try:
+            result = retrieve_graph_candidates(
+                context=self.graph_context,
+                categories=categories,
+                document_id=document_id,
+                # 当前 Document 内容不可变且尚无独立版本表，第一版本以 document_id 兼容版本键。
+                document_version_id=document_id or None,
+                limit=self.graph_top_k,
+            )
+        except Exception as exc:
+            log_event(
+                "classification.graph_query.degraded",
+                level="WARNING",
+                document_id=document_id or None,
+                status="DEGRADED",
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                error_code=exc.__class__.__name__,
+                message="图谱分类查询失败，已回退基础分类。",
+            )
+            return GraphClassificationResult(status="DEGRADED", warnings=["GRAPH_UNAVAILABLE"])
+        if result.status == "COMPLETED" and result.candidates:
+            log_event(
+                "classification.graph_rerank.completed",
+                document_id=document_id or None,
+                status="COMPLETED",
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                message="图谱分类候选重排完成",
+                candidate_count=len(categories),
+                graph_candidate_count=len(result.candidates),
+            )
+        return result
 
     def _classify_with_available_taxonomy(
         self,

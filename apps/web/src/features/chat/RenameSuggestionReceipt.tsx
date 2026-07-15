@@ -4,6 +4,8 @@ import { FilePenLine } from 'lucide-react';
 import type { ManagedFileResult } from '../../types';
 
 type RenameSuggestion = {
+  document_id?: string;
+  source_kind?: string;
   managed_file_id?: string;
   root_key?: string;
   relative_path?: string;
@@ -21,6 +23,7 @@ type RenameSuggestion = {
 
 export type RenamePlanResult = {
   ok?: boolean;
+  source_kind?: string;
   ready_count?: number;
   needs_review_count?: number;
   suggestions?: RenameSuggestion[];
@@ -34,6 +37,7 @@ export function RenameSuggestionReceipt({
   onOpenManagedFile?: (file: ManagedFileResult) => void;
 }) {
   const suggestions = (result.suggestions ?? []).filter((item) => !item.proposed_filename || item.status !== 'READY');
+  const uploadedScope = result.source_kind === 'uploaded_document';
   if (suggestions.length === 0) {
     return null;
   }
@@ -48,7 +52,7 @@ export function RenameSuggestionReceipt({
         {suggestions.map((suggestion, index) => (
           <button
             className="rename-suggestion-item rename-suggestion-item--openable"
-            key={suggestion.managed_file_id ?? `${suggestion.filename}-${index}`}
+            key={suggestion.managed_file_id ?? suggestion.document_id ?? `${suggestion.filename}-${index}`}
             type="button"
             disabled={!onOpenManagedFile || !suggestion.root_key || !suggestion.relative_path}
             onClick={() => openSuggestion(suggestion, onOpenManagedFile)}
@@ -61,8 +65,14 @@ export function RenameSuggestionReceipt({
           </button>
         ))}
       </div>
-      <p>如需改名，请回复：文件原文件名更正为新文件名</p>
-      <p>不需要改名请回复“不需要”。</p>
+      {uploadedScope ? (
+        <p>请补充可识别的年份和正文标题后重新发起附件重命名。</p>
+      ) : (
+        <>
+          <p>如需改名，请回复：文件原文件名更正为新文件名</p>
+          <p>不需要改名请回复“不需要”。</p>
+        </>
+      )}
     </section>
   );
 }

@@ -78,25 +78,25 @@ def test_create_operation_plan_persists_waiting_confirmation():
 
 
 def test_direct_rename_plan_creation_is_rejected():
-    """重命名计划必须由受控建议 Tool 生成，不能提交任意 before/after。"""
+    """受管和上传附件重命名计划都必须由受控建议 Tool 生成，不能提交任意 before/after。"""
 
     client, _ = client_with_database()
     _, token = _register_and_login(client, "operation-direct-rename")
-    response = client.post(
-        "/api/operations/plans",
-        headers=_auth_header(token),
-        json={
-            "conversation_id": "direct-rename-conversation",
-            "operation_type": "RENAME_FILES",
-            "items": [{
-                "document_id": "document-1",
-                "before": {"filename": "旧文件名.pdf"},
-                "after": {"filename": "新文件名.pdf"},
-            }],
-        },
-    )
-
-    assert response.status_code == 400
+    for operation_type in ["RENAME_FILES", "RENAME_UPLOADED_FILES"]:
+        response = client.post(
+            "/api/operations/plans",
+            headers=_auth_header(token),
+            json={
+                "conversation_id": "direct-rename-conversation",
+                "operation_type": operation_type,
+                "items": [{
+                    "document_id": "document-1",
+                    "before": {"filename": "旧文件名.pdf"},
+                    "after": {"filename": "新文件名.pdf"},
+                }],
+            },
+        )
+        assert response.status_code == 400
     clear_overrides()
 
 
@@ -136,11 +136,11 @@ def test_other_user_cannot_get_or_confirm_operation_plan():
     clear_overrides()
 
 
-def test_confirm_operation_plan_records_confirmation_and_marks_executed():
-    """确认计划后记录确认文本，并推进计划状态；当前阶段不执行真实文件动作。"""
+def test_confirm_operation_plan_rejects_operation_without_executor():
+    """没有受控执行器的高风险计划必须拒绝确认，不能伪造 EXECUTED 状态。"""
 
     client, SessionLocal = client_with_database()
-    user_id, token = _register_and_login(client, "operation-confirmer")
+    _, token = _register_and_login(client, "operation-confirmer")
     plan_id = _create_plan(client, token).json()["id"]
 
     response = client.post(
@@ -149,29 +149,24 @@ def test_confirm_operation_plan_records_confirmation_and_marks_executed():
         json={"confirmation": "确认执行"},
     )
 
-    assert response.status_code == 200
-    assert response.json()["id"] == plan_id
-    assert response.json()["status"] == "EXECUTED"
-    assert response.json()["changeset_id"] is None
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Operation type does not have a controlled executor"
 
     db = SessionLocal()
     try:
         plan = db.get(OperationPlan, plan_id)
         assert plan is not None
-        assert plan.status == "EXECUTED"
-        assert plan.confirmed_at is not None
-        assert plan.executed_at is not None
-        confirmation = db.query(OperationConfirmation).one()
-        assert confirmation.operation_plan_id == plan_id
-        assert confirmation.user_id == user_id
-        assert confirmation.confirmation_text == "确认执行"
+        assert plan.status == "WAITING_CONFIRMATION"
+        assert plan.confirmed_at is None
+        assert plan.executed_at is None
+        assert db.query(OperationConfirmation).count() == 0
     finally:
         db.close()
         clear_overrides()
 
 
 def test_confirm_operation_plan_rejects_repeated_confirmation():
-    """已确认执行的计划不能重复确认，避免重复执行风险。"""
+    """没有执行器的计划无论确认多少次都必须保持待确认，不能产生确认记录。"""
 
     client, _ = client_with_database()
     _, token = _register_and_login(client, "operation-repeat")
@@ -188,6 +183,6 @@ def test_confirm_operation_plan_rejects_repeated_confirmation():
         json={"confirmation": "确认执行"},
     )
 
-    assert first_response.status_code == 200
+    assert first_response.status_code == 409
     assert second_response.status_code == 409
     clear_overrides()

@@ -27,6 +27,9 @@ DEFAULT_FILE_RENAME_MAX_BATCH_SIZE = 20
 DEFAULT_FILE_RENAME_EXECUTION_TIMEOUT_SECONDS = 60
 DEFAULT_F2_EXPECTED_VERSION = "2.2.2"
 DEFAULT_F2_STDOUT_MAX_BYTES = 1024 * 1024
+DEFAULT_NEO4J_QUERY_TIMEOUT_SECONDS = 3
+DEFAULT_GRAPH_CLASSIFICATION_MAX_HOPS = 1
+DEFAULT_GRAPH_CLASSIFICATION_TOP_K = 8
 
 
 class Settings(BaseModel):
@@ -63,6 +66,15 @@ class Settings(BaseModel):
     f2_expected_version: str = DEFAULT_F2_EXPECTED_VERSION
     f2_fallback_to_native: bool = False
     f2_stdout_max_bytes: int = DEFAULT_F2_STDOUT_MAX_BYTES
+    graph_classification_enabled: bool = False
+    neo4j_uri: str = ""
+    neo4j_username: str = ""
+    neo4j_password: str = ""
+    neo4j_database: str = "neo4j"
+    neo4j_query_timeout_seconds: int = DEFAULT_NEO4J_QUERY_TIMEOUT_SECONDS
+    neo4j_sync_enabled: bool = False
+    graph_classification_max_hops: int = DEFAULT_GRAPH_CLASSIFICATION_MAX_HOPS
+    graph_classification_top_k: int = DEFAULT_GRAPH_CLASSIFICATION_TOP_K
 
 
 def find_dotenv_file() -> Path | None:
@@ -168,4 +180,22 @@ def get_settings() -> Settings:
         f2_expected_version=os.getenv("F2_EXPECTED_VERSION", DEFAULT_F2_EXPECTED_VERSION),
         f2_fallback_to_native=os.getenv("F2_FALLBACK_TO_NATIVE", "false").lower() == "true",
         f2_stdout_max_bytes=int(os.getenv("F2_STDOUT_MAX_BYTES", str(DEFAULT_F2_STDOUT_MAX_BYTES))),
+        graph_classification_enabled=os.getenv("GRAPH_CLASSIFICATION_ENABLED", "false").lower() == "true",
+        neo4j_uri=os.getenv("NEO4J_URI", "").strip(),
+        neo4j_username=os.getenv("NEO4J_USERNAME", "").strip(),
+        neo4j_password=os.getenv("NEO4J_PASSWORD", ""),
+        neo4j_database=os.getenv("NEO4J_DATABASE", "neo4j").strip() or "neo4j",
+        neo4j_query_timeout_seconds=max(
+            1,
+            int(os.getenv("NEO4J_QUERY_TIMEOUT_SECONDS", str(DEFAULT_NEO4J_QUERY_TIMEOUT_SECONDS))),
+        ),
+        neo4j_sync_enabled=os.getenv("NEO4J_SYNC_ENABLED", "false").lower() == "true",
+        graph_classification_max_hops=max(
+            1,
+            min(2, int(os.getenv("GRAPH_CLASSIFICATION_MAX_HOPS", str(DEFAULT_GRAPH_CLASSIFICATION_MAX_HOPS)))),
+        ),
+        graph_classification_top_k=max(
+            1,
+            min(20, int(os.getenv("GRAPH_CLASSIFICATION_TOP_K", str(DEFAULT_GRAPH_CLASSIFICATION_TOP_K)))),
+        ),
     )

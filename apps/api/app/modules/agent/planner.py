@@ -187,6 +187,12 @@ class DeterministicPlanner:
             message=message,
             lowered=lowered,
         )
+        if _has_rename_intent(message=message, lowered=lowered) and attachments:
+            return _uploaded_document_rename_plan(
+                user_goal=message,
+                document_ids=_document_ids(attachments),
+                route_source="deterministic_planner",
+            )
         if managed_rename_filters and not attachments:
             return _managed_file_rename_plan(
                 user_goal=message,
@@ -455,7 +461,8 @@ def build_plan_from_user_intent(
 ) -> PlannerOutput:
     """把 LLM 结构化意图转换为受控 PlannerOutput。"""
     lowered = message.lower()
-    document_ids = intent_plan.referenced_document_ids or _document_ids(attachments)
+    attachment_document_ids = _document_ids(attachments)
+    document_ids = intent_plan.referenced_document_ids or attachment_document_ids
     requested_capabilities = set(intent_plan.required_capabilities).union(
         intent_plan.tool_plan_hint
     )
@@ -513,6 +520,27 @@ def build_plan_from_user_intent(
         or "generate-rename-suggestions" in intent_plan.tool_plan_hint
         or (managed_rename_filters and not document_ids)
     ):
+        if attachment_document_ids:
+            return _uploaded_document_rename_plan(
+                user_goal=intent_plan.user_goal or message,
+                # 文件动作范围只能来自后端附件上下文，不能采用 LLM 自报的 document_id。
+                document_ids=attachment_document_ids,
+                response_style=intent_plan.response_style,
+                clarification_question=intent_plan.clarification_question,
+                llm_intent_plan=intent_plan.model_dump(),
+                route_source="capability_router" if capability_route else "llm_planner",
+            )
+        has_managed_scope = any(
+            [
+                intent_plan.managed_root_key,
+                intent_plan.managed_path_prefix,
+                intent_plan.managed_extension,
+                intent_plan.managed_filename_contains,
+                *managed_rename_filters.values(),
+            ]
+        )
+        if not has_managed_scope:
+            return _missing_file_scope_plan(user_goal=intent_plan.user_goal or message)
         return _managed_file_rename_plan(
             user_goal=intent_plan.user_goal or message,
             root_key=intent_plan.managed_root_key or managed_rename_filters.get("root_key"),
@@ -1051,6 +1079,47 @@ def _managed_file_rename_plan(
                 "skill": "file-rename",
                 "tool_name": "generate-rename-suggestions",
                 "input": input_json,
+                "requires_confirmation": False,
+                "risk_level": "low",
+                "expected_outputs": ["rename_suggestions", "operation_plan"],
+                "writes": ["document_pages", "operation_plans"],
+            }
+        ],
+        evidence_policy={"require_page_or_cell": True, "allow_no_evidence_answer": True},
+        confirmation_policy={"operation_plan_required": True},
+    )
+
+
+def _uploaded_document_rename_plan(
+    *,
+    user_goal: str,
+    document_ids: list[str],
+    response_style: str = "concise",
+    clarification_question: str | None = None,
+    llm_intent_plan: Dict[str, Any] | None = None,
+    route_source: str = "legacy_planner",
+) -> PlannerOutput:
+    """为上传附件生成临时存储重命名计划，不推断分类或受管目录。"""
+
+    return PlannerOutput(
+        intent="SUGGEST_RENAME",
+        user_goal=user_goal,
+        slots={
+            "document_ids": document_ids,
+            "requested_outputs": ["rename_suggestions", "operation_plan"],
+            "response_style": response_style,
+            "clarification_question": clarification_question,
+            "llm_intent_plan": llm_intent_plan or {},
+            "route_source": route_source,
+            "target_storage": "temporary",
+        },
+        selected_skills=["file-rename", "operation-plan"],
+        steps=[
+            {
+                "step_id": "step-uploaded-rename-suggestions",
+                "skill": "file-rename",
+                "tool_name": "generate-rename-suggestions",
+                "input": {"document_ids": document_ids},
                 "requires_confirmation": False,
                 "risk_level": "low",
                 "expected_outputs": ["rename_suggestions", "operation_plan"],
@@ -1610,10 +1679,7 @@ def _managed_file_read_filters_from_request(*, message: str, lowered: str) -> Di
 def _managed_file_rename_filters_from_request(*, message: str, lowered: str) -> Dict[str, str] | None:
     """提取受管目录重命名请求的逻辑目录与文件过滤条件。"""
 
-    if not (
-        any(keyword in message for keyword in ["重命名", "改名", "文件名建议", "命名建议"])
-        or any(keyword in lowered for keyword in ["rename", "filename suggestion"])
-    ):
+    if not _has_rename_intent(message=message, lowered=lowered):
         return None
     explicit_reference = _managed_file_reference_from_rename_request(message)
     if (
@@ -1646,6 +1712,15 @@ def _managed_file_rename_filters_from_request(*, message: str, lowered: str) -> 
     if filename_contains:
         filters["filename_contains"] = filename_contains
     return filters
+
+
+def _has_rename_intent(*, message: str, lowered: str) -> bool:
+    """识别文件重命名意图；对象范围仍必须由附件上下文或受管过滤条件确定。"""
+
+    return (
+        any(keyword in message for keyword in ["重命名", "改名", "文件名建议", "命名建议"])
+        or any(keyword in lowered for keyword in ["rename", "filename suggestion"])
+    )
 
 
 def _managed_file_reference_from_rename_request(message: str) -> Dict[str, str] | None:

@@ -1,5 +1,12 @@
 # Docling 与 Neo4j 图谱增强分类计划
 
+> 本文保留早期 Docling 与 Neo4j 组合设想。经仓库研究和现有代码对齐后，统一实施依据已拆分为：
+>
+> - `docs/neo4j-graph-classification-overall-plan.md`：整体架构、数据边界和分阶段路线。
+> - `docs/neo4j-graph-classification-v1-implementation-plan.md`：轻量第一版本任务、测试、发布和回滚方案。
+>
+> 如本文与上述两份文档冲突，以上述两份新文档为准。
+
 ## 1. 当前状态
 
 - 状态：暂缓实施。
@@ -146,4 +153,3 @@ categories = classification_judge.judge(
 - 图谱增强后，分类 Top-K 召回率或人工确认通过率有可量化提升。
 - 每个图谱增强分类均能解释所使用的关系、来源和正文证据。
 - 图谱写入、重试、撤销和重建均有审计记录。
-

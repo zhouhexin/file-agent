@@ -625,6 +625,25 @@ REJECTED
 
 低置信度分类必须进入 `SUGGESTED` 或 `NEEDS_REVIEW`，不能强行分类。
 
+### 11.1.1 Neo4j 图谱增强分类边界
+
+Neo4j 图谱分类采用“可重建投影 + 只读候选增强”模式：
+
+- PostgreSQL、taxonomy v2 配置和受管目录扫描结果仍是业务事实源，Neo4j 不得反向覆盖这些数据。
+- `DocumentClassificationService` 继续作为唯一分类入口；Planner、Graph 节点和 LLM 不得直接访问 Neo4j。
+- Neo4j Driver、Repository、Retriever 和 GraphRAG Adapter 属于运行时依赖，不得进入 `AgentGraphState`、checkpoint 或 `graph_state_json`。
+- 图谱只接收稳定业务 ID、分类候选和关系元数据，不得写入文件全文、OCR 全文、密钥或服务器绝对路径。
+- `SUGGESTED` 分类不得成为可信传播来源；只有人工确认、人工修正后的结构化分类，或明确标记为已分好类目录中的受控弱样本可以参与图谱支持。
+- 图谱候选不能绕过 taxonomy 白名单、正文证据和用户确认；图谱与正文冲突时必须进入 `NEEDS_REVIEW`。
+- 所有 Cypher 必须来自后端固定参数化模板，禁止 LLM 生成 Cypher 写语句，禁止普通用户使用 Text2Cypher。
+- 图谱关闭、未安装依赖、连接失败或查询超时时，上传、解析、OCR 和基础分类必须无损降级。
+- `neo4j-graphrag-python` 必须封装在项目 Adapter 后面；第一版本不使用实验性自动构图覆盖现有解析和分类链路。
+
+整体方案和第一版本实施依据分别为：
+
+- `docs/neo4j-graph-classification-overall-plan.md`
+- `docs/neo4j-graph-classification-v1-implementation-plan.md`
+
 ### 11.2 证据规则
 
 关键结论必须能定位到：
@@ -700,7 +719,9 @@ OperationPlan 必须展示：
 - 当前是否已执行。
 - 用户确认方式。
 
-当前阶段 OperationPlan 已支持受管目录文件的 Native/F2 重命名闭环：只有部署配置显式允许重命名的受管根目录，才能生成包含正文提取证据的 `RENAME_FILES` 计划；普通用户可以确认自己创建的计划，确认后按统一批次执行器协议执行并写入 `FILENAME_CHANGED` 或失败 ChangeItem。默认执行器必须是 `native`。自动建议发生目标名称冲突时，基础名称视为第一版，后续名称必须在扩展名前依次追加 `_第二版`、`_第三版` 等中文版本后缀；文件系统、`managed_files` 索引和同一批次待执行目标都必须参与冲突判断，仍不得覆盖既有文件。F2 只能作为固定版本、离线部署的受控 Adapter，必须先 dry-run 并与 OperationPlan 完全比对，禁止由 F2 自行修复冲突、覆盖、处理隐藏文件、目录改名、跨目录移动和全局 undo；版本后缀必须由后端在 OperationPlan 创建前确定。F2 不参与正文理解、年份/文号/标题提取或目标名称生成。执行器对象属于 `AgentRuntimeContext`/请求级运行依赖，不得进入 `AgentGraphState`。自动提取为 `NEEDS_REVIEW` 的项目必须跳过原批次，并持久化为当前用户、当前会话的待复核项。用户按“文件原文件名更正为新文件名”明确提供名称时，该消息可视为本次更正的执行确认，但后端仍必须先创建 `RENAME_FILES` OperationPlan 和 OperationConfirmation，再调用确认执行 Tool 并写 ChangeSet；不得直接绕过计划修改文件。用户手工更正时，原文件名匹配多个待复核项或手工目标名称重复必须列出候选或冲突提示，冲突项不得阻塞同一消息中其他唯一文件。用户回复“不需要”时只关闭待复核项，不修改文件。移动、删除、覆盖和上传原件改名仍不得真实执行，也不得伪造文件变更 ChangeSet。
+当前阶段 OperationPlan 已支持受管目录文件的 Native/F2 重命名闭环：只有部署配置显式允许重命名的受管根目录，才能生成包含正文提取证据的 `RENAME_FILES` 计划；普通用户可以确认自己创建的计划，确认后按统一批次执行器协议执行并写入 `FILENAME_CHANGED` 或失败 ChangeItem。默认执行器必须是 `native`。自动建议发生目标名称冲突时，基础名称视为第一版，后续名称必须在扩展名前依次追加 `_第二版`、`_第三版` 等中文版本后缀；文件系统、`managed_files` 索引和同一批次待执行目标都必须参与冲突判断，仍不得覆盖既有文件。F2 只能作为固定版本、离线部署的受控 Adapter，必须先 dry-run 并与 OperationPlan 完全比对，禁止由 F2 自行修复冲突、覆盖、处理隐藏文件、目录改名、跨目录移动和全局 undo；版本后缀必须由后端在 OperationPlan 创建前确定。F2 不参与正文理解、年份/文号/标题提取或目标名称生成。执行器对象属于 `AgentRuntimeContext`/请求级运行依赖，不得进入 `AgentGraphState`。自动提取为 `NEEDS_REVIEW` 的项目必须跳过原批次，并持久化为当前用户、当前会话的待复核项。用户按“文件原文件名更正为新文件名”明确提供名称时，该消息可视为本次更正的执行确认，但后端仍必须先创建 `RENAME_FILES` OperationPlan 和 OperationConfirmation，再调用确认执行 Tool 并写 ChangeSet；不得直接绕过计划修改文件。用户手工更正时，原文件名匹配多个待复核项或手工目标名称重复必须列出候选或冲突提示，冲突项不得阻塞同一消息中其他唯一文件。用户回复“不需要”时只关闭待复核项，不修改文件。
+
+当前阶段还支持上传附件的临时存储重命名：Planner 必须保留后端已经解析的明确 `document_ids`，`generate-rename-suggestions` 读取 `document_pages` 后生成 `RENAME_UPLOADED_FILES` OperationPlan；用户确认后，受控执行器只改变该 Document 的逻辑文件名和私有临时存储 basename，并写入 `FILENAME_CHANGED`、ToolInvocation、ChangeSet 和逐文件结果。此链路当前不生成分类建议、不选择受管目录、不执行正式归档；目标路径必须由后端固定为 Document 私有临时目录，不能接受 LLM 或计划中的任意路径。底层 FileObject 被多个 Document 或受管快照共享时必须写时复制，不能影响其他引用。Document 级幂等复用只允许同一用户、同一工作区、同一文件名、同一内容且仍为 `UPLOADED` 的草稿；已进入消息或来自受管快照的 Document 不能作为新上传结果复用，内容去重只能复用 FileObject。移动、删除和覆盖仍不得真实执行；没有白名单执行器的 OperationPlan 确认必须失败并保持待确认，不得伪造 `EXECUTED` 或文件变更 ChangeSet。
 
 旧版 `.xls` 必须优先使用 `xlrd>=2.0.1` 直接只读解析，失败后才允许尝试可选 LibreOffice 转换；当前部署不强制安装 LibreOffice，后续出现实际兼容性缺口时再启用。表格正文解析失败时，只允许 `.xls/.xlsx/.xlsm/.csv/.tsv` 使用高结构化文件名回退生成重命名建议；解析失败仍必须落库，文件名回退只能用于命名，不得作为正文、分类或事实证据。
 
