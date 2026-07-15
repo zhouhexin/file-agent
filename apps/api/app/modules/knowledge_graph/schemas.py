@@ -93,12 +93,75 @@ class ConfirmedClassificationProjection:
 
 
 @dataclass(frozen=True, slots=True)
+class SuggestedClassificationProjection:
+    """系统基于正文生成的多标签建议关系投影。"""
+
+    document_version_id: str
+    category_graph_key: str
+    suggestion_id: str
+    confidence: float
+    status: str
+    source: str
+
+
+@dataclass(frozen=True, slots=True)
 class LocatedInProjection:
     """文件版本位于受管目录中的关系投影。"""
 
     document_version_id: str
     folder_graph_key: str
     source_type: str = "managed_path"
+
+
+@dataclass(frozen=True, slots=True)
+class PathSuggestionProjection:
+    """受管目录对分类的弱提示关系，不表示人工确认。"""
+
+    document_version_id: str
+    category_graph_key: str
+    folder_graph_key: str
+    profile_version: str
+    confidence: float = 0.35
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentEmbeddingProjection:
+    """准备写入 Neo4j 的文档级聚合向量。"""
+
+    document_version_id: str
+    document_id: str
+    sha256: str
+    filename: str
+    embedding: tuple[float, ...]
+    embedding_model: str
+    embedding_version: str
+    embedding_dimension: int
+    successful_chunks: int
+    failed_chunks: int
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticCategorySupport:
+    """相似文档为分类提供的脱敏语义支持。"""
+
+    category_id: str
+    graph_key: str
+    category_path: list[str]
+    semantic_score: float
+    support_count: int
+    source: str = "confirmed_history"
+    taxonomy_key: str = ""
+    taxonomy_version: str = ""
+    name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class GraphSemanticResult:
+    """语义分类召回结果。"""
+
+    status: str
+    candidates: list[SemanticCategorySupport] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +173,7 @@ class ProjectionSummary:
     root_count: int = 0
     folder_count: int = 0
     document_version_count: int = 0
+    suggested_relation_count: int = 0
     confirmed_relation_count: int = 0
 
 

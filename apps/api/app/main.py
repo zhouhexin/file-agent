@@ -12,6 +12,7 @@ from app.core.logging import cleanup_old_logs, log_context, log_event, new_reque
 from app.modules.agent.router import agent_runs_router, router as agent_router
 from app.modules.auth.router import router as auth_router
 from app.modules.changesets.router import router as changesets_router
+from app.modules.classification.router import router as classification_router
 from app.modules.conversations.router import router as conversations_router
 from app.modules.files.router import router as files_router
 from app.modules.managed_files.router import router as managed_files_router
@@ -100,6 +101,7 @@ app.include_router(agent_router)
 app.include_router(agent_runs_router)
 app.include_router(auth_router)
 app.include_router(changesets_router)
+app.include_router(classification_router)
 app.include_router(conversations_router)
 app.include_router(files_router)
 app.include_router(managed_files_router)

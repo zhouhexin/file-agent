@@ -56,6 +56,11 @@ SPREADSHEET_VALIDATE_HINTS = {"validate_spreadsheet", "validate-spreadsheet"}
 MANAGED_FILE_LIST_HINTS = {"managed_file_list", "managed-file-list"}
 MANAGED_FILE_READ_HINTS = {"managed_file_read", "managed-file-read-document", "read_managed_file"}
 MANAGED_FILE_RENAME_HINTS = {"suggest_rename", "generate-rename-suggestions", "file_rename"}
+MANAGED_FILE_CLASSIFICATION_HINTS = {
+    "managed_file_classification",
+    "classify-managed-files",
+    "classify_managed_files",
+}
 MCP_FILESYSTEM_HINTS = {"mcp_filesystem_read", "mcp-filesystem-list", "mcp-filesystem-search", "mcp-filesystem-info"}
 SPREADSHEET_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".csv", ".tsv"}
 MANAGED_EXTENSION_ALIASES = {
@@ -200,6 +205,21 @@ class DeterministicPlanner:
                 path_prefix=managed_rename_filters.get("path_prefix"),
                 extension=managed_rename_filters.get("extension"),
                 filename_contains=managed_rename_filters.get("filename_contains"),
+                route_source="deterministic_planner",
+            )
+
+        managed_classification_filters = _managed_file_classification_filters_from_request(
+            message=message,
+            lowered=lowered,
+        )
+        if managed_classification_filters and not attachments:
+            return _managed_file_classification_plan(
+                user_goal=message,
+                root_key=managed_classification_filters.get("root_key"),
+                path_prefix=managed_classification_filters.get("path_prefix"),
+                extension=managed_classification_filters.get("extension"),
+                filename_contains=managed_classification_filters.get("filename_contains"),
+                force_reprocess=_should_force_reprocess(message=message, lowered=lowered),
                 route_source="deterministic_planner",
             )
 
@@ -556,7 +576,50 @@ def build_plan_from_user_intent(
             route_source="capability_router" if capability_route else "llm_planner",
         )
 
-    managed_read_filters = _managed_file_read_filters_from_request(message=message, lowered=lowered)
+    managed_classification_filters = _managed_file_classification_filters_from_request(
+        message=message,
+        lowered=lowered,
+    ) or {}
+    if (
+        intent_plan.intent == "CLASSIFY_MANAGED_FILES"
+        or requested_capabilities.intersection(MANAGED_FILE_CLASSIFICATION_HINTS)
+        or "classify-managed-files" in intent_plan.tool_plan_hint
+        or (managed_classification_filters and not document_ids)
+    ):
+        has_managed_scope = any(
+            [
+                intent_plan.managed_root_key,
+                intent_plan.managed_path_prefix,
+                intent_plan.managed_extension,
+                intent_plan.managed_filename_contains,
+                *managed_classification_filters.values(),
+            ]
+        )
+        if not has_managed_scope:
+            return _missing_file_scope_plan(user_goal=intent_plan.user_goal or message)
+        return _managed_file_classification_plan(
+            user_goal=intent_plan.user_goal or message,
+            root_key=intent_plan.managed_root_key or managed_classification_filters.get("root_key"),
+            path_prefix=(
+                intent_plan.managed_path_prefix
+                or managed_classification_filters.get("path_prefix")
+            ),
+            extension=intent_plan.managed_extension or managed_classification_filters.get("extension"),
+            filename_contains=(
+                intent_plan.managed_filename_contains
+                or managed_classification_filters.get("filename_contains")
+            ),
+            force_reprocess=_should_force_reprocess(message=message, lowered=lowered),
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
+            llm_intent_plan=intent_plan.model_dump(),
+            route_source="capability_router" if capability_route else "llm_planner",
+        )
+
+    managed_read_filters = _managed_file_read_filters_from_request(
+        message=message,
+        lowered=lowered,
+    ) or {}
     if (
         intent_plan.intent in {"READ_MANAGED_FILE", "SUMMARIZE_MANAGED_FILE", "ANSWER_MANAGED_FILE"}
         or requested_capabilities.intersection(MANAGED_FILE_READ_HINTS)
@@ -1280,6 +1343,80 @@ def _managed_file_read_document_plan(
     )
 
 
+def _managed_file_classification_plan(
+    *,
+    user_goal: str,
+    root_key: str | None,
+    path_prefix: str | None = None,
+    extension: str | None = None,
+    filename_contains: str | None = None,
+    force_reprocess: bool = False,
+    response_style: str = "concise",
+    clarification_question: str | None = None,
+    llm_intent_plan: Dict[str, Any] | None = None,
+    route_source: str = "legacy_planner",
+) -> PlannerOutput:
+    """生成受管目录文件批量分类计划，分类范围不依赖上传附件。"""
+
+    input_json: Dict[str, Any] = {
+        "recursive": True,
+        "force_reprocess": force_reprocess,
+    }
+    if root_key:
+        input_json["root_key"] = root_key
+    if path_prefix:
+        input_json["path_prefix"] = path_prefix
+    if extension:
+        input_json["extension"] = extension
+    if filename_contains:
+        input_json["filename_contains"] = filename_contains
+    return PlannerOutput(
+        intent="CLASSIFY_MANAGED_FILES",
+        user_goal=user_goal,
+        slots={
+            "document_ids": [],
+            "root_key": root_key,
+            "path_prefix": path_prefix,
+            "extension": extension,
+            "filename_contains": filename_contains,
+            "requested_outputs": ["classification", "receipt"],
+            "response_style": response_style,
+            "clarification_question": clarification_question,
+            "llm_intent_plan": llm_intent_plan or {},
+            "route_source": route_source,
+        },
+        selected_skills=[
+            "managed-file-classification",
+            "document-text-extract",
+            "document-classification",
+            "change-report",
+        ],
+        steps=[
+            {
+                "step_id": "step-classify-managed-files",
+                "skill": "managed-file-classification",
+                "tool_name": "classify-managed-files",
+                "input": input_json,
+                "requires_confirmation": False,
+                "risk_level": "low",
+                "expected_outputs": ["document_pages", "classification_suggestions", "receipt"],
+                "writes": [
+                    "documents",
+                    "file_objects",
+                    "document_extraction_runs",
+                    "document_pages",
+                    "document_classification_runs",
+                    "document_category_suggestions",
+                    "change_sets",
+                    "change_items",
+                ],
+            }
+        ],
+        evidence_policy={"require_page_or_cell": True, "allow_no_evidence_answer": True},
+        confirmation_policy={"operation_plan_required": False},
+    )
+
+
 def _classify_files_plan(
     *,
     user_goal: str,
@@ -1449,9 +1586,20 @@ def _should_extract_text(*, message: str, lowered: str) -> bool:
 
 def _should_force_reprocess(*, message: str, lowered: str) -> bool:
     """判断用户是否明确要求跳过缓存重新处理。"""
-    chinese_keywords = ["重新解析", "重新读取", "重新处理", "重跑", "强制重新"]
+    chinese_keywords = [
+        "重新解析",
+        "重新读取",
+        "重新处理",
+        "重新分类",
+        "重新归类",
+        "重跑",
+        "强制重新",
+    ]
     english_keywords = ["reprocess", "rerun", "force reprocess", "parse again"]
-    return any(keyword in message for keyword in chinese_keywords) or any(
+    explicit_reclassification = "重新" in message and any(
+        keyword in message for keyword in ["分类", "归类"]
+    )
+    return explicit_reclassification or any(keyword in message for keyword in chinese_keywords) or any(
         keyword in lowered for keyword in english_keywords
     )
 
@@ -1712,6 +1860,48 @@ def _managed_file_rename_filters_from_request(*, message: str, lowered: str) -> 
     if filename_contains:
         filters["filename_contains"] = filename_contains
     return filters
+
+
+def _managed_file_classification_filters_from_request(
+    *,
+    message: str,
+    lowered: str,
+) -> Dict[str, str] | None:
+    """提取受管目录批量分类请求中的后端可校验范围。"""
+
+    if not _has_classification_intent(message=message, lowered=lowered):
+        return None
+    if _has_classification_summary_intent(message=message):
+        return None
+
+    match = re.search(
+        r"(?P<prefix>[^，。！？]+?)\s*(?:目录下|文件夹下|下|中|里|里面)",
+        message,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    raw_prefix = re.sub(
+        r"^(?:请\s*)?(?:重新\s*)?(?:按正文\s*)?"
+        r"(?:(?:对|把|将|给)\s*)?(?:(?:分类|归类|整理)\s*)?",
+        "",
+        match.group("prefix").strip(),
+    )
+    prefix = _normalize_managed_path_prefix(raw_prefix)
+    filters: Dict[str, str] = {}
+    if prefix:
+        if re.fullmatch(r"[A-Za-z0-9_-]+", prefix):
+            filters["root_key"] = prefix
+        else:
+            filters["path_prefix"] = prefix
+    extension = _managed_extension_from_list_request(message)
+    filename_contains = _managed_filename_contains_from_list_request(message)
+    if extension:
+        filters["extension"] = extension
+    if filename_contains:
+        filters["filename_contains"] = filename_contains
+    return filters or None
 
 
 def _has_rename_intent(*, message: str, lowered: str) -> bool:

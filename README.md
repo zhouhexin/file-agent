@@ -15,6 +15,7 @@ File Agent 不是传统网盘，也不是只会问答的知识库系统。用户
 - `docs/skills-catalog.md`：项目内 Agent Skill 清单。
 - `docs/neo4j-graph-classification-overall-plan.md`：Neo4j 图谱增强分类整体方案。
 - `docs/neo4j-graph-classification-v1-implementation-plan.md`：轻量第一版本实施和验收方案。
+- `docs/neo4j-graph-classification-v2-implementation-plan.md`：真实图谱验证、相似文件语义召回和 Shadow 评测方案。
 - `docs/runbook.md`：本地启动、验证和当前可用接口。
 
 ## 本地运行
@@ -42,7 +43,7 @@ PDF、DOCX 默认启用本地 Docling 结构化解析，并把文档元素和位
 聊天上传附件也可通过 `generate-rename-suggestions` 生成 `RENAME_UPLOADED_FILES` 计划；用户确认后只在该 Document 的私有临时存储目录内改名，并写入 ChangeSet。当前不执行分类、受管目录选择或正式归档；共享物理内容会使用写时复制，避免影响其他 Document 或受管快照。
 默认不启用真实 LLM 调用；如需让对话阶段使用大模型理解用户需求，请在 `.env` 中配置 `LLM_ENABLED=true`、`LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_CHAT_MODEL`。当前 LLM 客户端使用 OpenAI-compatible Chat Completions 接口。
 分类判定默认仍为 `LLM_CLASSIFICATION_MODE=rule_only`。如需让 LLM 在候选分类内做语义判定，可设置 `LLM_CLASSIFICATION_MODE=hybrid`；如需允许 LLM 自由提出新分类路径，还必须显式设置 `LLM_CLASSIFICATION_ALLOW_FREE_PATHS=true`，该类结果只会以 `NEEDS_REVIEW` 保存，不会自动写入正式分类目录。
-Neo4j 图谱增强分类默认关闭。启用前需要安装 `requirements-graph.txt`、配置 Neo4j 并完成首次投影；图谱只增强候选排序，连接失败会自动回退现有分类。具体步骤见 `docs/runbook.md`。
+Neo4j 图谱增强分类默认关闭。第二版本支持目录角色 Profile、完整正文本地 Embedding、固定 `VectorCypherRetriever`、`off/shadow/enabled`、投影运行审计和分类反馈样本；无标注阶段只允许小范围展示建议，连接失败会自动回退现有分类。具体步骤见 `docs/runbook.md`。
 
 消息接口需要先注册、登录并携带 `Authorization: Bearer <access_token>`。示例见 `docs/runbook.md`。
 

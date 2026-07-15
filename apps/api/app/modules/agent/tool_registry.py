@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Type
 
 from pydantic import BaseModel, ValidationError
 
+from app.core.config import get_settings
 from app.core.logging import log_event
 from app.db.models import Document, DocumentCategorySuggestion, DocumentClassificationRun, DocumentInsight
 from app.modules.agent.capabilities.service import load_agent_capabilities
@@ -31,6 +32,7 @@ from app.modules.agent.tool_schemas import (
     GenerateRenameSuggestionsInput,
     IntentSummaryInput,
     JobStatusReadInput,
+    ManagedFileClassificationInput,
     ManagedFileListInput,
     ManagedFileReadDocumentInput,
     ManagedFileSearchInput,
@@ -202,6 +204,8 @@ class ToolRegistry:
 def _tool_invocation_status(output: Dict[str, Any]) -> str:
     """根据 Tool 业务输出确定审计状态，避免失败结果被记录为完成。"""
 
+    if output.get("status") == "PENDING":
+        return "PENDING"
     if output.get("ok") is False or output.get("status") == "FAILED":
         return "FAILED"
     if output.get("status") == "PARTIAL":
@@ -666,8 +670,9 @@ def _managed_file_read_document_handler(db: Any, user_id: str | None) -> ToolHan
             root_key=getattr(tool_input, "root_key", None),
             path_prefix=getattr(tool_input, "path_prefix", None) or getattr(tool_input, "relative_path", None),
         )
-        sync_configured_managed_roots(db, root_key=scope.root_key, scan=True)
-        db.commit()
+        if bool(getattr(tool_input, "scan_before_read", True)):
+            sync_configured_managed_roots(db, root_key=scope.root_key, scan=True)
+        db.flush()
         if scope.unresolved_root_key:
             return {
                 "ok": False,
@@ -751,6 +756,125 @@ def _managed_file_read_document_handler(db: Any, user_id: str | None) -> ToolHan
             "extraction_results": extraction_results,
             "source": "managed-file-read-document",
         }
+
+    return handler
+
+
+def _managed_file_classification_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """创建受管目录批量分类入口，并复用受控快照与全文解析实现。"""
+
+    read_handler = _managed_file_read_document_handler(db, user_id)
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """返回标准解析结果，后续统一由 Graph 全文分类服务消费。"""
+
+        if db is None:
+            return {"ok": False, "status": "FAILED", "error": {"code": "DB_REQUIRED", "message": "受管文件分类需要数据库会话。"}}
+        if user_id is None:
+            return {"ok": False, "status": "FAILED", "error": {"code": "AUTH_REQUIRED", "message": "受管文件分类需要当前用户。"}}
+        scope = resolve_managed_file_query_scope(
+            root_key=getattr(tool_input, "root_key", None),
+            path_prefix=getattr(tool_input, "path_prefix", None),
+        )
+        sync_configured_managed_roots(db, root_key=scope.root_key, scan=True)
+        db.flush()
+        if scope.unresolved_root_key:
+            return {
+                "ok": False,
+                "status": "FAILED",
+                "error": {"code": "MANAGED_ROOT_NOT_FOUND", "message": "未找到对应的受管目录。"},
+            }
+        sync_limit = get_settings().managed_file_classification_sync_limit
+        repository = ManagedFileRepository(db)
+        preview_rows = repository.list_files(
+            root_key=scope.root_key,
+            root_keys=scope.configured_root_keys if scope.root_key is None else None,
+            path_prefix=scope.path_prefix,
+            extension=getattr(tool_input, "extension", None),
+            filename_contains=getattr(tool_input, "filename_contains", None),
+            status="ACTIVE",
+            limit=sync_limit + 1,
+            offset=0,
+        )
+        if not preview_rows:
+            return {
+                "ok": False,
+                "status": "FAILED",
+                "error": {"code": "MANAGED_FILE_NOT_FOUND", "message": "未找到匹配的受管文件。"},
+            }
+        if len(preview_rows) > sync_limit:
+            conversation_id = str(getattr(tool_input, "conversation_id", None) or "")
+            agent_run_id = str(getattr(tool_input, "agent_run_id", None) or "")
+            if not conversation_id or not agent_run_id:
+                return {
+                    "ok": False,
+                    "status": "FAILED",
+                    "error": {
+                        "code": "ASYNC_JOB_CONTEXT_REQUIRED",
+                        "message": "大批量受管文件分类缺少 AgentRun 上下文。",
+                    },
+                }
+            distinct_root_ids = {root.id for _managed_file, root in preview_rows}
+            job = FilesystemJobQueue(db).create_job(
+                job_type="CLASSIFY_MANAGED_FILES",
+                root_id=next(iter(distinct_root_ids)) if len(distinct_root_ids) == 1 else None,
+                created_by=user_id,
+                payload={
+                    "user_id": user_id,
+                    "conversation_id": conversation_id,
+                    "agent_run_id": agent_run_id,
+                    "root_key": scope.root_key,
+                    "configured_root_keys": scope.configured_root_keys,
+                    "path_prefix": scope.path_prefix,
+                    "extension": getattr(tool_input, "extension", None),
+                    "filename_contains": getattr(tool_input, "filename_contains", None),
+                    "recursive": bool(getattr(tool_input, "recursive", True)),
+                    "force_reprocess": bool(getattr(tool_input, "force_reprocess", False)),
+                },
+            )
+            job.progress_total = repository.count_files(
+                root_key=scope.root_key,
+                root_keys=scope.configured_root_keys if scope.root_key is None else None,
+                path_prefix=scope.path_prefix,
+                extension=getattr(tool_input, "extension", None),
+                filename_contains=getattr(tool_input, "filename_contains", None),
+                status="ACTIVE",
+            )
+            db.flush()
+            return {
+                "ok": True,
+                "status": "PENDING",
+                "kind": "filesystem_job",
+                "async_job": True,
+                "job_id": job.id,
+                "async_job_id": job.id,
+                "job_type": job.job_type,
+                "matched_count": job.progress_total,
+                "source": "classify-managed-files",
+            }
+
+        read_input = ManagedFileReadDocumentInput(
+            root_key=getattr(tool_input, "root_key", None),
+            path_prefix=getattr(tool_input, "path_prefix", None),
+            extension=getattr(tool_input, "extension", None),
+            filename_contains=getattr(tool_input, "filename_contains", None),
+            force_reprocess=bool(getattr(tool_input, "force_reprocess", False)),
+            scan_before_read=False,
+        )
+        output = read_handler(read_input)
+        output["source"] = "classify-managed-files"
+        output["classification_requested"] = True
+        output["classification_force_reprocess"] = bool(
+            getattr(tool_input, "force_reprocess", False)
+        )
+        for item in output.get("extraction_results", []):
+            if isinstance(item, dict):
+                item["source"] = "classify-managed-files"
+                item["classification_requested"] = True
+                item["classification_force_reprocess"] = bool(
+                    getattr(tool_input, "force_reprocess", False)
+                )
+        return output
 
     return handler
 
@@ -1344,6 +1468,7 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("managed-file-list", "List server managed files by logical metadata filters.", ManagedFileListInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_list_handler(db)),
         _tool("managed-file-search", "Search server managed files by filename keyword.", ManagedFileSearchInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_search_handler(db)),
         _tool("managed-file-read-document", "Read one server managed file by logical filters, snapshot it as a document, and extract text.", ManagedFileReadDocumentInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages"], _managed_file_read_document_handler(db, user_id)),
+        _tool("classify-managed-files", "Snapshot, extract and classify files selected from a server managed directory.", ManagedFileClassificationInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages", "document_classification_runs", "document_category_suggestions", "change_sets", "change_items"], _managed_file_classification_handler(db, user_id)),
         _tool("generate-rename-suggestions", "Generate controlled rename suggestions for uploaded attachments or managed files and persist an OperationPlan without changing source files.", GenerateRenameSuggestionsInput, True, False, ["document_pages", "operation_plans"], _generate_rename_suggestions_handler(db, user_id)),
         _tool("resolve-rename-reviews", "Resolve pending rename reviews from explicit user corrections and immediately execute a confirmed OperationPlan.", ResolveRenameReviewsInput, True, False, ["operation_plans", "operation_confirmations", "change_sets", "change_items"], _resolve_rename_reviews_handler(db, user_id)),
         _tool("managed-root-scan", "Create an async scan job for a managed logical root.", ManagedRootScanInput, True, False, ["filesystem_jobs", "filesystem_job_events"], _managed_root_scan_handler(db, user_id)),

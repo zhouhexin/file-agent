@@ -48,6 +48,7 @@ class ClassificationRepository:
         taxonomy_version: str,
         status: str,
         source: str = "rule",
+        classifier_version: str = "taxonomy-rule-v1",
         error_message: str | None = None,
     ) -> DocumentClassificationRun:
         """创建一个文件在本次 AgentRun 中的分类运行记录。"""
@@ -57,7 +58,7 @@ class ClassificationRepository:
             document_id=document_id,
             taxonomy_key=taxonomy_key,
             taxonomy_version=taxonomy_version,
-            classifier_version="taxonomy-rule-v1",
+            classifier_version=classifier_version,
             source=source,
             status=status,
             error_message=error_message,
@@ -79,6 +80,8 @@ class ClassificationRepository:
         suggestion = DocumentCategorySuggestion(
             classification_run_id=classification_run_id,
             document_id=document_id,
+            document_version_id=document_id,
+            category_id=str(category.get("category_id") or ""),
             category_name=str(category.get("name") or "其他"),
             category_path_json=list(category.get("category_path") or [category.get("name") or "其他"]),
             taxonomy_key=str(category.get("taxonomy_key") or ""),
@@ -86,6 +89,8 @@ class ClassificationRepository:
             confidence=float(category.get("confidence") or 0),
             status=str(category.get("status") or "SUGGESTED"),
             evidence_json=list(category.get("evidence_items") or category.get("evidence") or []),
+            candidate_scores_json=dict(category.get("candidate_scores") or {}),
+            semantic_evidence_json=dict(category.get("semantic_evidence") or {}),
             source=str(category.get("source") or "rule"),
             rank=rank,
         )

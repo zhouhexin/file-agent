@@ -139,7 +139,10 @@ def _append_items_for_result(
     document_id = str(result.get("document_id") or "")
     target_document_id = document_id or None
     is_managed_file = result.get("source_kind") == "managed_file"
-    result_source = "managed-file-read-document" if is_managed_file else "extract-document-text"
+    result_source = str(
+        result.get("source")
+        or ("managed-file-read-document" if is_managed_file else "extract-document-text")
+    )
     managed_file_id = str(result.get("managed_file_id") or "") or None
     snapshot_status = str(result.get("snapshot_status") or "")
     if is_managed_file and snapshot_status in {"CREATED", "REUSED"}:

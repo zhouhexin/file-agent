@@ -164,6 +164,8 @@ def build_graph_classification_context(settings: Any) -> GraphClassificationCont
 
     if not settings.graph_classification_enabled:
         return NoOpGraphClassificationContext()
+    if getattr(settings, "graph_classification_mode", "enabled") == "off":
+        return NoOpGraphClassificationContext(reason="GRAPH_MODE_OFF")
     if not settings.neo4j_uri or not settings.neo4j_username or not settings.neo4j_password:
         return UnavailableGraphClassificationContext(reason="GRAPH_CONFIGURATION_MISSING")
     try:

@@ -3,6 +3,7 @@
 这些测试使用隔离 SQLite 临时库，只验证 ORM 和服务边界；生产目标数据库仍是 PostgreSQL。
 """
 
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -22,6 +23,7 @@ from app.db.models import (
     DocumentClassificationRun,
     DocumentExtractionRun,
     FileObject,
+    FilesystemJob,
     DocumentPage,
     ManagedFile,
     ManagedRoot,
@@ -34,12 +36,19 @@ from app.modules.agent.repository import AgentRunRepository
 from app.modules.agent.service import AgentRuntimeService
 from app.modules.changesets.service import persist_changeset_from_document_results
 from app.modules.classification.classifier_service import DocumentClassificationService
+from app.modules.classification.managed_catalog import GlobalManagedCategoryCatalogService
 from app.modules.classification.service import persist_document_results_classifications
 from app.modules.agent.context import AgentContextLoader
 from app.modules.conversations.repository import ConversationRepository
 from app.modules.conversations.schemas import MessageAttachment, SendMessageRequest
 from app.modules.conversations.service import ConversationMessageService
 from app.modules.llm.schemas import UserIntentPlan
+from app.modules.managed_files.worker import _process_job
+from app.modules.knowledge_graph.managed_path_profile import (
+    ManagedPathProfileRegistry,
+    ManagedPathRule,
+    ManagedRootClassificationProfile,
+)
 
 
 def _client_with_database() -> TestClient:
@@ -141,6 +150,7 @@ def test_post_message_persists_message_agent_run_and_tool_invocations():
     assert data["message"]["conversation_id"] == "conv-1"
     assert data["agent_run"]["status"] == "COMPLETED"
     assert [item["tool_name"] for item in data["agent_run"]["tool_invocations"]] == ["extract-document-text"]
+    assert data["agent_run"]["document_results"][0]["categories"][0]["suggestion_id"]
 
     db = next(app.dependency_overrides[get_db]())
     try:
@@ -445,7 +455,7 @@ def test_document_classification_service_reads_full_document_pages():
 
 
 def test_document_classification_service_prefers_managed_path_categories_when_available():
-    """存在已分类受管目录时，分类服务应优先使用子目录作为动态分类候选。"""
+    """存在审核后的分类来源目录时，分类服务应使用全局受管分类候选。"""
 
     client = _client_with_database()
     headers = _auth_header(client, username="managed-path-classification-user")
@@ -494,7 +504,28 @@ def test_document_classification_service_prefers_managed_path_categories_when_av
         )
         db.flush()
 
-        result = DocumentClassificationService(db=db).classify(
+        registry = ManagedPathProfileRegistry(
+            profiles={
+                root.root_key: ManagedRootClassificationProfile(
+                    root_key=root.root_key,
+                    version="v1",
+                    rules=(
+                        ManagedPathRule(
+                            path_prefix="奖学金/国家励志奖学金",
+                            role="CATEGORY",
+                            category_path=("奖学金", "国家励志奖学金"),
+                        ),
+                    ),
+                )
+            }
+        )
+        result = DocumentClassificationService(
+            db=db,
+            managed_catalog_service=GlobalManagedCategoryCatalogService(
+                db=db,
+                profile_registry=registry,
+            ),
+        ).classify(
             document_id=document_id,
             extraction_run_id=run.id,
             filename="国家励志奖学金申请表.txt",
@@ -502,9 +533,9 @@ def test_document_classification_service_prefers_managed_path_categories_when_av
 
         assert result["categories"][0]["name"] == "奖学金/国家励志奖学金"
         assert result["categories"][0]["category_path"] == ["奖学金", "国家励志奖学金"]
-        assert result["categories"][0]["taxonomy_key"] == "managed_path_categories"
-        assert result["categories"][0]["source"] == "managed_path"
-        assert result["categories"][0]["evidence_items"][0]["source"] == "managed_path"
+        assert result["categories"][0]["taxonomy_key"] == "managed_global_categories"
+        assert result["categories"][0]["source"] == "managed_global_catalog"
+        assert result["categories"][0]["evidence_items"][0]["source"] == "managed_global_catalog"
     finally:
         db.close()
         app.dependency_overrides.clear()
@@ -946,6 +977,203 @@ def test_managed_file_partial_batch_persists_partial_changeset(monkeypatch, tmp_
         assert "DOCUMENT_PROCESSING_FAILED" in change_types
         assert "TEXT_EXTRACTED" in change_types
         assert "DOCUMENT_PAGES_CREATED" in change_types
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_managed_directory_classification_uses_global_catalog_and_persists_suggestions(
+    monkeypatch,
+    tmp_path,
+):
+    """受管目录分类必须读取正文、使用全局候选并保存多标签建议。"""
+
+    managed_root = tmp_path / "classified-library"
+    category_dir = managed_root / "人事处" / "职称评定"
+    pending_dir = managed_root / "待分类"
+    category_dir.mkdir(parents=True)
+    pending_dir.mkdir(parents=True)
+    (category_dir / "历史样本.txt").write_text("职称评定历史材料", encoding="utf-8")
+    (pending_dir / "申报材料.txt").write_text(
+        "本材料用于教师职称评定和申报审核。",
+        encoding="utf-8",
+    )
+    profile_dir = tmp_path / "profiles"
+    profile_dir.mkdir()
+    (profile_dir / "classified_library.json").write_text(
+        json.dumps(
+            {
+                "root_key": "classified_library",
+                "version": "v1",
+                "rules": [
+                    {
+                        "path_prefix": "人事处/职称评定",
+                        "role": "CATEGORY",
+                        "category_path": ["人事处", "职称评定"],
+                    },
+                    {"path_prefix": "待分类", "role": "TEMPORARY"},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_CLASSIFIED_LIBRARY", str(managed_root))
+    monkeypatch.setenv(
+        "MANAGED_ROOT_CLASSIFIED_LIBRARY_CLASSIFICATION_MODE",
+        "PATH_AS_CATEGORY",
+    )
+    monkeypatch.setenv("MANAGED_PATH_CLASSIFICATION_PROFILE_DIR", str(profile_dir))
+    get_settings.cache_clear()
+    client = _client_with_database()
+    headers = _auth_header(client, username="managed-classification-user")
+
+    response = client.post(
+        "/api/conversations/managed-classification-conv/messages",
+        headers=headers,
+        json={"content": "对待分类下文件进行分类", "attachments": []},
+    )
+    second_response = client.post(
+        "/api/conversations/managed-classification-conv/messages",
+        headers=headers,
+        json={"content": "对待分类下文件进行分类", "attachments": []},
+    )
+
+    assert response.status_code == 200
+    assert second_response.status_code == 200
+    agent_run = response.json()["agent_run"]
+    second_run = second_response.json()["agent_run"]
+    assert agent_run["intent"] == "CLASSIFY_MANAGED_FILES"
+    assert [item["tool_name"] for item in agent_run["tool_invocations"]] == [
+        "classify-managed-files"
+    ]
+    assert len(agent_run["document_results"]) == 1
+    result = agent_run["document_results"][0]
+    assert result["relative_path"] == "待分类/申报材料.txt"
+    assert result["categories"][0]["category_path"] == ["人事处", "职称评定"]
+    assert result["categories"][0]["category_id"].startswith("managed.global.")
+    assert result["categories"][0]["status"] == "SUGGESTED"
+    assert result["classification_reused"] is False
+    assert second_run["document_results"][0]["classification_reused"] is True
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        assert db.query(DocumentClassificationRun).count() == 2
+        suggestions = db.query(DocumentCategorySuggestion).all()
+        assert len(suggestions) == 2
+        assert suggestions[0].category_path_json == ["人事处", "职称评定"]
+        assert (
+            db.query(ChangeItem)
+            .filter(ChangeItem.change_type == "CATEGORY_SUGGESTED")
+            .count()
+            == 1
+        )
+        assert (
+            db.query(ChangeItem)
+            .filter(ChangeItem.change_type == "CATEGORY_SUGGESTION_REUSED")
+            .count()
+            == 1
+        )
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_large_managed_directory_classification_job_updates_original_agent_run(
+    monkeypatch,
+    tmp_path,
+):
+    """大批量分类必须异步执行，并把逐文件结果回写原 AgentRun。"""
+
+    managed_root = tmp_path / "classified-library"
+    category_dir = managed_root / "人事处" / "职称评定"
+    pending_dir = managed_root / "待分类"
+    category_dir.mkdir(parents=True)
+    pending_dir.mkdir(parents=True)
+    (category_dir / "历史样本.txt").write_text("职称评定历史材料", encoding="utf-8")
+    for index in range(2):
+        (pending_dir / f"申报材料{index + 1}.txt").write_text(
+            "本材料用于教师职称评定和申报审核。",
+            encoding="utf-8",
+        )
+    profile_dir = tmp_path / "profiles"
+    profile_dir.mkdir()
+    (profile_dir / "classified_library.json").write_text(
+        json.dumps(
+            {
+                "root_key": "classified_library",
+                "version": "v1",
+                "rules": [
+                    {
+                        "path_prefix": "人事处/职称评定",
+                        "role": "CATEGORY",
+                        "category_path": ["人事处", "职称评定"],
+                    },
+                    {"path_prefix": "待分类", "role": "TEMPORARY"},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_CLASSIFIED_LIBRARY", str(managed_root))
+    monkeypatch.setenv(
+        "MANAGED_ROOT_CLASSIFIED_LIBRARY_CLASSIFICATION_MODE",
+        "PATH_AS_CATEGORY",
+    )
+    monkeypatch.setenv("MANAGED_PATH_CLASSIFICATION_PROFILE_DIR", str(profile_dir))
+    monkeypatch.setenv("MANAGED_FILE_CLASSIFICATION_SYNC_LIMIT", "1")
+    monkeypatch.setenv("MANAGED_FILE_CLASSIFICATION_BATCH_SIZE", "1")
+    get_settings.cache_clear()
+    client = _client_with_database()
+    headers = _auth_header(client, username="managed-async-classification-user")
+
+    response = client.post(
+        "/api/conversations/managed-async-classification-conv/messages",
+        headers=headers,
+        json={"content": "对待分类下文件进行分类", "attachments": []},
+    )
+
+    assert response.status_code == 200
+    initial_run = response.json()["agent_run"]
+    assert initial_run["status"] == "WAITING_FOR_ASYNC_JOB"
+    assert len(initial_run["async_job_ids"]) == 1
+    job_id = initial_run["async_job_ids"][0]
+    job_response = client.get(f"/api/filesystem-jobs/{job_id}", headers=headers)
+    assert job_response.status_code == 200
+    assert job_response.json()["status"] == "PENDING"
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        job = db.get(FilesystemJob, job_id)
+        assert job is not None
+        assert job.status == "PENDING"
+        assert job.progress_total == 2
+        job.status = "RUNNING"
+        _process_job(db=db, job=job)
+        db.commit()
+
+        db.refresh(job)
+        db.expire_all()
+        stored_run = db.get(AgentRun, initial_run["agent_run_id"])
+        assert job.status == "COMPLETED"
+        assert stored_run is not None
+        assert stored_run.status == "COMPLETED"
+        assert len(stored_run.graph_state_json["document_results"]) == 2
+        assert all(
+            item["categories"][0]["category_path"] == ["人事处", "职称评定"]
+            for item in stored_run.graph_state_json["document_results"]
+        )
+        assert db.query(DocumentClassificationRun).count() == 2
+        assert db.query(DocumentCategorySuggestion).count() == 2
+        assert (
+            db.query(ChangeItem)
+            .filter(ChangeItem.change_type == "CATEGORY_SUGGESTED")
+            .count()
+            == 2
+        )
     finally:
         db.close()
         app.dependency_overrides.clear()

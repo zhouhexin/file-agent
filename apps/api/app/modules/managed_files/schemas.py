@@ -18,7 +18,7 @@ class ManagedRootCreateRequest(BaseModel):
 
     root_key: str = Field(min_length=1, max_length=100)
     display_name: str = Field(min_length=1, max_length=200)
-    classification_mode: Literal["NONE", "PATH_AS_CATEGORY"] = "NONE"
+    classification_mode: Literal["NONE", "PATH_AS_CATEGORY", "PATH_AS_WEAK_LABEL"] = "NONE"
 
 
 class ManagedRootResponse(BaseModel):

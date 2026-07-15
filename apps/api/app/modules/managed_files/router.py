@@ -68,6 +68,20 @@ def get_filesystem_job(
     return ManagedFileService(db).get_job(job_id=job_id, current_user=current_user)
 
 
+@router.get("/api/filesystem-jobs/{job_id}", response_model=FilesystemJobResponse)
+def get_user_filesystem_job(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> FilesystemJobResponse:
+    """查询当前用户创建的受管文件异步分类任务。"""
+
+    return ManagedFileService(db).get_user_job(
+        job_id=job_id,
+        current_user=current_user,
+    )
+
+
 @router.get("/api/managed-files", response_model=list[ManagedFileResponse])
 def list_managed_files(
     root_key: str | None = None,

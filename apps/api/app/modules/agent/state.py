@@ -33,6 +33,7 @@ class AgentGraphState(TypedDict, total=False):
     tool_invocations: List[Dict[str, Any]]
     result_summary: Dict[str, Any]
     document_results: List[Dict[str, Any]]
+    async_job_ids: List[str]
     changeset_id: Optional[str]
     operation_plan_id: Optional[str]
     final_response: Optional[str]
@@ -69,6 +70,7 @@ class AgentRunResult(BaseModel):
     tool_invocations: List[ToolInvocationRecord]
 
     document_results: List[Dict[str, Any]] = Field(default_factory=list)
+    async_job_ids: List[str] = Field(default_factory=list)
 
     changeset_id: Optional[str] = None
     operation_plan_id: Optional[str] = None

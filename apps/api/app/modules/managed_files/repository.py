@@ -129,8 +129,8 @@ class ManagedFileRepository:
             # 用户说“2026年的文件”时，年份可能在文件名里，也可能是相对目录的一段。
             query = query.filter(
                 or_(
-                    ManagedFile.filename.contains(filename_contains),
-                    ManagedFile.relative_path.contains(filename_contains),
+                    ManagedFile.filename.contains(filename_contains, autoescape=True),
+                    ManagedFile.relative_path.contains(filename_contains, autoescape=True),
                 )
             )
         if status:
@@ -154,6 +154,7 @@ class ManagedFileRepository:
                 func.count(ManagedFile.id),
             )
             .join(ManagedRoot, ManagedFile.root_id == ManagedRoot.id)
+            .filter(ManagedRoot.enabled.is_(True))
             .filter(ManagedRoot.classification_mode == "PATH_AS_CATEGORY")
             .filter(ManagedFile.status == "ACTIVE")
             .filter(ManagedFile.category_path.isnot(None))
@@ -166,6 +167,81 @@ class ManagedFileRepository:
             .order_by(ManagedRoot.root_key.asc(), ManagedFile.category_path.asc())
             .all()
         )
+
+    def count_files(
+        self,
+        *,
+        root_key: str | None = None,
+        root_keys: list[str] | None = None,
+        path_prefix: str | None = None,
+        extension: str | None = None,
+        filename_contains: str | None = None,
+        status: str | None = None,
+    ) -> int:
+        """按批量任务过滤条件统计非隐藏受管文件数量。"""
+
+        query = self.db.query(func.count(ManagedFile.id)).join(
+            ManagedRoot,
+            ManagedFile.root_id == ManagedRoot.id,
+        )
+        if root_key:
+            query = query.filter(ManagedRoot.root_key == root_key)
+        elif root_keys is not None:
+            if not root_keys:
+                return 0
+            query = query.filter(ManagedRoot.root_key.in_(root_keys))
+        if path_prefix:
+            normalized_prefix = _normalize_path_prefix(path_prefix)
+            escaped_prefix = _escape_like(normalized_prefix)
+            query = query.filter(
+                or_(
+                    ManagedFile.relative_path == normalized_prefix,
+                    ManagedFile.relative_path.like(f"{escaped_prefix}/%", escape="\\"),
+                    ManagedFile.relative_path.like(f"%/{escaped_prefix}/%", escape="\\"),
+                )
+            )
+        if extension:
+            normalized_extension = extension if extension.startswith(".") else f".{extension}"
+            query = query.filter(ManagedFile.extension == normalized_extension.lower())
+        if filename_contains:
+            query = query.filter(
+                or_(
+                    ManagedFile.filename.contains(filename_contains, autoescape=True),
+                    ManagedFile.relative_path.contains(filename_contains, autoescape=True),
+                )
+            )
+        if status:
+            query = query.filter(ManagedFile.status == status)
+        query = _exclude_hidden_managed_paths(query)
+        return int(query.scalar() or 0)
+
+    def list_graph_folder_paths(
+        self,
+        *,
+        root_key: str | None = None,
+    ) -> list[tuple[str, str, str, str, int]]:
+        """列出图谱目录投影所需路径，兼容确认分类和弱标签模式。"""
+
+        query = (
+            self.db.query(ManagedRoot, ManagedFile.relative_path)
+            .join(ManagedFile, ManagedFile.root_id == ManagedRoot.id)
+            .filter(ManagedRoot.enabled.is_(True))
+            .filter(ManagedRoot.classification_mode.in_({"PATH_AS_CATEGORY", "PATH_AS_WEAK_LABEL"}))
+            .filter(ManagedFile.status == "ACTIVE")
+        )
+        query = _exclude_hidden_managed_paths(query)
+        if root_key:
+            query = query.filter(ManagedRoot.root_key == root_key)
+
+        counts: dict[tuple[str, str, str, str], int] = {}
+        for root, relative_path in query.yield_per(1000):
+            normalized_path = _normalize_path_prefix(str(relative_path or ""))
+            parent = normalized_path.rsplit("/", 1)[0] if "/" in normalized_path else ""
+            if not parent:
+                continue
+            key = (root.root_key, root.display_name, root.classification_mode, parent)
+            counts[key] = counts.get(key, 0) + 1
+        return [(*key, count) for key, count in sorted(counts.items())]
 
 
 def _normalize_path_prefix(path_prefix: str) -> str:

@@ -30,6 +30,13 @@ DEFAULT_F2_STDOUT_MAX_BYTES = 1024 * 1024
 DEFAULT_NEO4J_QUERY_TIMEOUT_SECONDS = 3
 DEFAULT_GRAPH_CLASSIFICATION_MAX_HOPS = 1
 DEFAULT_GRAPH_CLASSIFICATION_TOP_K = 8
+DEFAULT_GRAPH_CLASSIFICATION_MODE = "off"
+DEFAULT_GRAPH_EMBEDDING_DIMENSION = 384
+DEFAULT_GRAPH_VECTOR_TOP_K = 12
+DEFAULT_GRAPH_PROJECTION_BATCH_SIZE = 500
+DEFAULT_GRAPH_CLASSIFICATION_ROLLOUT_PERCENT = 10
+DEFAULT_GRAPH_FEEDBACK_EVAL_MIN_SAMPLES = 100
+DEFAULT_MANAGED_FILE_CLASSIFICATION_SYNC_LIMIT = 20
 
 
 class Settings(BaseModel):
@@ -75,6 +82,26 @@ class Settings(BaseModel):
     neo4j_sync_enabled: bool = False
     graph_classification_max_hops: int = DEFAULT_GRAPH_CLASSIFICATION_MAX_HOPS
     graph_classification_top_k: int = DEFAULT_GRAPH_CLASSIFICATION_TOP_K
+    graph_classification_mode: str = DEFAULT_GRAPH_CLASSIFICATION_MODE
+    graph_embedding_enabled: bool = False
+    graph_embedding_provider: str = "local"
+    graph_embedding_model_path: str = ""
+    graph_embedding_model_name: str = ""
+    graph_embedding_version: str = "document-semantic-v1"
+    graph_embedding_dimension: int = DEFAULT_GRAPH_EMBEDDING_DIMENSION
+    graph_vector_index_name: str = "document_version_embedding_v1"
+    graph_vector_top_k: int = DEFAULT_GRAPH_VECTOR_TOP_K
+    graph_vector_min_score: float = 0.0
+    graph_projection_worker_enabled: bool = False
+    graph_projection_batch_size: int = DEFAULT_GRAPH_PROJECTION_BATCH_SIZE
+    graph_feedback_collection_enabled: bool = True
+    graph_classification_rollout_percent: int = DEFAULT_GRAPH_CLASSIFICATION_ROLLOUT_PERCENT
+    graph_feedback_eval_min_samples: int = DEFAULT_GRAPH_FEEDBACK_EVAL_MIN_SAMPLES
+    managed_path_classification_profile_dir: str = "./rules/managed-root-classification"
+    managed_path_default_mode: str = "NONE"
+    managed_path_vector_pilot_limit: int = 1000
+    managed_file_classification_sync_limit: int = DEFAULT_MANAGED_FILE_CLASSIFICATION_SYNC_LIMIT
+    managed_file_classification_batch_size: int = 20
 
 
 def find_dotenv_file() -> Path | None:
@@ -198,4 +225,95 @@ def get_settings() -> Settings:
             1,
             min(20, int(os.getenv("GRAPH_CLASSIFICATION_TOP_K", str(DEFAULT_GRAPH_CLASSIFICATION_TOP_K)))),
         ),
+        graph_classification_mode=_choice(
+            os.getenv("GRAPH_CLASSIFICATION_MODE", DEFAULT_GRAPH_CLASSIFICATION_MODE),
+            allowed={"off", "shadow", "enabled"},
+            default=DEFAULT_GRAPH_CLASSIFICATION_MODE,
+        ),
+        graph_embedding_enabled=os.getenv("GRAPH_EMBEDDING_ENABLED", "false").lower() == "true",
+        graph_embedding_provider=os.getenv("GRAPH_EMBEDDING_PROVIDER", "local").strip().lower() or "local",
+        graph_embedding_model_path=os.getenv("GRAPH_EMBEDDING_MODEL_PATH", "").strip(),
+        graph_embedding_model_name=os.getenv("GRAPH_EMBEDDING_MODEL_NAME", "").strip(),
+        graph_embedding_version=os.getenv("GRAPH_EMBEDDING_VERSION", "document-semantic-v1").strip()
+        or "document-semantic-v1",
+        graph_embedding_dimension=max(
+            1,
+            int(os.getenv("GRAPH_EMBEDDING_DIMENSION", str(DEFAULT_GRAPH_EMBEDDING_DIMENSION))),
+        ),
+        graph_vector_index_name=os.getenv(
+            "GRAPH_VECTOR_INDEX_NAME",
+            "document_version_embedding_v1",
+        ).strip()
+        or "document_version_embedding_v1",
+        graph_vector_top_k=max(
+            1,
+            min(50, int(os.getenv("GRAPH_VECTOR_TOP_K", str(DEFAULT_GRAPH_VECTOR_TOP_K)))),
+        ),
+        graph_vector_min_score=max(0.0, min(1.0, float(os.getenv("GRAPH_VECTOR_MIN_SCORE", "0.0")))),
+        graph_projection_worker_enabled=os.getenv("GRAPH_PROJECTION_WORKER_ENABLED", "false").lower() == "true",
+        graph_projection_batch_size=max(
+            1,
+            min(5000, int(os.getenv("GRAPH_PROJECTION_BATCH_SIZE", str(DEFAULT_GRAPH_PROJECTION_BATCH_SIZE)))),
+        ),
+        graph_feedback_collection_enabled=os.getenv("GRAPH_FEEDBACK_COLLECTION_ENABLED", "true").lower() == "true",
+        graph_classification_rollout_percent=max(
+            0,
+            min(
+                100,
+                int(
+                    os.getenv(
+                        "GRAPH_CLASSIFICATION_ROLLOUT_PERCENT",
+                        str(DEFAULT_GRAPH_CLASSIFICATION_ROLLOUT_PERCENT),
+                    )
+                ),
+            ),
+        ),
+        graph_feedback_eval_min_samples=max(
+            1,
+            int(os.getenv("GRAPH_FEEDBACK_EVAL_MIN_SAMPLES", str(DEFAULT_GRAPH_FEEDBACK_EVAL_MIN_SAMPLES))),
+        ),
+        managed_path_classification_profile_dir=os.getenv(
+            "MANAGED_PATH_CLASSIFICATION_PROFILE_DIR",
+            "./rules/managed-root-classification",
+        ).strip()
+        or "./rules/managed-root-classification",
+        managed_path_default_mode=_choice(
+            os.getenv("MANAGED_PATH_DEFAULT_MODE", "NONE"),
+            allowed={"NONE", "PATH_AS_CATEGORY", "PATH_AS_WEAK_LABEL"},
+            default="NONE",
+            normalize=str.upper,
+        ),
+        managed_path_vector_pilot_limit=max(
+            1,
+            int(os.getenv("MANAGED_PATH_VECTOR_PILOT_LIMIT", "1000")),
+        ),
+        managed_file_classification_sync_limit=max(
+            1,
+            min(
+                200,
+                int(
+                    os.getenv(
+                        "MANAGED_FILE_CLASSIFICATION_SYNC_LIMIT",
+                        str(DEFAULT_MANAGED_FILE_CLASSIFICATION_SYNC_LIMIT),
+                    )
+                ),
+            ),
+        ),
+        managed_file_classification_batch_size=max(
+            1,
+            min(200, int(os.getenv("MANAGED_FILE_CLASSIFICATION_BATCH_SIZE", "20"))),
+        ),
     )
+
+
+def _choice(
+    value: str,
+    *,
+    allowed: set[str],
+    default: str,
+    normalize=lambda item: str(item).strip().lower(),
+) -> str:
+    """把枚举型环境变量收敛到受控集合，非法值使用安全默认值。"""
+
+    normalized = normalize(value)
+    return normalized if normalized in allowed else default

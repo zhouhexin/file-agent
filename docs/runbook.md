@@ -510,8 +510,8 @@ ChangeSet 和逐文件结果。
 
 ## 8. Neo4j 图谱增强分类
 
-图谱分类默认关闭。PostgreSQL、taxonomy v2 和受管目录扫描结果仍是事实源；Neo4j 只保存可重建的
-分类层级、目录映射和可信分类关系。普通 `SUGGESTED` 建议不会同步为可信关系。
+图谱分类默认关闭。PostgreSQL、taxonomy v2、分类反馈和受管目录扫描结果仍是事实源；Neo4j 只保存
+可重建分类层级、目录角色、可信或弱分类关系及文档级聚合向量。全文和分块正文不会写入 Neo4j。
 
 本地或非 Docker 环境安装可选依赖：
 
@@ -537,27 +537,87 @@ NEO4J_QUERY_TIMEOUT_SECONDS=3
 NEO4J_SYNC_ENABLED=false
 GRAPH_CLASSIFICATION_MAX_HOPS=1
 GRAPH_CLASSIFICATION_TOP_K=8
+GRAPH_CLASSIFICATION_MODE=off
+GRAPH_EMBEDDING_ENABLED=false
+GRAPH_EMBEDDING_PROVIDER=local
+GRAPH_EMBEDDING_MODEL_PATH=/absolute/path/to/local/model
+GRAPH_EMBEDDING_MODEL_NAME=<model-name>
+GRAPH_EMBEDDING_VERSION=document-semantic-v1
+GRAPH_EMBEDDING_DIMENSION=384
+GRAPH_VECTOR_INDEX_NAME=document_version_embedding_v1
+GRAPH_VECTOR_TOP_K=12
+GRAPH_VECTOR_MIN_SCORE=0.0
+GRAPH_FEEDBACK_COLLECTION_ENABLED=true
+GRAPH_CLASSIFICATION_ROLLOUT_PERCENT=10
+GRAPH_FEEDBACK_EVAL_MIN_SAMPLES=100
+MANAGED_PATH_CLASSIFICATION_PROFILE_DIR=./rules/managed-root-classification
+MANAGED_PATH_DEFAULT_MODE=NONE
+MANAGED_PATH_VECTOR_PILOT_LIMIT=1000
+MANAGED_FILE_CLASSIFICATION_SYNC_LIMIT=20
+MANAGED_FILE_CLASSIFICATION_BATCH_SIZE=20
 ```
+
+受管目录文件分类不超过 `MANAGED_FILE_CLASSIFICATION_SYNC_LIMIT` 时在当前 AgentRun
+内同步完成；超过阈值时创建 `CLASSIFY_MANAGED_FILES` 文件系统任务。部署环境必须同时运行
+filesystem worker：
+
+```bash
+PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
+  -m app.modules.managed_files.worker
+```
+
+worker 使用 `MANAGED_FILE_CLASSIFICATION_BATCH_SIZE` 分页读取文件，并隔离单文件失败。
+普通用户可通过 `GET /api/filesystem-jobs/{job_id}` 查询自己创建的任务；任务完成后会回写
+原 AgentRun、分类建议、ChangeSet 和逐文件回执，聊天页会自动轮询并刷新。
 
 首次上线顺序：
 
 1. 保持 `GRAPH_CLASSIFICATION_ENABLED=false` 发布 API。
-2. 安装图谱依赖并验证 Neo4j 网络连接。
-3. 临时设置 `NEO4J_SYNC_ENABLED=true`，重启一次 API，等待 taxonomy、受管目录和可信分类投影完成。
-4. 访问 `GET /api/health`，确认 `knowledge_graph.status=ok` 且 `graphrag_package=available`。
-5. 设置 `GRAPH_CLASSIFICATION_ENABLED=true`，完成分类 smoke test。
-6. 投影稳定后可以关闭启动同步；taxonomy、目录或反馈变化后再执行同步。
+2. 执行数据库迁移：`python -m alembic -c apps/api/alembic.ini upgrade head`。
+3. 安装图谱依赖，准备本地 Embedding 模型并验证 Neo4j 网络连接。
+4. 为需要弱标签治理的受管根创建 `rules/managed-root-classification/<root_key>.json`；没有 Profile 的弱标签目录保持 `UNKNOWN`。
+5. 执行首次事实投影：
+
+   ```bash
+   PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
+     -m app.modules.knowledge_graph.cli sync-all
+   ```
+
+6. 访问 `GET /api/health`，确认 `knowledge_graph.status=ok`、`graphrag_package=available` 和 `embedding_package=available`。
+7. 设置 `GRAPH_CLASSIFICATION_ENABLED=true`、`GRAPH_EMBEDDING_ENABLED=true`、`GRAPH_CLASSIFICATION_MODE=shadow`，重启并完成分类 smoke test。
+8. 分层生成首批最多 1,000 份文档向量：
+
+   ```bash
+   PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
+     -m app.modules.knowledge_graph.cli sync-embeddings --limit 1000
+   ```
+
+9. Shadow 链路稳定后才设置 `GRAPH_CLASSIFICATION_MODE=enabled`；初始仅按 `GRAPH_CLASSIFICATION_ROLLOUT_PERCENT` 小范围展示建议。
+10. 用户在分类证据展开区明确选择“正确、错误、更正”后，反馈写入 PostgreSQL；未操作不计样本。
+11. 有效反馈达到 `GRAPH_FEEDBACK_EVAL_MIN_SAMPLES` 后冻结分层评测集，离线回放通过并人工批准后才能扩大范围。
+
+分类反馈接口：
+
+```text
+POST /api/classification/suggestions/{suggestion_id}/feedback
+GET  /api/classification/feedback/summary
+```
+
+`sync-all` 和 `sync-embeddings` 都会写入 `graph_projection_runs`。单文件向量失败不会阻塞同批其他文件；
+相同 SHA-256、模型、版本和维度全部一致时复用已有向量。
 
 如果 Neo4j 查询超时或不可用，分类服务会记录 `classification.graph_query.degraded`，并自动回退到现有
 规则/LLM 分类，不中断上传、解析、OCR 和其他文件。立即回滚只需要：
 
 ```text
 GRAPH_CLASSIFICATION_ENABLED=false
+GRAPH_CLASSIFICATION_MODE=off
+GRAPH_EMBEDDING_ENABLED=false
 NEO4J_SYNC_ENABLED=false
 ```
 
-当前第一版本不把全文写入 Neo4j，不启用向量索引、自动 schema、自由构图或 Text2Cypher。
-`neo4j-graphrag-python` 已通过受控 Adapter 预留固定 VectorCypher Retriever，向量召回在第二阶段启用。
+第二版本仍不启用自动实体构图、自由 Cypher、Text2Cypher 或 GraphRAG 文件问答。`VectorCypherRetriever`
+只使用后端固定遍历模板，普通用户响应不会暴露相似来源文件身份。
 
 ## 9. 当前限制
 

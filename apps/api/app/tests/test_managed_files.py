@@ -111,3 +111,50 @@ def test_managed_file_relative_path_hash_is_unique_per_root():
             db.commit()
     finally:
         db.close()
+
+
+def test_filename_filter_treats_sql_wildcards_as_literal_text():
+    """文件名过滤中的百分号和下划线不能扩大列表或批量统计范围。"""
+
+    from app.modules.managed_files.repository import ManagedFileRepository
+
+    db = _session()
+    try:
+        root = ManagedRoot(
+            root_key="downloads",
+            display_name="downloads",
+            container_path="/managed/downloads",
+        )
+        db.add(root)
+        db.flush()
+        for index, filename in enumerate(["完成率100%.txt", "普通材料.txt"], start=1):
+            db.add(
+                ManagedFile(
+                    root_id=root.id,
+                    relative_path=filename,
+                    relative_path_hash=f"hash-filter-{index}",
+                    filename=filename,
+                    extension=".txt",
+                    size_bytes=10,
+                    fingerprint=str(index) * 64,
+                    status="ACTIVE",
+                )
+            )
+        db.flush()
+        repository = ManagedFileRepository(db)
+
+        rows = repository.list_files(
+            root_key="downloads",
+            filename_contains="%",
+            status="ACTIVE",
+        )
+        count = repository.count_files(
+            root_key="downloads",
+            filename_contains="%",
+            status="ACTIVE",
+        )
+
+        assert [file.filename for file, _root in rows] == ["完成率100%.txt"]
+        assert count == 1
+    finally:
+        db.close()

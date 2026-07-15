@@ -35,6 +35,7 @@ MVP Skill 只保留业务编排边界。文件读取、表格读取、chunk、em
 | `document-classification` | 分类编排自研；证据召回可使用 LangChain/LlamaIndex/pgvector adapter；可参考文件整理类 Skill 的“先建议、后确认”模式 | 文档完成解析和索引；或存在 `PATH_AS_CATEGORY` 受管目录可作为动态分类来源 | `multi-label-classify`, `hybrid-search`, `document-lineage-read` | document_categories、动态目录分类建议、置信度、证据、NEEDS_REVIEW 原因 |
 | `file-search` | 使用开源检索 adapter：LangChain、LlamaIndex、pgvector | 用户请求查找文件或材料 | `hybrid-search`, `document-lineage-read` | 分层检索结果、推荐理由 |
 | `managed-file-query` | 不直接使用开源 Skill；自研受管目录元数据查询编排 | 用户请求列出、查看或搜索服务器受管目录文件 | `managed-file-list`, `managed-file-search`, `feedback-record` | 受管目录文件清单、元数据过滤条件、解析反馈样本 |
+| `managed-file-classification` | 分类编排自研；正文解析使用现有 adapter，图谱增强可使用 Neo4j/neo4j-graphrag-python | 用户要求对受管目录范围内的文件分类或重新分类 | `classify-managed-files`, `job-status-read`, `feedback-record` | 同步逐文件多标签结果或异步 Job、分类建议、证据、ChangeSet |
 | `file-rename` | 参考 tfeldmann/organize 与 F2 的规则化批处理思想；第一版使用自研 Native 执行器 | 用户要求按年份、文号和正文标题生成受管文件改名建议 | `generate-rename-suggestions`, `confirmed-file-action` | 字段证据、重命名建议、OperationPlan、确认后的 ChangeSet |
 | `spreadsheet-workbench` | 使用 openpyxl、pandas 和可选 LibreOffice adapter | 用户请求表格 Profile、统计、校验、编辑、重算或格式转换 | `profile-spreadsheet`, `analyze-spreadsheet`, `validate-spreadsheet`, `operation-plan-create`；后续 `edit-spreadsheet`, `recalculate-spreadsheet` | 表结构、只读分析结果、校验报告、待确认编辑计划 |
 | `evidence-answer` | 使用 LangGraph/LangChain 编排和结构化输出；业务证据规则自研 | 用户提出需要回答的问题 | `hybrid-search`, `evidence-answer` | answer、references、无依据说明 |
@@ -69,6 +70,7 @@ feedback-learning + user-memory -> feedback-and-memory
 | `document-classification` | 间接 | 分类证据召回、相似文档检索；受管目录子目录可作为动态分类候选源 | https://github.com/langchain-ai/langchain, https://github.com/run-llama/llama_index, https://github.com/pgvector/pgvector |
 | `file-search` | 是 | 混合检索、retriever/query engine adapter | https://github.com/langchain-ai/langchain, https://github.com/run-llama/llama_index, https://github.com/pgvector/pgvector |
 | `managed-file-query` | 否 | 自研受管目录元数据查询和反馈样本记录 | 无 |
+| `managed-file-classification` | 间接 | Docling/Office/OCR 正文解析与 Neo4j 图谱候选增强 | https://github.com/docling-project/docling, https://github.com/neo4j/neo4j, https://github.com/neo4j/neo4j-graphrag-python |
 | `spreadsheet-workbench` | 是 | 表格 Profile、只读分析、校验、后续编辑和重算 | https://foss.heptapod.net/openpyxl/openpyxl, https://github.com/pandas-dev/pandas, https://www.libreoffice.org |
 | `evidence-answer` | 是 | LangGraph 节点编排、LangChain 结构化输出/Tool 调用 | https://github.com/langchain-ai/langgraph, https://github.com/langchain-ai/langchain |
 | `change-report` | 否 | 自研 ChangeSet 回执 | 无 |
@@ -182,6 +184,7 @@ skills/file-ingest/SKILL.md
 skills/document-classification/SKILL.md
 skills/file-search/SKILL.md
 skills/managed-file-query/SKILL.md
+skills/managed-file-classification/SKILL.md
 skills/spreadsheet-workbench/SKILL.md
 skills/evidence-answer/SKILL.md
 skills/change-report/SKILL.md

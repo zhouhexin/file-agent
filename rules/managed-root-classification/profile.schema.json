@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://file-agent.local/schemas/managed-root-classification-profile.json",
+  "title": "Managed Root Classification Profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["root_key", "version", "rules"],
+  "properties": {
+    "root_key": {"type": "string", "minLength": 1},
+    "version": {"type": "string", "minLength": 1},
+    "default_role": {
+      "type": "string",
+      "enum": ["DEPARTMENT", "CATEGORY", "YEAR", "COLLECTION", "TEMPORARY", "UNKNOWN"],
+      "default": "UNKNOWN"
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path_prefix", "role"],
+        "properties": {
+          "path_prefix": {"type": "string", "minLength": 1},
+          "role": {
+            "type": "string",
+            "enum": ["DEPARTMENT", "CATEGORY", "YEAR", "COLLECTION", "TEMPORARY", "UNKNOWN"]
+          },
+          "category_path": {
+            "oneOf": [
+              {"type": "string"},
+              {"type": "array", "items": {"type": "string"}}
+            ]
+          },
+          "recursive": {"type": "boolean", "default": true}
+        }
+      }
+    }
+  }
+}

@@ -16,6 +16,7 @@ from app.core.logging import log_context, log_event
 from app.modules.agent.planner import build_plan_from_user_intent # 导入一个函数：把 LLM 理解出来的用户意图转换成工具执行计划。
 from app.modules.agent.runtime import AgentRuntimeContext # LangGraph runtime 里要用的上下文类型。这个上下文里会放 planner、registry、context_loader、llm_intent_service 等运行时对象。
 from app.modules.agent.state import AgentGraphState, ToolInvocationRecord # AgentGraphState 是整个图在节点之间传递的状态结构；ToolInvocationRecord 是工具调用记录结构。
+from app.modules.classification.result_builder import build_document_results_from_extraction_results
 from app.modules.llm.client import LLMResponseError
 # 两个表格结果格式化器，用于最终 response 阶段生成自然语言回复。
 from app.modules.spreadsheet_analysis.formatter import format_spreadsheet_analysis_response
@@ -264,7 +265,11 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
             continue
         try:
             tool_input = dict(step["input"])
-            if step["tool_name"] in {"generate-rename-suggestions", "resolve-rename-reviews"}:
+            if step["tool_name"] in {
+                "generate-rename-suggestions",
+                "resolve-rename-reviews",
+                "classify-managed-files",
+            }:
                 # 运行标识来自受信任 State，不能由 LLM 直接提供。
                 tool_input["conversation_id"] = state["conversation_id"]
                 tool_input["agent_run_id"] = state["agent_run_id"]
@@ -351,11 +356,17 @@ def evidence_or_change(state: AgentGraphState, runtime: Runtime[AgentRuntimeCont
         context_documents=state.get("context_documents", []),
         classification_service=runtime.context.classification_service,
     )
+    filesystem_job = result_summary.get("filesystem_job", {})
     return {
         "changeset_id": state.get("changeset_id"),
         "operation_plan_id": state.get("operation_plan_id"),
         "result_summary": result_summary,
         "document_results": result_summary.get("document_results", []),
+        "async_job_ids": (
+            [str(filesystem_job["job_id"])]
+            if filesystem_job.get("job_id")
+            else []
+        ),
     }
 
 
@@ -374,7 +385,7 @@ def _aggregate_tool_results(
     return {
         "spreadsheet_workbench_results": _spreadsheet_workbench_results_from_results(tool_results),
         "spreadsheet_analysis_results": _spreadsheet_analysis_results_from_results(tool_results),
-        "document_results": _document_results_from_extraction_results(
+        "document_results": build_document_results_from_extraction_results(
             extraction_results=extraction_results,
             context_documents=context_documents,
             classification_service=classification_service,
@@ -390,7 +401,17 @@ def _aggregate_tool_results(
         "rename_plan": _rename_plan_from_results(tool_results),
         "rename_review_resolution": _rename_review_resolution_from_results(tool_results),
         "intent_summary": _intent_summary_from_results(tool_results),
+        "filesystem_job": _filesystem_job_from_results(tool_results),
     }
+
+
+def _filesystem_job_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """提取受管目录异步任务回执。"""
+
+    for result in tool_results:
+        if result.get("kind") == "filesystem_job" and result.get("job_id"):
+            return result
+    return {}
 
 
 def _should_classify_documents(state: AgentGraphState) -> bool:
@@ -460,6 +481,17 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                 else "NEEDS_REVIEW"
             ),
             "final_response": _build_rename_review_resolution_response(rename_review_resolution),
+        }
+
+    filesystem_job = result_summary.get("filesystem_job", {})
+    if filesystem_job:
+        return {
+            "status": "WAITING_FOR_ASYNC_JOB",
+            "final_response": (
+                "匹配文件较多，已创建后台分类任务。"
+                f"任务编号：{filesystem_job.get('job_id')}。"
+                "处理完成后将更新本次逐文件分类回执。"
+            ),
         }
 
     document_results = result_summary.get("document_results", [])
@@ -949,66 +981,6 @@ def _build_general_chat_response(intent_summary: Dict[str, Any]) -> str:
     if user_goal in {"你好", "您好", "hello", "hi", "Hello", "Hi"}:
         return "你好，我在。请告诉我你想聊什么。"
     return "我已收到。请继续说明你的需求。"
-
-
-def _document_results_from_extraction_results(
-    *,
-    extraction_results: List[Dict[str, Any]],
-    context_documents: List[Dict[str, Any]],
-    classification_service,
-    include_categories: bool,
-) -> List[Dict[str, Any]]:
-    """把正文解析 Tool 输出聚合成逐文件业务结果。"""
-
-    document_lookup = {
-        str(document.get("document_id")): document
-        for document in context_documents
-        if document.get("document_id")
-    }
-    document_results: List[Dict[str, Any]] = []
-    for result in extraction_results:
-        document_id = str(result.get("document_id") or "")
-        document_context = document_lookup.get(document_id, {})
-        managed_file = result.get("managed_file") if isinstance(result.get("managed_file"), dict) else {}
-        pages = [page for page in result.get("pages", []) if isinstance(page, dict)]
-        char_count = sum(int(page.get("char_count", 0) or 0) for page in pages)
-        text_preview = "\n".join(str(page.get("text_preview") or "") for page in pages)
-        error = result.get("error") if isinstance(result.get("error"), dict) else None
-        categories = (
-            classification_service.classify(
-                document_id=document_id,
-                extraction_run_id=str(result.get("extraction_run_id") or ""),
-                filename=str(document_context.get("filename") or ""),
-                fallback_text=text_preview,
-            ).get("categories", [])
-            if include_categories and result.get("status") == "COMPLETED"
-            else []
-        )
-        document_results.append(
-            {
-                "document_id": document_id,
-                "filename": document_context.get("filename") or managed_file.get("filename") or document_id,
-                "extraction_status": result.get("status"),
-                "extractor": result.get("extractor"),
-                "read_quality": result.get("read_quality"),
-                "read_profile": result.get("read_profile") or {},
-                "page_count": len(pages),
-                "char_count": char_count,
-                "text_reused": bool(result.get("reused")),
-                "classification_reused": bool(result.get("reused")),
-                "source_kind": result.get("source_kind"),
-                "managed_file_id": result.get("managed_file_id"),
-                "root_key": result.get("root_key"),
-                "relative_path": result.get("relative_path"),
-                "snapshot_id": result.get("snapshot_id"),
-                "snapshot_status": result.get("snapshot_status"),
-                "source_sha256": result.get("source_sha256"),
-                "categories": categories,
-                "warnings": [],
-                "errors": [error] if error else [],
-            }
-        )
-    return document_results
 
 
 def _build_document_results_response(document_results: List[Dict[str, Any]]) -> str:

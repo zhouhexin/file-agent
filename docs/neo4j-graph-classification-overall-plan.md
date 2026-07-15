@@ -10,6 +10,8 @@
   - [angelosalatino/cso-classifier](https://github.com/angelosalatino/cso-classifier)
   - [neo4j/neo4j-graphrag-python](https://github.com/neo4j/neo4j-graphrag-python)
 - 第一版本实施文档：`docs/neo4j-graph-classification-v1-implementation-plan.md`。
+- 第二版本实施文档：`docs/neo4j-graph-classification-v2-implementation-plan.md`。
+- 受管文件全局多标签分类后续计划：`docs/managed-file-global-multi-label-classification-plan.md`。
 
 ## 2. 当前基础
 
@@ -19,7 +21,7 @@
 - `DocumentClassificationService` 作为全文分类统一入口。
 - taxonomy v2 提供稳定 `category_id`、别名、正负信号和版本。
 - `recall_category_candidates()` 支持基于标题、文件名、正文和信号词的确定性候选召回。
-- `PATH_AS_CATEGORY` 可以把指定受管目录的子目录作为动态分类目录。
+- `PATH_AS_CATEGORY` 可以把经过 Profile 审核的受管目录路径作为全局动态分类候选；文件位于该目录只提供弱位置信号，不代表已确认分类。
 - `document_classification_runs`、`document_category_suggestions` 和 `document_category_feedback` 保存分类运行、建议和反馈。
 - LLM 分类只能在候选集合中裁决；自由路径需要显式开启并进入 `NEEDS_REVIEW`。
 - 分类结果必须带正文页码、Sheet、原文片段或人工确认来源等证据。
@@ -169,6 +171,8 @@ Persistent Stores
 (ManagedFolder)-[:CHILD_OF]->(ManagedFolder)
 (ManagedFolder)-[:MAPS_TO]->(Category)
 (DocumentVersion)-[:LOCATED_IN]->(ManagedFolder)
+(DocumentVersion)-[:PATH_SUGGESTS]->(Category)
+(DocumentVersion)-[:SUGGESTED_AS]->(Category)
 (DocumentVersion)-[:CONFIRMED_AS]->(Category)
 (DocumentVersion)-[:SIMILAR_TO]->(DocumentVersion)
 (DocumentVersion)-[:HAS_CHUNK]->(Chunk)
@@ -176,6 +180,8 @@ Persistent Stores
 ```
 
 分类建议默认不作为可信图事实传播。若为审计需要投影 `SUGGESTED_AS`，查询时必须明确排除它作为已确认支持信号。
+`PATH_AS_CATEGORY` 只决定目录能否贡献全局分类候选，`LOCATED_IN` 和 `PATH_SUGGESTS` 均不得自动提升为 `CONFIRMED_AS`。
+一个 `DocumentVersion` 可以同时关联多个分类；分类关系与物理目录关系彼此独立。
 
 ### 6.4 关系溯源属性
 
@@ -335,10 +341,13 @@ GRAPH_CLASSIFICATION_MIN_SUPPORT=1
 
 ### 阶段 2：语义相似文件增强
 
+- 先对大型受管目录进行目录角色治理，区分部门、稳定分类、年份、批次和临时目录。
+- 大型历史目录默认使用 `PATH_AS_WEAK_LABEL`，不能把路径归属直接提升为人工确认分类。
 - 生成或复用文档版本 embedding。
 - 使用 Neo4j vector index 或 `neo4j-graphrag-python` Retriever 召回相似已确认文件。
 - 增加 `SIMILAR_TO` 和 embedding 版本治理。
 - 评测语义信号对 Top-K 召回率和误分类率的影响。
+- 详细任务、Shadow 模式和验收标准见 `docs/neo4j-graph-classification-v2-implementation-plan.md`。
 
 ### 阶段 3：结构化实体与关系
 
@@ -410,4 +419,3 @@ GRAPH_CLASSIFICATION_MIN_SUPPORT=1
 5. 反馈能够形成可信分类关系，但建议不会自我强化。
 6. GraphRAG 仅通过受控 Adapter 和 Retriever 使用。
 7. 图谱关闭或不可用时，现有系统功能和结果结构保持兼容。
-

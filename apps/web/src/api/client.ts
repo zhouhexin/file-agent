@@ -2,7 +2,9 @@
 import type {
   AgentCapabilityCatalog,
   ChangeSetResponse,
+  ClassificationFeedbackResponse,
   ConversationDetailResponse,
+  FilesystemJobResponse,
   OperationConfirmResponse,
   OperationPlanResponse,
   SendMessageResponse,
@@ -90,6 +92,14 @@ export async function getConversationDetail(
   }
   const query = params.toString();
   return request<ConversationDetailResponse>(`/conversations/${conversationId}${query ? `?${query}` : ''}`, { token });
+}
+
+export async function getFilesystemJob(
+  token: string,
+  jobId: string,
+): Promise<FilesystemJobResponse> {
+  // 普通用户只能轮询自己创建的异步分类任务。
+  return request<FilesystemJobResponse>(`/filesystem-jobs/${jobId}`, { token });
 }
 
 export async function fetchUploadedFileBlob(token: string, documentId: string): Promise<Blob> {
@@ -212,5 +222,20 @@ export async function confirmOperationPlan(
   return request(`/operations/plans/${planId}/confirm`, {
     token,
     body: { confirmation: '确认执行' },
+  });
+}
+
+export async function submitClassificationFeedback(
+  token: string,
+  suggestionId: string,
+  payload: {
+    action: 'ACCEPT' | 'REJECT' | 'CORRECT';
+    corrected_category_path?: string[];
+  },
+): Promise<ClassificationFeedbackResponse> {
+  // 只有用户明确操作才写入反馈，未点击不推断为正样本。
+  return request(`/classification/suggestions/${suggestionId}/feedback`, {
+    token,
+    body: payload,
   });
 }

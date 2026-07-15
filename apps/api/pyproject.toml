@@ -30,6 +30,7 @@ test = [
 graph = [
   "neo4j>=5,<7",
   "neo4j-graphrag>=1,<2",
+  "sentence-transformers>=3,<6",
 ]
 
 [tool.pytest.ini_options]

@@ -14,13 +14,14 @@ def persist_document_results_classifications(
     db: Session,
     agent_run_id: str,
     document_results: list[dict[str, Any]],
-) -> None:
+) -> dict[tuple[str, int], str]:
     """把 AgentRun 的 document_results 分类建议落库。
 
     这里保存的是 SUGGESTED 分类建议，不写正式 document_categories。
     """
 
     repository = ClassificationRepository(db)
+    suggestion_ids: dict[tuple[str, int], str] = {}
     repository.delete_by_agent_run(agent_run_id)
     for result in document_results:
         document_id = str(result.get("document_id") or "")
@@ -42,15 +43,19 @@ def persist_document_results_classifications(
             taxonomy_version=taxonomy_version,
             status=status,
             source=source,
+            classifier_version=_classifier_version(categories),
             error_message=error_message,
         )
         for rank, category in enumerate(categories, start=1):
-            repository.create_suggestion(
+            suggestion = repository.create_suggestion(
                 classification_run_id=classification_run.id,
                 document_id=document_id,
                 category=category,
                 rank=rank,
             )
+            category["suggestion_id"] = suggestion.id
+            suggestion_ids[(document_id, rank)] = suggestion.id
+    return suggestion_ids
 
 
 def _first_category_value(categories: list[dict[str, Any]], key: str) -> str:
@@ -73,3 +78,16 @@ def _first_error_message(result: dict[str, Any]) -> str | None:
     if isinstance(first_error, dict):
         return str(first_error.get("message") or "")
     return str(first_error)
+
+
+def _classifier_version(categories: list[dict[str, Any]]) -> str:
+    """根据候选分量标记分类器版本，支持后续反馈回放。"""
+
+    explicit_version = _first_category_value(categories, "classifier_version")
+    if explicit_version:
+        return explicit_version
+    if any((category.get("candidate_scores") or {}).get("semantic") for category in categories):
+        return "taxonomy-graph-semantic-v2"
+    if any((category.get("candidate_scores") or {}).get("graph") for category in categories):
+        return "taxonomy-graph-v1"
+    return "taxonomy-rule-v1"

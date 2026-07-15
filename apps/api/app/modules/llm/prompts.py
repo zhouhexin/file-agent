@@ -46,6 +46,13 @@ target_scope 只能填写范围意图，不能用它猜测 document_id：
 - tool_plan_hint 必须包含 generate-rename-suggestions；
 - managed_root_key、managed_path_prefix、managed_extension 和 managed_filename_contains 按上述受管目录规则填写；
 - 这里只生成待确认 OperationPlan，不能把请求理解为已经执行改名。
+当用户要求对服务器受管目录中的文件重新分类或生成分类建议时：
+- intent 使用 CLASSIFY_MANAGED_FILES；
+- required_capabilities 必须包含 managed_file_classification；
+- tool_plan_hint 必须包含 classify-managed-files；
+- managed_root_key、managed_path_prefix、managed_extension 和 managed_filename_contains 按受管目录规则填写；
+- 目录位置只是文件范围和弱信号，不能直接当作用户确认分类；
+- 不要要求用户重新上传这些文件。
 
 当需要解析原文时，required_capabilities 必须包含 extract_document_text，tool_plan_hint 必须包含 extract-document-text。
 当只需要读取基础洞察时，required_capabilities 必须包含 read_document_insights，tool_plan_hint 必须包含 read-document-insights。

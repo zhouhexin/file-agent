@@ -5,6 +5,7 @@ import type { ChatAttachment } from './presentation';
 import { formatFileSize, getFailureMessage } from './presentation';
 
 type DocumentResultCardProps = {
+  token?: string;
   result: DocumentResult;
   index: number;
   attachment?: ChatAttachment;
@@ -16,6 +17,7 @@ export function DocumentResultCard({
   index,
   attachment,
   onOpenFile,
+  token,
 }: DocumentResultCardProps) {
   // 每个文件单独成卡，避免把批量结果挤成一整段文本。
   const failed = result.extraction_status === 'FAILED';
@@ -72,7 +74,7 @@ export function DocumentResultCard({
             </div>
             {primaryCategory ? (
               <div className="document-result-inline-category">
-                <CategoryChip category={primaryCategory} compact />
+                <CategoryChip category={primaryCategory} compact token={token} />
               </div>
             ) : null}
             <span className="document-result-confidence">
@@ -84,7 +86,12 @@ export function DocumentResultCard({
             <div className="document-result-categories">
               <div className="category-chip-list">
                 {result.categories.slice(1).map((category) => (
-                  <CategoryChip category={category} key={`${category.name}-${category.confidence}`} compact />
+                  <CategoryChip
+                    category={category}
+                    key={`${category.name}-${category.confidence}`}
+                    compact
+                    token={token}
+                  />
                 ))}
               </div>
             </div>

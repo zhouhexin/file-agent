@@ -121,7 +121,7 @@ def _is_hidden_relative_path(relative_path: str) -> bool:
 def _category_path_for(*, root: ManagedRoot, relative_path: str) -> str | None:
     """按受管目录模式从父目录推导分类路径。"""
 
-    if root.classification_mode != "PATH_AS_CATEGORY":
+    if root.classification_mode not in {"PATH_AS_CATEGORY", "PATH_AS_WEAK_LABEL"}:
         return None
     parent = Path(relative_path).parent.as_posix()
     if parent in {"", "."}:

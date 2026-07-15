@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from app.modules.classification.managed_catalog import GlobalManagedCategoryCatalog
+
 
 TAXONOMY_KEY = "managed_path_categories"
 TAXONOMY_VERSION = "managed-path-v1"
@@ -77,6 +79,54 @@ def match_managed_path_categories(
     return [
         {key: value for key, value in candidate.items() if key != "_order"}
         for candidate in candidates[:max(0, min(limit, 8))]
+    ]
+
+
+def match_global_managed_categories(
+    *,
+    filename: str,
+    text: str,
+    catalog: GlobalManagedCategoryCatalog,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """从全局受管目录候选中生成多标签分类，不按当前根裁剪。"""
+
+    candidates: list[dict[str, Any]] = []
+    for order, category in enumerate(catalog.categories):
+        parts = list(category.category_path)
+        score, signals, reason = _score_path_category(
+            parts=parts,
+            title_text=filename or "",
+            body_text=text or "",
+            file_count=category.file_count,
+        )
+        if score <= 0:
+            continue
+        candidates.append(
+            {
+                "name": "/".join(parts),
+                "category_id": category.category_id,
+                "category_path": parts,
+                "confidence": round(min(0.92, max(0.45, score)), 2),
+                "status": "SUGGESTED",
+                "source": "managed_global_catalog",
+                "evidence": signals,
+                "rule_score": round(min(1.0, score), 4),
+                "matched_signals": signals,
+                "negative_signals": [],
+                "taxonomy_key": catalog.taxonomy_key,
+                "taxonomy_version": catalog.taxonomy_version,
+                "source_roots": list(category.source_roots),
+                "candidate_reason": reason,
+                "_order": order,
+            }
+        )
+    if not candidates:
+        return [_managed_global_other_category(catalog=catalog)]
+    candidates.sort(key=lambda item: (-float(item["confidence"]), int(item["_order"])))
+    return [
+        {key: value for key, value in candidate.items() if key != "_order"}
+        for candidate in candidates[: max(1, min(limit, 12))]
     ]
 
 
@@ -175,4 +225,25 @@ def _managed_other_category() -> dict[str, Any]:
         "evidence": [],
         "taxonomy_key": TAXONOMY_KEY,
         "taxonomy_version": TAXONOMY_VERSION,
+    }
+
+
+def _managed_global_other_category(
+    *,
+    catalog: GlobalManagedCategoryCatalog,
+) -> dict[str, Any]:
+    """全局目录未命中时返回待复核结果，不切换到预置业务分类。"""
+
+    warning = "CATEGORY_CATALOG_EMPTY" if not catalog.categories else "NO_GLOBAL_CATEGORY_MATCH"
+    return {
+        "name": "其他",
+        "category_path": ["其他"],
+        "confidence": 0.2,
+        "status": "NEEDS_REVIEW",
+        "source": "managed_global_catalog",
+        "evidence": [],
+        "taxonomy_key": catalog.taxonomy_key,
+        "taxonomy_version": catalog.taxonomy_version,
+        "candidate_reason": warning,
+        "warnings": [warning],
     }

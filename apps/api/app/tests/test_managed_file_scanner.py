@@ -65,14 +65,17 @@ def test_scanner_fingerprint_is_fixed_length_for_deep_paths(tmp_path):
         clear_overrides()
 
 
-def test_scanner_derives_category_path_only_for_path_classified_root(tmp_path):
-    """只有 PATH_AS_CATEGORY 目录会把父目录写成分类路径。"""
+def test_scanner_derives_category_path_for_strong_and_weak_path_modes(tmp_path):
+    """强分类和弱标签目录都保留父目录，普通目录不产生分类路径。"""
 
     classified_dir = tmp_path / "classified"
+    weak_label_dir = tmp_path / "weak-label"
     plain_dir = tmp_path / "plain"
     (classified_dir / "奖学金" / "国家励志奖学金").mkdir(parents=True)
+    (weak_label_dir / "教务处" / "考试管理").mkdir(parents=True)
     plain_dir.mkdir()
     (classified_dir / "奖学金" / "国家励志奖学金" / "a.pdf").write_bytes(b"pdf")
+    (weak_label_dir / "教务处" / "考试管理" / "c.docx").write_bytes(b"docx")
     (plain_dir / "临时" ).mkdir()
     (plain_dir / "临时" / "b.pdf").write_bytes(b"pdf")
 
@@ -85,21 +88,30 @@ def test_scanner_derives_category_path_only_for_path_classified_root(tmp_path):
             container_path=str(classified_dir),
             classification_mode="PATH_AS_CATEGORY",
         )
+        weak_label_root = ManagedRoot(
+            root_key="weak_label_library",
+            display_name="历史文件库",
+            container_path=str(weak_label_dir),
+            classification_mode="PATH_AS_WEAK_LABEL",
+        )
         plain_root = ManagedRoot(
             root_key="plain_inbox",
             display_name="普通收件箱",
             container_path=str(plain_dir),
             classification_mode="NONE",
         )
-        db.add_all([classified_root, plain_root])
+        db.add_all([classified_root, weak_label_root, plain_root])
         db.commit()
 
         ManagedFileScanner(db).scan_root(classified_root)
+        ManagedFileScanner(db).scan_root(weak_label_root)
         ManagedFileScanner(db).scan_root(plain_root)
 
         classified_file = db.query(ManagedFile).filter(ManagedFile.root_id == classified_root.id).one()
+        weak_label_file = db.query(ManagedFile).filter(ManagedFile.root_id == weak_label_root.id).one()
         plain_file = db.query(ManagedFile).filter(ManagedFile.root_id == plain_root.id).one()
         assert classified_file.category_path == "奖学金/国家励志奖学金"
+        assert weak_label_file.category_path == "教务处/考试管理"
         assert plain_file.category_path is None
     finally:
         db.close()

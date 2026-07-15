@@ -207,6 +207,7 @@ export function AgentRunReceipt({
               index={index + 1}
               key={`${result.document_id}-${index}`}
               result={result}
+              token={token}
               onOpenFile={onOpenAttachment}
             />
           ))}

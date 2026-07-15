@@ -1439,6 +1439,8 @@ external model use for file content must be explicit
   uses GET /api/operations/plans/{plan_id}
   uses POST /api/operations/plans/{plan_id}/confirm
   uses POST /api/feedback
+  uses POST /api/classification/suggestions/{suggestion_id}/feedback
+  uses GET /api/classification/feedback/summary
 
 /admin/documents
   uses GET /api/admin/documents
@@ -1474,6 +1476,8 @@ external model use for file content must be explicit
 | `POST /api/operations/plans/{id}/confirm` | owner | yes | yes |
 | `GET /api/changesets/{id}` | owner | yes | yes |
 | `POST /api/feedback` | yes | yes | yes |
+| `POST /api/classification/suggestions/{id}/feedback` | owner run | owner run | owner run |
+| `GET /api/classification/feedback/summary` | own | own | own |
 | `GET /api/admin/documents` | no | yes | yes |
 | `POST /api/admin/documents/{id}/reprocess` | no | yes | yes |
 | `GET /api/admin/feedback` | no | yes | yes |

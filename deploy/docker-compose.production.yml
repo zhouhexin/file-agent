@@ -39,6 +39,7 @@ services:
     volumes:
       - ../data/uploads:/data/uploads
       - ../data/logs:/data/logs
+      - ../models:/models:ro
       - E:/workdata:/managed/workdata:${MANAGED_ROOT_VOLUME_MODE:-ro}
     depends_on:
       postgres:
@@ -71,6 +72,7 @@ services:
     volumes:
       - ../data/uploads:/data/uploads
       - ../data/logs:/data/logs
+      - ../models:/models:ro
       - E:/workdata:/managed/workdata:${MANAGED_ROOT_VOLUME_MODE:-ro}
     depends_on:
       postgres:

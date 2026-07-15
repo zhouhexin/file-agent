@@ -48,6 +48,11 @@ class AgentRunRepository:
         )
         if changeset is not None:
             state["changeset_id"] = changeset.id
+        persist_document_results_classifications(
+            db=self.db,
+            agent_run_id=run.id,
+            document_results=document_results,
+        )
 
         run.intent = state.get("intent")
         run.status = state.get("status", run.status)
@@ -57,11 +62,6 @@ class AgentRunRepository:
         run.final_response = state.get("final_response")
         run.error_message = "; ".join(state.get("errors", [])) or None
         run.updated_at = utcnow()
-        persist_document_results_classifications(
-            db=self.db,
-            agent_run_id=run.id,
-            document_results=document_results,
-        )
         self.db.flush()
         return run
 
@@ -135,6 +135,7 @@ class AgentRunRepository:
             tool_results=[item.output_json for item in invocation_models],
             tool_invocations=invocation_models,
             document_results=graph_state.get("document_results", []),
+            async_job_ids=graph_state.get("async_job_ids", []),
             changeset_id=_first_valid_uuid([run.changeset_id, *[item.changeset_id for item in invocation_models]]),
             operation_plan_id=_last_non_empty([item.operation_plan_id for item in invocation_models]),
             final_response=run.final_response,
@@ -159,6 +160,7 @@ def _safe_graph_state_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         "tool_results": state.get("tool_results", []),
         "result_summary": state.get("result_summary", {}),
         "document_results": state.get("document_results", []),
+        "async_job_ids": state.get("async_job_ids", []),
         "changeset_id": state.get("changeset_id"),
         "operation_plan_id": state.get("operation_plan_id"),
         "final_response": state.get("final_response"),

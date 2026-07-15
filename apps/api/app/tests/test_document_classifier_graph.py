@@ -1,7 +1,12 @@
 """文档分类服务图谱增强接入测试。"""
 
 from app.modules.classification.classifier_service import DocumentClassificationService
-from app.modules.knowledge_graph.schemas import GraphCandidateSupport, GraphClassificationResult
+from app.modules.knowledge_graph.schemas import (
+    GraphCandidateSupport,
+    GraphClassificationResult,
+    GraphSemanticResult,
+    SemanticCategorySupport,
+)
 
 
 class SupportingGraphContext:
@@ -50,6 +55,28 @@ class FailingGraphContext:
         return {"status": "unavailable"}
 
 
+class SupportingSemanticContext:
+    """根据规则候选稳定返回语义支持。"""
+
+    def __init__(self) -> None:
+        self.full_text = ""
+
+    def retrieve(self, *, full_text, **kwargs):
+        self.full_text = full_text
+        return GraphSemanticResult(
+            status="COMPLETED",
+            candidates=[
+                SemanticCategorySupport(
+                    category_id="school.hr.title-review",
+                    graph_key="school_file_classification:2026-06-v2:school.hr.title-review",
+                    category_path=["学校", "人事师资", "职称"],
+                    semantic_score=0.9,
+                    support_count=2,
+                )
+            ],
+        )
+
+
 def test_document_classification_service_adds_graph_scores_without_passing_full_text():
     """分类服务应只把候选标识交给图谱，并保留正文证据链。"""
 
@@ -82,3 +109,40 @@ def test_document_classification_service_degrades_when_graph_query_fails():
     assert result["graph_status"] == "DEGRADED"
     assert result["graph_warnings"] == ["GRAPH_UNAVAILABLE"]
     assert result["categories"][0]["name"] == "学校/人事师资/职称"
+
+
+def test_shadow_mode_runs_semantic_retrieval_without_changing_visible_candidates():
+    """Shadow 必须执行完整正文语义召回，但用户结果仍保持基础候选。"""
+
+    semantic_context = SupportingSemanticContext()
+    result = DocumentClassificationService(
+        graph_mode="shadow",
+        semantic_context=semantic_context,
+    ).classify(
+        document_id="document-shadow",
+        extraction_run_id="run-shadow",
+        filename="职称申报材料.txt",
+        fallback_text="本文件涉及教师职称申报材料。",
+    )
+
+    assert semantic_context.full_text == "本文件涉及教师职称申报材料。"
+    assert result["semantic_status"] == "COMPLETED"
+    assert result["graph_mode"] == "shadow"
+    assert "semantic" not in result["categories"][0].get("candidate_scores", {})
+
+
+def test_enabled_mode_adds_semantic_score_to_suggested_category():
+    """enabled 模式只增强建议分量，不自动形成正式分类。"""
+
+    result = DocumentClassificationService(
+        graph_mode="enabled",
+        semantic_context=SupportingSemanticContext(),
+    ).classify(
+        document_id="document-enabled",
+        extraction_run_id="run-enabled",
+        filename="职称申报材料.txt",
+        fallback_text="本文件涉及教师职称申报材料。",
+    )
+
+    assert result["categories"][0]["candidate_scores"]["semantic"] == 0.9
+    assert result["categories"][0]["status"] != "CONFIRMED"

@@ -638,11 +638,26 @@ Neo4j 图谱分类采用“可重建投影 + 只读候选增强”模式：
 - 所有 Cypher 必须来自后端固定参数化模板，禁止 LLM 生成 Cypher 写语句，禁止普通用户使用 Text2Cypher。
 - 图谱关闭、未安装依赖、连接失败或查询超时时，上传、解析、OCR 和基础分类必须无损降级。
 - `neo4j-graphrag-python` 必须封装在项目 Adapter 后面；第一版本不使用实验性自动构图覆盖现有解析和分类链路。
+- 第二版本向量分类必须读取 `document_pages.text_content` 完整正文，在运行时分块、归一化和聚合；正文和向量不得进入 `AgentGraphState`、日志或前端响应。
+- 相同 SHA-256、Embedding 模型、版本和维度全部一致时可以复用 Neo4j 派生向量；模型或版本变化必须重算。
+- 受管目录必须通过版本化 Profile 区分 `DEPARTMENT`、`CATEGORY`、`YEAR`、`COLLECTION`、`TEMPORARY` 和 `UNKNOWN`；`PATH_AS_WEAK_LABEL` 只能生成 `PATH_SUGGESTS`，不得生成 `CONFIRMED_AS`。
+- `PATH_AS_CATEGORY` 只表示经 Profile 审核的目录路径可以成为全局分类候选来源，不表示目录内文件已确认属于该分类；`LOCATED_IN` 和父目录信息始终只能作为弱位置证据。
+- 所有分类来源根必须共同形成全局候选集，新上传文件和任意受管目录文件都必须使用同一候选空间，不能按文件当前所在根或父目录裁剪候选。
+- 配置了 `PATH_AS_CATEGORY` 分类来源根时，受管目录全局候选集是业务分类目录来源；不得静默混入或回退到另一套预置业务分类，目录为空或 Profile 无有效分类时必须进入 `NEEDS_REVIEW`。
+- 文件与分类是多对多逻辑关系，一个文件必须允许同时保存和展示多个不同分支的 `SUGGESTED_AS` 或 `CONFIRMED_AS`；物理目录关系与逻辑分类关系必须分离。
+- 只有用户明确接受或更正后的分类才能投影为 `CONFIRMED_AS`，目录位置、未反馈建议和普通弱标签均不得自动提升为确认分类。
+- 图谱分类运行模式必须区分 `off`、`shadow` 和 `enabled`；`shadow` 只记录候选差异，不能改变用户结果。
+- 无人工标注样本时允许小范围上线图谱增强建议，但结果只能是 `SUGGESTED` 或 `NEEDS_REVIEW`，不得自动写入正式 `document_categories`。
+- 分类反馈必须来自用户明确的接受、拒绝或更正；未反馈、打开、下载或继续对话均不能推断为正样本。
+- 接受产生目标正样本，拒绝产生原分类负样本，更正同时产生原分类负样本和目标分类正样本；反馈必须关联 taxonomy、分类器和 Embedding 版本，并采用可追踪的追加记录。
+- 用户反馈不得直接修改 ACTIVE taxonomy、线上权重或可信图谱关系。候选配置必须先经过冻结反馈集的离线回放、人工批准和可回滚发布。
 
 整体方案和第一版本实施依据分别为：
 
 - `docs/neo4j-graph-classification-overall-plan.md`
 - `docs/neo4j-graph-classification-v1-implementation-plan.md`
+- `docs/neo4j-graph-classification-v2-implementation-plan.md`
+- `docs/managed-file-global-multi-label-classification-plan.md`
 
 ### 11.2 证据规则
 

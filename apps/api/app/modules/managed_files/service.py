@@ -99,6 +99,17 @@ class ManagedFileService:
             raise HTTPException(status_code=404, detail="Filesystem job not found")
         return self.to_job_response(job)
 
+    def get_user_job(self, *, job_id: str, current_user: User) -> FilesystemJobResponse:
+        """允许任务创建者查询自己的异步分类任务。"""
+
+        _require_role(current_user, {"user", "ops", "admin"})
+        job = FilesystemJobRepository(self.db).get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Filesystem job not found")
+        if current_user.role not in {"ops", "admin"} and job.created_by != current_user.id:
+            raise HTTPException(status_code=404, detail="Filesystem job not found")
+        return self.to_job_response(job)
+
     def list_files(
         self,
         *,
@@ -379,8 +390,8 @@ def _configured_classification_mode(root_key: str) -> str:
     """读取受管目录分类模式；未配置或非法时默认 NONE。"""
 
     env_key = f"MANAGED_ROOT_{root_key.upper()}_CLASSIFICATION_MODE"
-    value = os.getenv(env_key, "NONE").upper()
-    if value not in {"NONE", "PATH_AS_CATEGORY"}:
+    value = os.getenv(env_key, os.getenv("MANAGED_PATH_DEFAULT_MODE", "NONE")).upper()
+    if value not in {"NONE", "PATH_AS_CATEGORY", "PATH_AS_WEAK_LABEL"}:
         return "NONE"
     return value
 

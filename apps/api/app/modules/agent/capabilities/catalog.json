@@ -90,6 +90,15 @@
       "intents": ["LIST_MANAGED_FILES", "SEARCH_MANAGED_FILES", "READ_MANAGED_FILE", "SUMMARIZE_MANAGED_FILE"],
       "capability_keys": ["managed_file_list", "managed-file-list", "managed_file_search", "managed-file-search", "managed_file_read", "managed-file-read-document", "mcp_filesystem_read"],
       "tool_names": ["managed-file-list", "managed-file-search", "managed-file-read-document", "mcp-filesystem-list", "mcp-filesystem-search", "mcp-filesystem-info"]
+    },
+    {
+      "id": "managed_file_classification",
+      "name": "受管目录文件批量分类",
+      "description": "按受管目录、扩展名或文件名范围创建文件快照，读取完整正文并生成全局多标签分类建议。目录位置只作为弱信号。",
+      "examples": ["对党办下文件进行分类", "重新分类受管目录中的 PDF 文件"],
+      "intents": ["CLASSIFY_MANAGED_FILES"],
+      "capability_keys": ["managed_file_classification", "classify_managed_files", "classify-managed-files"],
+      "tool_names": ["classify-managed-files"]
     }
   ]
 }

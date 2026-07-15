@@ -8,6 +8,7 @@ import {
   fetchManagedFileBlob,
   fetchUploadedFileBlob,
   getConversationDetail,
+  getFilesystemJob,
   sendAgentMessage,
   uploadFile,
 } from '../../api/client';
@@ -95,6 +96,8 @@ export function ChatPage({
   const [loadingMoreHistory, setLoadingMoreHistory] = useState(false);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const previewUrls = useRef<Set<string>>(new Set());
+  const pageActiveRef = useRef(true);
+  const pollingAgentRunsRef = useRef<Set<string>>(new Set());
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const hasTurns = chatTurns.length > 0;
   const primaryConversationId = getWebConversationId(user.id);
@@ -118,7 +121,9 @@ export function ChatPage({
 
   useEffect(() => {
     // 页面卸载时统一释放仍在展示的图片预览 object URL。
+    pageActiveRef.current = true;
     return () => {
+      pageActiveRef.current = false;
       previewUrls.current.forEach((url) => {
         URL.revokeObjectURL(url);
       });
@@ -179,6 +184,29 @@ export function ChatPage({
       cancelled = true;
     };
   }, [primaryConversationId, scrollMessageListToBottom, token]);
+
+  useEffect(() => {
+    // 页面刷新后也要继续跟踪尚未完成的后台分类任务。
+    chatTurns.forEach((turn) => {
+      const agentRun = turn.response?.agent_run;
+      if (
+        !agentRun
+        || agentRun.status !== 'WAITING_FOR_ASYNC_JOB'
+        || agentRun.async_job_ids.length === 0
+        || pollingAgentRunsRef.current.has(agentRun.agent_run_id)
+      ) {
+        return;
+      }
+      pollingAgentRunsRef.current.add(agentRun.agent_run_id);
+      void pollAsyncAgentRun({
+        turnId: turn.id,
+        messageId: turn.response?.message.id ?? agentRun.message_id,
+        jobIds: agentRun.async_job_ids,
+      }).finally(() => {
+        pollingAgentRunsRef.current.delete(agentRun.agent_run_id);
+      });
+    });
+  }, [chatTurns]);
 
   const loadOlderHistory = useCallback(async () => {
     const beforeMessageId = chatTurns[0]?.id;
@@ -273,6 +301,59 @@ export function ChatPage({
       setError(formatError(err));
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function pollAsyncAgentRun({
+    turnId,
+    messageId,
+    jobIds,
+  }: {
+    turnId: string;
+    messageId: string;
+    jobIds: string[];
+  }) {
+    // 后台批量任务完成后重新读取服务端 AgentRun，避免前端拼装分类和 ChangeSet。
+    while (pageActiveRef.current) {
+      try {
+        const jobs = await Promise.all(jobIds.map((jobId) => getFilesystemJob(token, jobId)));
+        const completed = jobs.every((job) => ['COMPLETED', 'FAILED'].includes(job.status));
+        if (completed) {
+          const conversation = await getConversationDetail(token, conversationId, { limit: 50 });
+          const historyMessage = conversation.messages.find((item) => item.id === messageId);
+          if (historyMessage?.agent_run) {
+            const updatedAgentRun = historyMessage.agent_run;
+            setChatTurns((current) => current.map((turn) => (
+              turn.id === turnId
+                ? {
+                    ...turn,
+                    response: {
+                      message: {
+                        id: historyMessage.id,
+                        conversation_id: historyMessage.conversation_id,
+                        user_id: historyMessage.user_id,
+                        role: historyMessage.role,
+                        content: historyMessage.content,
+                        attachments: historyMessage.attachments.map((file) => ({
+                          document_id: file.document_id,
+                        })),
+                      },
+                      agent_run: updatedAgentRun,
+                    },
+                    status: 'completed',
+                  }
+                : turn
+            )));
+          }
+          return;
+        }
+      } catch (pollError) {
+        if (pageActiveRef.current) {
+          setError(formatError(pollError));
+        }
+        return;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
     }
   }
 

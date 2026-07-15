@@ -25,6 +25,8 @@ def _normalize_path_prefix(value: Optional[str]) -> Optional[str]:
         return None
 
     normalized = value.replace("\\", "/").strip().strip("/")
+    if "\x00" in normalized:
+        raise ValueError("path_prefix must not contain NUL characters")
     if normalized in {"", "."}:
         return None
 
@@ -209,6 +211,7 @@ class ManagedFileReadDocumentInput(StrictToolInput):
     extension: Optional[str] = None
     filename_contains: Optional[str] = None
     force_reprocess: bool = False
+    scan_before_read: bool = True
 
     @field_validator("relative_path", "path_prefix")
     @classmethod
@@ -216,6 +219,38 @@ class ManagedFileReadDocumentInput(StrictToolInput):
         """校验并规范化受管目录内的相对路径。"""
 
         return _normalize_path_prefix(value)
+
+
+class ManagedFileClassificationInput(StrictToolInput):
+    """按受管目录逻辑范围批量创建快照、解析正文并分类。"""
+
+    root_key: Optional[str] = Field(default=None, max_length=100)
+    path_prefix: Optional[str] = Field(
+        default=None,
+        max_length=1000,
+        description="受管根目录下的相对目录前缀。",
+    )
+    extension: Optional[str] = Field(default=None, max_length=20)
+    filename_contains: Optional[str] = Field(default=None, max_length=255)
+    recursive: bool = True
+    force_reprocess: bool = False
+    conversation_id: Optional[str] = Field(default=None, max_length=255)
+    agent_run_id: Optional[str] = Field(default=None, max_length=255)
+
+    @field_validator("path_prefix")
+    @classmethod
+    def validate_path_prefix(cls, value: Optional[str]) -> Optional[str]:
+        """校验并规范化受管目录内的相对路径。"""
+
+        return _normalize_path_prefix(value)
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> "ManagedFileClassificationInput":
+        """禁止无范围扫描全部受管目录，避免误触发大批量解析。"""
+
+        if not any([self.root_key, self.path_prefix, self.extension, self.filename_contains]):
+            raise ValueError("managed file classification requires at least one scope filter")
+        return self
 
 
 class GenerateRenameSuggestionsInput(StrictToolInput):

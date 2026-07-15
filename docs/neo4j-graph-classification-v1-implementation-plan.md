@@ -3,6 +3,7 @@
 ## 1. 版本目标
 
 - 实施状态：第一版本代码与自动测试已完成；真实 Neo4j 环境 smoke test 待部署连接配置完成后执行。
+- 兼容说明：本版本中把“已分好类目录归属”视为确认分类的设计已由 `docs/managed-file-global-multi-label-classification-plan.md` 覆盖；目录只提供全局分类来源和弱位置证据。
 
 第一版本以最小风险验证“ontology 图结构能否提升现有分类候选质量”。本版本只实现：
 
@@ -26,7 +27,7 @@ taxonomy / 受管目录分类层级投影
 - `GraphClassificationContext` 抽象、Neo4j 实现、no-op 实现和 fake 实现。
 - taxonomy v2 `Category/PARENT_OF` 幂等投影。
 - `PATH_AS_CATEGORY` 的 `ManagedRoot/ManagedFolder/CHILD_OF` 幂等投影。
-- 已确认分类或可明确标识的可信目录样本投影。
+- 已确认分类和受控目录弱样本投影。
 - 根据规则候选查询父节点、子节点、目录映射和已确认样本支持。
 - 合并规则分数与图谱分数，输出分量分数和解释路径。
 - `GRAPH_CLASSIFICATION_ENABLED` 开关和故障自动降级。
@@ -351,7 +352,7 @@ ManagedRoot
 同步优先级：
 
 1. 用户明确确认或修正后的正式分类。
-2. 明确标识为已分好类受管根中的目录归属，以 `source_type=managed_path` 和中等信任记录。
+2. 受管根中的目录归属只投影为 `PATH_SUGGESTS`，不得转为 `CONFIRMED_AS`。
 3. 其他建议不投影为 `CONFIRMED_AS`。
 
 如果当前数据库还没有正式分类关系写入链路，先实现同步接口和空结果，不得把 `document_category_suggestions` 直接升级为确认事实。
@@ -581,6 +582,8 @@ NEO4J_SYNC_ENABLED=false
 11. 真实环境完成开启和关闭图谱两组 smoke test。
 
 ## 17. 第一版本之后
+
+下一版本的具体实施依据为 `docs/neo4j-graph-classification-v2-implementation-plan.md`。
 
 通过第一版本评测后，再决定是否进入：
 

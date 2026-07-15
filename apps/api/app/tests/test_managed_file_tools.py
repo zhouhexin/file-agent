@@ -316,6 +316,46 @@ def test_managed_file_read_document_tool_reads_multiple_matches(monkeypatch, tmp
         clear_overrides()
 
 
+def test_classify_managed_files_tool_returns_batch_extraction_results(monkeypatch, tmp_path):
+    """受管目录分类 Tool 必须批量创建快照并返回 Graph 可消费的解析结果。"""
+
+    managed_root = tmp_path / "downloads"
+    target_dir = managed_root / "党办"
+    target_dir.mkdir(parents=True)
+    (target_dir / "制度一.txt").write_text("科学发展观制度正文", encoding="utf-8")
+    (target_dir / "制度二.txt").write_text("会议管理制度正文", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "storage"))
+    client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        result = ToolRegistry(db=db, user_id="user-1").invoke(
+            "classify-managed-files",
+            {
+                "root_key": "downloads",
+                "path_prefix": "党办",
+                "recursive": True,
+                "force_reprocess": False,
+            },
+        )
+
+        assert result.status == "COMPLETED"
+        assert result.output_json["source"] == "classify-managed-files"
+        assert result.output_json["classification_requested"] is True
+        assert result.output_json["matched_count"] == 2
+        assert all(
+            item["source"] == "classify-managed-files"
+            and item["classification_requested"] is True
+            for item in result.output_json["extraction_results"]
+        )
+        assert db.query(Document).count() == 2
+        assert db.query(DocumentPage).count() == 2
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def test_managed_file_read_document_tool_isolates_partial_batch_failures(monkeypatch, tmp_path):
     """批量读取中单个文件解析失败时，其余文件应继续完成并返回 PARTIAL。"""
 

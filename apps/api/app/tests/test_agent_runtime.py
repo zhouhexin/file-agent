@@ -5,6 +5,7 @@ Tool 输入必须经过 schema 校验，直接文件写入必须在 dispatch 前
 """
 
 import json
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 import pytest
@@ -17,7 +18,7 @@ from app.modules.llm.schemas import UserIntentPlan
 from app.modules.agent.graph import _build_document_results_response, response
 from app.modules.agent.repository import _safe_graph_state_snapshot
 from app.modules.agent.planner import DeterministicPlanner, build_plan_from_user_intent
-from app.modules.agent.service import AgentRuntimeService
+from app.modules.agent.service import AgentRuntimeService, _graph_mode_for_user
 from app.modules.agent.state import ToolInvocationRecord
 from app.modules.agent.tool_registry import ToolRegistry, UnknownToolError
 from app.modules.agent.tool_schemas import ToolInputValidationError
@@ -240,6 +241,83 @@ def test_deterministic_planner_routes_managed_file_summary_to_read_document():
     assert plan.steps[0].input["path_prefix"] == "党办"
     assert plan.steps[0].input["filename_contains"] == "科学发展观"
     assert plan.slots["requested_outputs"] == ["text", "summary", "receipt"]
+
+
+def test_deterministic_planner_routes_managed_directory_classification():
+    """受管目录分类必须使用专用 Tool，不能误判为缺少上传附件。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-managed-classification",
+        user_id="user-1",
+        message_id="msg-managed-classification",
+        message="对党办下文件进行分类",
+        attachments=[],
+    )
+
+    assert plan.intent == "CLASSIFY_MANAGED_FILES"
+    assert [step.tool_name for step in plan.steps] == ["classify-managed-files"]
+    assert plan.steps[0].input["path_prefix"] == "党办"
+    assert plan.slots["requested_outputs"] == ["classification", "receipt"]
+
+
+def test_llm_planner_routes_managed_directory_classification_without_attachments():
+    """LLM 只提供高层意图，受管范围仍应进入受控分类 Tool。"""
+
+    intent_plan = UserIntentPlan(
+        intent="CLASSIFY_MANAGED_FILES",
+        user_goal="对党办下 PDF 文件进行分类",
+        required_capabilities=["managed_file_classification"],
+        tool_plan_hint=["classify-managed-files"],
+        managed_path_prefix="党办",
+        managed_extension="pdf",
+    )
+
+    plan = build_plan_from_user_intent(
+        intent_plan=intent_plan,
+        message="对党办下 PDF 文件进行分类",
+        attachments=[],
+    )
+
+    assert plan.intent == "CLASSIFY_MANAGED_FILES"
+    assert plan.steps[0].tool_name == "classify-managed-files"
+    assert plan.steps[0].input == {
+        "path_prefix": "党办",
+        "extension": "pdf",
+        "recursive": True,
+        "force_reprocess": False,
+    }
+
+
+def test_deterministic_planner_parses_managed_classification_extension_and_deep_path():
+    """受管目录分类应独立解析深层路径和扩展名，不依赖“文件”紧邻条件。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conversation-managed-classification-deep",
+        user_id="user-managed-classification-deep",
+        message_id="message-managed-classification-deep",
+        message="对党办/2026下所有 PDF 分类",
+        attachments=[],
+    )
+
+    assert plan.intent == "CLASSIFY_MANAGED_FILES"
+    assert plan.steps[0].input["path_prefix"] == "党办/2026"
+    assert plan.steps[0].input["extension"] == "pdf"
+
+
+def test_deterministic_planner_parses_action_first_managed_classification_scope():
+    """“重新按正文分类某目录下文件”也必须稳定解析目录范围。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conversation-managed-classification-action-first",
+        user_id="user-managed-classification-action-first",
+        message_id="message-managed-classification-action-first",
+        message="重新按正文分类党办下的文件",
+        attachments=[],
+    )
+
+    assert plan.intent == "CLASSIFY_MANAGED_FILES"
+    assert plan.steps[0].input["path_prefix"] == "党办"
+    assert plan.steps[0].input["force_reprocess"] is True
 
 
 def test_deterministic_planner_routes_nested_managed_file_subdirectory():
@@ -2092,3 +2170,22 @@ def test_graph_does_not_execute_direct_file_writes_from_planner_output():
             attachments=[{"document_id": "doc-1"}],
             planner=DeterministicPlanner(force_unsafe_step=True),
         )
+
+
+def test_graph_enabled_rollout_uses_shadow_outside_configured_percentage():
+    """无标注灰度为零时不得改变用户结果，百分百时应启用增强建议。"""
+
+    assert _graph_mode_for_user(
+        settings=SimpleNamespace(
+            graph_classification_mode="enabled",
+            graph_classification_rollout_percent=0,
+        ),
+        user_id="user-rollout",
+    ) == "shadow"
+    assert _graph_mode_for_user(
+        settings=SimpleNamespace(
+            graph_classification_mode="enabled",
+            graph_classification_rollout_percent=100,
+        ),
+        user_id="user-rollout",
+    ) == "enabled"

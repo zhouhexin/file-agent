@@ -127,6 +127,9 @@ def test_settings_defaults_graph_classification_to_disabled(monkeypatch, tmp_pat
     assert settings.neo4j_sync_enabled is False
     assert settings.graph_classification_max_hops == 1
     assert settings.graph_classification_top_k == 8
+    assert settings.graph_classification_mode == "off"
+    assert settings.graph_embedding_enabled is False
+    assert settings.graph_classification_rollout_percent == 10
 
 
 def test_settings_loads_graph_classification_options(monkeypatch, tmp_path):
@@ -143,6 +146,11 @@ def test_settings_loads_graph_classification_options(monkeypatch, tmp_path):
     monkeypatch.setenv("NEO4J_SYNC_ENABLED", "true")
     monkeypatch.setenv("GRAPH_CLASSIFICATION_MAX_HOPS", "2")
     monkeypatch.setenv("GRAPH_CLASSIFICATION_TOP_K", "6")
+    monkeypatch.setenv("GRAPH_CLASSIFICATION_MODE", "shadow")
+    monkeypatch.setenv("GRAPH_EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("GRAPH_EMBEDDING_DIMENSION", "768")
+    monkeypatch.setenv("GRAPH_VECTOR_TOP_K", "15")
+    monkeypatch.setenv("GRAPH_CLASSIFICATION_ROLLOUT_PERCENT", "25")
     _reset_settings_cache()
 
     settings = config.get_settings()
@@ -156,3 +164,8 @@ def test_settings_loads_graph_classification_options(monkeypatch, tmp_path):
     assert settings.neo4j_sync_enabled is True
     assert settings.graph_classification_max_hops == 2
     assert settings.graph_classification_top_k == 6
+    assert settings.graph_classification_mode == "shadow"
+    assert settings.graph_embedding_enabled is True
+    assert settings.graph_embedding_dimension == 768
+    assert settings.graph_vector_top_k == 15
+    assert settings.graph_classification_rollout_percent == 25

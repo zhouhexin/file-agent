@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 from app.modules.knowledge_graph.schemas import (
     CategoryProjection,
     CategoryRelationProjection,
     ConfirmedClassificationProjection,
+    DocumentEmbeddingProjection,
     DocumentVersionProjection,
     FolderCategoryRelationProjection,
     GraphCandidateSeed,
@@ -16,6 +17,8 @@ from app.modules.knowledge_graph.schemas import (
     ManagedFolderProjection,
     ManagedFolderRelationProjection,
     ManagedRootProjection,
+    PathSuggestionProjection,
+    SuggestedClassificationProjection,
 )
 
 
@@ -54,6 +57,34 @@ class GraphRepository(Protocol):
         locations: list[LocatedInProjection],
     ) -> None:
         """幂等写入可信分类和目录归属。"""
+
+    def delete_confirmed_classifications_by_source(self, *, source_type: str) -> None:
+        """清理可重建来源关系，避免撤销反馈或 Profile 变化后残留。"""
+
+    def replace_suggested_classifications(
+        self,
+        *,
+        relations: list[SuggestedClassificationProjection],
+    ) -> None:
+        """全量重建正文分类建议关系，避免重分类后旧建议残留。"""
+
+    def replace_weak_path_suggestions(self, *, relations: list[PathSuggestionProjection]) -> None:
+        """重建受管目录弱分类关系，避免旧 Profile 关系残留。"""
+
+    def ensure_vector_index(self, *, index_name: str, dimension: int) -> None:
+        """确保文档版本向量索引存在。"""
+
+    def read_embedding_metadata(self, *, document_version_id: str) -> dict | None:
+        """读取已存向量版本，用于跳过重复计算。"""
+
+    def read_document_embedding(self, *, document_version_id: str) -> list[float] | None:
+        """在运行时读取文档向量，不进入 Agent State 或日志。"""
+
+    def upsert_document_embeddings(self, *, projections: list[DocumentEmbeddingProjection]) -> None:
+        """幂等写入文档级向量和模型版本。"""
+
+    def get_driver(self) -> Any:
+        """向受控 GraphRAG Adapter 提供线程安全 Driver。"""
 
     def expand_candidates(
         self,

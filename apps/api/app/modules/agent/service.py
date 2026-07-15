@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
@@ -26,7 +27,14 @@ from app.modules.llm.client import OpenAICompatibleLLMClient
 from app.modules.llm.document_summary import LLMDocumentSummaryService
 from app.modules.llm.service import LLMIntentService
 from app.modules.changesets.service import persist_changeset_from_document_results
-from app.modules.knowledge_graph.classification_context import build_graph_classification_context
+from app.modules.knowledge_graph.classification_context import (
+    build_graph_classification_context,
+    get_graph_repository,
+)
+from app.modules.knowledge_graph.semantic_context import (
+    NoOpSemanticClassificationContext,
+    build_semantic_classification_context,
+)
 
 class AgentRuntimeService:
     """协调 Planner、Tool Registry 和 LangGraph 执行。"""
@@ -145,6 +153,7 @@ class AgentRuntimeService:
                     tool_results=final_state.get("tool_results", []),
                     tool_invocations=invocation_records,
                     document_results=final_state.get("document_results", []),
+                    async_job_ids=final_state.get("async_job_ids", []),
                     changeset_id=final_state.get("changeset_id"),
                     operation_plan_id=final_state.get("operation_plan_id"),
                     final_response=final_state.get("final_response"),
@@ -172,6 +181,8 @@ class AgentRuntimeService:
         settings = get_settings()
         llm_judge = _build_classification_judge(settings)
         graph_context = build_graph_classification_context(settings)
+        semantic_context = _build_semantic_context(settings)
+        graph_mode = _graph_mode_for_user(settings=settings, user_id=user_id)
         return AgentRuntimeContext(
             planner=planner or DeterministicPlanner(),
             registry=self.registry_factory(db, user_id),
@@ -183,6 +194,8 @@ class AgentRuntimeService:
                 mode=settings.llm_classification_mode,
                 graph_context=graph_context,
                 graph_top_k=settings.graph_classification_top_k,
+                graph_mode=graph_mode,
+                semantic_context=semantic_context,
             ),
             document_summary_service=self.document_summary_service
             or _build_document_summary_service(settings=settings, db=db),
@@ -220,6 +233,7 @@ class AgentRuntimeService:
             "tool_invocations": [],
             "result_summary": {},
             "document_results": [],
+            "async_job_ids": [],
             "changeset_id": None,
             "operation_plan_id": None,
             "final_response": None,
@@ -250,6 +264,43 @@ def _build_classification_judge(settings) -> LLMClassificationJudge | None:
         client=client,
         allow_free_category_paths=settings.llm_classification_allow_free_paths,
     )
+
+
+def _build_semantic_context(settings):
+    """构造第二版语义分类上下文，依赖不完整时保持关闭式降级。"""
+
+    if (
+        not settings.graph_classification_enabled
+        or not settings.graph_embedding_enabled
+        or settings.graph_classification_mode == "off"
+    ):
+        return NoOpSemanticClassificationContext()
+    try:
+        repository = get_graph_repository(settings)
+        return build_semantic_classification_context(settings=settings, repository=repository)
+    except Exception as exc:
+        log_event(
+            "graph.semantic_context.loaded",
+            level="WARNING",
+            status="DEGRADED",
+            error_code=exc.__class__.__name__,
+            message="语义分类运行时不可用，已回退基础分类",
+        )
+        return NoOpSemanticClassificationContext(reason="SEMANTIC_CONTEXT_UNAVAILABLE")
+
+
+def _graph_mode_for_user(*, settings, user_id: str) -> str:
+    """按稳定用户桶执行 enabled 灰度，未命中用户继续使用 Shadow。"""
+
+    if settings.graph_classification_mode != "enabled":
+        return settings.graph_classification_mode
+    rollout = int(settings.graph_classification_rollout_percent)
+    if rollout >= 100:
+        return "enabled"
+    if rollout <= 0:
+        return "shadow"
+    bucket = int(hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:8], 16) % 100
+    return "enabled" if bucket < rollout else "shadow"
 
 
 def _build_document_summary_service(*, settings, db: Session | None) -> LLMDocumentSummaryService:

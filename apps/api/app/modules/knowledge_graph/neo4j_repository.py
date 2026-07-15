@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.modules.knowledge_graph.schemas import (
     CategoryProjection,
     CategoryRelationProjection,
     ConfirmedClassificationProjection,
+    DocumentEmbeddingProjection,
     DocumentVersionProjection,
     FolderCategoryRelationProjection,
     GraphCandidateSeed,
@@ -16,6 +18,8 @@ from app.modules.knowledge_graph.schemas import (
     ManagedFolderProjection,
     ManagedFolderRelationProjection,
     ManagedRootProjection,
+    PathSuggestionProjection,
+    SuggestedClassificationProjection,
 )
 
 try:
@@ -125,6 +129,11 @@ class Neo4jGraphRepository:
     ) -> None:
         """幂等写入受管目录层级，不保存服务器绝对路径。"""
 
+        # 目录到分类的映射完全由当前 Profile 重建，先清理可避免规则变更后残留旧关系。
+        self._execute(
+            "MATCH (:ManagedFolder)-[relation:MAPS_TO]->(:Category) DELETE relation",
+            {},
+        )
         if roots:
             self._execute(
                 """
@@ -235,6 +244,150 @@ class Neo4jGraphRepository:
                 """,
                 {"rows": [_location_row(item) for item in locations]},
             )
+
+    def delete_confirmed_classifications_by_source(self, *, source_type: str) -> None:
+        """按受控来源清理可重建可信关系。"""
+
+        if source_type not in {"user_feedback", "managed_path"}:
+            raise ValueError("不支持清理该图谱关系来源。")
+        self._execute(
+            """
+            MATCH (:DocumentVersion)-[relation:CONFIRMED_AS]->(:Category)
+            WHERE relation.source_type = $source_type
+            DELETE relation
+            """,
+            {"source_type": source_type},
+        )
+
+    def replace_suggested_classifications(
+        self,
+        *,
+        relations: list[SuggestedClassificationProjection],
+    ) -> None:
+        """全量重建 `SUGGESTED_AS`，普通建议不能参与可信传播。"""
+
+        self._execute(
+            "MATCH (:DocumentVersion)-[relation:SUGGESTED_AS]->(:Category) DELETE relation",
+            {},
+        )
+        if not relations:
+            return
+        self._execute(
+            """
+            UNWIND $rows AS row
+            MATCH (version:DocumentVersion {document_version_id: row.document_version_id})
+            MATCH (category:Category {graph_key: row.category_graph_key})
+            MERGE (version)-[relation:SUGGESTED_AS {suggestion_id: row.suggestion_id}]->(category)
+            SET relation.confidence = row.confidence,
+                relation.status = row.status,
+                relation.source = row.source,
+                relation.updated_at = datetime()
+            """,
+            {"rows": [_suggested_relation_row(item) for item in relations]},
+        )
+
+    def replace_weak_path_suggestions(self, *, relations: list[PathSuggestionProjection]) -> None:
+        """按 Profile 全量重建 `PATH_SUGGESTS`，它不能升级为可信关系。"""
+
+        self._execute(
+            "MATCH (:DocumentVersion)-[relation:PATH_SUGGESTS]->(:Category) DELETE relation",
+            {},
+        )
+        if not relations:
+            return
+        self._execute(
+            """
+            UNWIND $rows AS row
+            MATCH (version:DocumentVersion {document_version_id: row.document_version_id})
+            MATCH (category:Category {graph_key: row.category_graph_key})
+            MATCH (folder:ManagedFolder {graph_key: row.folder_graph_key})
+            MERGE (version)-[relation:PATH_SUGGESTS]->(category)
+            SET relation.folder_graph_key = folder.graph_key,
+                relation.profile_version = row.profile_version,
+                relation.confidence = row.confidence,
+                relation.updated_at = datetime()
+            """,
+            {"rows": [_path_suggestion_row(item) for item in relations]},
+        )
+
+    def ensure_vector_index(self, *, index_name: str, dimension: int) -> None:
+        """创建固定维度余弦向量索引，索引名只允许安全标识符。"""
+
+        safe_name = _safe_identifier(index_name)
+        safe_dimension = max(1, int(dimension))
+        self._execute(
+            f"""
+            CREATE VECTOR INDEX `{safe_name}` IF NOT EXISTS
+            FOR (node:DocumentVersion) ON (node.embedding)
+            OPTIONS {{indexConfig: {{
+                `vector.dimensions`: {safe_dimension},
+                `vector.similarity_function`: 'cosine'
+            }}}}
+            """,
+            {},
+        )
+
+    def read_embedding_metadata(self, *, document_version_id: str) -> dict[str, Any] | None:
+        """读取文档向量版本，不返回向量数值。"""
+
+        rows = self._execute(
+            """
+            MATCH (version:DocumentVersion {document_version_id: $document_version_id})
+            WHERE version.embedding IS NOT NULL
+            RETURN version.sha256 AS sha256,
+                   version.embedding_model AS embedding_model,
+                   version.embedding_version AS embedding_version,
+                   version.embedding_dimension AS embedding_dimension
+            LIMIT 1
+            """,
+            {"document_version_id": document_version_id},
+        )
+        return rows[0] if rows else None
+
+    def read_document_embedding(self, *, document_version_id: str) -> list[float] | None:
+        """读取已存文档向量，仅供受控相似召回使用。"""
+
+        rows = self._execute(
+            """
+            MATCH (version:DocumentVersion {document_version_id: $document_version_id})
+            WHERE version.embedding IS NOT NULL
+            RETURN version.embedding AS embedding
+            LIMIT 1
+            """,
+            {"document_version_id": document_version_id},
+        )
+        if not rows:
+            return None
+        return [float(item) for item in (rows[0].get("embedding") or [])]
+
+    def upsert_document_embeddings(self, *, projections: list[DocumentEmbeddingProjection]) -> None:
+        """写入文档级聚合向量及其可复用版本元数据。"""
+
+        if not projections:
+            return
+        self._execute(
+            """
+            UNWIND $rows AS row
+            MERGE (version:DocumentVersion {document_version_id: row.document_version_id})
+            SET version.document_id = row.document_id,
+                version.sha256 = row.sha256,
+                version.filename = row.filename,
+                version.embedding = row.embedding,
+                version.embedding_model = row.embedding_model,
+                version.embedding_version = row.embedding_version,
+                version.embedding_dimension = row.embedding_dimension,
+                version.embedding_successful_chunks = row.successful_chunks,
+                version.embedding_failed_chunks = row.failed_chunks,
+                version.embedding_updated_at = datetime(),
+                version.is_active = true
+            """,
+            {"rows": [_embedding_row(item) for item in projections]},
+        )
+
+    def get_driver(self) -> Any:
+        """向受控 GraphRAG Adapter 暴露线程安全 Driver。"""
+
+        return self.driver
 
     def expand_candidates(
         self,
@@ -379,12 +532,57 @@ def _confirmed_relation_row(item: ConfirmedClassificationProjection) -> dict[str
     }
 
 
+def _suggested_relation_row(item: SuggestedClassificationProjection) -> dict[str, Any]:
+    return {
+        "document_version_id": item.document_version_id,
+        "category_graph_key": item.category_graph_key,
+        "suggestion_id": item.suggestion_id,
+        "confidence": item.confidence,
+        "status": item.status,
+        "source": item.source,
+    }
+
+
 def _location_row(item: LocatedInProjection) -> dict[str, str]:
     return {
         "document_version_id": item.document_version_id,
         "folder_graph_key": item.folder_graph_key,
         "source_type": item.source_type,
     }
+
+
+def _path_suggestion_row(item: PathSuggestionProjection) -> dict[str, Any]:
+    return {
+        "document_version_id": item.document_version_id,
+        "category_graph_key": item.category_graph_key,
+        "folder_graph_key": item.folder_graph_key,
+        "profile_version": item.profile_version,
+        "confidence": item.confidence,
+    }
+
+
+def _embedding_row(item: DocumentEmbeddingProjection) -> dict[str, Any]:
+    return {
+        "document_version_id": item.document_version_id,
+        "document_id": item.document_id,
+        "sha256": item.sha256,
+        "filename": item.filename,
+        "embedding": list(item.embedding),
+        "embedding_model": item.embedding_model,
+        "embedding_version": item.embedding_version,
+        "embedding_dimension": item.embedding_dimension,
+        "successful_chunks": item.successful_chunks,
+        "failed_chunks": item.failed_chunks,
+    }
+
+
+def _safe_identifier(value: str) -> str:
+    """校验不能参数化的 Neo4j 索引标识符。"""
+
+    normalized = str(value or "").strip()
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", normalized):
+        raise ValueError("Neo4j 索引名只能包含字母、数字和下划线，并且必须以字母开头。")
+    return normalized
 
 
 def _seed_row(item: GraphCandidateSeed) -> dict[str, Any]:

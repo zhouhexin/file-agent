@@ -274,6 +274,8 @@ class DocumentCategorySuggestion(Base):
         nullable=False,
         index=True,
     )
+    document_version_id: Mapped[str] = mapped_column(String(36), nullable=False, default="", index=True)
+    category_id: Mapped[str] = mapped_column(String(255), nullable=False, default="", index=True)
     category_name: Mapped[str] = mapped_column(String(255), nullable=False)
     category_path_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     taxonomy_key: Mapped[str] = mapped_column(String(120), nullable=False, default="")
@@ -281,6 +283,8 @@ class DocumentCategorySuggestion(Base):
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="SUGGESTED")
     evidence_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    candidate_scores_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    semantic_evidence_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     source: Mapped[str] = mapped_column(String(40), nullable=False, default="rule")
     rank: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
@@ -315,8 +319,38 @@ class DocumentCategoryFeedback(Base):
         index=True,
     )
     action: Mapped[str] = mapped_column(String(40), nullable=False)
+    corrected_category_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    corrected_category_path_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    supersedes_feedback_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("document_category_feedback.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    is_active: Mapped[bool] = mapped_column(nullable=False, default=True, index=True)
     comment: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class GraphProjectionRun(Base):
+    """Neo4j 可重建投影的一次运行记录。"""
+
+    __tablename__ = "graph_projection_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    projection_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    scope_type: Mapped[str] = mapped_column(String(40), nullable=False, default="ALL")
+    scope_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    projection_version: Mapped[str] = mapped_column(String(80), nullable=False, default="graph-v2")
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="RUNNING", index=True)
+    nodes_written: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    relationships_written: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    items_succeeded: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    items_failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AgentRun(Base):

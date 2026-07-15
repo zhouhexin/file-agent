@@ -26,6 +26,7 @@ export type AgentRun = {
   final_response: string | null;
   tool_invocations: ToolInvocation[];
   document_results: DocumentResult[];
+  async_job_ids: string[];
   changeset_id: string | null;
   operation_plan_id: string | null;
 };
@@ -158,7 +159,20 @@ export type SendMessageResponse = {
   agent_run: AgentRun;
 };
 
+export type FilesystemJobResponse = {
+  id: string;
+  job_type: string;
+  root_id: string | null;
+  status: string;
+  progress_current: number;
+  progress_total: number;
+  result: Record<string, unknown>;
+  error_message: string | null;
+};
+
 export type DocumentCategory = {
+  suggestion_id?: string;
+  category_id?: string;
   name: string;
   category_path?: string[];
   confidence: number;
@@ -166,6 +180,24 @@ export type DocumentCategory = {
   status?: 'SUGGESTED' | 'CONFIRMED' | string;
   source?: string;
   taxonomy_version?: string;
+  candidate_scores?: Record<string, number>;
+  semantic_evidence?: {
+    support_count?: number;
+    similarity_bucket?: string;
+    source?: string;
+  };
+};
+
+export type ClassificationFeedbackResponse = {
+  id: string;
+  suggestion_id: string;
+  document_id: string;
+  action: 'ACCEPTED' | 'REJECTED' | 'CORRECTED' | string;
+  corrected_category_id?: string | null;
+  corrected_category_path: string[];
+  positive_category_ids: string[];
+  negative_category_ids: string[];
+  created_at: string;
 };
 
 export type DocumentResult = {
