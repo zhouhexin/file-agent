@@ -23,6 +23,7 @@ DEFAULT_OCR_LLM_FALLBACK_QUALITY_THRESHOLD = 0.68
 DEFAULT_OCR_PADDLE_MODEL_SOURCE = "BOS"
 DEFAULT_DOCLING_FORMATS = ("pdf", "docx")
 DEFAULT_FILE_RENAME_EXECUTOR = "native"
+DEFAULT_FILE_RENAME_PARSE_MODE = "hybrid"
 DEFAULT_FILE_RENAME_MAX_BATCH_SIZE = 20
 DEFAULT_FILE_RENAME_EXECUTION_TIMEOUT_SECONDS = 60
 DEFAULT_F2_EXPECTED_VERSION = "2.2.2"
@@ -67,6 +68,7 @@ class Settings(BaseModel):
     docling_formats: tuple[str, ...] = DEFAULT_DOCLING_FORMATS
     docling_ocr_enabled: bool = False
     file_rename_executor: str = DEFAULT_FILE_RENAME_EXECUTOR
+    file_rename_parse_mode: str = DEFAULT_FILE_RENAME_PARSE_MODE
     file_rename_max_batch_size: int = DEFAULT_FILE_RENAME_MAX_BATCH_SIZE
     file_rename_execution_timeout_seconds: int = DEFAULT_FILE_RENAME_EXECUTION_TIMEOUT_SECONDS
     f2_binary_path: str = "f2"
@@ -194,6 +196,11 @@ def get_settings() -> Settings:
         ),
         docling_ocr_enabled=os.getenv("DOCLING_OCR_ENABLED", "false").lower() == "true",
         file_rename_executor=os.getenv("FILE_RENAME_EXECUTOR", DEFAULT_FILE_RENAME_EXECUTOR),
+        file_rename_parse_mode=_choice(
+            os.getenv("FILE_RENAME_PARSE_MODE", DEFAULT_FILE_RENAME_PARSE_MODE),
+            allowed={"hybrid", "native", "docling"},
+            default=DEFAULT_FILE_RENAME_PARSE_MODE,
+        ),
         file_rename_max_batch_size=int(
             os.getenv("FILE_RENAME_MAX_BATCH_SIZE", str(DEFAULT_FILE_RENAME_MAX_BATCH_SIZE))
         ),

@@ -554,6 +554,7 @@ def build_plan_from_user_intent(
             [
                 intent_plan.managed_root_key,
                 intent_plan.managed_path_prefix,
+                intent_plan.managed_path_candidates,
                 intent_plan.managed_extension,
                 intent_plan.managed_filename_contains,
                 *managed_rename_filters.values(),
@@ -561,10 +562,23 @@ def build_plan_from_user_intent(
         )
         if not has_managed_scope:
             return _missing_file_scope_plan(user_goal=intent_plan.user_goal or message)
+        validated_path_candidates = list(
+            dict.fromkeys(
+                item
+                for item in [
+                    *intent_plan.managed_path_candidates,
+                    intent_plan.managed_path_prefix,
+                    managed_rename_filters.get("path_prefix"),
+                ]
+                if item
+            )
+        )
         return _managed_file_rename_plan(
             user_goal=intent_plan.user_goal or message,
             root_key=intent_plan.managed_root_key or managed_rename_filters.get("root_key"),
             path_prefix=intent_plan.managed_path_prefix or managed_rename_filters.get("path_prefix"),
+            path_candidates=validated_path_candidates,
+            scope_confidence=intent_plan.managed_scope_confidence,
             extension=intent_plan.managed_extension or managed_rename_filters.get("extension"),
             filename_contains=(
                 intent_plan.managed_filename_contains
@@ -1102,6 +1116,8 @@ def _managed_file_rename_plan(
     user_goal: str,
     root_key: str | None,
     path_prefix: str | None = None,
+    path_candidates: List[str] | None = None,
+    scope_confidence: float | None = None,
     extension: str | None = None,
     filename_contains: str | None = None,
     response_style: str = "concise",
@@ -1116,6 +1132,10 @@ def _managed_file_rename_plan(
         input_json["root_key"] = root_key
     if path_prefix:
         input_json["path_prefix"] = path_prefix
+    if path_candidates:
+        input_json["path_candidates"] = path_candidates
+    if scope_confidence is not None:
+        input_json["scope_confidence"] = scope_confidence
     if extension:
         input_json["extension"] = extension
     if filename_contains:
@@ -1127,6 +1147,8 @@ def _managed_file_rename_plan(
             "document_ids": [],
             "root_key": root_key,
             "path_prefix": path_prefix,
+            "path_candidates": path_candidates or [],
+            "scope_confidence": scope_confidence,
             "extension": extension,
             "filename_contains": filename_contains,
             "requested_outputs": ["rename_suggestions", "operation_plan"],
@@ -1855,6 +1877,9 @@ def _managed_file_rename_filters_from_request(*, message: str, lowered: str) -> 
         if explicit_reference
         else _managed_filename_contains_from_list_request(message)
     )
+    if path_prefix and filename_contains and path_prefix.split("/")[-1] == filename_contains:
+        # “校办下 2024 年的文件”已经收敛为校办/2024，不能再扩大为通用文件名条件。
+        filename_contains = None
     if extension:
         filters["extension"] = extension
     if filename_contains:
@@ -1935,6 +1960,17 @@ def _managed_file_reference_from_rename_request(message: str) -> Dict[str, str] 
 
 def _managed_path_prefix_from_rename_request(*, message: str, root_key: str | None) -> str | None:
     """从重命名表达中提取受管根目录内的子目录。"""
+
+    hierarchical_match = re.search(
+        r"(?:对|把|将|给)?\s*(?P<prefix>[^，。！？]+?)\s*"
+        r"(?:目录下|文件夹下|下|中|里)\s*"
+        r"(?P<year>(?:19|20)\d{2})\s*年?\s*(?:的)?(?:所有|全部)?(?:文件|文档|材料)"
+        r".*(?:重命名|改名)",
+        message,
+    )
+    if hierarchical_match:
+        prefix = re.sub(r"^(?:把|将|对|给)\s*", "", hierarchical_match.group("prefix").strip())
+        return _normalize_managed_path_prefix(f"{prefix}/{hierarchical_match.group('year')}")
 
     if root_key:
         return _managed_path_prefix_from_list_request(message=message, root_key=root_key)

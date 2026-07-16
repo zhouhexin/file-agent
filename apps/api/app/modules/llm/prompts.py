@@ -45,6 +45,9 @@ target_scope 只能填写范围意图，不能用它猜测 document_id：
 - required_capabilities 必须包含 suggest_rename；
 - tool_plan_hint 必须包含 generate-rename-suggestions；
 - managed_root_key、managed_path_prefix、managed_extension 和 managed_filename_contains 按上述受管目录规则填写；
+- 多层目录必须使用 `/` 连接后写入 managed_path_prefix，例如“校办下 2024 年的文件”优先理解为 `校办/2024`，不要只把 2024 写入 managed_filename_contains；
+- managed_path_candidates 保存可能的完整相对目录路径；只有确实存在多种目录解释时才返回多个候选，不要把文件名过滤方案混入目录候选；
+- managed_scope_confidence 表示目录范围理解置信度，范围为 0 到 1；目录表达不明确时降低置信度并填写 clarification_question；
 - 这里只生成待确认 OperationPlan，不能把请求理解为已经执行改名。
 当用户要求对服务器受管目录中的文件重新分类或生成分类建议时：
 - intent 使用 CLASSIFY_MANAGED_FILES；

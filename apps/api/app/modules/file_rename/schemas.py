@@ -31,6 +31,9 @@ class RenameEvidenceItem(BaseModel):
     element_index: int | None = None
     element_label: str | None = None
     bbox: dict[str, Any] | None = None
+    parser_name: str | None = None
+    candidate_score: float | None = Field(default=None, ge=0, le=1)
+    selection_reason: str | None = None
 
 
 class RenameFieldResult(BaseModel):
@@ -127,6 +130,9 @@ class RenameSuggestion(BaseModel):
     template_key: str | None = None
     status: str
     warnings: list[str] = Field(default_factory=list)
+    rename_parse_mode: str = ""
+    rename_candidate_parsers: list[str] = Field(default_factory=list)
+    arbitration_warnings: list[dict[str, Any]] = Field(default_factory=list)
     errors: list[dict[str, Any]] = Field(default_factory=list)
 
 

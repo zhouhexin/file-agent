@@ -77,6 +77,7 @@ export type OperationPlanResponse = {
   reason: string;
   items: OperationPlanItem[];
   skipped_items: Array<Record<string, unknown>>;
+  scope?: Record<string, unknown>;
   created_at: string;
   updated_at: string;
   confirmed_at: string | null;

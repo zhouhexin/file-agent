@@ -35,6 +35,7 @@ _FULL_DATE_PATTERN = re.compile(
     r"(?P<day>\d{1,2})\s*日"
 )
 _DATE_ONLY_PATTERN = re.compile(r"^\s*(?:19|20)\d{2}年(?:\d{1,2}月(?:\d{1,2}日)?)?\s*$")
+_BODY_INTRO_PATTERN = re.compile(r"(?:通知|说明|安排|要求)如下\s*[：:]?")
 _DOCUMENT_TYPE_TERMS = (
     "通知",
     "通报",
@@ -67,14 +68,16 @@ class FilenameMetadataExtractor:
         filename: str,
         pages: list[Any],
         elements: list[Any] | None = None,
+        parser_name: str = "",
     ) -> FilenameMetadataResult:
         """从按页正文和原文件名提取命名字段。"""
 
         normalized_pages = [_normalize_page(page) for page in pages]
         normalized_elements = [_normalize_element(element) for element in elements or []]
-        if normalized_elements:
-            document_number, document_year = _extract_structured_document_number(normalized_elements)
-        else:
+        document_number, document_year = _extract_structured_document_number(normalized_elements)
+        if document_number.status == RenameFieldStatus.MISSING and (
+            not normalized_elements or parser_name == "native"
+        ):
             document_number, document_year = _extract_document_number(normalized_pages)
         document_date = (
             _extract_structured_issue_date(normalized_elements)
@@ -99,12 +102,13 @@ class FilenameMetadataExtractor:
                 year=year.value,
             )
         )
-        return FilenameMetadataResult(
+        result = FilenameMetadataResult(
             document_date=document_date,
             year=year,
             document_number=document_number,
             title=title,
         )
+        return _annotate_parser(result, parser_name=parser_name)
 
 
 def _normalize_page(page: Any) -> dict[str, Any]:
@@ -134,6 +138,8 @@ def _normalize_element(element: Any) -> dict[str, Any]:
             "page_number": element.get("page_number"),
             "bbox": element.get("bbox") or element.get("bbox_json") or {},
             "content_layer": str(element.get("content_layer") or "body").lower(),
+            "parent_ref": element.get("parent_ref"),
+            "metadata": element.get("metadata") or element.get("metadata_json") or {},
         }
     return {
         "element_index": getattr(element, "element_index", None),
@@ -142,6 +148,8 @@ def _normalize_element(element: Any) -> dict[str, Any]:
         "page_number": getattr(element, "page_number", None),
         "bbox": getattr(element, "bbox_json", {}) or {},
         "content_layer": str(getattr(element, "content_layer", "body") or "body").lower(),
+        "parent_ref": getattr(element, "parent_ref", None),
+        "metadata": getattr(element, "metadata_json", {}) or {},
     }
 
 
@@ -151,8 +159,20 @@ def _extract_structured_document_number(
     """只从首页正文层的独立非段落元素提取当前文件文号。"""
 
     candidates: list[tuple[str, str, dict[str, Any], str]] = []
-    for element in elements:
+    first_page_elements = sorted(
+        [element for element in elements if int(element.get("page_number") or 1) == 1 and _is_body_element(element)],
+        key=lambda item: int(item.get("element_index") or 0),
+    )
+    title_indices = [
+        int(element.get("element_index") or 0)
+        for element in first_page_elements
+        if element["label"] in {"title", "section_header"}
+    ]
+    header_limit = min(30, (min(title_indices) + 12) if title_indices else 24)
+    for element in first_page_elements:
         if int(element.get("page_number") or 1) != 1 or not _is_body_element(element):
+            continue
+        if int(element.get("element_index") or 0) > header_limit:
             continue
         if element["label"] in {"paragraph", "reference", "page_header", "page_footer"}:
             continue
@@ -187,14 +207,14 @@ def _extract_structured_document_number(
             value=value,
             status=RenameFieldStatus.RESOLVED,
             source="document_structure_header",
-            confidence=0.99,
+            confidence=0.94,
             evidence_items=[evidence],
         ),
         RenameFieldResult(
             value=year,
             status=RenameFieldStatus.RESOLVED,
             source="document_number",
-            confidence=0.99,
+            confidence=0.94,
             evidence_items=[evidence],
         ),
     )
@@ -207,14 +227,23 @@ def _extract_structured_issue_date(elements: list[dict[str, Any]]) -> RenameFiel
     if not body_elements:
         return None
     last_page = max(int(element.get("page_number") or 1) for element in body_elements)
-    candidates: list[tuple[int, dict[str, Any], str, str]] = []
-    for element in body_elements:
+    candidates: list[tuple[int, int, dict[str, Any], str, str]] = []
+    eligible_elements = [
+        element
+        for element in body_elements
+        if element["label"] not in {"table", "table_cell", "caption", "reference", "footnote"}
+    ][-40:]
+    for element in eligible_elements:
         page_number = int(element.get("page_number") or 1)
         if page_number < max(1, last_page - 1):
             continue
-        for match in _FULL_DATE_PATTERN.finditer(element["text"]):
+        for raw_line in [line.strip() for line in element["text"].splitlines() if line.strip()]:
+            match = _FULL_DATE_PATTERN.search(raw_line)
+            if match is None or len(raw_line) > 60:
+                continue
             candidates.append(
                 (
+                    1 if _DATE_ONLY_PATTERN.fullmatch(raw_line) else 0,
                     int(element.get("element_index") or 0),
                     element,
                     _normalized_date(match),
@@ -223,12 +252,12 @@ def _extract_structured_issue_date(elements: list[dict[str, Any]]) -> RenameFiel
             )
     if not candidates:
         return None
-    _, element, document_date, quote = max(candidates, key=lambda item: item[0])
+    _, _, element, document_date, quote = max(candidates, key=lambda item: (item[0], item[1]))
     return RenameFieldResult(
         value=document_date,
         status=RenameFieldStatus.RESOLVED,
         source="document_structure_date",
-        confidence=0.99,
+        confidence=0.93,
         evidence_items=[_element_evidence(element, quote=quote, source="document_structure_date")],
     )
 
@@ -241,36 +270,37 @@ def _extract_structured_title(
 ) -> RenameFieldResult | None:
     """优先从 Docling title/section_header 元素提取完整标题。"""
 
-    candidates: list[tuple[int, str, dict[str, Any], str]] = []
+    candidates: list[tuple[int, str, dict[str, Any], str, float]] = []
     title_elements = [
         element
         for element in elements
         if _is_body_element(element)
-        and int(element.get("page_number") or 1) <= 3
+        and int(element.get("page_number") or 1) == 1
         and element["label"] in {"title", "section_header"}
     ]
     for index, element in enumerate(title_elements):
         variants = [(element["text"], element["text"], 1)]
-        for count in (2, 3):
+        for count in (2, 3, 4, 5):
             segment = title_elements[index : index + count]
-            if len(segment) != count or len({item.get("page_number") for item in segment}) != 1:
+            if len(segment) != count or not _is_contiguous_title_segment(segment):
                 continue
             variants.append(("".join(item["text"] for item in segment), "\n".join(item["text"] for item in segment), count))
         for value, quote, count in variants:
             cleaned = _clean_title(value, document_number=document_number, year=year)
             if not _is_title_candidate(cleaned, raw_line=value):
                 continue
-            label_score = 100 if element["label"] == "title" else 70
+            label_score = 100 if element["label"] == "title" else 55
             score = label_score + _title_candidate_score(cleaned) + count
-            candidates.append((score, cleaned, element, quote))
+            confidence = min(0.97, (0.94 if element["label"] == "title" else 0.76) + (count - 1) * 0.01)
+            candidates.append((score, cleaned, element, quote, confidence))
     if not candidates:
         return None
-    _, value, element, quote = max(candidates, key=lambda item: item[0])
+    _, value, element, quote, confidence = max(candidates, key=lambda item: item[0])
     return RenameFieldResult(
         value=value,
         status=RenameFieldStatus.RESOLVED,
         source="document_structure",
-        confidence=0.99,
+        confidence=confidence,
         evidence_items=[_element_evidence(element, quote=quote, source="document_structure")],
     )
 
@@ -282,6 +312,25 @@ def _is_body_element(element: dict[str, Any]) -> bool:
         "page_header",
         "page_footer",
     }
+
+
+def _is_contiguous_title_segment(segment: list[dict[str, Any]]) -> bool:
+    """只合并同页、同层级且元素顺序相邻的标题块。"""
+
+    if len({item.get("page_number") for item in segment}) != 1:
+        return False
+    indices = [int(item.get("element_index") or 0) for item in segment]
+    if any(right - left > 2 for left, right in zip(indices, indices[1:])):
+        return False
+    parent_refs = {item.get("parent_ref") for item in segment if item.get("parent_ref")}
+    if len(parent_refs) > 1:
+        return False
+    hierarchy_levels = {
+        (item.get("metadata") or {}).get("hierarchy_level")
+        for item in segment
+        if (item.get("metadata") or {}).get("hierarchy_level") is not None
+    }
+    return len(hierarchy_levels) <= 1
 
 
 def _extract_document_number(
@@ -488,7 +537,12 @@ def _extract_title(
                 if not _is_title_candidate(line, raw_line=raw_value):
                     continue
                 score = _title_candidate_score(line)
-                if line_count > 1 and line.endswith(_DOCUMENT_TYPE_TERMS + _TABLE_TITLE_TERMS):
+                first_line = _clean_title(raw_line, document_number=document_number, year=year)
+                if (
+                    line_count > 1
+                    and line.endswith(_DOCUMENT_TYPE_TERMS + _TABLE_TITLE_TERMS)
+                    and not first_line.endswith(_DOCUMENT_TYPE_TERMS + _TABLE_TITLE_TERMS)
+                ):
                     score += 1
                 candidates.append((score, -position, line, page, evidence_quote))
             position += 1
@@ -579,6 +633,8 @@ def _is_title_candidate(value: str, *, raw_line: str) -> bool:
         return False
     if any(pattern.search(raw_line) for pattern in _DOCUMENT_NUMBER_PATTERNS):
         return False
+    if _BODY_INTRO_PATTERN.search(value):
+        return False
     if value.startswith(("各", "现将", "根据", "为进一步", "经研究")) and not value.endswith(
         _DOCUMENT_TYPE_TERMS + _TABLE_TITLE_TERMS
     ):
@@ -614,3 +670,24 @@ def _element_evidence(element: dict[str, Any], *, quote: str, source: str) -> Re
         element_label=element.get("label"),
         bbox=element.get("bbox") or None,
     )
+
+
+def _annotate_parser(metadata: FilenameMetadataResult, *, parser_name: str) -> FilenameMetadataResult:
+    """把解析器来源和字段分数附加到证据，供后续仲裁和审计使用。"""
+
+    if not parser_name:
+        return metadata
+    updates: dict[str, RenameFieldResult] = {}
+    for field_name in ("document_date", "year", "document_number", "title"):
+        field_result = getattr(metadata, field_name)
+        evidence_items = [
+            item.model_copy(
+                update={
+                    "parser_name": parser_name,
+                    "candidate_score": field_result.confidence,
+                }
+            )
+            for item in field_result.evidence_items
+        ]
+        updates[field_name] = field_result.model_copy(update={"evidence_items": evidence_items})
+    return metadata.model_copy(update=updates)

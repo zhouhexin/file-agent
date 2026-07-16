@@ -247,6 +247,7 @@ def test_extract_document_text_persists_docx_pages(monkeypatch, tmp_path):
     """extract-document-text 应解析 docx 正文并持久化 DocumentPage。"""
 
     monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("DOCLING_ENABLED", "false")
     config.get_settings.cache_clear()
     client, SessionLocal = client_with_database()
     headers = _auth_header(client, "docx-extractor")

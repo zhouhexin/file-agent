@@ -41,6 +41,7 @@ class OperationPlanResponse(BaseModel):
     reason: str
     items: list[OperationPlanItem]
     skipped_items: list[dict[str, Any]] = Field(default_factory=list)
+    scope: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
     confirmed_at: datetime | None

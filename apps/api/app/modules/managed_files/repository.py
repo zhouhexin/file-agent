@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
@@ -142,6 +144,36 @@ class ManagedFileRepository:
             .limit(limit)
             .all()
         )
+
+    def list_directory_paths(
+        self,
+        *,
+        root_key: str | None = None,
+        root_keys: list[str] | None = None,
+    ) -> list[tuple[str, str]]:
+        """从有效文件索引推导可供范围校验的真实相对目录。"""
+
+        query = self.db.query(ManagedRoot.root_key, ManagedFile.relative_path).join(
+            ManagedRoot,
+            ManagedFile.root_id == ManagedRoot.id,
+        )
+        if root_key:
+            query = query.filter(ManagedRoot.root_key == root_key)
+        elif root_keys is not None:
+            if not root_keys:
+                return []
+            query = query.filter(ManagedRoot.root_key.in_(root_keys))
+        query = query.filter(ManagedFile.status == "ACTIVE")
+        query = _exclude_hidden_managed_paths(query)
+
+        directories: set[tuple[str, str]] = set()
+        for matched_root_key, relative_path in query.all():
+            parent_parts = PurePosixPath(str(relative_path)).parent.parts
+            for depth in range(1, len(parent_parts) + 1):
+                directory = PurePosixPath(*parent_parts[:depth]).as_posix()
+                if directory not in {"", "."}:
+                    directories.add((str(matched_root_key), directory))
+        return sorted(directories)
 
     def list_category_paths(self, *, root_key: str | None = None) -> list[tuple[str, str, str, int]]:
         """列出已分类受管目录中的分类路径和文件数量。"""

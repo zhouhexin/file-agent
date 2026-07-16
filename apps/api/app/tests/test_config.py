@@ -112,6 +112,29 @@ def test_settings_defaults_paddleocr_model_source_to_baidu_bos(monkeypatch, tmp_
     assert settings.ocr_paddle_model_source == "BOS"
 
 
+@pytest.mark.parametrize("mode", ["hybrid", "native", "docling"])
+def test_settings_loads_file_rename_parse_mode(monkeypatch, tmp_path, mode):
+    """重命名解析模式必须接受三个受控配置值。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.setenv("FILE_RENAME_PARSE_MODE", mode)
+    _reset_settings_cache()
+
+    assert config.get_settings().file_rename_parse_mode == mode
+
+
+def test_settings_defaults_unknown_file_rename_parse_mode_to_hybrid(monkeypatch, tmp_path):
+    """未知解析模式必须回退 hybrid，不能进入重命名业务层。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.setenv("FILE_RENAME_PARSE_MODE", "unsupported")
+    _reset_settings_cache()
+
+    assert config.get_settings().file_rename_parse_mode == "hybrid"
+
+
 def test_settings_defaults_graph_classification_to_disabled(monkeypatch, tmp_path):
     """图谱分类必须默认关闭，未部署 Neo4j 时不能影响后端启动。"""
 

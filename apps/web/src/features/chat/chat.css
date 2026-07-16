@@ -973,6 +973,13 @@
   color: #c2410c;
 }
 
+.operation-plan-scope {
+  margin: 0;
+  color: #475569;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 .operation-plan-items {
   display: grid;
   gap: 8px;

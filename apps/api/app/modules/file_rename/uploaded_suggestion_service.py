@@ -13,11 +13,11 @@ from sqlalchemy.orm import Session
 
 from app.db.models import AgentRun, Document, ManagedFileSnapshot, User
 from app.modules.file_rename.filename_builder import FilenameBuildError, FilenameBuilder
-from app.modules.file_rename.metadata_extractor import FilenameMetadataExtractor
+from app.modules.file_rename.metadata_resolution_service import RenameMetadataResolutionService
+from app.modules.file_rename.parsing_service import extract_rename_primary, rename_primary_config_hash
 from app.modules.file_rename.policy_loader import load_rename_policy
 from app.modules.file_rename.schemas import RenameFieldResult, RenameFieldStatus
 from app.modules.files.extraction_repository import FileExtractionRepository
-from app.modules.files.extractors import extract_document_text, extraction_config_hash
 from app.modules.operations.repository import OperationPlanRepository
 
 
@@ -30,7 +30,7 @@ class UploadedRenameSuggestionService:
         self.db = db
         self.user_id = user_id
         self.policy = load_rename_policy()
-        self.metadata_extractor = FilenameMetadataExtractor()
+        self.metadata_resolution_service = RenameMetadataResolutionService()
         self.filename_builder = FilenameBuilder()
 
     def generate_plan(
@@ -167,11 +167,21 @@ class UploadedRenameSuggestionService:
                     },
                     extraction_result,
                 )
-            metadata = self.metadata_extractor.extract(
+            resolved_source = FileExtractionRepository(self.db, self.user_id).resolve_original_file_for_document(document)
+            metadata_resolution = self.metadata_resolution_service.resolve(
+                file_path=resolved_source.get("file_path") if resolved_source.get("ok") else None,
                 filename=document.original_filename,
-                pages=pages,
-                elements=elements,
+                content_type=document.content_type,
+                primary_result=extraction_result,
+                primary_pages=pages,
+                primary_elements=elements,
             )
+            metadata = metadata_resolution.metadata
+            arbitration_warnings = metadata_resolution.warnings
+            warning_messages = [str(item.get("message") or "") for item in arbitration_warnings if item.get("message")]
+            extraction_result["rename_parse_mode"] = metadata_resolution.mode
+            extraction_result["rename_candidate_parsers"] = metadata_resolution.candidate_parsers
+            extraction_result["rename_arbitration_warnings"] = arbitration_warnings
             if not metadata.can_build_filename:
                 return (
                     {
@@ -183,7 +193,10 @@ class UploadedRenameSuggestionService:
                         "title": metadata.title.model_dump(mode="json"),
                         "template_key": None,
                         "status": "NEEDS_REVIEW",
-                        "warnings": ["年份或正文标题缺失，已从可执行批次中跳过。"],
+                        "warnings": ["年份或正文标题存在缺失或歧义，已从可执行批次中跳过。", *warning_messages],
+                        "rename_parse_mode": metadata_resolution.mode,
+                        "rename_candidate_parsers": metadata_resolution.candidate_parsers,
+                        "arbitration_warnings": arbitration_warnings,
                         "errors": [],
                     },
                     extraction_result,
@@ -204,7 +217,13 @@ class UploadedRenameSuggestionService:
                     "title": metadata.title.model_dump(mode="json"),
                     "template_key": template_key,
                     "status": "NO_CHANGE" if no_change else "READY",
-                    "warnings": ["文件名已经符合当前规则，无需重命名。"] if no_change else [],
+                    "warnings": [
+                        *(["文件名已经符合当前规则，无需重命名。"] if no_change else []),
+                        *warning_messages,
+                    ],
+                    "rename_parse_mode": metadata_resolution.mode,
+                    "rename_candidate_parsers": metadata_resolution.candidate_parsers,
+                    "arbitration_warnings": arbitration_warnings,
                     "errors": [],
                 },
                 extraction_result,
@@ -234,7 +253,7 @@ class UploadedRenameSuggestionService:
         """生成或复用 document_pages，并只把轻量摘要返回给 Graph State。"""
 
         repository = FileExtractionRepository(self.db, self.user_id)
-        parser_config_hash = extraction_config_hash(filename=document.original_filename)
+        parser_config_hash = rename_primary_config_hash(filename=document.original_filename)
         reusable = repository.get_latest_successful_extraction(
             document_id=document.id,
             parser_config_hash=parser_config_hash,
@@ -248,7 +267,7 @@ class UploadedRenameSuggestionService:
                     error=resolved.get("error") or {},
                 ), [], []
             try:
-                extraction = extract_document_text(
+                extraction = extract_rename_primary(
                     file_path=resolved["file_path"],
                     filename=document.original_filename,
                     content_type=document.content_type,
@@ -309,6 +328,7 @@ class UploadedRenameSuggestionService:
                 "extraction_run_id": run.id,
                 "status": "COMPLETED",
                 "extractor": run.extractor,
+                "parser_name": run.parser_name,
                 "reused": reused,
                 "pages": [
                     {
@@ -350,6 +370,9 @@ def _operation_plan_item(suggestion: dict[str, Any]) -> dict[str, Any]:
             "year": suggestion["year"],
             "document_number": suggestion["document_number"],
             "title": suggestion["title"],
+            "parse_mode": suggestion.get("rename_parse_mode", ""),
+            "candidate_parsers": suggestion.get("rename_candidate_parsers", []),
+            "arbitration_warnings": suggestion.get("arbitration_warnings", []),
         },
         "execution_status": "PLANNED",
     }

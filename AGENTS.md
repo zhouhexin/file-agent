@@ -311,6 +311,7 @@ LangGraph 实现规则：
 - `planner`、`registry`、`context_loader`、`llm_intent_service`、数据库 Session、LLM client、API key、HTTP client 等运行对象不得写入 `AgentGraphState`、checkpoint 或 `graph_state_json`。
 - LangGraph 节点需要运行依赖时，必须通过 `AgentRuntimeContext` 或等价的运行时上下文机制获取，不能把服务对象塞进 State。
 - 会话附件范围必须先由后端 `ConversationAttachmentContextService` 或等价服务解析成确定的 `document_ids`，并标记 `uploaded` / `inferred_context` 与真实上传 `batch_id`；Planner、LLM 和 Graph 节点不得自行猜测“刚刚上传”“上面文件”“第二个文件”对应的文件集合。
+- 受管目录自然语言范围采用“LLM 结构化候选 + 后端真实索引校验”：LLM 只能输出 `managed_root_key`、完整相对目录候选和置信度，不能把候选直接视为真实路径；后端必须基于当前受管目录索引唯一解析 `root_key + path_prefix`。不存在或匹配多个目录时必须停止 Tool 执行并请求用户提供完整路径，不得合并多个歧义目录执行批量解析、分类或重命名。
 - 用户要求总结、讲解或针对附件正文问答时，必须先通过受控 Tool 生成或复用 `document_pages`，再由 `AgentRuntimeContext` 中的文档阅读 LLM 服务读取 `document_pages.text_content` 完整正文生成回复；不得只基于 Tool 返回的短 `text_preview` 生成最终内容回复。
 - 文档阅读 LLM 服务可以对小文件直接调用模型，对大文件先分块总结再汇总；分块阈值属于运行时服务配置，不得把全文、分块内容或 LLM client 写入 `AgentGraphState`。
 - 绑定用户、数据库会话或请求上下文的运行依赖必须通过 factory 在每次 AgentRun 中重新构造；尤其是 Tool Registry 不得作为长期单例复用，避免旧 `user_id` 或旧数据库会话泄漏到新请求。

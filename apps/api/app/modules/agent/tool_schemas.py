@@ -259,6 +259,8 @@ class GenerateRenameSuggestionsInput(StrictToolInput):
     document_ids: List[str] = Field(default_factory=list, max_length=50)
     root_key: Optional[str] = None
     path_prefix: Optional[str] = None
+    path_candidates: List[str] = Field(default_factory=list, max_length=10)
+    scope_confidence: Optional[float] = Field(default=None, ge=0, le=1)
     extension: Optional[str] = None
     filename_contains: Optional[str] = None
     limit: int = Field(default=20, ge=1, le=50)
@@ -271,6 +273,14 @@ class GenerateRenameSuggestionsInput(StrictToolInput):
         """校验受管目录内的相对路径。"""
 
         return _normalize_path_prefix(value)
+
+    @field_validator("path_candidates")
+    @classmethod
+    def validate_path_candidates(cls, value: List[str]) -> List[str]:
+        """规范化 LLM 目录候选并保持顺序去重。"""
+
+        normalized = [_normalize_path_prefix(item) for item in value]
+        return list(dict.fromkeys(item for item in normalized if item))
 
     @field_validator("document_ids")
     @classmethod
@@ -287,7 +297,7 @@ class GenerateRenameSuggestionsInput(StrictToolInput):
         """附件范围与受管目录过滤条件不能混用，防止跨边界扫描。"""
 
         if self.document_ids and any(
-            [self.root_key, self.path_prefix, self.extension, self.filename_contains]
+            [self.root_key, self.path_prefix, self.path_candidates, self.extension, self.filename_contains]
         ):
             raise ValueError("document_ids cannot be combined with managed-file filters")
         return self

@@ -427,10 +427,17 @@ curl -X POST http://127.0.0.1:8000/api/conversations/conv-1/messages \
 受管文件重命名必须先生成 `RENAME_FILES` OperationPlan，再由计划创建者确认。默认执行器为：
 
 ```text
+FILE_RENAME_PARSE_MODE=hybrid
 FILE_RENAME_EXECUTOR=native
 FILE_RENAME_MAX_BATCH_SIZE=20
 FILE_RENAME_EXECUTION_TIMEOUT_SECONDS=60
 ```
+
+`FILE_RENAME_PARSE_MODE` 控制命名字段的解析来源，与执行器配置相互独立：
+
+- `hybrid`：Docling 与原生解析器生成候选并逐字段仲裁，默认用于生产。
+- `native`：只使用原生解析器，Docling 质量异常时用于紧急回退。
+- `docling`：只使用 Docling，主要用于对比测试和问题定位；Docling 不可用时仍安全回退原生解析。
 
 F2 v2.2.2 是可选批量执行器。F2 不提取年份、文号或标题，只执行后端已经确认的同目录
 `before -> after` 映射。切换前需要把对应平台的 F2 二进制放入离线部署包，核对发布资产

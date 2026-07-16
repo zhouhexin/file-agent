@@ -16,6 +16,7 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
   const [error, setError] = useState('');
   const waiting = plan.status === 'WAITING_CONFIRMATION' || plan.status === 'PLANNED';
   const uploadedTemporaryRename = plan.operation_type === 'RENAME_UPLOADED_FILES';
+  const pathPrefix = readOptionalString(plan.scope, 'path_prefix');
 
   async function handleConfirm() {
     setConfirming(true);
@@ -47,6 +48,10 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
 
       {uploadedTemporaryRename ? (
         <p>本次只修改附件在临时存储中的文件名，不执行分类或写入受管目录。</p>
+      ) : null}
+
+      {!uploadedTemporaryRename && pathPrefix ? (
+        <p className="operation-plan-scope">处理范围：{pathPrefix}</p>
       ) : null}
 
       <div className="operation-plan-items">
@@ -85,6 +90,11 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
 function readString(payload: Record<string, unknown>, key: string): string {
   const value = payload[key];
   return typeof value === 'string' && value ? value : '未命名文件';
+}
+
+function readOptionalString(payload: Record<string, unknown> | undefined, key: string): string {
+  const value = payload?.[key];
+  return typeof value === 'string' ? value : '';
 }
 
 function formatPlanStatus(status: string): string {

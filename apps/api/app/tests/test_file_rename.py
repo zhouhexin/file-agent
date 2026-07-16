@@ -73,6 +73,36 @@ def test_filename_metadata_extractor_reads_official_document_fields():
     assert result.title.status == RenameFieldStatus.RESOLVED
 
 
+def test_filename_metadata_extractor_rejects_body_intro_merged_with_section_title():
+    """正文引导句与首节标题合并后，不得覆盖首页独立公文标题。"""
+
+    result = FilenameMetadataExtractor().extract(
+        filename="关于2015年绩效工资结算及2016年绩效预发方案的通知.doc",
+        pages=[
+            {
+                "page_number": 1,
+                "sheet_name": None,
+                "text": (
+                    "关于2015年绩效工资结算及2016年绩效工资预发方案的通知\n\n"
+                    "校属各单位：\n"
+                    "经学校研究决定，现将绩效工资2015年结算方案、"
+                    "2016年预发方案及具体要求通知如下：\n"
+                    "一、2015年绩效工资结算方案\n"
+                    "（一）岗位基础津贴部分\n"
+                    "人事处\n"
+                    "2016年1月6日"
+                ),
+            }
+        ],
+        parser_name="native",
+    )
+
+    assert result.year.value == "2016"
+    assert result.document_date.value == "20160106"
+    assert result.title.value == "关于2015年绩效工资结算及2016年绩效工资预发方案的通知"
+    assert "通知如下" not in (result.title.value or "")
+
+
 def test_filename_metadata_extractor_allows_missing_document_number():
     """普通材料没有文号时仍可按年份和标题生成降级名称。"""
 
@@ -266,6 +296,97 @@ def test_filename_metadata_extractor_prefers_structured_document_elements():
     assert result.year.source == "document_structure_date"
 
 
+def test_filename_metadata_extractor_merges_five_structured_title_elements():
+    """Docling 把长标题拆成五块时仍应恢复完整正文标题。"""
+
+    title_parts = ["关于", "进一步规范", "学校印章", "使用管理", "的通知"]
+    result = FilenameMetadataExtractor().extract(
+        filename="扫描件.pdf",
+        pages=[{"page_number": 1, "text": "\n".join(title_parts)}],
+        elements=[
+            {
+                "element_index": index,
+                "label": "title",
+                "text": value,
+                "page_number": 1,
+                "content_layer": "body",
+                "parent_ref": "#/body/0",
+                "metadata": {"hierarchy_level": 1},
+            }
+            for index, value in enumerate(title_parts)
+        ],
+        parser_name="docling",
+    )
+
+    assert result.title.value == "关于进一步规范学校印章使用管理的通知"
+    assert result.title.evidence_items[0].parser_name == "docling"
+
+
+def test_filename_metadata_extractor_ignores_table_date_after_issue_date():
+    """附件表格中的较晚日期不得覆盖正文落款日期。"""
+
+    result = FilenameMetadataExtractor().extract(
+        filename="通知.pdf",
+        pages=[{"page_number": 1, "text": "关于做好测试工作的通知\n2024年7月12日\n2026年5月8日"}],
+        elements=[
+            {
+                "element_index": 0,
+                "label": "title",
+                "text": "关于做好测试工作的通知",
+                "page_number": 1,
+                "content_layer": "body",
+            },
+            {
+                "element_index": 8,
+                "label": "text",
+                "text": "党委办公室\n2024年7月12日",
+                "page_number": 1,
+                "content_layer": "body",
+            },
+            {
+                "element_index": 9,
+                "label": "table",
+                "text": "填表日期\n2026年5月8日",
+                "page_number": 1,
+                "content_layer": "body",
+            },
+        ],
+        parser_name="docling",
+    )
+
+    assert result.document_date.value == "20240712"
+    assert result.year.value == "2024"
+
+
+def test_filename_metadata_extractor_ignores_late_structured_reference_number():
+    """远离首页标题区的独立引用文号不得作为本文件文号。"""
+
+    result = FilenameMetadataExtractor().extract(
+        filename="2024_学校印章使用管理通知.pdf",
+        pages=[{"page_number": 1, "text": "学校印章使用管理通知\n西安理工发〔2023〕2号"}],
+        elements=[
+            {
+                "element_index": 0,
+                "label": "title",
+                "text": "学校印章使用管理通知",
+                "page_number": 1,
+                "content_layer": "body",
+            },
+            {
+                "element_index": 20,
+                "label": "text",
+                "text": "西安理工发〔2023〕2号",
+                "page_number": 1,
+                "content_layer": "body",
+            },
+        ],
+        parser_name="docling",
+    )
+
+    assert result.document_number.status == RenameFieldStatus.MISSING
+    assert result.year.value == "2024"
+
+
 def test_deterministic_planner_routes_managed_rename_request():
     """确定性 Planner 应把受管目录改名请求路由到建议 Tool。"""
 
@@ -281,6 +402,65 @@ def test_deterministic_planner_routes_managed_rename_request():
     assert plan.steps[0].tool_name == "generate-rename-suggestions"
     assert plan.steps[0].input["path_prefix"] == "党办"
     assert plan.confirmation_policy["operation_plan_required"] is True
+
+
+def test_deterministic_planner_builds_hierarchical_year_directory_for_rename():
+    """LLM 不可用时也应把“校办下 2024 年”收敛为完整目录路径。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conversation-year-directory",
+        user_id="user-year-directory",
+        message_id="message-year-directory",
+        message="对校办下2024年的文件进行重命名",
+        attachments=[],
+    )
+
+    assert plan.intent == "SUGGEST_RENAME"
+    assert plan.steps[0].input["path_prefix"] == "校办/2024"
+    assert "filename_contains" not in plan.steps[0].input
+
+
+def test_llm_planner_keeps_managed_directory_candidates_for_backend_validation():
+    """LLM 目录候选和置信度必须交给后端 Tool 校验，不能直接视为真实路径。"""
+
+    plan = build_plan_from_user_intent(
+        intent_plan=UserIntentPlan(
+            intent="SUGGEST_RENAME",
+            user_goal="对校办下2024年的文件进行重命名",
+            required_capabilities=["suggest_rename"],
+            tool_plan_hint=["generate-rename-suggestions"],
+            managed_path_prefix="校办/2024",
+            managed_path_candidates=["校办/2024"],
+            managed_scope_confidence=0.93,
+        ),
+        message="对校办下2024年的文件进行重命名",
+        attachments=[],
+    )
+
+    assert plan.steps[0].input["path_prefix"] == "校办/2024"
+    assert plan.steps[0].input["path_candidates"] == ["校办/2024"]
+    assert plan.steps[0].input["scope_confidence"] == 0.93
+
+
+def test_llm_and_deterministic_managed_paths_are_both_kept_when_they_disagree():
+    """模型与规则对目录理解不一致时必须保留两者，交由后端判定是否需要澄清。"""
+
+    plan = build_plan_from_user_intent(
+        intent_plan=UserIntentPlan(
+            intent="SUGGEST_RENAME",
+            user_goal="对校办下2024年的文件进行重命名",
+            required_capabilities=["suggest_rename"],
+            managed_path_prefix="校办",
+            managed_path_candidates=["校办"],
+            managed_filename_contains="2024",
+            managed_scope_confidence=0.62,
+        ),
+        message="对校办下2024年的文件进行重命名",
+        attachments=[],
+    )
+
+    assert plan.steps[0].input["path_prefix"] == "校办"
+    assert plan.steps[0].input["path_candidates"] == ["校办", "校办/2024"]
 
 
 def test_deterministic_planner_keeps_uploaded_document_scope_for_rename():
@@ -427,6 +607,8 @@ def test_uploaded_attachment_rename_confirms_into_private_temporary_path(monkeyp
     assert plan["status"] == "WAITING_CONFIRMATION"
     assert plan["items"][0]["before"]["filename"] == "扫描件.txt"
     assert plan["items"][0]["after"]["filename"] == "2026_春季学生活动总结.txt"
+    assert plan["items"][0]["rename_metadata"]["parse_mode"] == "hybrid"
+    assert plan["items"][0]["rename_metadata"]["candidate_parsers"] == ["native"]
     assert shared_path.exists()
 
     confirm_response = client.post(
@@ -540,9 +722,12 @@ def test_managed_rename_chat_plan_and_confirm_executes_native_rename(monkeypatch
     assert plan_response.status_code == 200
     plan = plan_response.json()
     assert plan["status"] == "WAITING_CONFIRMATION"
+    assert plan["scope"]["path_prefix"] == "党办"
     assert plan["items"][0]["after"]["filename"] == (
         "2026_校发〔2026〕12号_关于做好奖学金评审工作的通知.txt"
     )
+    assert plan["items"][0]["rename_metadata"]["parse_mode"] == "hybrid"
+    assert plan["items"][0]["rename_metadata"]["candidate_parsers"] == ["native"]
 
     confirm_response = client.post(
         f"/api/operations/plans/{plan['id']}/confirm",
@@ -623,7 +808,7 @@ def test_legacy_xls_extraction_failure_uses_filename_and_second_version(monkeypa
     monkeypatch.chdir(tmp_path)
     _configure_test_managed_root(monkeypatch, managed_root)
     monkeypatch.setattr(
-        "app.modules.file_rename.suggestion_service.extract_document_text",
+        "app.modules.file_rename.suggestion_service.extract_rename_primary",
         lambda **_: {
             "ok": False,
             "status": "FAILED",

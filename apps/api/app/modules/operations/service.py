@@ -124,6 +124,7 @@ class OperationPlanService:
             reason=plan.reason,
             items=[OperationPlanItem.model_validate(item) for item in plan.plan_json.get("items", [])],
             skipped_items=[item for item in plan.plan_json.get("skipped_items", []) if isinstance(item, dict)],
+            scope=plan.plan_json.get("scope", {}) if isinstance(plan.plan_json.get("scope"), dict) else {},
             created_at=plan.created_at,
             updated_at=plan.updated_at,
             confirmed_at=plan.confirmed_at,

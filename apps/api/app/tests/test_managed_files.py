@@ -158,3 +158,57 @@ def test_filename_filter_treats_sql_wildcards_as_literal_text():
         assert count == 1
     finally:
         db.close()
+
+
+def test_managed_directory_scope_resolver_requires_unique_real_directory():
+    """末级目录重名时必须澄清，完整多级路径应唯一解析。"""
+
+    from app.modules.managed_files.directory_scope_resolver import ManagedDirectoryScopeResolver
+    from app.modules.managed_files.repository import ManagedFileRepository
+
+    db = _session()
+    try:
+        root = ManagedRoot(
+            root_key="downloads",
+            display_name="downloads",
+            container_path="/managed/downloads",
+        )
+        db.add(root)
+        db.flush()
+        for index, relative_path in enumerate(
+            ["校办/2024/工作通知.txt", "党办/2024/会议通知.txt"],
+            start=1,
+        ):
+            db.add(
+                ManagedFile(
+                    root_id=root.id,
+                    relative_path=relative_path,
+                    relative_path_hash=f"hash-scope-{index}",
+                    filename=relative_path.rsplit("/", 1)[-1],
+                    extension=".txt",
+                    size_bytes=10,
+                    fingerprint=str(index) * 64,
+                    status="ACTIVE",
+                )
+            )
+        db.flush()
+        resolver = ManagedDirectoryScopeResolver(ManagedFileRepository(db))
+
+        ambiguous = resolver.resolve(
+            root_key="downloads",
+            configured_root_keys=["downloads"],
+            path_prefix="2024",
+        )
+        resolved = resolver.resolve(
+            root_key="downloads",
+            configured_root_keys=["downloads"],
+            path_prefix="校办/2024",
+        )
+
+        assert ambiguous.status == "NEEDS_CLARIFICATION"
+        assert [item.path_prefix for item in ambiguous.candidates] == ["党办/2024", "校办/2024"]
+        assert resolved.status == "RESOLVED"
+        assert resolved.root_key == "downloads"
+        assert resolved.path_prefix == "校办/2024"
+    finally:
+        db.close()

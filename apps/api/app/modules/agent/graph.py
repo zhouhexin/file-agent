@@ -153,6 +153,8 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                 target_scope=intent_plan.target_scope,
                 managed_root_key=intent_plan.managed_root_key,
                 managed_path_prefix=intent_plan.managed_path_prefix,
+                managed_path_candidates=intent_plan.managed_path_candidates,
+                managed_scope_confidence=intent_plan.managed_scope_confidence,
                 managed_extension=intent_plan.managed_extension,
                 managed_filename_contains=intent_plan.managed_filename_contains,
                 required_capabilities=intent_plan.required_capabilities,
@@ -226,9 +228,10 @@ def _deterministic_preflight_plan(
         message=state["message"],
         attachments=state.get("attachments", []),
     )
+    if plan.intent == "SUGGEST_RENAME" and plan.slots.get("document_ids"):
+        return plan
     if plan.intent in {
         "LIST_MANAGED_FILES",
-        "SUGGEST_RENAME",
         "RESOLVE_RENAME_REVIEW",
         "CAPABILITY_HELP",
         "LIST_CLASSIFICATION_TAXONOMY",
@@ -774,6 +777,9 @@ def _build_rename_plan_response(payload: Dict[str, Any]) -> str:
         f"已检查 {matched_count} 个文件，生成 {ready_count} 个可执行的重命名建议。",
         "当前仅生成操作计划，原文件尚未修改。",
     ]
+    query = payload.get("query") if isinstance(payload.get("query"), dict) else {}
+    if query.get("path_prefix"):
+        lines.insert(0, f"处理范围：{query['path_prefix']}")
     if review_count:
         lines.append("以下文件缺少重命名所需信息（年份或正文标题），暂未处理。")
     if ready_count:

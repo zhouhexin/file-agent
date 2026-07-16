@@ -8,14 +8,18 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.db.models import ManagedFile, ManagedRoot, User
+from app.db.models import Document, ManagedFile, ManagedRoot, User
 from app.modules.file_rename.filename_builder import FilenameBuildError, FilenameBuilder
-from app.modules.file_rename.metadata_extractor import FilenameMetadataExtractor
+from app.modules.file_rename.metadata_resolution_service import RenameMetadataResolutionService
+from app.modules.file_rename.parsing_service import extract_rename_primary, rename_primary_config_hash
 from app.modules.file_rename.policy_loader import load_rename_policy
 from app.modules.file_rename.review_service import RenameReviewService
 from app.modules.file_rename.schemas import RenameFieldResult, RenameFieldStatus, RenameSuggestion
 from app.modules.files.extraction_repository import FileExtractionRepository
-from app.modules.files.extractors import extract_document_text, extraction_config_hash
+from app.modules.managed_files.directory_scope_resolver import (
+    ManagedDirectoryScopeResolution,
+    ManagedDirectoryScopeResolver,
+)
 from app.modules.managed_files.repository import ManagedFileRepository
 from app.modules.managed_files.service import resolve_managed_file_query_scope, sync_configured_managed_roots
 from app.modules.managed_files.snapshot_service import ManagedFileSnapshotService
@@ -34,7 +38,7 @@ class RenameSuggestionService:
         self.db = db
         self.user_id = user_id
         self.policy = load_rename_policy()
-        self.metadata_extractor = FilenameMetadataExtractor()
+        self.metadata_resolution_service = RenameMetadataResolutionService()
         self.filename_builder = FilenameBuilder()
 
     def generate_plan(
@@ -44,6 +48,8 @@ class RenameSuggestionService:
         agent_run_id: str,
         root_key: str | None = None,
         path_prefix: str | None = None,
+        path_candidates: list[str] | None = None,
+        scope_confidence: float | None = None,
         extension: str | None = None,
         filename_contains: str | None = None,
         limit: int = 20,
@@ -57,10 +63,25 @@ class RenameSuggestionService:
         if scope.unresolved_root_key:
             return _error("MANAGED_ROOT_NOT_CONFIGURED", "未找到对应的受管目录配置。")
         sync_configured_managed_roots(self.db, root_key=scope.root_key, scan=True)
-        rows = ManagedFileRepository(self.db).list_files(
+        repository = ManagedFileRepository(self.db)
+        directory_resolution = ManagedDirectoryScopeResolver(repository).resolve(
             root_key=scope.root_key,
-            root_keys=scope.configured_root_keys,
+            configured_root_keys=scope.configured_root_keys,
             path_prefix=scope.path_prefix,
+            path_candidates=path_candidates,
+        )
+        if directory_resolution.status != "RESOLVED":
+            return _directory_scope_clarification(
+                resolution=directory_resolution,
+                requested_path=scope.path_prefix,
+                scope_confidence=scope_confidence,
+            )
+        resolved_root_key = directory_resolution.root_key or scope.root_key
+        resolved_path_prefix = directory_resolution.path_prefix
+        rows = repository.list_files(
+            root_key=resolved_root_key,
+            root_keys=scope.configured_root_keys if resolved_root_key is None else None,
+            path_prefix=resolved_path_prefix,
             extension=extension,
             filename_contains=filename_contains,
             status="ACTIVE",
@@ -121,6 +142,12 @@ class RenameSuggestionService:
                 plan_json={
                     "policy_key": self.policy.policy_key,
                     "policy_version": self.policy.version,
+                    "scope": {
+                        "root_key": resolved_root_key,
+                        "path_prefix": resolved_path_prefix,
+                        "extension": extension,
+                        "filename_contains": filename_contains,
+                    },
                     "items": [_operation_plan_item(item) for item in ready],
                     "skipped_items": [item.model_dump(mode="json") for item in skipped],
                 },
@@ -137,8 +164,10 @@ class RenameSuggestionService:
             "suggestions": [item.model_dump(mode="json") for item in suggestions],
             "extraction_results": extraction_results,
             "query": {
-                "root_key": scope.root_key,
-                "path_prefix": scope.path_prefix,
+                "root_key": resolved_root_key,
+                "path_prefix": resolved_path_prefix,
+                "path_candidates": path_candidates or [],
+                "scope_confidence": scope_confidence,
                 "extension": extension,
                 "filename_contains": filename_contains,
             },
@@ -184,7 +213,7 @@ class RenameSuggestionService:
             )
             if extraction_result.get("status") != "COMPLETED":
                 error = extraction_result.get("error") or {}
-                filename_metadata = self.metadata_extractor.extract(
+                filename_metadata = self.metadata_resolution_service.metadata_extractor.extract(
                     filename=metadata_filename,
                     pages=[],
                     elements=[],
@@ -254,11 +283,26 @@ class RenameSuggestionService:
                     ),
                     extraction_result,
                 )
-            metadata = self.metadata_extractor.extract(
-                filename=metadata_filename,
-                pages=pages,
-                elements=elements,
+            document = self.db.get(Document, document_id)
+            resolved_source = (
+                FileExtractionRepository(self.db, self.user_id).resolve_original_file_for_document(document)
+                if document is not None
+                else {"ok": False}
             )
+            metadata_resolution = self.metadata_resolution_service.resolve(
+                file_path=resolved_source.get("file_path") if resolved_source.get("ok") else None,
+                filename=metadata_filename,
+                content_type=document.content_type if document is not None else "",
+                primary_result=extraction_result,
+                primary_pages=pages,
+                primary_elements=elements,
+            )
+            metadata = metadata_resolution.metadata
+            arbitration_warnings = metadata_resolution.warnings
+            warning_messages = [str(item.get("message") or "") for item in arbitration_warnings if item.get("message")]
+            extraction_result["rename_parse_mode"] = metadata_resolution.mode
+            extraction_result["rename_candidate_parsers"] = metadata_resolution.candidate_parsers
+            extraction_result["rename_arbitration_warnings"] = arbitration_warnings
             if not metadata.can_build_filename:
                 return (
                     RenameSuggestion(
@@ -274,7 +318,10 @@ class RenameSuggestionService:
                         policy_key=self.policy.policy_key,
                         policy_version=self.policy.version,
                         status="NEEDS_REVIEW",
-                        warnings=["年份或正文标题缺失，已从可执行批次中跳过。"],
+                        warnings=["年份或正文标题存在缺失或歧义，已从可执行批次中跳过。", *warning_messages],
+                        rename_parse_mode=metadata_resolution.mode,
+                        rename_candidate_parsers=metadata_resolution.candidate_parsers,
+                        arbitration_warnings=arbitration_warnings,
                     ),
                     extraction_result,
                 )
@@ -307,6 +354,10 @@ class RenameSuggestionService:
                     policy_version=self.policy.version,
                     template_key=template_key,
                     status="CONFLICT" if conflict else "READY",
+                    warnings=warning_messages,
+                    rename_parse_mode=metadata_resolution.mode,
+                    rename_candidate_parsers=metadata_resolution.candidate_parsers,
+                    arbitration_warnings=arbitration_warnings,
                     errors=[{"code": "TARGET_ALREADY_EXISTS", "message": "目标文件名已存在。"}] if conflict else [],
                 ),
                 extraction_result,
@@ -342,7 +393,7 @@ class RenameSuggestionService:
             root=root,
         )
         repository = FileExtractionRepository(self.db, self.user_id)
-        parser_config_hash = extraction_config_hash(filename=resolution.document.original_filename)
+        parser_config_hash = rename_primary_config_hash(filename=resolution.document.original_filename)
         reusable = repository.get_latest_successful_extraction(
             document_id=resolution.document.id,
             parser_config_hash=parser_config_hash,
@@ -365,7 +416,7 @@ class RenameSuggestionService:
                     resolution.document.original_filename,
                 )
             try:
-                extraction = extract_document_text(
+                extraction = extract_rename_primary(
                     file_path=resolved["file_path"],
                     filename=resolution.document.original_filename,
                     content_type=resolution.document.content_type,
@@ -442,6 +493,7 @@ class RenameSuggestionService:
             "extraction_run_id": run.id,
             "status": "COMPLETED",
             "extractor": run.extractor,
+            "parser_name": run.parser_name,
             "reused": resolution.snapshot_status == "REUSED",
             "pages": [
                 {
@@ -736,6 +788,9 @@ def _operation_plan_item(suggestion: RenameSuggestion) -> dict[str, Any]:
             "year": suggestion.year.model_dump(mode="json"),
             "document_number": suggestion.document_number.model_dump(mode="json"),
             "title": suggestion.title.model_dump(mode="json"),
+            "parse_mode": suggestion.rename_parse_mode,
+            "candidate_parsers": suggestion.rename_candidate_parsers,
+            "arbitration_warnings": suggestion.arbitration_warnings,
         },
         "execution_status": "PLANNED",
     }
@@ -774,6 +829,46 @@ def _failed_extraction_result(
         "source": "generate-rename-suggestions",
         "source_kind": "managed_file",
         "managed_file_id": managed_file.id,
+    }
+
+
+def _directory_scope_clarification(
+    *,
+    resolution: ManagedDirectoryScopeResolution,
+    requested_path: str | None,
+    scope_confidence: float | None,
+) -> dict[str, Any]:
+    """构造不会触发文件解析或 OperationPlan 的目录澄清结果。"""
+
+    candidates = [candidate.to_dict() for candidate in resolution.candidates]
+    if candidates:
+        candidate_lines = "\n".join(
+            f"{index}. {candidate['display_path']}"
+            for index, candidate in enumerate(candidates, start=1)
+        )
+        message = (
+            "无法唯一确定要处理的目录，请使用完整目录路径重新发送，例如："
+            "“对校办/2024目录下的文件进行重命名”。\n"
+            f"匹配到的目录：\n{candidate_lines}"
+        )
+    else:
+        requested_label = f"“{requested_path}”" if requested_path else "所述目录"
+        message = (
+            f"未找到{requested_label}对应的受管目录。"
+            "请使用 `/` 提供完整相对路径后重新发送。"
+        )
+    return {
+        "ok": False,
+        "kind": "rename_plan",
+        "status": "NEEDS_CLARIFICATION",
+        "error": {
+            "code": resolution.error_code or "MANAGED_DIRECTORY_SCOPE_AMBIGUOUS",
+            "message": message,
+        },
+        "scope_candidates": candidates,
+        "scope_confidence": scope_confidence,
+        "suggestions": [],
+        "extraction_results": [],
     }
 
 

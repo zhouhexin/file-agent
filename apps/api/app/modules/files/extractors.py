@@ -38,6 +38,30 @@ def extract_document_text(*, file_path: Path, filename: str, content_type: str, 
             parser_version=docling_runtime_version(),
             parser_config_hash=parser_config_hash or "",
         )
+    native_result = extract_document_text_native(
+        file_path=file_path,
+        filename=filename,
+        content_type=content_type,
+        ocr_service=ocr_service,
+    )
+    if suffix in {".docx", ".pdf"}:
+        return _apply_parser_metadata(
+            _append_parser_warning(native_result, docling_failure),
+            parser_config_hash=parser_config_hash,
+        )
+    return native_result
+
+
+def extract_document_text_native(
+    *,
+    file_path: Path,
+    filename: str,
+    content_type: str,
+    ocr_service: Any = None,
+) -> Dict[str, Any]:
+    """绕过 Docling 并按文件类型调用项目原生解析器。"""
+
+    suffix = Path(filename).suffix.lower()
     if suffix in {".txt", ".md"} or content_type.startswith("text/"):
         text = file_path.read_text(encoding="utf-8", errors="ignore")
         return _completed("plain-text", [{"page_number": 1, "sheet_name": None, "text": text, "metadata": {}}])
@@ -51,15 +75,9 @@ def extract_document_text(*, file_path: Path, filename: str, content_type: str, 
     if suffix == ".doc" or content_type == "application/msword":
         return _extract_doc_text(file_path)
     if suffix == ".docx" or content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-        return _apply_parser_metadata(
-            _append_parser_warning(_extract_docx_text(file_path), docling_failure),
-            parser_config_hash=parser_config_hash,
-        )
+        return _extract_docx_text(file_path)
     if suffix == ".pdf" or content_type == "application/pdf":
-        return _apply_parser_metadata(
-            _append_parser_warning(_extract_pdf_text(file_path, ocr_service=ocr_service), docling_failure),
-            parser_config_hash=parser_config_hash,
-        )
+        return _extract_pdf_text(file_path, ocr_service=ocr_service)
     if content_type.startswith("image/") or suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"}:
         return _extract_image_text(file_path, ocr_service=ocr_service)
     return _failed("unsupported", "UNSUPPORTED_FILE_TYPE", f"暂不支持解析该文件类型：{filename}")
@@ -270,7 +288,36 @@ def _extract_docx_text(file_path: Path) -> Dict[str, Any]:
         return _failed("docx", "DOCX_EXTRACTOR_NOT_AVAILABLE", "缺少 python-docx，无法解析 docx 文件。")
 
     document = DocxDocument(file_path)
-    lines = [paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()]
+    paragraphs = [paragraph for paragraph in document.paragraphs if paragraph.text.strip()]
+    lines = [paragraph.text for paragraph in paragraphs]
+    elements = []
+    for element_index, paragraph in enumerate(paragraphs):
+        style_name = str(getattr(getattr(paragraph, "style", None), "name", "") or "")
+        normalized_style = style_name.lower()
+        label = "title" if "title" in normalized_style else "section_header" if "heading" in normalized_style else "paragraph"
+        font_sizes = [run.font.size.pt for run in paragraph.runs if run.font.size is not None]
+        bold_runs = [run for run in paragraph.runs if run.text.strip()]
+        elements.append(
+            {
+                "element_index": element_index,
+                "label": label,
+                "text": paragraph.text,
+                "page_number": 1,
+                "bbox": None,
+                "content_layer": "body",
+                "parent_ref": None,
+                "metadata": {
+                    "style_name": style_name,
+                    "alignment": str(paragraph.alignment or ""),
+                    "max_font_size": max(font_sizes) if font_sizes else None,
+                    "bold_ratio": (
+                        sum(1 for run in bold_runs if run.bold is True) / len(bold_runs)
+                        if bold_runs
+                        else 0
+                    ),
+                },
+            }
+        )
     for table in document.tables:
         for row in table.rows:
             values = [cell.text.strip() for cell in row.cells]
@@ -286,6 +333,7 @@ def _extract_docx_text(file_path: Path) -> Dict[str, Any]:
                 "metadata": {"paragraph_count": len(document.paragraphs), "table_count": len(document.tables)},
             }
         ],
+        elements=elements,
     )
 
 
