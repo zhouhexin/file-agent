@@ -115,17 +115,18 @@ class RenameReviewService:
                     batch_item.status = "EXCLUDED"
                     batch_item.decision_json = {"action": "exclude", "message": normalized_message}
                     batch_item.updated_at = utcnow()
-            plan = batch_service.create_operation_plan_if_complete(batch) if batch_service and batch else None
+            if batch_service and batch:
+                batch_service.refresh_counts(batch)
             self.db.flush()
             return {
                 "ok": True,
                 "kind": "rename_review_resolution",
-                "status": "WAITING_CONFIRMATION" if plan is not None else "COMPLETED",
+                "status": "COMPLETED",
                 "dismissed_count": len(pending),
                 "completed_items": [],
                 "failed_items": [],
                 "ambiguous_items": [],
-                "operation_plan_id": plan.id if plan is not None else None,
+                "operation_plan_id": None,
                 "changeset_id": None,
                 "rename_batch_id": batch.id if batch else None,
                 "accepted_count": 0,
@@ -211,6 +212,7 @@ class RenameReviewService:
         result = None
         changeset = None
         if executable and batch is not None and batch_service is not None:
+            batch_executable: list[tuple[FileRenameReviewItem, FileRenameBatchItem, str]] = []
             for item, target_relative_path in executable:
                 batch_item = self._batch_item(item)
                 if batch_item is None:
@@ -221,6 +223,7 @@ class RenameReviewService:
                         "error_message": "重命名批次文件项不存在，请重新发起重命名任务。",
                     })
                     continue
+                batch_executable.append((item, batch_item, target_relative_path))
                 batch_item.proposed_relative_path = target_relative_path
                 batch_item.proposed_filename = Path(target_relative_path).name
                 batch_item.status = "USER_NAMED"
@@ -235,8 +238,13 @@ class RenameReviewService:
                     "requested_relative_path": target_relative_path,
                 }
                 item.updated_at = utcnow()
-            plan = batch_service.create_operation_plan_if_complete(batch)
-            if plan is not None and not failed_items and not ambiguous_items:
+            plan = batch_service.create_operation_plan_for_ready(
+                batch,
+                item_ids={batch_item.id for _, batch_item, _ in batch_executable},
+                reason="用户在待确认回执中明确提供并确认了文件名",
+                reuse_waiting_plan=False,
+            )
+            if plan is not None:
                 self.repository.confirm_plan(
                     plan=plan,
                     user_id=self.user_id,
@@ -245,7 +253,7 @@ class RenameReviewService:
                 result, changeset = ConfirmedRenameService(self.db).execute(plan=plan)
                 batch_service.record_execution_result(batch, result)
                 result_by_id = {entry.managed_file_id: entry for entry in result.items}
-                for item, target_relative_path in executable:
+                for item, batch_item, target_relative_path in batch_executable:
                     execution = result_by_id.get(item.managed_file_id)
                     item.status = "EXECUTED" if execution and execution.status == "COMPLETED" else "NEEDS_REVIEW"
                     item.decision_json = {
@@ -255,6 +263,8 @@ class RenameReviewService:
                         "execution": execution.model_dump(mode="json") if execution else {},
                     }
                     item.updated_at = utcnow()
+                    if execution is None or execution.status != "COMPLETED":
+                        batch_item.status = "FAILED"
         elif executable:
             # 迁移前遗留待复核项没有批次关系，继续兼容原来的单次人工确认执行。
             user = self.db.get(User, self.user_id)

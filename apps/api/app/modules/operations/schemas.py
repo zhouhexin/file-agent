@@ -54,6 +54,7 @@ class OperationConfirmRequest(BaseModel):
     """确认 OperationPlan 的请求。"""
 
     confirmation: str = Field(min_length=1)
+    excluded_rename_batch_item_ids: list[str] = Field(default_factory=list, max_length=500)
 
 
 class OperationConfirmResponse(BaseModel):

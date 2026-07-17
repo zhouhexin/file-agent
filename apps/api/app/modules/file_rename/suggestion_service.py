@@ -176,7 +176,7 @@ class RenameSuggestionService:
                 rename_batch_item_id=batch_items[suggestion.managed_file_id].id,
             )
             suggestion.review_id = review_item.id
-        plan = batch_service.create_operation_plan_if_complete(batch)
+        plan = batch_service.create_operation_plan_for_ready(batch)
         preview_suggestions = (skipped + ready)[:10]
         self.db.flush()
         return {

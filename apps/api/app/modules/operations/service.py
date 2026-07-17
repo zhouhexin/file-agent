@@ -85,18 +85,28 @@ class OperationPlanService:
                 status_code=409,
                 detail="Operation type does not have a controlled executor",
             )
-        self.repository.confirm_plan(
-            plan=plan,
-            user_id=current_user.id,
-            confirmation_text=request.confirmation,
-        )
         if plan.operation_type == "RENAME_FILES":
-            result, changeset = ConfirmedRenameService(self.db).execute(plan=plan)
             scope = plan.plan_json.get("scope", {}) if isinstance(plan.plan_json, dict) else {}
             batch_id = scope.get("rename_batch_id") if isinstance(scope, dict) else None
+            batch_service = None
+            batch = None
             if batch_id:
                 batch_service = RenameBatchService(self.db, current_user.id)
                 batch = batch_service.get_owned_batch(str(batch_id))
+                batch_service.apply_plan_exclusions(
+                    batch=batch,
+                    plan=plan,
+                    excluded_item_ids=set(request.excluded_rename_batch_item_ids),
+                )
+            elif request.excluded_rename_batch_item_ids:
+                raise HTTPException(status_code=400, detail="Rename selection requires a managed-file batch")
+            self.repository.confirm_plan(
+                plan=plan,
+                user_id=current_user.id,
+                confirmation_text=request.confirmation,
+            )
+            result, changeset = ConfirmedRenameService(self.db).execute(plan=plan)
+            if batch_service is not None and batch is not None:
                 batch_service.record_execution_result(batch, result)
             self.db.commit()
             self.db.refresh(plan)
@@ -106,6 +116,11 @@ class OperationPlanService:
                 changeset_id=changeset.id,
                 result=result.model_dump(mode="json"),
             )
+        self.repository.confirm_plan(
+            plan=plan,
+            user_id=current_user.id,
+            confirmation_text=request.confirmation,
+        )
         result, changeset = ConfirmedUploadedRenameService(self.db).execute(plan=plan)
         self.db.commit()
         self.db.refresh(plan)

@@ -218,11 +218,15 @@ export async function getOperationPlan(
 export async function confirmOperationPlan(
   token: string,
   planId: string,
+  excludedRenameBatchItemIds: string[] = [],
 ): Promise<OperationConfirmResponse> {
   // 高风险文件操作必须通过独立确认接口，不能复用普通消息发送。
   return request(`/operations/plans/${planId}/confirm`, {
     token,
-    body: { confirmation: '确认执行' },
+    body: {
+      confirmation: '确认执行',
+      excluded_rename_batch_item_ids: excludedRenameBatchItemIds,
+    },
   });
 }
 

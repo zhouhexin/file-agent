@@ -983,8 +983,8 @@ def test_missing_date_with_reliable_title_uses_title_only_filename(monkeypatch, 
     clear_overrides()
 
 
-def test_needs_review_item_blocks_partial_operation_plan(monkeypatch, tmp_path):
-    """批次仍有待复核文件时，不得只为识别成功项创建部分执行计划。"""
+def test_needs_review_item_does_not_block_ready_operation_plan(monkeypatch, tmp_path):
+    """待确认文件不得阻止自动建议文件生成和执行计划。"""
 
     managed_root = tmp_path / "managed"
     source_dir = managed_root / "党办"
@@ -1006,7 +1006,7 @@ def test_needs_review_item_blocks_partial_operation_plan(monkeypatch, tmp_path):
     )
 
     assert response.status_code == 200
-    assert "以下文件未能可靠识别正文标题，暂未处理。" in response.json()["agent_run"]["final_response"]
+    assert "另有 1 个文件待确认，不进入当前重命名计划" in response.json()["agent_run"]["final_response"]
     assert "缺少年份" not in response.json()["agent_run"]["final_response"]
     invocation = next(
         item
@@ -1015,9 +1015,19 @@ def test_needs_review_item_blocks_partial_operation_plan(monkeypatch, tmp_path):
     )
     assert invocation["output_json"]["ready_count"] == 1
     assert invocation["output_json"]["needs_review_count"] == 1
-    assert response.json()["agent_run"]["operation_plan_id"] is None
-    assert invocation["output_json"]["status"] == "NEEDS_REVIEW"
+    plan_id = response.json()["agent_run"]["operation_plan_id"]
+    assert plan_id
+    assert invocation["output_json"]["status"] == "WAITING_CONFIRMATION"
     assert invocation["output_json"]["rename_batch_id"]
+    confirmed = client.post(
+        f"/api/operations/plans/{plan_id}/confirm",
+        headers=_auth_header(token),
+        json={"confirmation": "确认执行", "excluded_rename_batch_item_ids": []},
+    )
+    assert confirmed.status_code == 200
+    assert not (source_dir / "可重命名.txt").exists()
+    assert (source_dir / "2026_春季学生活动总结.txt").exists()
+    assert (source_dir / "待复核.txt").exists()
     clear_overrides()
 
 
@@ -1072,8 +1082,8 @@ def test_user_correction_immediately_confirms_and_renames_review_item(monkeypatc
         clear_overrides()
 
 
-def test_batch_correction_executes_ready_and_user_named_files_together(monkeypatch, tmp_path):
-    """最后一个待复核项补齐后，应把自动建议项和人工命名项放入同一执行计划。"""
+def test_batch_correction_executes_only_user_named_review_item(monkeypatch, tmp_path):
+    """对话确认待确认文件时，应独立执行且不连带未确认的自动建议。"""
 
     managed_root = tmp_path / "managed"
     source_dir = managed_root / "党办"
@@ -1093,7 +1103,8 @@ def test_batch_correction_executes_ready_and_user_named_files_together(monkeypat
         headers=_auth_header(token),
         json={"content": "对党办目录下的文件进行重命名", "attachments": []},
     )
-    assert initial.json()["agent_run"]["operation_plan_id"] is None
+    initial_plan_id = initial.json()["agent_run"]["operation_plan_id"]
+    assert initial_plan_id
 
     corrected = client.post(
         url,
@@ -1103,16 +1114,19 @@ def test_batch_correction_executes_ready_and_user_named_files_together(monkeypat
 
     assert corrected.status_code == 200
     assert corrected.json()["agent_run"]["operation_plan_id"]
-    assert not ready_path.exists()
+    assert ready_path.exists()
     assert not review_path.exists()
-    assert (source_dir / "2026_春季学生活动总结.txt").exists()
+    assert not (source_dir / "2026_春季学生活动总结.txt").exists()
     assert (source_dir / "人工确认标题.txt").exists()
     db = SessionLocal()
     try:
         batch = db.query(FileRenameBatch).one()
-        assert batch.status == "COMPLETED"
-        assert batch.completed_count == 2
-        assert {item.status for item in db.query(FileRenameBatchItem).all()} == {"COMPLETED"}
+        assert batch.status == "READY_FOR_CONFIRMATION"
+        assert batch.completed_count == 1
+        assert {item.status for item in db.query(FileRenameBatchItem).all()} == {"READY", "COMPLETED"}
+        initial_plan = db.get(OperationPlan, initial_plan_id)
+        assert initial_plan is not None
+        assert initial_plan.status == "WAITING_CONFIRMATION"
     finally:
         db.close()
         clear_overrides()
@@ -1172,8 +1186,8 @@ def test_rename_batch_api_returns_summary_and_cursor_pages(monkeypatch, tmp_path
     clear_overrides()
 
 
-def test_duplicate_pending_filename_keeps_same_batch_waiting(monkeypatch, tmp_path):
-    """同批次同名文件存在歧义时，已更正的唯一文件也应等待批次补齐。"""
+def test_duplicate_pending_filename_does_not_block_unique_correction(monkeypatch, tmp_path):
+    """同名文件存在歧义时，消息中唯一匹配的文件仍应独立执行。"""
 
     managed_root = tmp_path / "managed"
     for directory, filename in [("党办/一", "通知.txt"), ("党办/二", "通知.txt"), ("党办", "唯一.txt")]:
@@ -1208,11 +1222,65 @@ def test_duplicate_pending_filename_keeps_same_batch_waiting(monkeypatch, tmp_pa
     assert "“通知.txt”匹配到多个待复核文件" in run["final_response"]
     assert "党办/一/通知.txt" in run["final_response"]
     assert "党办/二/通知.txt" in run["final_response"]
-    assert run["operation_plan_id"] is None
-    assert (managed_root / "党办" / "唯一.txt").exists()
+    assert run["operation_plan_id"]
+    assert not (managed_root / "党办" / "唯一.txt").exists()
+    assert (managed_root / "党办" / "2026_唯一文件.txt").exists()
     assert (managed_root / "党办" / "一" / "通知.txt").exists()
     assert (managed_root / "党办" / "二" / "通知.txt").exists()
     clear_overrides()
+
+
+def test_confirmed_rename_excludes_unchecked_batch_item(monkeypatch, tmp_path):
+    """用户取消勾选只排除该文件，其他已选文件继续执行。"""
+
+    managed_root = tmp_path / "managed"
+    source_dir = managed_root / "党办"
+    source_dir.mkdir(parents=True)
+    first_path = source_dir / "甲.txt"
+    second_path = source_dir / "乙.txt"
+    first_path.write_text("2026年春季学生活动总结\n本学期组织了多项活动。", encoding="utf-8")
+    second_path.write_text("2026年秋季资助工作报告\n本年度资助工作已经完成。", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    _configure_test_managed_root(monkeypatch, managed_root)
+
+    client, SessionLocal = client_with_database()
+    _, token = _register_and_login(client, "rename-checkbox-selection")
+    response = client.post(
+        "/api/conversations/rename-checkbox-selection/messages",
+        headers=_auth_header(token),
+        json={"content": "对党办目录下的文件进行重命名", "attachments": []},
+    )
+    plan_id = response.json()["agent_run"]["operation_plan_id"]
+    plan = client.get(f"/api/operations/plans/{plan_id}", headers=_auth_header(token)).json()
+    excluded = next(
+        item for item in plan["items"] if item["before"]["filename"] == "乙.txt"
+    )
+    excluded_item_id = excluded["rename_metadata"]["rename_batch_item_id"]
+
+    confirmed = client.post(
+        f"/api/operations/plans/{plan_id}/confirm",
+        headers=_auth_header(token),
+        json={
+            "confirmation": "确认执行",
+            "excluded_rename_batch_item_ids": [excluded_item_id],
+        },
+    )
+
+    assert confirmed.status_code == 200
+    assert not first_path.exists()
+    assert (source_dir / "2026_春季学生活动总结.txt").exists()
+    assert second_path.exists()
+    assert not (source_dir / "2026_秋季资助工作报告.txt").exists()
+    db = SessionLocal()
+    try:
+        statuses = {
+            item.original_filename: item.status
+            for item in db.query(FileRenameBatchItem).all()
+        }
+        assert statuses == {"甲.txt": "COMPLETED", "乙.txt": "EXCLUDED"}
+    finally:
+        db.close()
+        clear_overrides()
 
 
 def test_existing_target_name_only_fails_conflicting_correction(monkeypatch, tmp_path):

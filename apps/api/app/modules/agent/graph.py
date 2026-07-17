@@ -779,7 +779,7 @@ def _build_rename_plan_response(payload: Dict[str, Any]) -> str:
         lines.insert(0, f"处理范围：{query['path_prefix']}")
     if review_count:
         lines.extend([
-            f"本批次还有 {review_count} 个文件待复核，暂未创建可执行计划，原文件尚未修改。",
+            f"另有 {review_count} 个文件待确认，不进入当前重命名计划，也不阻止其他文件执行。",
             "以下文件未能可靠识别正文标题，暂未处理。",
         ])
     else:
@@ -809,10 +809,7 @@ def _build_rename_review_resolution_response(payload: Dict[str, Any]) -> str:
 
     if payload.get("dismissed_count"):
         lines = [f"已跳过 {int(payload.get('dismissed_count') or 0)} 个待复核文件。"]
-        if payload.get("operation_plan_id"):
-            lines.append("其余文件已生成完整重命名计划，确认后才会修改原文件。")
-        else:
-            lines.append("本批次没有需要执行的重命名，原文件未修改。")
+        lines.append("其他已经生成名称的文件仍按原计划等待用户勾选确认。")
         return "\n".join(lines)
     error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
     lines: List[str] = []

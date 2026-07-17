@@ -18,7 +18,7 @@ RESOLVED_STATUSES = {*EXECUTABLE_STATUSES, "EXCLUDED"}
 
 
 class RenameBatchService:
-    """持久化一次固定文件范围，并在全部文件已决策后创建计划。"""
+    """持久化一次固定文件范围，并让可执行项与待确认项相互隔离。"""
 
     def __init__(self, db: Session, user_id: str) -> None:
         self.db = db
@@ -93,28 +93,45 @@ class RenameBatchService:
         batch.excluded_count = counts["EXCLUDED"]
         batch.completed_count = counts["COMPLETED"]
         batch.failed_count = counts["FAILED"]
-        if batch.status not in {"EXECUTING", "COMPLETED", "PARTIAL_FAILED"}:
-            batch.status = "NEEDS_REVIEW" if batch.needs_review_count else "READY_FOR_CONFIRMATION"
+        # 批次状态始终由逐文件状态推导，避免失败项修正成功后仍残留旧状态。
+        if batch.failed_count:
+            batch.status = "PARTIAL_FAILED"
+        elif batch.ready_count and batch.needs_review_count:
+            batch.status = "READY_WITH_REVIEW"
+        elif batch.ready_count:
+            batch.status = "READY_FOR_CONFIRMATION"
+        elif batch.needs_review_count:
+            batch.status = "NEEDS_REVIEW"
+        else:
+            batch.status = "COMPLETED"
         batch.updated_at = utcnow()
         self.db.flush()
         return batch
 
-    def create_operation_plan_if_complete(self, batch: FileRenameBatch) -> Any | None:
-        """仅在范围内没有待复核项时，为所有可执行文件创建一个计划。"""
+    def create_operation_plan_for_ready(
+        self,
+        batch: FileRenameBatch,
+        *,
+        item_ids: set[str] | None = None,
+        reason: str = "系统已为文件生成可确认的重命名建议",
+        reuse_waiting_plan: bool = True,
+    ) -> Any | None:
+        """为当前可执行项创建计划，待确认项不阻塞也不进入计划。"""
 
         self.refresh_counts(batch)
-        if batch.needs_review_count:
+        items = self.list_all_items(batch_id=batch.id, statuses=EXECUTABLE_STATUSES)
+        if item_ids is not None:
+            items = [item for item in items if item.id in item_ids]
+        if not items:
+            self.db.flush()
             return None
-        if batch.operation_plan_id:
-            return OperationPlanRepository(self.db).get_owned_plan(
+        if reuse_waiting_plan and batch.operation_plan_id:
+            existing = OperationPlanRepository(self.db).get_owned_plan(
                 plan_id=batch.operation_plan_id,
                 user_id=self.user_id,
             )
-        items = self.list_all_items(batch_id=batch.id, statuses=EXECUTABLE_STATUSES)
-        if not items:
-            batch.status = "COMPLETED"
-            self.db.flush()
-            return None
+            if existing is not None and existing.status in {"PLANNED", "WAITING_CONFIRMATION"}:
+                return existing
         plan = OperationPlanRepository(self.db).create_plan(
             workspace_id=batch.workspace_id,
             conversation_id=batch.conversation_id,
@@ -122,7 +139,7 @@ class RenameBatchService:
             user_id=batch.user_id,
             operation_type="RENAME_FILES",
             risk_level="medium",
-            reason="批次内全部文件已生成名称或由用户明确排除",
+            reason=reason,
             plan_json={
                 "policy_key": str(batch.scope_json.get("policy_key") or "school_official_document"),
                 "policy_version": str(batch.scope_json.get("policy_version") or "1.3"),
@@ -132,10 +149,69 @@ class RenameBatchService:
             },
         )
         batch.operation_plan_id = plan.id
-        batch.status = "READY_FOR_CONFIRMATION"
+        batch.status = "READY_WITH_REVIEW" if batch.needs_review_count else "READY_FOR_CONFIRMATION"
         batch.updated_at = utcnow()
         self.db.flush()
         return plan
+
+    def apply_plan_exclusions(
+        self,
+        *,
+        batch: FileRenameBatch,
+        plan: Any,
+        excluded_item_ids: set[str],
+    ) -> None:
+        """在确认时固化用户取消勾选的文件，并收窄计划执行项。"""
+
+        plan_json = plan.plan_json if isinstance(plan.plan_json, dict) else {}
+        plan_items = [item for item in plan_json.get("items", []) if isinstance(item, dict)]
+        known_ids = {
+            str((item.get("rename_metadata") or {}).get("rename_batch_item_id") or "")
+            for item in plan_items
+        }
+        unknown_ids = excluded_item_ids - known_ids
+        if unknown_ids:
+            raise HTTPException(status_code=400, detail="Rename selection contains items outside this plan")
+        selected_items = [
+            item
+            for item in plan_items
+            if str((item.get("rename_metadata") or {}).get("rename_batch_item_id") or "")
+            not in excluded_item_ids
+        ]
+        if not selected_items:
+            raise HTTPException(status_code=400, detail="At least one rename item must be selected")
+
+        excluded_items: list[dict[str, Any]] = []
+        for item_id in excluded_item_ids:
+            batch_item = self.db.get(FileRenameBatchItem, item_id)
+            if batch_item is None or batch_item.rename_batch_id != batch.id:
+                raise HTTPException(status_code=400, detail="Rename batch item does not belong to this batch")
+            if batch_item.status not in EXECUTABLE_STATUSES:
+                raise HTTPException(status_code=409, detail="Rename batch item is no longer selectable")
+            batch_item.status = "EXCLUDED"
+            batch_item.decision_json = {
+                **(batch_item.decision_json if isinstance(batch_item.decision_json, dict) else {}),
+                "action": "exclude",
+                "operation_plan_id": plan.id,
+            }
+            batch_item.updated_at = utcnow()
+            excluded_items.append({
+                "rename_batch_item_id": batch_item.id,
+                "managed_file_id": batch_item.managed_file_id,
+                "filename": batch_item.original_filename,
+                "reason": "用户取消勾选",
+            })
+
+        plan.plan_json = {
+            **plan_json,
+            "items": selected_items,
+            "skipped_items": [
+                *[item for item in plan_json.get("skipped_items", []) if isinstance(item, dict)],
+                *excluded_items,
+            ],
+        }
+        self.refresh_counts(batch)
+        self.db.flush()
 
     def get_owned_batch(self, batch_id: str) -> FileRenameBatch:
         """读取当前用户自己的重命名批次。"""
@@ -192,6 +268,8 @@ class RenameBatchService:
         result_by_file_id = {entry.managed_file_id: entry for entry in result.items}
         for item in self.list_all_items(batch_id=batch.id, statuses=EXECUTABLE_STATUSES):
             execution = result_by_file_id.get(item.managed_file_id)
+            if execution is None:
+                continue
             item.status = "COMPLETED" if execution and execution.status == "COMPLETED" else "FAILED"
             item.decision_json = {
                 **(item.decision_json if isinstance(item.decision_json, dict) else {}),
@@ -201,13 +279,6 @@ class RenameBatchService:
             if item.status == "FAILED":
                 self._ensure_failed_review_item(batch=batch, item=item)
         self.refresh_counts(batch)
-        if batch.failed_count:
-            # 旧计划继续保留审计，但失败项需要在用户更正后生成新的重试计划。
-            batch.operation_plan_id = None
-            batch.status = "NEEDS_REVIEW"
-        else:
-            batch.status = "COMPLETED"
-        batch.updated_at = utcnow()
         self.db.flush()
         return batch
 

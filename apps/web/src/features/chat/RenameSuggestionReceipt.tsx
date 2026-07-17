@@ -55,10 +55,10 @@ export function RenameSuggestionReceipt({
   return (
     <section className="rename-suggestion-card">
       <header className="rename-suggestion-header">
-        <strong><FilePenLine size={18} />待复核文件</strong>
+        <strong><FilePenLine size={18} />待确认文件</strong>
         <span>{result.needs_review_count ?? suggestions.length} 个暂未处理</span>
       </header>
-      <p>以下文件未能可靠识别正文标题，暂未处理。</p>
+      <p>以下文件暂不满足自动重命名条件，请通过对话确认名称。</p>
       <div className="rename-suggestion-list">
         {suggestions.map((suggestion, index) => (
           <button

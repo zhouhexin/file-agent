@@ -1,5 +1,5 @@
 // OperationPlan 卡片只负责展示和确认受控计划，不在浏览器直接修改文件。
-import { AlertTriangle, CheckCircle2, FilePenLine } from 'lucide-react';
+import { CheckCircle2, FilePenLine } from 'lucide-react';
 import { useState } from 'react';
 
 import { confirmOperationPlan, getRenameBatchItems } from '../../api/client';
@@ -16,6 +16,7 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
   const [loadingItems, setLoadingItems] = useState(false);
   const [loadedItems, setLoadedItems] = useState<OperationPlanItem[] | null>(null);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
+  const [excludedItemIds, setExcludedItemIds] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState('');
   const waiting = plan.status === 'WAITING_CONFIRMATION' || plan.status === 'PLANNED';
   const uploadedTemporaryRename = plan.operation_type === 'RENAME_UPLOADED_FILES';
@@ -23,15 +24,18 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
   const renameBatchId = readOptionalString(plan.scope, 'rename_batch_id');
   const totalItemCount = plan.total_item_count || plan.items.length;
   const visibleItems = loadedItems ?? plan.items;
+  const selectable = waiting && Boolean(renameBatchId);
+  const selectedCount = Math.max(0, totalItemCount - excludedItemIds.size);
 
   async function handleConfirm() {
     setConfirming(true);
     setError('');
     try {
-      await confirmOperationPlan(token, plan.id);
+      await confirmOperationPlan(token, plan.id, [...excludedItemIds]);
       await onConfirmed();
       setLoadedItems(null);
       setNextCursor(null);
+      setExcludedItemIds(new Set());
     } catch (exception) {
       setError(exception instanceof Error ? exception.message : '确认执行失败');
     } finally {
@@ -47,7 +51,7 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
             <FilePenLine size={18} />
             {uploadedTemporaryRename ? '上传附件临时重命名计划' : '文件重命名计划'}
           </strong>
-          <span>{totalItemCount} 个可执行 · {plan.skipped_items.length} 个待复核</span>
+          <span>{selectable ? `已选择 ${selectedCount} / ${totalItemCount} 个文件` : `${totalItemCount} 个文件`}</span>
         </div>
         <em className={`operation-plan-status operation-plan-status--${plan.status.toLowerCase()}`}>
           {formatPlanStatus(plan.status)}
@@ -65,7 +69,25 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
       <div className="operation-plan-items">
         {visibleItems.map((item, index) => (
           <div className="operation-plan-item" key={`${item.document_id}-${index}`}>
-            <span>{index + 1}</span>
+            {selectable ? (
+              <input
+                aria-label={`选择重命名 ${readString(item.before, 'filename')}`}
+                checked={!excludedItemIds.has(readRenameBatchItemId(item))}
+                onChange={(event) => {
+                  const itemId = readRenameBatchItemId(item);
+                  if (!itemId) return;
+                  setExcludedItemIds((current) => {
+                    const next = new Set(current);
+                    if (event.target.checked) next.delete(itemId);
+                    else next.add(itemId);
+                    return next;
+                  });
+                }}
+                type="checkbox"
+              />
+            ) : (
+              <span>{index + 1}</span>
+            )}
             <div>
               <del>{readString(item.before, 'filename')}</del>
               <strong>{readString(item.after, 'filename')}</strong>
@@ -103,20 +125,18 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
         </button>
       ) : null}
 
-      {plan.skipped_items.length > 0 ? (
-        <div className="operation-plan-review">
-          <AlertTriangle size={16} />
-          <span>待复核文件未进入执行批次，不会随本次确认被改名。</span>
-        </div>
-      ) : null}
-
       {plan.status === 'EXECUTED' ? (
         <div className="operation-plan-complete"><CheckCircle2 size={16} />重命名已执行</div>
       ) : null}
       {error ? <p className="operation-plan-error">{error}</p> : null}
       {waiting ? (
-        <button className="operation-plan-confirm" disabled={confirming} onClick={handleConfirm} type="button">
-          {confirming ? '执行中...' : `确认重命名 ${totalItemCount} 个文件`}
+        <button
+          className="operation-plan-confirm"
+          disabled={confirming || selectedCount === 0}
+          onClick={handleConfirm}
+          type="button"
+        >
+          {confirming ? '执行中...' : `确认重命名 ${selectedCount} 个文件`}
         </button>
       ) : null}
     </section>
@@ -134,9 +154,14 @@ function batchItemToPlanItem(item: RenameBatchItem): OperationPlanItem {
     after: {
       filename: item.proposed_filename ?? '未命名文件',
     },
-    rename_metadata: {},
+    rename_metadata: { rename_batch_item_id: item.id },
     execution_status: 'PLANNED',
   };
+}
+
+function readRenameBatchItemId(item: OperationPlanItem): string {
+  const value = item.rename_metadata.rename_batch_item_id;
+  return typeof value === 'string' ? value : '';
 }
 
 function readString(payload: Record<string, unknown>, key: string): string {
