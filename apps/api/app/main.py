@@ -15,11 +15,13 @@ from app.modules.changesets.router import router as changesets_router
 from app.modules.classification.router import router as classification_router
 from app.modules.conversations.router import router as conversations_router
 from app.modules.files.router import router as files_router
+from app.modules.file_rename.router import router as file_rename_router
 from app.modules.managed_files.router import router as managed_files_router
 from app.modules.operations.router import router as operations_router
 from app.modules.knowledge_graph.classification_context import close_graph_resources
 from app.modules.knowledge_graph.health import graph_health
 from app.modules.knowledge_graph.projection_service import sync_graph_projection_if_enabled
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -104,6 +106,7 @@ app.include_router(changesets_router)
 app.include_router(classification_router)
 app.include_router(conversations_router)
 app.include_router(files_router)
+app.include_router(file_rename_router)
 app.include_router(managed_files_router)
 app.include_router(operations_router)
 

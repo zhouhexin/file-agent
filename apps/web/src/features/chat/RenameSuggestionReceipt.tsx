@@ -1,7 +1,9 @@
 // 重命名建议回执展示 Tool 的结构化结果，不从最终回复字符串反向解析文件名。
 import { FilePenLine } from 'lucide-react';
+import { useState } from 'react';
 
-import type { ManagedFileResult } from '../../types';
+import { getRenameBatchItems } from '../../api/client';
+import type { ManagedFileResult, RenameBatchItem } from '../../types';
 
 type RenameSuggestion = {
   document_id?: string;
@@ -26,17 +28,26 @@ export type RenamePlanResult = {
   source_kind?: string;
   ready_count?: number;
   needs_review_count?: number;
+  rename_batch_id?: string;
   suggestions?: RenameSuggestion[];
 };
 
 export function RenameSuggestionReceipt({
   result,
+  token,
   onOpenManagedFile,
 }: {
   result: RenamePlanResult;
+  token?: string;
   onOpenManagedFile?: (file: ManagedFileResult) => void;
 }) {
-  const suggestions = (result.suggestions ?? []).filter((item) => !item.proposed_filename || item.status !== 'READY');
+  const initialSuggestions = (result.suggestions ?? []).filter(
+    (item) => !item.proposed_filename || item.status !== 'READY',
+  );
+  const [loadedSuggestions, setLoadedSuggestions] = useState<RenameSuggestion[] | null>(null);
+  const [nextCursor, setNextCursor] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+  const suggestions = loadedSuggestions ?? initialSuggestions;
   const uploadedScope = result.source_kind === 'uploaded_document';
   if (suggestions.length === 0) {
     return null;
@@ -47,7 +58,7 @@ export function RenameSuggestionReceipt({
         <strong><FilePenLine size={18} />待复核文件</strong>
         <span>{result.needs_review_count ?? suggestions.length} 个暂未处理</span>
       </header>
-      <p>以下文件缺少重命名所需信息（年份或正文标题），暂未处理。</p>
+      <p>以下文件未能可靠识别正文标题，暂未处理。</p>
       <div className="rename-suggestion-list">
         {suggestions.map((suggestion, index) => (
           <button
@@ -65,6 +76,31 @@ export function RenameSuggestionReceipt({
           </button>
         ))}
       </div>
+      {canLoadMore(result, suggestions, nextCursor) && token && result.rename_batch_id ? (
+        <button
+          className="rename-suggestion-more"
+          disabled={loading}
+          onClick={async () => {
+            setLoading(true);
+            try {
+              const page = await getRenameBatchItems(
+                token,
+                result.rename_batch_id!,
+                'NEEDS_REVIEW',
+                loadedSuggestions === null ? 0 : (nextCursor ?? 0),
+              );
+              const mapped = page.items.map(batchItemToSuggestion);
+              setLoadedSuggestions((current) => current === null ? mapped : [...current, ...mapped]);
+              setNextCursor(page.next_cursor);
+            } finally {
+              setLoading(false);
+            }
+          }}
+          type="button"
+        >
+          {loading ? '加载中...' : '查看其余待复核文件'}
+        </button>
+      ) : null}
       {uploadedScope ? (
         <p>请补充可识别的年份和正文标题后重新发起附件重命名。</p>
       ) : (
@@ -75,6 +111,27 @@ export function RenameSuggestionReceipt({
       )}
     </section>
   );
+}
+
+function canLoadMore(
+  result: RenamePlanResult,
+  suggestions: RenameSuggestion[],
+  nextCursor: number | null,
+): boolean {
+  if (nextCursor !== null) return true;
+  return (result.needs_review_count ?? 0) > suggestions.length;
+}
+
+function batchItemToSuggestion(item: RenameBatchItem): RenameSuggestion {
+  return {
+    managed_file_id: item.managed_file_id,
+    root_key: item.root_key,
+    relative_path: item.original_relative_path,
+    filename: item.original_filename,
+    extension: item.original_filename.includes('.') ? `.${item.original_filename.split('.').pop()}` : '',
+    status: item.status,
+    warnings: item.warnings,
+  };
 }
 
 function openSuggestion(

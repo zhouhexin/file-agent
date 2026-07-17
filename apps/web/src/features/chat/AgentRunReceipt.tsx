@@ -143,7 +143,7 @@ export function AgentRunReceipt({
           />
         ) : null}
         {renamePlanResult ? (
-          <RenameSuggestionReceipt result={renamePlanResult} onOpenManagedFile={onOpenManagedFile} />
+          <RenameSuggestionReceipt token={token} result={renamePlanResult} onOpenManagedFile={onOpenManagedFile} />
         ) : agentRun.final_response ? (
           <p className="agent-chat-response">{agentRun.final_response}</p>
         ) : null}

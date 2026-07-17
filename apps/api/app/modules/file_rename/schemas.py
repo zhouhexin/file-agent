@@ -63,12 +63,14 @@ class FilenameMetadataResult(BaseModel):
 
     @property
     def can_build_filename(self) -> bool:
-        """年份和标题可靠时允许生成正式或降级文件名。"""
+        """正文标题可靠时允许生成正式、日期降级或纯标题文件名。"""
 
-        return (
-            self.year.status == RenameFieldStatus.RESOLVED
-            and self.title.status == RenameFieldStatus.RESOLVED
-        )
+        if self.title.status != RenameFieldStatus.RESOLVED:
+            return False
+        if self.year.status != RenameFieldStatus.RESOLVED and self.title.source == "filename":
+            # 纯标题兜底必须来自正文或结构化文档，不能把原文件名原样当成新名称。
+            return False
+        return True
 
 
 class RenameTemplate(BaseModel):

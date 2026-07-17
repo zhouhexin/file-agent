@@ -28,24 +28,28 @@ class FilenameBuilder:
         """返回目标文件名和使用的模板 key。"""
 
         if not metadata.can_build_filename:
-            raise FilenameBuildError("年份或正文标题缺失，不能生成安全文件名。")
+            raise FilenameBuildError("正文标题缺失，不能生成安全文件名。")
+        resolved_fields = {
+            "year": bool(metadata.year.value),
+            "document_number": bool(metadata.document_number.value),
+            "title": bool(metadata.title.value),
+        }
         template = next(
             (
                 item
                 for item in policy.templates
-                if metadata.document_number.value and "document_number" in item.required_fields
+                if all(resolved_fields.get(field, False) for field in item.required_fields)
+                and not (
+                    item.when == "document_number_missing"
+                    and resolved_fields["document_number"]
+                )
+                and not (
+                    item.when == "year_missing"
+                    and resolved_fields["year"]
+                )
             ),
             None,
         )
-        if template is None:
-            template = next(
-                (
-                    item
-                    for item in policy.templates
-                    if item.when == "document_number_missing" and "document_number" not in item.required_fields
-                ),
-                None,
-            )
         if template is None:
             raise FilenameBuildError("没有匹配当前字段情况的重命名模板。")
 

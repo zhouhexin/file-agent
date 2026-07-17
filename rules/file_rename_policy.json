@@ -1,6 +1,6 @@
 {
   "policy_key": "school_official_document",
-  "version": "1.2",
+  "version": "1.3",
   "separator": "_",
   "templates": [
     {
@@ -13,6 +13,12 @@
       "template": "{year}_{title}{extension}",
       "required_fields": ["year", "title"],
       "when": "document_number_missing"
+    },
+    {
+      "key": "title_only",
+      "template": "{title}{extension}",
+      "required_fields": ["title"],
+      "when": "year_missing"
     }
   ],
   "missing_field_strategy": "NEEDS_REVIEW",

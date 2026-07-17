@@ -621,18 +621,19 @@ def _generate_rename_suggestions_handler(db: Any, user_id: str | None) -> ToolHa
                 conversation_id=str(getattr(tool_input, "conversation_id")),
                 agent_run_id=str(getattr(tool_input, "agent_run_id")),
                 document_ids=document_ids,
-                limit=int(getattr(tool_input, "limit", 20)),
+                limit=int(getattr(tool_input, "limit", 500)),
             )
         return RenameSuggestionService(db=db, user_id=user_id).generate_plan(
             conversation_id=str(getattr(tool_input, "conversation_id")),
             agent_run_id=str(getattr(tool_input, "agent_run_id")),
             root_key=getattr(tool_input, "root_key", None),
             path_prefix=getattr(tool_input, "path_prefix", None),
+            relative_path=getattr(tool_input, "relative_path", None),
             path_candidates=list(getattr(tool_input, "path_candidates", []) or []),
             scope_confidence=getattr(tool_input, "scope_confidence", None),
             extension=getattr(tool_input, "extension", None),
             filename_contains=getattr(tool_input, "filename_contains", None),
-            limit=int(getattr(tool_input, "limit", 20)),
+            limit=int(getattr(tool_input, "limit", 500)),
         )
 
     return handler

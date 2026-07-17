@@ -7,6 +7,7 @@ import type {
   FilesystemJobResponse,
   OperationConfirmResponse,
   OperationPlanResponse,
+  RenameBatchItemsResponse,
   SendMessageResponse,
   TokenResponse,
   UploadedFile,
@@ -223,6 +224,17 @@ export async function confirmOperationPlan(
     token,
     body: { confirmation: '确认执行' },
   });
+}
+
+export async function getRenameBatchItems(
+  token: string,
+  batchId: string,
+  status: string,
+  cursor = 0,
+): Promise<RenameBatchItemsResponse> {
+  // 大批量重命名明细按游标加载，避免聊天页面一次渲染全部文件。
+  const query = new URLSearchParams({ status, cursor: String(cursor), limit: '20' });
+  return request(`/file-renames/batches/${batchId}/items?${query.toString()}`, { token });
 }
 
 export async function submitClassificationFeedback(

@@ -9,7 +9,15 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.db.models import FileRenameReviewItem, ManagedFile, User, utcnow
+from app.db.models import (
+    FileRenameBatch,
+    FileRenameBatchItem,
+    FileRenameReviewItem,
+    ManagedFile,
+    User,
+    utcnow,
+)
+from app.modules.file_rename.batch_service import RenameBatchService
 from app.modules.file_rename.execution_service import ConfirmedRenameService
 from app.modules.file_rename.schemas import RenameSuggestion
 from app.modules.operations.repository import OperationPlanRepository
@@ -35,6 +43,8 @@ class RenameReviewService:
         conversation_id: str,
         agent_run_id: str,
         suggestion: RenameSuggestion,
+        rename_batch_id: str | None = None,
+        rename_batch_item_id: str | None = None,
     ) -> FileRenameReviewItem:
         """把未进入执行计划的建议保存为后续对话可解析的待复核项。"""
 
@@ -55,6 +65,8 @@ class RenameReviewService:
             conversation_id=conversation_id,
             agent_run_id=agent_run_id,
             user_id=self.user_id,
+            rename_batch_id=rename_batch_id,
+            rename_batch_item_id=rename_batch_item_id,
             managed_file_id=suggestion.managed_file_id,
             document_id=suggestion.document_id or None,
             root_key=suggestion.root_key,
@@ -88,23 +100,36 @@ class RenameReviewService:
         """处理放弃或人工更正消息，并在更正成功时立即确认和执行计划。"""
 
         pending = self._pending_items(conversation_id=conversation_id)
+        if not pending:
+            return _resolution_error("PENDING_RENAME_NOT_FOUND", "当前会话没有待复核的重命名文件。")
+        batch = self._batch_for_pending(pending)
+        batch_service = RenameBatchService(self.db, self.user_id) if batch is not None else None
         normalized_message = message.strip().rstrip("。！!")
         if normalized_message in _DISMISS_MESSAGES:
             for item in pending:
                 item.status = "DISMISSED"
                 item.decision_json = {"action": "dismiss", "message": normalized_message}
                 item.updated_at = utcnow()
+                batch_item = self._batch_item(item)
+                if batch_item is not None:
+                    batch_item.status = "EXCLUDED"
+                    batch_item.decision_json = {"action": "exclude", "message": normalized_message}
+                    batch_item.updated_at = utcnow()
+            plan = batch_service.create_operation_plan_if_complete(batch) if batch_service and batch else None
             self.db.flush()
             return {
                 "ok": True,
                 "kind": "rename_review_resolution",
-                "status": "COMPLETED",
+                "status": "WAITING_CONFIRMATION" if plan is not None else "COMPLETED",
                 "dismissed_count": len(pending),
                 "completed_items": [],
                 "failed_items": [],
                 "ambiguous_items": [],
-                "operation_plan_id": None,
+                "operation_plan_id": plan.id if plan is not None else None,
                 "changeset_id": None,
+                "rename_batch_id": batch.id if batch else None,
+                "accepted_count": 0,
+                "remaining_review_count": batch.needs_review_count if batch else 0,
             }
 
         corrections, parse_failures = _parse_corrections(message)
@@ -156,13 +181,22 @@ class RenameReviewService:
                 continue
             plan_candidates.append((item, target_relative_path))
 
-        # 同一批次目标名重复时，仅跳过冲突项，不影响其余唯一文件。
+        # 同一批次目标名重复时，仅保留不冲突的人工更正，避免覆盖其他文件。
         duplicate_targets = {
             target for target, count in Counter(target for _, target in plan_candidates).items() if count > 1
         }
+        occupied_targets = {
+            item.proposed_relative_path
+            for item in (
+                batch_service.list_all_items(batch_id=batch.id, statuses={"READY", "USER_NAMED"})
+                if batch_service and batch
+                else []
+            )
+            if item.proposed_relative_path
+        }
         executable: list[tuple[FileRenameReviewItem, str]] = []
         for item, target_relative_path in plan_candidates:
-            if target_relative_path in duplicate_targets:
+            if target_relative_path in duplicate_targets or target_relative_path in occupied_targets:
                 failed_items.append({
                     "review_id": item.id,
                     "source": item.original_filename,
@@ -176,7 +210,53 @@ class RenameReviewService:
         plan = None
         result = None
         changeset = None
-        if executable:
+        if executable and batch is not None and batch_service is not None:
+            for item, target_relative_path in executable:
+                batch_item = self._batch_item(item)
+                if batch_item is None:
+                    failed_items.append({
+                        "review_id": item.id,
+                        "source": item.original_filename,
+                        "error_code": "RENAME_BATCH_ITEM_NOT_FOUND",
+                        "error_message": "重命名批次文件项不存在，请重新发起重命名任务。",
+                    })
+                    continue
+                batch_item.proposed_relative_path = target_relative_path
+                batch_item.proposed_filename = Path(target_relative_path).name
+                batch_item.status = "USER_NAMED"
+                batch_item.decision_json = {
+                    "action": "rename",
+                    "message": message[:200],
+                }
+                batch_item.updated_at = utcnow()
+                item.status = "CORRECTED"
+                item.decision_json = {
+                    "action": "rename",
+                    "requested_relative_path": target_relative_path,
+                }
+                item.updated_at = utcnow()
+            plan = batch_service.create_operation_plan_if_complete(batch)
+            if plan is not None and not failed_items and not ambiguous_items:
+                self.repository.confirm_plan(
+                    plan=plan,
+                    user_id=self.user_id,
+                    confirmation_text=message[:200],
+                )
+                result, changeset = ConfirmedRenameService(self.db).execute(plan=plan)
+                batch_service.record_execution_result(batch, result)
+                result_by_id = {entry.managed_file_id: entry for entry in result.items}
+                for item, target_relative_path in executable:
+                    execution = result_by_id.get(item.managed_file_id)
+                    item.status = "EXECUTED" if execution and execution.status == "COMPLETED" else "NEEDS_REVIEW"
+                    item.decision_json = {
+                        "action": "rename",
+                        "requested_relative_path": target_relative_path,
+                        "operation_plan_id": plan.id,
+                        "execution": execution.model_dump(mode="json") if execution else {},
+                    }
+                    item.updated_at = utcnow()
+        elif executable:
+            # 迁移前遗留待复核项没有批次关系，继续兼容原来的单次人工确认执行。
             user = self.db.get(User, self.user_id)
             if user is None or not user.default_workspace_id:
                 return _resolution_error("USER_WORKSPACE_REQUIRED", "当前用户缺少默认工作区。")
@@ -236,21 +316,52 @@ class RenameReviewService:
             "ambiguous_items": ambiguous_items,
             "operation_plan_id": plan.id if plan else None,
             "changeset_id": changeset.id if changeset else None,
+            "rename_batch_id": batch.id if batch else None,
+            "accepted_count": len(executable),
+            "remaining_review_count": batch.needs_review_count if batch else 0,
         }
 
     def _pending_items(self, *, conversation_id: str) -> list[FileRenameReviewItem]:
         """读取当前用户和会话的待复核项，较新的批次优先。"""
 
-        return (
-            self.db.query(FileRenameReviewItem)
+        query = self.db.query(FileRenameReviewItem)
+        latest_batch_id = (
+            self.db.query(FileRenameReviewItem.rename_batch_id)
             .filter(
                 FileRenameReviewItem.user_id == self.user_id,
                 FileRenameReviewItem.conversation_id == conversation_id,
                 FileRenameReviewItem.status == "NEEDS_REVIEW",
+                FileRenameReviewItem.rename_batch_id.isnot(None),
             )
             .order_by(FileRenameReviewItem.created_at.desc())
-            .all()
+            .limit(1)
+            .scalar()
         )
+        query = query.filter(
+            FileRenameReviewItem.user_id == self.user_id,
+            FileRenameReviewItem.conversation_id == conversation_id,
+            FileRenameReviewItem.status == "NEEDS_REVIEW",
+        )
+        if latest_batch_id:
+            query = query.filter(FileRenameReviewItem.rename_batch_id == latest_batch_id)
+        else:
+            query = query.filter(FileRenameReviewItem.rename_batch_id.is_(None))
+        return query.order_by(FileRenameReviewItem.created_at.desc()).all()
+
+    def _batch_for_pending(self, pending: list[FileRenameReviewItem]) -> FileRenameBatch | None:
+        """从最新待复核项解析其唯一批次。"""
+
+        batch_ids = {item.rename_batch_id for item in pending if item.rename_batch_id}
+        if len(batch_ids) != 1:
+            return None
+        return self.db.get(FileRenameBatch, next(iter(batch_ids)))
+
+    def _batch_item(self, review_item: FileRenameReviewItem) -> FileRenameBatchItem | None:
+        """读取待复核项对应的批次文件。"""
+
+        if not review_item.rename_batch_item_id:
+            return None
+        return self.db.get(FileRenameBatchItem, review_item.rename_batch_item_id)
 
 
 def _parse_corrections(message: str) -> tuple[list[tuple[str, str]], list[dict[str, Any]]]:

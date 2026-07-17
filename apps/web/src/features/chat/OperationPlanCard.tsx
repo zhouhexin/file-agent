@@ -2,8 +2,8 @@
 import { AlertTriangle, CheckCircle2, FilePenLine } from 'lucide-react';
 import { useState } from 'react';
 
-import { confirmOperationPlan } from '../../api/client';
-import type { OperationPlanResponse } from '../../types';
+import { confirmOperationPlan, getRenameBatchItems } from '../../api/client';
+import type { OperationPlanItem, OperationPlanResponse, RenameBatchItem } from '../../types';
 
 type OperationPlanCardProps = {
   token: string;
@@ -13,10 +13,16 @@ type OperationPlanCardProps = {
 
 export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCardProps) {
   const [confirming, setConfirming] = useState(false);
+  const [loadingItems, setLoadingItems] = useState(false);
+  const [loadedItems, setLoadedItems] = useState<OperationPlanItem[] | null>(null);
+  const [nextCursor, setNextCursor] = useState<number | null>(null);
   const [error, setError] = useState('');
   const waiting = plan.status === 'WAITING_CONFIRMATION' || plan.status === 'PLANNED';
   const uploadedTemporaryRename = plan.operation_type === 'RENAME_UPLOADED_FILES';
   const pathPrefix = readOptionalString(plan.scope, 'path_prefix');
+  const renameBatchId = readOptionalString(plan.scope, 'rename_batch_id');
+  const totalItemCount = plan.total_item_count || plan.items.length;
+  const visibleItems = loadedItems ?? plan.items;
 
   async function handleConfirm() {
     setConfirming(true);
@@ -24,6 +30,8 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
     try {
       await confirmOperationPlan(token, plan.id);
       await onConfirmed();
+      setLoadedItems(null);
+      setNextCursor(null);
     } catch (exception) {
       setError(exception instanceof Error ? exception.message : '确认执行失败');
     } finally {
@@ -39,7 +47,7 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
             <FilePenLine size={18} />
             {uploadedTemporaryRename ? '上传附件临时重命名计划' : '文件重命名计划'}
           </strong>
-          <span>{plan.items.length} 个可执行 · {plan.skipped_items.length} 个待复核</span>
+          <span>{totalItemCount} 个可执行 · {plan.skipped_items.length} 个待复核</span>
         </div>
         <em className={`operation-plan-status operation-plan-status--${plan.status.toLowerCase()}`}>
           {formatPlanStatus(plan.status)}
@@ -55,7 +63,7 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
       ) : null}
 
       <div className="operation-plan-items">
-        {plan.items.map((item, index) => (
+        {visibleItems.map((item, index) => (
           <div className="operation-plan-item" key={`${item.document_id}-${index}`}>
             <span>{index + 1}</span>
             <div>
@@ -66,6 +74,34 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
           </div>
         ))}
       </div>
+
+      {waiting && renameBatchId && (nextCursor !== null || totalItemCount > visibleItems.length) ? (
+        <button
+          className="rename-suggestion-more"
+          disabled={loadingItems}
+          onClick={async () => {
+            setLoadingItems(true);
+            try {
+              const page = await getRenameBatchItems(
+                token,
+                renameBatchId,
+                'EXECUTABLE',
+                loadedItems === null ? 0 : (nextCursor ?? 0),
+              );
+              const mapped = page.items.map(batchItemToPlanItem);
+              setLoadedItems((current) => current === null ? mapped : [...current, ...mapped]);
+              setNextCursor(page.next_cursor);
+            } catch (exception) {
+              setError(exception instanceof Error ? exception.message : '加载文件明细失败');
+            } finally {
+              setLoadingItems(false);
+            }
+          }}
+          type="button"
+        >
+          {loadingItems ? '加载中...' : `查看其余 ${Math.max(0, totalItemCount - visibleItems.length)} 个文件`}
+        </button>
+      ) : null}
 
       {plan.skipped_items.length > 0 ? (
         <div className="operation-plan-review">
@@ -80,11 +116,27 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
       {error ? <p className="operation-plan-error">{error}</p> : null}
       {waiting ? (
         <button className="operation-plan-confirm" disabled={confirming} onClick={handleConfirm} type="button">
-          {confirming ? '执行中...' : `确认重命名 ${plan.items.length} 个文件`}
+          {confirming ? '执行中...' : `确认重命名 ${totalItemCount} 个文件`}
         </button>
       ) : null}
     </section>
   );
+}
+
+function batchItemToPlanItem(item: RenameBatchItem): OperationPlanItem {
+  return {
+    document_id: item.id,
+    before: {
+      managed_file_id: item.managed_file_id,
+      relative_path: item.original_relative_path,
+      filename: item.original_filename,
+    },
+    after: {
+      filename: item.proposed_filename ?? '未命名文件',
+    },
+    rename_metadata: {},
+    execution_status: 'PLANNED',
+  };
 }
 
 function readString(payload: Record<string, unknown>, key: string): string {

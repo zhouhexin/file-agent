@@ -7,6 +7,8 @@ from app.db.models import (
     ChangeItem,
     Document,
     FileObject,
+    FileRenameBatch,
+    FileRenameBatchItem,
     FileRenameReviewItem,
     ManagedFile,
     OperationConfirmation,
@@ -656,7 +658,7 @@ def test_uploaded_attachment_rename_confirms_into_private_temporary_path(monkeyp
 
 
 def test_planner_targets_exact_managed_filename_for_rename():
-    """目录下的完整文件名应转换为路径、扩展名和文件名过滤条件。"""
+    """目录下的完整文件名应转换为精确相对路径，而不是模糊包含条件。"""
 
     message = "对党办下科学发展观的讨论主题[1].doc 进行重命名"
     deterministic_plan = DeterministicPlanner().plan(
@@ -680,7 +682,8 @@ def test_planner_targets_exact_managed_filename_for_rename():
     for plan in [deterministic_plan, llm_plan]:
         assert plan.intent == "SUGGEST_RENAME"
         assert plan.steps[0].input["path_prefix"] == "党办"
-        assert plan.steps[0].input["filename_contains"] == "科学发展观的讨论主题[1].doc"
+        assert plan.steps[0].input["relative_path"] == "党办/科学发展观的讨论主题[1].doc"
+        assert "filename_contains" not in plan.steps[0].input
         assert plan.steps[0].input["extension"] == "doc"
 
 
@@ -947,8 +950,41 @@ def test_batch_same_title_uses_full_date_to_distinguish_files(monkeypatch, tmp_p
     clear_overrides()
 
 
-def test_needs_review_item_is_skipped_from_operation_plan(monkeypatch, tmp_path):
-    """缺少年份或标题的文件应保留回执但不进入可执行计划。"""
+def test_missing_date_with_reliable_title_uses_title_only_filename(monkeypatch, tmp_path):
+    """缺少日期但正文标题可靠时，应直接使用正文标题生成名称。"""
+
+    managed_root = tmp_path / "managed"
+    source_dir = managed_root / "党办"
+    source_dir.mkdir(parents=True)
+    (source_dir / "材料.txt").write_text(
+        "春季学生活动总结\n本学期组织了多项活动。",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    _configure_test_managed_root(monkeypatch, managed_root)
+
+    client, _ = client_with_database()
+    _, token = _register_and_login(client, "rename-title-only")
+    response = client.post(
+        "/api/conversations/rename-title-only/messages",
+        headers=_auth_header(token),
+        json={"content": "重命名党办目录下的文件", "attachments": []},
+    )
+
+    assert response.status_code == 200
+    invocation = next(
+        item
+        for item in response.json()["agent_run"]["tool_invocations"]
+        if item["tool_name"] == "generate-rename-suggestions"
+    )
+    assert invocation["output_json"]["ready_count"] == 1
+    assert invocation["output_json"]["suggestions"][0]["proposed_filename"] == "春季学生活动总结.txt"
+    assert response.json()["agent_run"]["operation_plan_id"]
+    clear_overrides()
+
+
+def test_needs_review_item_blocks_partial_operation_plan(monkeypatch, tmp_path):
+    """批次仍有待复核文件时，不得只为识别成功项创建部分执行计划。"""
 
     managed_root = tmp_path / "managed"
     source_dir = managed_root / "党办"
@@ -957,7 +993,7 @@ def test_needs_review_item_is_skipped_from_operation_plan(monkeypatch, tmp_path)
         "2026年春季学生活动总结\n本学期组织了多项活动。",
         encoding="utf-8",
     )
-    (source_dir / "待复核.txt").write_text("没有明确年份", encoding="utf-8")
+    (source_dir / "待复核.txt").write_text("1\n2", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     _configure_test_managed_root(monkeypatch, managed_root)
 
@@ -970,7 +1006,7 @@ def test_needs_review_item_is_skipped_from_operation_plan(monkeypatch, tmp_path)
     )
 
     assert response.status_code == 200
-    assert "以下文件缺少重命名所需信息（年份或正文标题），暂未处理。" in response.json()["agent_run"]["final_response"]
+    assert "以下文件未能可靠识别正文标题，暂未处理。" in response.json()["agent_run"]["final_response"]
     assert "缺少年份" not in response.json()["agent_run"]["final_response"]
     invocation = next(
         item
@@ -979,9 +1015,9 @@ def test_needs_review_item_is_skipped_from_operation_plan(monkeypatch, tmp_path)
     )
     assert invocation["output_json"]["ready_count"] == 1
     assert invocation["output_json"]["needs_review_count"] == 1
-    plan_id = response.json()["agent_run"]["operation_plan_id"]
-    plan_response = client.get(f"/api/operations/plans/{plan_id}", headers=_auth_header(token))
-    assert len(plan_response.json()["items"]) == 1
+    assert response.json()["agent_run"]["operation_plan_id"] is None
+    assert invocation["output_json"]["status"] == "NEEDS_REVIEW"
+    assert invocation["output_json"]["rename_batch_id"]
     clear_overrides()
 
 
@@ -1036,11 +1072,111 @@ def test_user_correction_immediately_confirms_and_renames_review_item(monkeypatc
         clear_overrides()
 
 
-def test_duplicate_pending_filename_does_not_block_unique_correction(monkeypatch, tmp_path):
-    """同名待复核项应要求完整路径，唯一文件仍在同一消息中完成重命名。"""
+def test_batch_correction_executes_ready_and_user_named_files_together(monkeypatch, tmp_path):
+    """最后一个待复核项补齐后，应把自动建议项和人工命名项放入同一执行计划。"""
 
     managed_root = tmp_path / "managed"
-    for directory, filename in [("党办", "通知.txt"), ("校办", "通知.txt"), ("党办", "唯一.txt")]:
+    source_dir = managed_root / "党办"
+    source_dir.mkdir(parents=True)
+    ready_path = source_dir / "自动项.txt"
+    review_path = source_dir / "人工项.txt"
+    ready_path.write_text("2026年春季学生活动总结\n本学期组织了多项活动。", encoding="utf-8")
+    review_path.write_text("没有可识别的日期和规范标题", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    _configure_test_managed_root(monkeypatch, managed_root)
+
+    client, SessionLocal = client_with_database()
+    _, token = _register_and_login(client, "rename-complete-batch")
+    url = "/api/conversations/rename-complete-batch/messages"
+    initial = client.post(
+        url,
+        headers=_auth_header(token),
+        json={"content": "对党办目录下的文件进行重命名", "attachments": []},
+    )
+    assert initial.json()["agent_run"]["operation_plan_id"] is None
+
+    corrected = client.post(
+        url,
+        headers=_auth_header(token),
+        json={"content": "文件人工项.txt更正为人工确认标题", "attachments": []},
+    )
+
+    assert corrected.status_code == 200
+    assert corrected.json()["agent_run"]["operation_plan_id"]
+    assert not ready_path.exists()
+    assert not review_path.exists()
+    assert (source_dir / "2026_春季学生活动总结.txt").exists()
+    assert (source_dir / "人工确认标题.txt").exists()
+    db = SessionLocal()
+    try:
+        batch = db.query(FileRenameBatch).one()
+        assert batch.status == "COMPLETED"
+        assert batch.completed_count == 2
+        assert {item.status for item in db.query(FileRenameBatchItem).all()} == {"COMPLETED"}
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_rename_batch_api_returns_summary_and_cursor_pages(monkeypatch, tmp_path):
+    """大批次回执只预览十项，完整文件清单通过受控游标接口读取。"""
+
+    managed_root = tmp_path / "managed"
+    source_dir = managed_root / "党办"
+    source_dir.mkdir(parents=True)
+    for index in range(12):
+        (source_dir / f"待复核-{index:02d}.txt").write_text(
+            "没有可识别的日期和规范标题",
+            encoding="utf-8",
+        )
+    monkeypatch.chdir(tmp_path)
+    _configure_test_managed_root(monkeypatch, managed_root)
+
+    client, _ = client_with_database()
+    _, token = _register_and_login(client, "rename-batch-page")
+    response = client.post(
+        "/api/conversations/rename-batch-page/messages",
+        headers=_auth_header(token),
+        json={"content": "对党办目录下的文件进行重命名", "attachments": []},
+    )
+
+    invocation = next(
+        item
+        for item in response.json()["agent_run"]["tool_invocations"]
+        if item["tool_name"] == "generate-rename-suggestions"
+    )
+    output = invocation["output_json"]
+    assert output["matched_count"] == 12
+    assert len(output["suggestions"]) == 10
+    assert output["suggestions_truncated"] is True
+    batch_id = output["rename_batch_id"]
+
+    summary = client.get(f"/api/file-renames/batches/{batch_id}", headers=_auth_header(token))
+    assert summary.status_code == 200
+    assert summary.json()["total_count"] == 12
+    assert summary.json()["needs_review_count"] == 12
+    assert len(summary.json()["preview_items"]) == 10
+
+    first_page = client.get(
+        f"/api/file-renames/batches/{batch_id}/items?status=NEEDS_REVIEW&limit=5",
+        headers=_auth_header(token),
+    )
+    assert len(first_page.json()["items"]) == 5
+    cursor = first_page.json()["next_cursor"]
+    second_page = client.get(
+        f"/api/file-renames/batches/{batch_id}/items?status=NEEDS_REVIEW&limit=5&cursor={cursor}",
+        headers=_auth_header(token),
+    )
+    assert len(second_page.json()["items"]) == 5
+    assert second_page.json()["next_cursor"] is not None
+    clear_overrides()
+
+
+def test_duplicate_pending_filename_keeps_same_batch_waiting(monkeypatch, tmp_path):
+    """同批次同名文件存在歧义时，已更正的唯一文件也应等待批次补齐。"""
+
+    managed_root = tmp_path / "managed"
+    for directory, filename in [("党办/一", "通知.txt"), ("党办/二", "通知.txt"), ("党办", "唯一.txt")]:
         path = managed_root / directory / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("没有可识别的日期和规范标题", encoding="utf-8")
@@ -1050,17 +1186,12 @@ def test_duplicate_pending_filename_does_not_block_unique_correction(monkeypatch
     client, _ = client_with_database()
     _, token = _register_and_login(client, "rename-ambiguous")
     conversation_url = "/api/conversations/rename-ambiguous-conversation/messages"
-    for request_text in [
-        "对党办下通知.txt进行重命名",
-        "对校办下通知.txt进行重命名",
-        "对党办下唯一.txt进行重命名",
-    ]:
-        response = client.post(
-            conversation_url,
-            headers=_auth_header(token),
-            json={"content": request_text, "attachments": []},
-        )
-        assert response.status_code == 200
+    response = client.post(
+        conversation_url,
+        headers=_auth_header(token),
+        json={"content": "对党办目录下的文件进行重命名", "attachments": []},
+    )
+    assert response.status_code == 200
 
     corrected = client.post(
         conversation_url,
@@ -1075,11 +1206,12 @@ def test_duplicate_pending_filename_does_not_block_unique_correction(monkeypatch
     run = corrected.json()["agent_run"]
     assert run["status"] == "NEEDS_REVIEW"
     assert "“通知.txt”匹配到多个待复核文件" in run["final_response"]
-    assert "党办/通知.txt" in run["final_response"]
-    assert "校办/通知.txt" in run["final_response"]
-    assert (managed_root / "党办" / "2026_唯一文件.txt").exists()
-    assert (managed_root / "党办" / "通知.txt").exists()
-    assert (managed_root / "校办" / "通知.txt").exists()
+    assert "党办/一/通知.txt" in run["final_response"]
+    assert "党办/二/通知.txt" in run["final_response"]
+    assert run["operation_plan_id"] is None
+    assert (managed_root / "党办" / "唯一.txt").exists()
+    assert (managed_root / "党办" / "一" / "通知.txt").exists()
+    assert (managed_root / "党办" / "二" / "通知.txt").exists()
     clear_overrides()
 
 
@@ -1089,7 +1221,7 @@ def test_existing_target_name_only_fails_conflicting_correction(monkeypatch, tmp
     managed_root = tmp_path / "managed"
     source_dir = managed_root / "党办"
     source_dir.mkdir(parents=True)
-    for filename in ["甲.txt", "乙.txt", "重复.txt"]:
+    for filename in ["甲.txt", "乙.txt"]:
         (source_dir / filename).write_text("没有可识别的日期和规范标题", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     _configure_test_managed_root(monkeypatch, managed_root)
@@ -1097,13 +1229,13 @@ def test_existing_target_name_only_fails_conflicting_correction(monkeypatch, tmp
     client, _ = client_with_database()
     _, token = _register_and_login(client, "rename-target-conflict")
     url = "/api/conversations/rename-target-conflict-conversation/messages"
-    for filename in ["甲.txt", "乙.txt"]:
-        response = client.post(
-            url,
-            headers=_auth_header(token),
-            json={"content": f"对党办下{filename}进行重命名", "attachments": []},
-        )
-        assert response.status_code == 200
+    response = client.post(
+        url,
+        headers=_auth_header(token),
+        json={"content": "对党办目录下的文件进行重命名", "attachments": []},
+    )
+    assert response.status_code == 200
+    (source_dir / "重复.txt").write_text("已经存在的目标文件", encoding="utf-8")
 
     corrected = client.post(
         url,
@@ -1121,6 +1253,16 @@ def test_existing_target_name_only_fails_conflicting_correction(monkeypatch, tmp
     assert (source_dir / "重复.txt").exists()
     assert (source_dir / "新的乙文件.txt").exists()
     assert not (source_dir / "乙.txt").exists()
+
+    retried = client.post(
+        url,
+        headers=_auth_header(token),
+        json={"content": "文件甲.txt更正为不重复的甲文件", "attachments": []},
+    )
+    assert retried.status_code == 200
+    assert retried.json()["agent_run"]["operation_plan_id"]
+    assert not (source_dir / "甲.txt").exists()
+    assert (source_dir / "不重复的甲文件.txt").exists()
     clear_overrides()
 
 

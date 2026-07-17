@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db.models import Document, ManagedFile, ManagedRoot, User
+from app.modules.file_rename.batch_service import RenameBatchService
 from app.modules.file_rename.filename_builder import FilenameBuildError, FilenameBuilder
 from app.modules.file_rename.metadata_resolution_service import RenameMetadataResolutionService
 from app.modules.file_rename.parsing_service import extract_rename_primary, rename_primary_config_hash
@@ -23,7 +24,6 @@ from app.modules.managed_files.directory_scope_resolver import (
 from app.modules.managed_files.repository import ManagedFileRepository
 from app.modules.managed_files.service import resolve_managed_file_query_scope, sync_configured_managed_roots
 from app.modules.managed_files.snapshot_service import ManagedFileSnapshotService
-from app.modules.operations.repository import OperationPlanRepository
 
 
 _SPREADSHEET_RENAME_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".csv", ".tsv"}
@@ -48,11 +48,12 @@ class RenameSuggestionService:
         agent_run_id: str,
         root_key: str | None = None,
         path_prefix: str | None = None,
+        relative_path: str | None = None,
         path_candidates: list[str] | None = None,
         scope_confidence: float | None = None,
         extension: str | None = None,
         filename_contains: str | None = None,
-        limit: int = 20,
+        limit: int = 500,
     ) -> dict[str, Any]:
         """为匹配文件生成建议，并只把 READY 项写入 OperationPlan。"""
 
@@ -78,6 +79,20 @@ class RenameSuggestionService:
             )
         resolved_root_key = directory_resolution.root_key or scope.root_key
         resolved_path_prefix = directory_resolution.path_prefix
+        if not relative_path:
+            matched_total = repository.count_files(
+                root_key=resolved_root_key,
+                root_keys=scope.configured_root_keys if resolved_root_key is None else None,
+                path_prefix=resolved_path_prefix,
+                extension=extension,
+                filename_contains=filename_contains,
+                status="ACTIVE",
+            )
+            if matched_total > limit:
+                return _error(
+                    "RENAME_SCOPE_TOO_LARGE",
+                    f"当前范围匹配到 {matched_total} 个文件，单批最多处理 {limit} 个，请缩小目录或增加过滤条件。",
+                )
         rows = repository.list_files(
             root_key=resolved_root_key,
             root_keys=scope.configured_root_keys if resolved_root_key is None else None,
@@ -87,6 +102,13 @@ class RenameSuggestionService:
             status="ACTIVE",
             limit=limit,
         )
+        if relative_path:
+            normalized_relative_path = relative_path.replace("\\", "/").strip().strip("/")
+            rows = [
+                (managed_file, root)
+                for managed_file, root in rows
+                if managed_file.relative_path == normalized_relative_path
+            ]
         if not rows:
             return _error("NO_MANAGED_FILES_FOUND", "没有找到符合条件的受管文件。")
 
@@ -121,55 +143,58 @@ class RenameSuggestionService:
 
         ready = [item for item in suggestions if item.status == "READY"]
         skipped = [item for item in suggestions if item.status != "READY"]
+        scope_payload = {
+            "root_key": resolved_root_key,
+            "path_prefix": resolved_path_prefix,
+            "relative_path": relative_path,
+            "extension": extension,
+            "filename_contains": filename_contains,
+            "policy_key": self.policy.policy_key,
+            "policy_version": self.policy.version,
+        }
+        batch_service = RenameBatchService(self.db, self.user_id)
+        batch = batch_service.create_batch(
+            conversation_id=conversation_id,
+            agent_run_id=agent_run_id,
+            scope=scope_payload,
+        )
+        batch_items = {
+            suggestion.managed_file_id: batch_service.add_suggestion(
+                batch=batch,
+                suggestion=suggestion,
+                position=position,
+            )
+            for position, suggestion in enumerate(suggestions)
+        }
         review_service = RenameReviewService(self.db, self.user_id)
         for suggestion in skipped:
             review_item = review_service.persist_suggestion(
                 conversation_id=conversation_id,
                 agent_run_id=agent_run_id,
                 suggestion=suggestion,
+                rename_batch_id=batch.id,
+                rename_batch_item_id=batch_items[suggestion.managed_file_id].id,
             )
             suggestion.review_id = review_item.id
-        plan = None
-        if ready:
-            plan = OperationPlanRepository(self.db).create_plan(
-                workspace_id=user.default_workspace_id,
-                conversation_id=conversation_id,
-                agent_run_id=agent_run_id,
-                user_id=self.user_id,
-                operation_type="RENAME_FILES",
-                risk_level="medium",
-                reason="按年份、文号和正文标题生成标准文件名",
-                plan_json={
-                    "policy_key": self.policy.policy_key,
-                    "policy_version": self.policy.version,
-                    "scope": {
-                        "root_key": resolved_root_key,
-                        "path_prefix": resolved_path_prefix,
-                        "extension": extension,
-                        "filename_contains": filename_contains,
-                    },
-                    "items": [_operation_plan_item(item) for item in ready],
-                    "skipped_items": [item.model_dump(mode="json") for item in skipped],
-                },
-            )
+        plan = batch_service.create_operation_plan_if_complete(batch)
+        preview_suggestions = (skipped + ready)[:10]
         self.db.flush()
         return {
             "ok": True,
             "kind": "rename_plan",
             "status": "WAITING_CONFIRMATION" if plan is not None else "NEEDS_REVIEW",
             "operation_plan_id": plan.id if plan is not None else None,
+            "rename_batch_id": batch.id,
             "matched_count": len(suggestions),
             "ready_count": len(ready),
             "needs_review_count": len(skipped),
-            "suggestions": [item.model_dump(mode="json") for item in suggestions],
+            "suggestions": [item.model_dump(mode="json") for item in preview_suggestions],
+            "suggestions_truncated": len(suggestions) > len(preview_suggestions),
             "extraction_results": extraction_results,
             "query": {
-                "root_key": resolved_root_key,
-                "path_prefix": resolved_path_prefix,
+                **scope_payload,
                 "path_candidates": path_candidates or [],
                 "scope_confidence": scope_confidence,
-                "extension": extension,
-                "filename_contains": filename_contains,
             },
         }
 
@@ -318,7 +343,7 @@ class RenameSuggestionService:
                         policy_key=self.policy.policy_key,
                         policy_version=self.policy.version,
                         status="NEEDS_REVIEW",
-                        warnings=["年份或正文标题存在缺失或歧义，已从可执行批次中跳过。", *warning_messages],
+                        warnings=["正文标题缺失或存在歧义，当前批次等待用户复核。", *warning_messages],
                         rename_parse_mode=metadata_resolution.mode,
                         rename_candidate_parsers=metadata_resolution.candidate_parsers,
                         arbitration_warnings=arbitration_warnings,

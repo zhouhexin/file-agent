@@ -1089,6 +1089,21 @@
   font-size: 13px;
 }
 
+.rename-suggestion-more {
+  width: fit-content;
+  border: 0;
+  background: transparent;
+  color: #2563eb;
+  font: inherit;
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.rename-suggestion-more:disabled {
+  color: #94a3b8;
+  cursor: default;
+}
+
 .rename-suggestion-list {
   display: grid;
   gap: 8px;

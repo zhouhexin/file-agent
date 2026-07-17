@@ -40,6 +40,8 @@ class OperationPlanResponse(BaseModel):
     risk_level: str
     reason: str
     items: list[OperationPlanItem]
+    total_item_count: int = 0
+    items_truncated: bool = False
     skipped_items: list[dict[str, Any]] = Field(default_factory=list)
     scope: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime

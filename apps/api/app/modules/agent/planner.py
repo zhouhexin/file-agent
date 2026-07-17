@@ -203,6 +203,7 @@ class DeterministicPlanner:
                 user_goal=message,
                 root_key=managed_rename_filters.get("root_key"),
                 path_prefix=managed_rename_filters.get("path_prefix"),
+                relative_path=managed_rename_filters.get("relative_path"),
                 extension=managed_rename_filters.get("extension"),
                 filename_contains=managed_rename_filters.get("filename_contains"),
                 route_source="deterministic_planner",
@@ -577,6 +578,7 @@ def build_plan_from_user_intent(
             user_goal=intent_plan.user_goal or message,
             root_key=intent_plan.managed_root_key or managed_rename_filters.get("root_key"),
             path_prefix=intent_plan.managed_path_prefix or managed_rename_filters.get("path_prefix"),
+            relative_path=managed_rename_filters.get("relative_path"),
             path_candidates=validated_path_candidates,
             scope_confidence=intent_plan.managed_scope_confidence,
             extension=intent_plan.managed_extension or managed_rename_filters.get("extension"),
@@ -1116,6 +1118,7 @@ def _managed_file_rename_plan(
     user_goal: str,
     root_key: str | None,
     path_prefix: str | None = None,
+    relative_path: str | None = None,
     path_candidates: List[str] | None = None,
     scope_confidence: float | None = None,
     extension: str | None = None,
@@ -1132,6 +1135,8 @@ def _managed_file_rename_plan(
         input_json["root_key"] = root_key
     if path_prefix:
         input_json["path_prefix"] = path_prefix
+    if relative_path:
+        input_json["relative_path"] = relative_path
     if path_candidates:
         input_json["path_candidates"] = path_candidates
     if scope_confidence is not None:
@@ -1147,6 +1152,7 @@ def _managed_file_rename_plan(
             "document_ids": [],
             "root_key": root_key,
             "path_prefix": path_prefix,
+            "relative_path": relative_path,
             "path_candidates": path_candidates or [],
             "scope_confidence": scope_confidence,
             "extension": extension,
@@ -1877,6 +1883,12 @@ def _managed_file_rename_filters_from_request(*, message: str, lowered: str) -> 
         if explicit_reference
         else _managed_filename_contains_from_list_request(message)
     )
+    if explicit_reference:
+        # 目录可去除自然语言空白，但真实文件名中的空格必须原样保留用于精确匹配。
+        filters["relative_path"] = (
+            f"{explicit_reference['path_prefix']}/{explicit_reference['filename']}"
+        )
+        filename_contains = None
     if path_prefix and filename_contains and path_prefix.split("/")[-1] == filename_contains:
         # “校办下 2024 年的文件”已经收敛为校办/2024，不能再扩大为通用文件名条件。
         filename_contains = None

@@ -76,6 +76,8 @@ export type OperationPlanResponse = {
   risk_level: string;
   reason: string;
   items: OperationPlanItem[];
+  total_item_count: number;
+  items_truncated: boolean;
   skipped_items: Array<Record<string, unknown>>;
   scope?: Record<string, unknown>;
   created_at: string;
@@ -89,6 +91,23 @@ export type OperationConfirmResponse = {
   status: string;
   changeset_id: string | null;
   result: Record<string, unknown>;
+};
+
+export type RenameBatchItem = {
+  id: string;
+  managed_file_id: string;
+  root_key: string;
+  original_relative_path: string;
+  original_filename: string;
+  proposed_filename: string | null;
+  status: string;
+  position: number;
+  warnings: string[];
+};
+
+export type RenameBatchItemsResponse = {
+  items: RenameBatchItem[];
+  next_cursor: number | null;
 };
 
 export type ToolInvocation = {

@@ -773,16 +773,18 @@ def _build_rename_plan_response(payload: Dict[str, Any]) -> str:
     matched_count = int(payload.get("matched_count") or 0)
     ready_count = int(payload.get("ready_count") or 0)
     review_count = int(payload.get("needs_review_count") or 0)
-    lines = [
-        f"已检查 {matched_count} 个文件，生成 {ready_count} 个可执行的重命名建议。",
-        "当前仅生成操作计划，原文件尚未修改。",
-    ]
+    lines = [f"已检查 {matched_count} 个文件，生成 {ready_count} 个可执行的重命名建议。"]
     query = payload.get("query") if isinstance(payload.get("query"), dict) else {}
     if query.get("path_prefix"):
         lines.insert(0, f"处理范围：{query['path_prefix']}")
     if review_count:
-        lines.append("以下文件缺少重命名所需信息（年份或正文标题），暂未处理。")
-    if ready_count:
+        lines.extend([
+            f"本批次还有 {review_count} 个文件待复核，暂未创建可执行计划，原文件尚未修改。",
+            "以下文件未能可靠识别正文标题，暂未处理。",
+        ])
+    else:
+        lines.append("当前仅生成操作计划，原文件尚未修改。")
+    if ready_count and payload.get("operation_plan_id"):
         lines.append("请核对下方计划，确认后才会执行重命名。")
     suggestions = [
         item for item in payload.get("suggestions", []) if isinstance(item, dict)
@@ -806,7 +808,12 @@ def _build_rename_review_resolution_response(payload: Dict[str, Any]) -> str:
     """生成用户更正后的成功、失败和重名候选回执。"""
 
     if payload.get("dismissed_count"):
-        return f"已跳过 {int(payload.get('dismissed_count') or 0)} 个待复核文件，不会修改原文件。"
+        lines = [f"已跳过 {int(payload.get('dismissed_count') or 0)} 个待复核文件。"]
+        if payload.get("operation_plan_id"):
+            lines.append("其余文件已生成完整重命名计划，确认后才会修改原文件。")
+        else:
+            lines.append("本批次没有需要执行的重命名，原文件未修改。")
+        return "\n".join(lines)
     error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
     lines: List[str] = []
     completed = [item for item in payload.get("completed_items", []) if isinstance(item, dict)]
@@ -838,6 +845,10 @@ def _build_rename_review_resolution_response(payload: Dict[str, Any]) -> str:
             else:
                 message = item.get("error_message") or error_code or "处理失败"
             lines.append(f"- {source}：{message}")
+    accepted_count = int(payload.get("accepted_count") or 0)
+    remaining_count = int(payload.get("remaining_review_count") or 0)
+    if accepted_count and not completed:
+        lines.append(f"已记录 {accepted_count} 个文件的新名称，仍有 {remaining_count} 个文件待复核。")
     if not lines:
         lines.append(str(error.get("message") or "没有找到可处理的待复核文件。"))
     return "\n".join(lines)

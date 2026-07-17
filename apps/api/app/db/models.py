@@ -582,6 +582,18 @@ class FileRenameReviewItem(Base):
         nullable=False,
         index=True,
     )
+    rename_batch_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("file_rename_batches.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    rename_batch_item_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("file_rename_batch_items.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     managed_file_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("managed_files.id", ondelete="RESTRICT"),
@@ -600,6 +612,71 @@ class FileRenameReviewItem(Base):
     source_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="NEEDS_REVIEW", index=True)
     review_context_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    decision_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class FileRenameBatch(Base):
+    """一次对话确定的不可混用文件重命名范围。"""
+
+    __tablename__ = "file_rename_batches"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    conversation_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    agent_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    operation_plan_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("operation_plans.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="ANALYZING", index=True)
+    scope_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    total_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ready_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    needs_review_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    excluded_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class FileRenameBatchItem(Base):
+    """重命名批次中的单个文件、建议名称和用户决策。"""
+
+    __tablename__ = "file_rename_batch_items"
+    __table_args__ = (
+        UniqueConstraint("rename_batch_id", "managed_file_id", name="uq_file_rename_batch_file"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    rename_batch_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("file_rename_batches.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    managed_file_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("managed_files.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    document_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    root_key: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    original_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    original_filename: Mapped[str] = mapped_column(Text, nullable=False)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    proposed_relative_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    proposed_filename: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="NEEDS_REVIEW", index=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     decision_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)

@@ -36,6 +36,9 @@ _FULL_DATE_PATTERN = re.compile(
 )
 _DATE_ONLY_PATTERN = re.compile(r"^\s*(?:19|20)\d{2}年(?:\d{1,2}月(?:\d{1,2}日)?)?\s*$")
 _BODY_INTRO_PATTERN = re.compile(r"(?:通知|说明|安排|要求)如下\s*[：:]?")
+_TITLE_PLACEHOLDER_PATTERN = re.compile(
+    r"^(?:没有|无|暂无|未找到|未识别|无法识别).{0,30}(?:日期|年份|标题|内容|信息)"
+)
 _DOCUMENT_TYPE_TERMS = (
     "通知",
     "通报",
@@ -634,6 +637,8 @@ def _is_title_candidate(value: str, *, raw_line: str) -> bool:
     if any(pattern.search(raw_line) for pattern in _DOCUMENT_NUMBER_PATTERNS):
         return False
     if _BODY_INTRO_PATTERN.search(value):
+        return False
+    if _TITLE_PLACEHOLDER_PATTERN.search(value):
         return False
     if value.startswith(("各", "现将", "根据", "为进一步", "经研究")) and not value.endswith(
         _DOCUMENT_TYPE_TERMS + _TABLE_TITLE_TERMS

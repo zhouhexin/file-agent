@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Conversation, OperationPlan, User
 from app.modules.conversations.repository import ConversationRepository
 from app.modules.file_rename.execution_service import ConfirmedRenameService
+from app.modules.file_rename.batch_service import RenameBatchService
 from app.modules.file_rename.uploaded_execution_service import ConfirmedUploadedRenameService
 from app.modules.operations.repository import OperationPlanRepository
 from app.modules.operations.schemas import (
@@ -91,6 +92,12 @@ class OperationPlanService:
         )
         if plan.operation_type == "RENAME_FILES":
             result, changeset = ConfirmedRenameService(self.db).execute(plan=plan)
+            scope = plan.plan_json.get("scope", {}) if isinstance(plan.plan_json, dict) else {}
+            batch_id = scope.get("rename_batch_id") if isinstance(scope, dict) else None
+            if batch_id:
+                batch_service = RenameBatchService(self.db, current_user.id)
+                batch = batch_service.get_owned_batch(str(batch_id))
+                batch_service.record_execution_result(batch, result)
             self.db.commit()
             self.db.refresh(plan)
             return OperationConfirmResponse(
@@ -113,6 +120,7 @@ class OperationPlanService:
     def to_response(plan: OperationPlan) -> OperationPlanResponse:
         """把 ORM OperationPlan 转换为 API 响应。"""
 
+        all_items = [item for item in plan.plan_json.get("items", []) if isinstance(item, dict)]
         return OperationPlanResponse(
             id=plan.id,
             conversation_id=plan.conversation_id,
@@ -122,7 +130,9 @@ class OperationPlanService:
             requires_confirmation=True,
             risk_level=plan.risk_level,
             reason=plan.reason,
-            items=[OperationPlanItem.model_validate(item) for item in plan.plan_json.get("items", [])],
+            items=[OperationPlanItem.model_validate(item) for item in all_items[:10]],
+            total_item_count=len(all_items),
+            items_truncated=len(all_items) > 10,
             skipped_items=[item for item in plan.plan_json.get("skipped_items", []) if isinstance(item, dict)],
             scope=plan.plan_json.get("scope", {}) if isinstance(plan.plan_json.get("scope"), dict) else {},
             created_at=plan.created_at,

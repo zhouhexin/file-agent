@@ -193,7 +193,7 @@ class UploadedRenameSuggestionService:
                         "title": metadata.title.model_dump(mode="json"),
                         "template_key": None,
                         "status": "NEEDS_REVIEW",
-                        "warnings": ["年份或正文标题存在缺失或歧义，已从可执行批次中跳过。", *warning_messages],
+                        "warnings": ["正文标题缺失或存在歧义，当前批次等待用户复核。", *warning_messages],
                         "rename_parse_mode": metadata_resolution.mode,
                         "rename_candidate_parsers": metadata_resolution.candidate_parsers,
                         "arbitration_warnings": arbitration_warnings,

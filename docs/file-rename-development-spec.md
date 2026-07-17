@@ -128,8 +128,8 @@ skills/file-rename/SKILL.md
 - 组合字段提取、命名策略和冲突预检。
 - 支持批量文件并进行逐文件失败隔离。
 - 输出 READY、NEEDS_REVIEW、CONFLICT 或 FAILED。
-- READY 项才允许进入 OperationPlan。
-- NEEDS_REVIEW 项从本批次 OperationPlan 中跳过，并保留在逐文件回执中。
+- READY 和 USER_NAMED 项才允许进入 OperationPlan。
+- NEEDS_REVIEW 项保留在持久化重命名批次中，并阻止创建部分 OperationPlan；用户更正或排除后再一次性固化全部可执行项。
 
 ### 4.4 `executor.py`
 
@@ -670,6 +670,6 @@ F2 测试使用 fake subprocess；只有显式 integration 标记才调用本机
 
 1. 默认分隔符使用 `_`。
 2. 缺少文号的普通材料允许使用 `{year}_{title}` 降级模板。
-3. `NEEDS_REVIEW` 项从批次 OperationPlan 中跳过，不阻止 READY 项执行。
+3. `NEEDS_REVIEW` 项阻止批次创建部分 OperationPlan，直到用户补齐名称或明确排除。
 4. 第一版只实现 Native 执行器，F2 放到第二次迭代。
 5. 普通 `user` 可以创建并确认自己的 OperationPlan，但不能确认其他用户的计划。
