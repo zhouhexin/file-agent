@@ -39,6 +39,10 @@ _BODY_INTRO_PATTERN = re.compile(r"(?:通知|说明|安排|要求)如下\s*[：:
 _TITLE_PLACEHOLDER_PATTERN = re.compile(
     r"^(?:没有|无|暂无|未找到|未识别|无法识别).{0,30}(?:日期|年份|标题|内容|信息)"
 )
+_ATTACHMENT_TITLE_PREFIX_PATTERN = re.compile(
+    r"^附件(?:\s*[（(]?\s*(?:\d+|[一二三四五六七八九十]+)\s*[）)]?\s*[：:、._\-—]?\s*"
+    r"|[：:、._\-—]\s*|\s+|(?=关于))"
+)
 _DOCUMENT_TYPE_TERMS = (
     "通知",
     "通报",
@@ -56,6 +60,7 @@ _DOCUMENT_TYPE_TERMS = (
     "制度",
     "规定",
     "细则",
+    "说明",
     "材料",
 )
 _TABLE_TITLE_TERMS = ("表", "清单", "台账")
@@ -520,9 +525,17 @@ def _extract_title(
 ) -> RenameFieldResult:
     """优先选择正文前部的公文标题，最后回退原文件名。"""
 
-    candidates: list[tuple[int, int, str, dict[str, Any], str]] = []
+    candidates: list[tuple[int, int, int, str, dict[str, Any], str]] = []
     position = 0
-    for page in pages[:3]:
+    candidate_pages = pages[:3]
+    numbered_pages = [
+        int(page.get("page_number"))
+        for page in candidate_pages
+        if page.get("page_number") is not None
+    ]
+    first_page_number = min(numbered_pages) if numbered_pages else 1
+    for page_index, page in enumerate(candidate_pages):
+        page_number = int(page.get("page_number") or (page_index + 1))
         raw_lines = [
             line.strip()
             for line in page["text"].splitlines()[:50]
@@ -547,10 +560,13 @@ def _extract_title(
                     and not first_line.endswith(_DOCUMENT_TYPE_TERMS + _TABLE_TITLE_TERMS)
                 ):
                     score += 1
-                candidates.append((score, -position, line, page, evidence_quote))
+                candidates.append((page_number, score, -position, line, page, evidence_quote))
             position += 1
     if candidates:
-        _, _, value, page, quote = max(candidates, key=lambda item: (item[0], item[1]))
+        # 首页存在有效候选时，不允许后页章节标题或模板示例凭关键词分数覆盖首页标题。
+        first_page_candidates = [item for item in candidates if item[0] == first_page_number]
+        selection_pool = first_page_candidates or candidates
+        _, _, _, value, page, quote = max(selection_pool, key=lambda item: (item[1], item[2]))
         return RenameFieldResult(
             value=value,
             status=RenameFieldStatus.RESOLVED,
@@ -617,6 +633,8 @@ def _clean_title(value: str, *, document_number: str | None, year: str | None) -
     """从标题候选中移除已单独表达的年份和文号。"""
 
     cleaned = re.sub(r"\s+", " ", value).strip(" \t-_—:：，,。")
+    # “附件”“附件1：”属于版式标记，不应成为业务标题的一部分。
+    cleaned = _ATTACHMENT_TITLE_PREFIX_PATTERN.sub("", cleaned, count=1)
     if document_number:
         cleaned = cleaned.replace(document_number, "")
     if year:

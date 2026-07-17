@@ -105,6 +105,54 @@ def test_filename_metadata_extractor_rejects_body_intro_merged_with_section_titl
     assert "通知如下" not in (result.title.value or "")
 
 
+def test_filename_metadata_extractor_does_not_replace_first_page_title_with_later_page_template():
+    """后页带强文种词的模板标题不得覆盖首页有效标题。"""
+
+    result = FilenameMetadataExtractor().extract(
+        filename="附件1：西安理工大学公文排版要求及格式说明(1).pdf",
+        pages=[
+            {
+                "page_number": 1,
+                "sheet_name": None,
+                "text": "西安理工大学公文排版要求及格式说明\n一、公文排版基本要求",
+            },
+            {
+                "page_number": 2,
+                "sheet_name": None,
+                "text": "二、公文格式示例\n正文内容",
+            },
+            {
+                "page_number": 3,
+                "sheet_name": None,
+                "text": "签发人：某某某\n西安理工大学关于XXXXXXXXXXXX的请示",
+            },
+        ],
+        parser_name="native",
+    )
+
+    assert result.title.value == "西安理工大学公文排版要求及格式说明"
+    assert result.title.evidence_items[0].page_number == 1
+
+
+def test_filename_metadata_extractor_removes_attachment_title_prefixes():
+    """首页标题中的附件版式标记不应进入最终文件名。"""
+
+    for prefix in ("附件", "附件1：", "附件（1）"):
+        result = FilenameMetadataExtractor().extract(
+            filename="计算机学院寒假走访调研活动审批表.docx",
+            pages=[
+                {
+                    "page_number": 1,
+                    "sheet_name": None,
+                    "text": f"{prefix}关于组织开展2024年寒假走访调研活动审批表",
+                }
+            ],
+            parser_name="native",
+        )
+
+        assert result.title.value == "关于组织开展2024年寒假走访调研活动审批表"
+
+
 def test_filename_metadata_extractor_allows_missing_document_number():
     """普通材料没有文号时仍可按年份和标题生成降级名称。"""
 
