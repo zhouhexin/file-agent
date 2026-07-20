@@ -16,6 +16,7 @@ from app.modules.file_rename.parsing_service import extract_rename_primary, rena
 from app.modules.file_rename.policy_loader import load_rename_policy
 from app.modules.file_rename.review_service import RenameReviewService
 from app.modules.file_rename.schemas import RenameFieldResult, RenameFieldStatus, RenameSuggestion
+from app.modules.file_rename.validation_service import RenameValidationService
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.managed_files.directory_scope_resolver import (
     ManagedDirectoryScopeResolution,
@@ -32,7 +33,12 @@ _SPREADSHEET_RENAME_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".csv", ".tsv"}
 class RenameSuggestionService:
     """解析受管文件并持久化可确认的重命名计划。"""
 
-    def __init__(self, db: Session, user_id: str) -> None:
+    def __init__(
+        self,
+        db: Session,
+        user_id: str,
+        validation_service: RenameValidationService | None = None,
+    ) -> None:
         """保存请求级数据库会话和用户边界。"""
 
         self.db = db
@@ -40,6 +46,8 @@ class RenameSuggestionService:
         self.policy = load_rename_policy()
         self.metadata_resolution_service = RenameMetadataResolutionService()
         self.filename_builder = FilenameBuilder()
+        self.validation_service = validation_service or RenameValidationService()
+        self._llm_validation_calls = 0
 
     def generate_plan(
         self,
@@ -60,6 +68,7 @@ class RenameSuggestionService:
         user = self.db.get(User, self.user_id)
         if user is None or not user.default_workspace_id:
             return _error("USER_WORKSPACE_REQUIRED", "当前用户缺少默认工作区，无法创建重命名计划。")
+        self._llm_validation_calls = 0
         scope = resolve_managed_file_query_scope(root_key=root_key, path_prefix=path_prefix)
         if scope.unresolved_root_key:
             return _error("MANAGED_ROOT_NOT_CONFIGURED", "未找到对应的受管目录配置。")
@@ -260,6 +269,12 @@ class RenameSuggestionService:
                         root=root,
                         proposed_relative_path=proposed_relative_path,
                     )
+                    validation = self._validate_suggestion(
+                        original_filename=managed_file.filename,
+                        proposed_filename=proposed_filename,
+                        metadata=filename_metadata,
+                        arbitration_warnings=[],
+                    )
                     return (
                         RenameSuggestion(
                             managed_file_id=managed_file.id,
@@ -277,8 +292,12 @@ class RenameSuggestionService:
                             policy_key=self.policy.policy_key,
                             policy_version=self.policy.version,
                             template_key=template_key,
-                            status="CONFLICT" if conflict else "READY",
-                            warnings=["表格正文解析失败，已使用结构化文件名生成待确认建议。"],
+                            status="CONFLICT" if conflict else validation.status,
+                            warnings=[
+                                "表格正文解析失败，已使用结构化文件名生成待确认建议。",
+                                *validation.warning_codes,
+                            ],
+                            rename_validation=validation.audit,
                             errors=(
                                 [{"code": "TARGET_ALREADY_EXISTS", "message": "目标文件名已存在。"}]
                                 if conflict
@@ -361,6 +380,12 @@ class RenameSuggestionService:
                 root=root,
                 proposed_relative_path=proposed_relative_path,
             )
+            validation = self._validate_suggestion(
+                original_filename=managed_file.filename,
+                proposed_filename=proposed_filename,
+                metadata=metadata,
+                arbitration_warnings=arbitration_warnings,
+            )
             return (
                 RenameSuggestion(
                     managed_file_id=managed_file.id,
@@ -378,11 +403,12 @@ class RenameSuggestionService:
                     policy_key=self.policy.policy_key,
                     policy_version=self.policy.version,
                     template_key=template_key,
-                    status="CONFLICT" if conflict else "READY",
-                    warnings=warning_messages,
+                    status="CONFLICT" if conflict else validation.status,
+                    warnings=[*warning_messages, *validation.warning_codes],
                     rename_parse_mode=metadata_resolution.mode,
                     rename_candidate_parsers=metadata_resolution.candidate_parsers,
                     arbitration_warnings=arbitration_warnings,
+                    rename_validation=validation.audit,
                     errors=[{"code": "TARGET_ALREADY_EXISTS", "message": "目标文件名已存在。"}] if conflict else [],
                 ),
                 extraction_result,
@@ -404,6 +430,35 @@ class RenameSuggestionService:
                 ),
                 None,
             )
+
+    def _validate_suggestion(
+        self,
+        *,
+        original_filename: str,
+        proposed_filename: str,
+        metadata: Any,
+        arbitration_warnings: list[dict[str, Any]],
+    ) -> Any:
+        """执行统一质量门禁，并限制单批同步模型调用数量。"""
+
+        needs_llm = self.validation_service.would_call_llm(
+            original_filename=original_filename,
+            proposed_filename=proposed_filename,
+            metadata=metadata,
+            arbitration_warnings=arbitration_warnings,
+        )
+        max_calls = self.validation_service.settings.file_rename_llm_validation_max_items_per_batch
+        allow_llm = not needs_llm or self._llm_validation_calls < max_calls
+        result = self.validation_service.validate(
+            original_filename=original_filename,
+            proposed_filename=proposed_filename,
+            metadata=metadata,
+            arbitration_warnings=arbitration_warnings,
+            allow_llm=allow_llm,
+        )
+        if needs_llm and allow_llm:
+            self._llm_validation_calls += 1
+        return result
 
     def _extract_managed_file(
         self,
@@ -816,6 +871,11 @@ def _operation_plan_item(suggestion: RenameSuggestion) -> dict[str, Any]:
             "parse_mode": suggestion.rename_parse_mode,
             "candidate_parsers": suggestion.rename_candidate_parsers,
             "arbitration_warnings": suggestion.arbitration_warnings,
+            "rename_validation": (
+                suggestion.rename_validation.model_dump(mode="json")
+                if suggestion.rename_validation is not None
+                else None
+            ),
         },
         "execution_status": "PLANNED",
     }

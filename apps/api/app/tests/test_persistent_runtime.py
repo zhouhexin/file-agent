@@ -454,8 +454,8 @@ def test_document_classification_service_reads_full_document_pages():
         app.dependency_overrides.clear()
 
 
-def test_document_classification_service_prefers_managed_path_categories_when_available():
-    """存在审核后的分类来源目录时，分类服务应使用全局受管分类候选。"""
+def test_document_classification_service_uses_unified_taxonomy_when_managed_catalog_exists():
+    """存在受管目录候选时，分类服务也必须使用统一 taxonomy。"""
 
     client = _client_with_database()
     headers = _auth_header(client, username="managed-path-classification-user")
@@ -531,11 +531,12 @@ def test_document_classification_service_prefers_managed_path_categories_when_av
             filename="国家励志奖学金申请表.txt",
         )
 
-        assert result["categories"][0]["name"] == "奖学金/国家励志奖学金"
-        assert result["categories"][0]["category_path"] == ["奖学金", "国家励志奖学金"]
-        assert result["categories"][0]["taxonomy_key"] == "managed_global_categories"
-        assert result["categories"][0]["source"] == "managed_global_catalog"
-        assert result["categories"][0]["evidence_items"][0]["source"] == "managed_global_catalog"
+        assert result["categories"][0]["taxonomy_key"] == "unified_school_file_classification"
+        assert result["categories"][0]["taxonomy_version"] == "2026-07-v2"
+        assert result["categories"][0]["source"] == "rule"
+        assert "managed_global_catalog" not in {
+            item["source"] for item in result["categories"]
+        }
     finally:
         db.close()
         app.dependency_overrides.clear()
@@ -986,7 +987,7 @@ def test_managed_directory_classification_uses_global_catalog_and_persists_sugge
     monkeypatch,
     tmp_path,
 ):
-    """受管目录分类必须读取正文、使用全局候选并保存多标签建议。"""
+    """受管目录分类必须读取正文、使用统一 taxonomy 并保存多标签建议。"""
 
     managed_root = tmp_path / "classified-library"
     category_dir = managed_root / "人事处" / "职称评定"
@@ -1051,8 +1052,8 @@ def test_managed_directory_classification_uses_global_catalog_and_persists_sugge
     assert len(agent_run["document_results"]) == 1
     result = agent_run["document_results"][0]
     assert result["relative_path"] == "待分类/申报材料.txt"
-    assert result["categories"][0]["category_path"] == ["人事处", "职称评定"]
-    assert result["categories"][0]["category_id"].startswith("managed.global.")
+    assert result["categories"][0]["category_path"] == ["学校", "人事师资", "职称"]
+    assert result["categories"][0]["category_id"] == "school.hr.title-review"
     assert result["categories"][0]["status"] == "SUGGESTED"
     assert result["classification_reused"] is False
     assert second_run["document_results"][0]["classification_reused"] is True
@@ -1061,19 +1062,22 @@ def test_managed_directory_classification_uses_global_catalog_and_persists_sugge
     try:
         assert db.query(DocumentClassificationRun).count() == 2
         suggestions = db.query(DocumentCategorySuggestion).all()
-        assert len(suggestions) == 2
-        assert suggestions[0].category_path_json == ["人事处", "职称评定"]
+        expected_suggestions = len(result["categories"]) + len(
+            second_run["document_results"][0]["categories"]
+        )
+        assert len(suggestions) == expected_suggestions
+        assert suggestions[0].category_path_json == ["学校", "人事师资", "职称"]
         assert (
             db.query(ChangeItem)
             .filter(ChangeItem.change_type == "CATEGORY_SUGGESTED")
             .count()
-            == 1
+            == len(result["categories"])
         )
         assert (
             db.query(ChangeItem)
             .filter(ChangeItem.change_type == "CATEGORY_SUGGESTION_REUSED")
             .count()
-            == 1
+            == len(second_run["document_results"][0]["categories"])
         )
     finally:
         db.close()
@@ -1163,16 +1167,20 @@ def test_large_managed_directory_classification_job_updates_original_agent_run(
         assert stored_run.status == "COMPLETED"
         assert len(stored_run.graph_state_json["document_results"]) == 2
         assert all(
-            item["categories"][0]["category_path"] == ["人事处", "职称评定"]
+            item["categories"][0]["category_path"] == ["学校", "人事师资", "职称"]
             for item in stored_run.graph_state_json["document_results"]
         )
         assert db.query(DocumentClassificationRun).count() == 2
-        assert db.query(DocumentCategorySuggestion).count() == 2
+        expected_suggestions = sum(
+            len(item["categories"])
+            for item in stored_run.graph_state_json["document_results"]
+        )
+        assert db.query(DocumentCategorySuggestion).count() == expected_suggestions
         assert (
             db.query(ChangeItem)
             .filter(ChangeItem.change_type == "CATEGORY_SUGGESTED")
             .count()
-            == 2
+            == expected_suggestions
         )
     finally:
         db.close()

@@ -26,6 +26,10 @@ DEFAULT_FILE_RENAME_EXECUTOR = "native"
 DEFAULT_FILE_RENAME_PARSE_MODE = "hybrid"
 DEFAULT_FILE_RENAME_MAX_BATCH_SIZE = 20
 DEFAULT_FILE_RENAME_EXECUTION_TIMEOUT_SECONDS = 60
+DEFAULT_FILE_RENAME_LLM_VALIDATION_THRESHOLD = 0.60
+DEFAULT_FILE_RENAME_LLM_VALIDATION_TIMEOUT_SECONDS = 30
+DEFAULT_FILE_RENAME_LLM_VALIDATION_MAX_ITEMS_PER_BATCH = 20
+DEFAULT_FILE_RENAME_LLM_VALIDATION_PROMPT_VERSION = "rename-validation-v1"
 DEFAULT_F2_EXPECTED_VERSION = "2.2.2"
 DEFAULT_F2_STDOUT_MAX_BYTES = 1024 * 1024
 DEFAULT_NEO4J_QUERY_TIMEOUT_SECONDS = 3
@@ -71,6 +75,12 @@ class Settings(BaseModel):
     file_rename_parse_mode: str = DEFAULT_FILE_RENAME_PARSE_MODE
     file_rename_max_batch_size: int = DEFAULT_FILE_RENAME_MAX_BATCH_SIZE
     file_rename_execution_timeout_seconds: int = DEFAULT_FILE_RENAME_EXECUTION_TIMEOUT_SECONDS
+    file_rename_llm_validation_enabled: bool = False
+    file_rename_llm_validation_mode: str = "risk_based"
+    file_rename_llm_validation_threshold: float = DEFAULT_FILE_RENAME_LLM_VALIDATION_THRESHOLD
+    file_rename_llm_validation_timeout_seconds: int = DEFAULT_FILE_RENAME_LLM_VALIDATION_TIMEOUT_SECONDS
+    file_rename_llm_validation_max_items_per_batch: int = DEFAULT_FILE_RENAME_LLM_VALIDATION_MAX_ITEMS_PER_BATCH
+    file_rename_llm_validation_prompt_version: str = DEFAULT_FILE_RENAME_LLM_VALIDATION_PROMPT_VERSION
     f2_binary_path: str = "f2"
     f2_expected_version: str = DEFAULT_F2_EXPECTED_VERSION
     f2_fallback_to_native: bool = False
@@ -210,6 +220,48 @@ def get_settings() -> Settings:
                 str(DEFAULT_FILE_RENAME_EXECUTION_TIMEOUT_SECONDS),
             )
         ),
+        file_rename_llm_validation_enabled=os.getenv(
+            "FILE_RENAME_LLM_VALIDATION_ENABLED", "false"
+        ).lower() == "true",
+        file_rename_llm_validation_mode=_choice(
+            os.getenv("FILE_RENAME_LLM_VALIDATION_MODE", "risk_based"),
+            allowed={"off", "risk_based", "all"},
+            default="risk_based",
+        ),
+        file_rename_llm_validation_threshold=max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    os.getenv(
+                        "FILE_RENAME_LLM_VALIDATION_THRESHOLD",
+                        str(DEFAULT_FILE_RENAME_LLM_VALIDATION_THRESHOLD),
+                    )
+                ),
+            ),
+        ),
+        file_rename_llm_validation_timeout_seconds=max(
+            1,
+            int(
+                os.getenv(
+                    "FILE_RENAME_LLM_VALIDATION_TIMEOUT_SECONDS",
+                    str(DEFAULT_FILE_RENAME_LLM_VALIDATION_TIMEOUT_SECONDS),
+                )
+            ),
+        ),
+        file_rename_llm_validation_max_items_per_batch=max(
+            0,
+            int(
+                os.getenv(
+                    "FILE_RENAME_LLM_VALIDATION_MAX_ITEMS_PER_BATCH",
+                    str(DEFAULT_FILE_RENAME_LLM_VALIDATION_MAX_ITEMS_PER_BATCH),
+                )
+            ),
+        ),
+        file_rename_llm_validation_prompt_version=os.getenv(
+            "FILE_RENAME_LLM_VALIDATION_PROMPT_VERSION",
+            DEFAULT_FILE_RENAME_LLM_VALIDATION_PROMPT_VERSION,
+        ).strip() or DEFAULT_FILE_RENAME_LLM_VALIDATION_PROMPT_VERSION,
         f2_binary_path=os.getenv("F2_BINARY_PATH", "f2"),
         f2_expected_version=os.getenv("F2_EXPECTED_VERSION", DEFAULT_F2_EXPECTED_VERSION),
         f2_fallback_to_native=os.getenv("F2_FALLBACK_TO_NATIVE", "false").lower() == "true",

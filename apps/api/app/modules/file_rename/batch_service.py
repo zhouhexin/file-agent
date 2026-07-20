@@ -70,7 +70,14 @@ class RenameBatchService:
             proposed_filename=suggestion.proposed_filename,
             status=status,
             position=position,
-            metadata_json={"suggestion": suggestion.model_dump(mode="json")},
+            metadata_json={
+                "suggestion": suggestion.model_dump(mode="json"),
+                "rename_validation": (
+                    suggestion.rename_validation.model_dump(mode="json")
+                    if suggestion.rename_validation is not None
+                    else None
+                ),
+            },
         )
         self.db.add(item)
         self.db.flush()
@@ -344,6 +351,7 @@ def _operation_plan_item(item: FileRenameBatchItem) -> dict[str, Any]:
             "parse_mode": metadata.get("rename_parse_mode", ""),
             "candidate_parsers": metadata.get("rename_candidate_parsers", []),
             "arbitration_warnings": metadata.get("arbitration_warnings", []),
+            "rename_validation": metadata.get("rename_validation"),
         })
     return {
         "document_id": item.document_id or "",

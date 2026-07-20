@@ -12,6 +12,8 @@ File Agent 不是传统网盘，也不是只会问答的知识库系统。用户
 - `docs/database-schema.md`：数据库结构设计。
 - `docs/api-contract.md`：API 契约。
 - `docs/langgraph-runtime-issues.md`：LangGraph Runtime 当前问题与改造路线。
+- `docs/langgraph-framework-decision.md`：选择 LangGraph 作为 Agent Runtime 底层编排框架的架构决策。
+- `docs/file-rename-llm-validation-implementation-plan.md`：重命名差异风险、LLM 证据校验、降级和验收计划。
 - `docs/skills-catalog.md`：项目内 Agent Skill 清单。
 - `docs/neo4j-graph-classification-overall-plan.md`：Neo4j 图谱增强分类整体方案。
 - `docs/neo4j-graph-classification-v1-implementation-plan.md`：轻量第一版本实施和验收方案。

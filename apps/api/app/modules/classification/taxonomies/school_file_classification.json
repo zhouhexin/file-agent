@@ -1,7 +1,7 @@
 {
   "key": "school_file_classification",
   "name": "学校文件归类表",
-  "version": "2026-06-v2",
+  "version": "2026-07-v3",
   "source": "文件归类(1).xlsx",
   "categories": [
     {
@@ -53,6 +53,11 @@
         {
           "id": "school.hr",
           "name": "人事师资",
+          "description": "与学校人事、师资管理及人事部门发文相关的文件。",
+          "aliases": ["人事", "人事处", "师资"],
+          "positive_signals": ["人事", "人事处", "师资"],
+          "negative_signals": [],
+          "examples": ["西安理工人事〔2022〕14号"],
           "children": [
             {
               "id": "school.hr.title-review",

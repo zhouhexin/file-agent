@@ -18,7 +18,6 @@ from app.db.models import (
 )
 from app.modules.classification.loader import load_default_taxonomy
 from app.modules.classification.managed_catalog import GlobalManagedCategoryCatalogService
-from app.modules.classification.managed_path import match_global_managed_categories
 from app.modules.classification.matcher import match_document_text
 from app.modules.knowledge_graph.candidate_retriever import retrieve_graph_candidates
 from app.modules.knowledge_graph.classification_context import NoOpGraphClassificationContext
@@ -71,12 +70,7 @@ class DocumentClassificationService:
 
         start = time.perf_counter()
         try:
-            catalog = (
-                self.managed_catalog_service.load()
-                if self.managed_catalog_service is not None
-                else None
-            )
-            taxonomy_key, taxonomy_version = self._taxonomy_identity(catalog=catalog)
+            taxonomy_key, taxonomy_version = self._taxonomy_identity()
             if not force_reprocess:
                 cached_categories = self._load_cached_categories(
                     document_id=document_id,
@@ -101,10 +95,9 @@ class DocumentClassificationService:
             pages = self._load_pages(extraction_run_id=extraction_run_id)
             full_text = "\n".join(page.text_content for page in pages if page.text_content)
             classification_text = full_text or fallback_text
-            base_categories = self._classify_with_available_taxonomy(
+            base_categories = self._classify_with_unified_taxonomy(
                 filename=filename,
                 classification_text=classification_text,
-                catalog=catalog,
             )
             graph_result = self._load_graph_candidates(
                 document_id=document_id,
@@ -273,21 +266,14 @@ class DocumentClassificationService:
             )
         return result
 
-    def _classify_with_available_taxonomy(
+    def _classify_with_unified_taxonomy(
         self,
         *,
         filename: str,
         classification_text: str,
-        catalog=None,
     ) -> list[dict[str, Any]]:
-        """配置受管分类来源后统一使用全局目录，不静默混入预置业务分类。"""
+        """统一使用构建后的单一 taxonomy，受管目录只作为离线构建证据。"""
 
-        if catalog is not None and catalog.configured:
-            return match_global_managed_categories(
-                filename=filename,
-                text=classification_text,
-                catalog=catalog,
-            )
         taxonomy = load_default_taxonomy()
         return match_document_text(text=f"{filename}\n{classification_text}", taxonomy=taxonomy)
 
@@ -295,13 +281,11 @@ class DocumentClassificationService:
     def classifier_version(self) -> str:
         """返回会影响分类结果的受控实现版本。"""
 
-        return f"taxonomy-{self.mode}-graph-{self.graph_mode}-v2"
+        return f"taxonomy-{self.mode}-graph-{self.graph_mode}-v3"
 
-    def _taxonomy_identity(self, *, catalog) -> tuple[str, str]:
-        """解析本次分类使用的唯一 taxonomy 身份。"""
+    def _taxonomy_identity(self) -> tuple[str, str]:
+        """返回当前统一 taxonomy 身份，用于分类结果缓存隔离。"""
 
-        if catalog is not None and catalog.configured:
-            return catalog.taxonomy_key, catalog.taxonomy_version
         taxonomy = load_default_taxonomy()
         return taxonomy.key, taxonomy.version
 

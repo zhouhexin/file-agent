@@ -10,7 +10,7 @@ def test_classifier_returns_taxonomy_category_path_with_evidence():
 
     assert categories[0]["name"] == "学校/人事师资/职称"
     assert categories[0]["category_path"] == ["学校", "人事师资", "职称"]
-    assert categories[0]["taxonomy_key"] == "school_file_classification"
+    assert categories[0]["taxonomy_key"] == "unified_school_file_classification"
     assert "职称" in categories[0]["evidence"]
 
 
@@ -35,7 +35,7 @@ def test_classifier_returns_other_when_no_keywords_match():
             "confidence": 0.2,
             "status": "SUGGESTED",
             "evidence": [],
-            "taxonomy_key": "school_file_classification",
-                "taxonomy_version": "2026-06-v2",
+            "taxonomy_key": "unified_school_file_classification",
+            "taxonomy_version": "2026-07-v2",
         }
     ]

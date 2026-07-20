@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import os
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -33,13 +34,14 @@ class PaddleOcrProvider:
         """延迟加载 PaddleOCR，避免服务启动时强依赖模型。"""
 
         self._ocr = None
+        self._api_major = 2
         self.model_source = model_source
 
     def extract_image(self, *, image_path: Path, page_number: int = 1) -> dict[str, Any]:
         """使用 PaddleOCR 识别图片文字。"""
 
         ocr = self._load_ocr()
-        result = ocr.ocr(str(image_path), cls=True)
+        result = ocr.ocr(str(image_path)) if self._api_major >= 3 else ocr.ocr(str(image_path), cls=True)
         blocks = _paddle_result_to_blocks(result)
         text = "\n".join(block["text"] for block in blocks if block.get("text"))
         confidence_values = [float(block["confidence"]) for block in blocks if block.get("confidence") is not None]
@@ -65,7 +67,16 @@ class PaddleOcrProvider:
                 from paddleocr import PaddleOCR
             except ImportError as exc:
                 raise RuntimeError("缺少 paddleocr，无法执行本地 OCR。") from exc
-            self._ocr = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
+            self._api_major = _paddleocr_major_version()
+            if self._api_major >= 3:
+                self._ocr = PaddleOCR(
+                    lang="ch",
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                    use_textline_orientation=True,
+                )
+            else:
+                self._ocr = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
         return self._ocr
 
 
@@ -162,6 +173,27 @@ def _paddle_result_to_blocks(result: Any) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
     order = 0
     for page_result in result or []:
+        if isinstance(page_result, dict) and "rec_texts" in page_result:
+            texts = _sequence_values(page_result.get("rec_texts"))
+            scores = _sequence_values(page_result.get("rec_scores"))
+            polygon_values = page_result.get("rec_polys")
+            if polygon_values is None:
+                polygon_values = page_result.get("dt_polys")
+            polygons = _sequence_values(polygon_values)
+            for index, value in enumerate(texts):
+                order += 1
+                score = scores[index] if index < len(scores) else None
+                polygon = polygons[index] if index < len(polygons) else None
+                blocks.append(
+                    {
+                        "text": str(value),
+                        "order": order,
+                        "polygon": _json_compatible_polygon(polygon),
+                        "confidence": float(score) if score is not None else None,
+                        "role": "text",
+                    }
+                )
+            continue
         for item in page_result or []:
             if not isinstance(item, (list, tuple)) or len(item) < 2:
                 continue
@@ -180,6 +212,30 @@ def _paddle_result_to_blocks(result: Any) -> list[dict[str, Any]]:
                 }
             )
     return blocks
+
+
+def _paddleocr_major_version() -> int:
+    """识别 PaddleOCR 主版本，兼容 2.x 和 3.x API。"""
+
+    try:
+        return int(package_version("paddleocr").split(".", 1)[0])
+    except (PackageNotFoundError, ValueError):
+        return 2
+
+
+def _json_compatible_polygon(value: Any) -> Any:
+    """把 PaddleOCR 3.x 的 numpy 坐标转换为可持久化列表。"""
+
+    tolist = getattr(value, "tolist", None)
+    return tolist() if callable(tolist) else value
+
+
+def _sequence_values(value: Any) -> list[Any]:
+    """把 list、tuple 或 numpy 数组统一转换为列表，避免数组真值判断异常。"""
+
+    if value is None:
+        return []
+    return list(value)
 
 
 def _quality_score(*, text: str, confidence: float | None) -> float:

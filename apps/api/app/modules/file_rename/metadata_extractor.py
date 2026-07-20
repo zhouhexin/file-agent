@@ -12,11 +12,12 @@ from app.modules.file_rename.schemas import (
     RenameFieldResult,
     RenameFieldStatus,
 )
+from app.modules.file_rename.title_quality import looks_like_body_sentence
 
 
 _DOCUMENT_NUMBER_PATTERNS = [
     re.compile(
-        r"(?P<prefix>[\u4e00-\u9fffA-Za-z]{1,20}?)\s*[〔\[（(](?P<year>(?:19|20)\d{2})[〕\]）)]\s*(?P<number>\d{1,6})\s*号"
+        r"(?P<prefix>[\u4e00-\u9fffA-Za-z]{1,20}?)\s*[〔\[（(【](?P<year>(?:19|20)\d{2})[〕\]）)】]\s*(?P<number>\d{1,6})\s*号"
     ),
     re.compile(r"(?P<year>(?:19|20)\d{2})\s*年\s*第\s*(?P<number>\d{1,6})\s*号"),
 ]
@@ -42,6 +43,14 @@ _TITLE_PLACEHOLDER_PATTERN = re.compile(
 _ATTACHMENT_TITLE_PREFIX_PATTERN = re.compile(
     r"^附件(?:\s*[（(]?\s*(?:\d+|[一二三四五六七八九十]+)\s*[）)]?\s*[：:、._\-—]?\s*"
     r"|[：:、._\-—]\s*|\s+|(?=关于))"
+)
+_INSTITUTION_DOCUMENT_MASTHEAD_PATTERN = re.compile(
+    r"^(?!关于).{2,30}(?:大学|学院|学校|委员会|办公室)文件$"
+)
+_PERSONNEL_GROUP_HEADING_PATTERN = re.compile(
+    r"^(?:正高级|副高级|高级|中级|初级)?"
+    r"(?:工程师|实验师|教师|讲师|教授|副教授|研究员|专业技术人员)"
+    r"\s*[（(]\s*\d+\s*人\s*[）)]\s*[：:]?"
 )
 _DOCUMENT_TYPE_TERMS = (
     "通知",
@@ -287,6 +296,10 @@ def _extract_structured_title(
         and element["label"] in {"title", "section_header"}
     ]
     for index, element in enumerate(title_elements):
+        element_title = _clean_title(element["text"], document_number=document_number, year=year)
+        if _INSTITUTION_DOCUMENT_MASTHEAD_PATTERN.fullmatch(element_title):
+            # 版头与正文标题之间通常夹有文号，不能参与后续多块标题拼接。
+            continue
         variants = [(element["text"], element["text"], 1)]
         for count in (2, 3, 4, 5):
             segment = title_elements[index : index + count]
@@ -541,6 +554,19 @@ def _extract_title(
             for line in page["text"].splitlines()[:50]
             if line.strip() and not _is_page_number_marker(line)
         ]
+        personnel_group_index = next(
+            (
+                index
+                for index, line in enumerate(raw_lines)
+                if _PERSONNEL_GROUP_HEADING_PATTERN.match(
+                    _clean_title(line, document_number=document_number, year=year)
+                )
+            ),
+            None,
+        )
+        if personnel_group_index is not None:
+            # 人员名单从职称分组行开始，后续姓名和单位不能再参与正文标题拼接。
+            raw_lines = raw_lines[:personnel_group_index]
         for line_index, raw_line in enumerate(raw_lines):
             variants = [(raw_line, raw_line, 1)]
             # Word/PDF 转文本后标题经常被拆成两至三行，需要作为一个标题候选共同评分。
@@ -551,6 +577,10 @@ def _extract_title(
             for raw_value, evidence_quote, line_count in variants:
                 line = _clean_title(raw_value, document_number=document_number, year=year)
                 if not _is_title_candidate(line, raw_line=raw_value):
+                    continue
+                if personnel_group_index is not None and not line.endswith(
+                    _DOCUMENT_TYPE_TERMS + _TABLE_TITLE_TERMS
+                ):
                     continue
                 score = _title_candidate_score(line)
                 first_line = _clean_title(raw_line, document_number=document_number, year=year)
@@ -646,13 +676,19 @@ def _clean_title(value: str, *, document_number: str | None, year: str | None) -
 def _is_title_candidate(value: str, *, raw_line: str) -> bool:
     """过滤日期、文号和明显正文句。"""
 
-    if len(value) < 4 or len(value) > 120:
+    if not value or len(value) > 120:
+        return False
+    if looks_like_body_sentence(value):
         return False
     if "\t" in raw_line:
         return False
     if _DATE_ONLY_PATTERN.fullmatch(raw_line.strip()):
         return False
     if any(pattern.search(raw_line) for pattern in _DOCUMENT_NUMBER_PATTERNS):
+        return False
+    if _INSTITUTION_DOCUMENT_MASTHEAD_PATTERN.fullmatch(value):
+        return False
+    if _PERSONNEL_GROUP_HEADING_PATTERN.match(value):
         return False
     if _BODY_INTRO_PATTERN.search(value):
         return False

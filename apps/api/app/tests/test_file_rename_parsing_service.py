@@ -56,6 +56,32 @@ def test_hybrid_collects_docling_and_native_candidates(monkeypatch, tmp_path):
     assert [item.parser_name for item in result.candidates] == ["docling", "native"]
 
 
+def test_hybrid_keeps_docling_candidate_when_native_parser_raises(monkeypatch, tmp_path):
+    """补充 native 候选异常时不得丢弃已成功的 Docling 结果。"""
+
+    monkeypatch.setattr("app.modules.file_rename.parsing_service.get_settings", lambda: _settings(mode="hybrid"))
+
+    def raise_native_error(**_):
+        raise ValueError("PaddleOCR 参数不兼容")
+
+    monkeypatch.setattr(
+        "app.modules.file_rename.parsing_service.extract_document_text_native",
+        raise_native_error,
+    )
+
+    result = RenameParsingService().collect(
+        file_path=tmp_path / "scan.pdf",
+        filename="scan.pdf",
+        content_type="application/pdf",
+        primary_result=_primary_docling_result(),
+        primary_pages=[{"page_number": 1, "text": "Docling OCR 正文"}],
+        primary_elements=[{"label": "title", "text": "Docling OCR 标题"}],
+    )
+
+    assert [item.parser_name for item in result.candidates] == ["docling"]
+    assert result.warnings[0]["code"] == "NATIVE_RENAME_PARSE_EXCEPTION"
+
+
 def test_native_mode_ignores_docling_primary_result(monkeypatch, tmp_path):
     """native 模式必须明确绕过已经存在的 Docling 结果。"""
 

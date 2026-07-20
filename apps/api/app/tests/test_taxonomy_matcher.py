@@ -13,8 +13,8 @@ def test_matcher_returns_specific_school_category_path():
 
     assert matches[0]["name"] == "学校/人事师资/职称"
     assert matches[0]["category_path"] == ["学校", "人事师资", "职称"]
-    assert matches[0]["taxonomy_key"] == "school_file_classification"
-    assert matches[0]["taxonomy_version"] == "2026-06-v2"
+    assert matches[0]["taxonomy_key"] == "unified_school_file_classification"
+    assert matches[0]["taxonomy_version"] == "2026-07-v2"
     assert "职称" in matches[0]["evidence"]
 
 
@@ -60,8 +60,8 @@ def test_matcher_returns_other_when_no_taxonomy_keywords_match():
             "confidence": 0.2,
             "status": "SUGGESTED",
             "evidence": [],
-            "taxonomy_key": "school_file_classification",
-            "taxonomy_version": "2026-06-v2",
+            "taxonomy_key": "unified_school_file_classification",
+            "taxonomy_version": "2026-07-v2",
         }
     ]
 
@@ -83,6 +83,37 @@ def test_recall_candidates_uses_aliases_and_positive_signals_for_implicit_topic(
     assert {"教师", "岗位", "聘期", "考核", "续聘"} & set(candidates[0].matched_signals)
     assert candidates[0].rule_score > 0
     assert "标题" in candidates[0].candidate_reason or "正文" in candidates[0].candidate_reason
+
+
+def test_matcher_uses_document_number_department_as_parent_category_signal():
+    """文号中的“人事”应召回学校人事师资父分类。"""
+
+    taxonomy = load_default_taxonomy()
+    matches = match_document_text(
+        "西安理工人事〔2022〕14号\n关于崔杰等21位同志任职资格的通知",
+        taxonomy,
+    )
+
+    hr_category = next(item for item in matches if item["category_path"] == ["学校", "人事师资"])
+    assert "人事" in hr_category["evidence"]
+
+
+def test_unified_taxonomy_classifies_school_appointment_notice_without_college_duplicate():
+    """统一 taxonomy 应识别校级职称材料，并抑制同名学院候选。"""
+
+    taxonomy = load_default_taxonomy()
+    matches = match_document_text(
+        "工程师资格-西理人事[2022]14号.PDF\n"
+        "西安理工人事〔2022〕14号\n"
+        "关于崔杰等21位同志任职资格的通知\n"
+        "专业技术职务任职资格",
+        taxonomy,
+    )
+
+    category_ids = {item["category_id"] for item in matches}
+    assert "school.hr.title-review" in category_ids
+    assert "school.hr" in category_ids
+    assert "college.hr.title-review" not in category_ids
 
 
 def test_recall_candidates_penalizes_negative_signals():

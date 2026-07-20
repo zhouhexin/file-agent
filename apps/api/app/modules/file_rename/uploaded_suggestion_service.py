@@ -17,6 +17,7 @@ from app.modules.file_rename.metadata_resolution_service import RenameMetadataRe
 from app.modules.file_rename.parsing_service import extract_rename_primary, rename_primary_config_hash
 from app.modules.file_rename.policy_loader import load_rename_policy
 from app.modules.file_rename.schemas import RenameFieldResult, RenameFieldStatus
+from app.modules.file_rename.validation_service import RenameValidationService
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.operations.repository import OperationPlanRepository
 
@@ -24,7 +25,12 @@ from app.modules.operations.repository import OperationPlanRepository
 class UploadedRenameSuggestionService:
     """为上传附件生成只作用于临时存储的待确认重命名计划。"""
 
-    def __init__(self, db: Session, user_id: str) -> None:
+    def __init__(
+        self,
+        db: Session,
+        user_id: str,
+        validation_service: RenameValidationService | None = None,
+    ) -> None:
         """保存请求级数据库会话和用户边界。"""
 
         self.db = db
@@ -32,6 +38,8 @@ class UploadedRenameSuggestionService:
         self.policy = load_rename_policy()
         self.metadata_resolution_service = RenameMetadataResolutionService()
         self.filename_builder = FilenameBuilder()
+        self.validation_service = validation_service or RenameValidationService()
+        self._llm_validation_calls = 0
 
     def generate_plan(
         self,
@@ -53,6 +61,7 @@ class UploadedRenameSuggestionService:
             return _error("DOCUMENT_SCOPE_REQUIRED", "请先选择要重命名的上传附件。")
         if len(document_ids) > limit:
             return _error("RENAME_BATCH_TOO_LARGE", f"单次最多处理 {limit} 个上传附件。")
+        self._llm_validation_calls = 0
 
         documents = (
             self.db.query(Document)
@@ -207,6 +216,12 @@ class UploadedRenameSuggestionService:
                 policy=self.policy,
             )
             no_change = proposed_filename == document.original_filename
+            validation = self._validate_suggestion(
+                original_filename=document.original_filename,
+                proposed_filename=proposed_filename,
+                metadata=metadata,
+                arbitration_warnings=arbitration_warnings,
+            )
             return (
                 {
                     **base,
@@ -216,14 +231,16 @@ class UploadedRenameSuggestionService:
                     "document_number": metadata.document_number.model_dump(mode="json"),
                     "title": metadata.title.model_dump(mode="json"),
                     "template_key": template_key,
-                    "status": "NO_CHANGE" if no_change else "READY",
+                    "status": "NO_CHANGE" if no_change else validation.status,
                     "warnings": [
                         *(["文件名已经符合当前规则，无需重命名。"] if no_change else []),
                         *warning_messages,
+                        *([] if no_change else validation.warning_codes),
                     ],
                     "rename_parse_mode": metadata_resolution.mode,
                     "rename_candidate_parsers": metadata_resolution.candidate_parsers,
                     "arbitration_warnings": arbitration_warnings,
+                    "rename_validation": validation.audit.model_dump(mode="json"),
                     "errors": [],
                 },
                 extraction_result,
@@ -244,6 +261,35 @@ class UploadedRenameSuggestionService:
                 },
                 None,
             )
+
+    def _validate_suggestion(
+        self,
+        *,
+        original_filename: str,
+        proposed_filename: str,
+        metadata: Any,
+        arbitration_warnings: list[dict[str, Any]],
+    ) -> Any:
+        """对上传附件复用同一质量门禁和批次模型额度。"""
+
+        needs_llm = self.validation_service.would_call_llm(
+            original_filename=original_filename,
+            proposed_filename=proposed_filename,
+            metadata=metadata,
+            arbitration_warnings=arbitration_warnings,
+        )
+        max_calls = self.validation_service.settings.file_rename_llm_validation_max_items_per_batch
+        allow_llm = not needs_llm or self._llm_validation_calls < max_calls
+        result = self.validation_service.validate(
+            original_filename=original_filename,
+            proposed_filename=proposed_filename,
+            metadata=metadata,
+            arbitration_warnings=arbitration_warnings,
+            allow_llm=allow_llm,
+        )
+        if needs_llm and allow_llm:
+            self._llm_validation_calls += 1
+        return result
 
     def _extract_document(
         self,
@@ -373,6 +419,7 @@ def _operation_plan_item(suggestion: dict[str, Any]) -> dict[str, Any]:
             "parse_mode": suggestion.get("rename_parse_mode", ""),
             "candidate_parsers": suggestion.get("rename_candidate_parsers", []),
             "arbitration_warnings": suggestion.get("arbitration_warnings", []),
+            "rename_validation": suggestion.get("rename_validation"),
         },
         "execution_status": "PLANNED",
     }

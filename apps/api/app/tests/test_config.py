@@ -135,12 +135,34 @@ def test_settings_defaults_unknown_file_rename_parse_mode_to_hybrid(monkeypatch,
     assert config.get_settings().file_rename_parse_mode == "hybrid"
 
 
+def test_settings_loads_file_rename_llm_validation(monkeypatch, tmp_path):
+    """重命名模型校验配置必须集中由 Settings 读取。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost/test")
+    monkeypatch.setenv("FILE_RENAME_LLM_VALIDATION_ENABLED", "true")
+    monkeypatch.setenv("FILE_RENAME_LLM_VALIDATION_MODE", "all")
+    monkeypatch.setenv("FILE_RENAME_LLM_VALIDATION_THRESHOLD", "0.72")
+    monkeypatch.setenv("FILE_RENAME_LLM_VALIDATION_TIMEOUT_SECONDS", "12")
+    monkeypatch.setenv("FILE_RENAME_LLM_VALIDATION_MAX_ITEMS_PER_BATCH", "8")
+    config.get_settings.cache_clear()
+
+    settings = config.get_settings()
+
+    assert settings.file_rename_llm_validation_enabled is True
+    assert settings.file_rename_llm_validation_mode == "all"
+    assert settings.file_rename_llm_validation_threshold == 0.72
+    assert settings.file_rename_llm_validation_timeout_seconds == 12
+    assert settings.file_rename_llm_validation_max_items_per_batch == 8
+
+
 def test_settings_defaults_graph_classification_to_disabled(monkeypatch, tmp_path):
     """图谱分类必须默认关闭，未部署 Neo4j 时不能影响后端启动。"""
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
     monkeypatch.delenv("GRAPH_CLASSIFICATION_ENABLED", raising=False)
+    monkeypatch.delenv("GRAPH_CLASSIFICATION_MODE", raising=False)
     monkeypatch.delenv("NEO4J_SYNC_ENABLED", raising=False)
     _reset_settings_cache()
 

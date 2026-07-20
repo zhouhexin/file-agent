@@ -72,6 +72,7 @@ export function RenameSuggestionReceipt({
             <div>
               <strong>{suggestion.filename ?? '未知文件'}</strong>
               <small>{suggestion.relative_path ?? ''}</small>
+              {renameReviewMessage(suggestion) ? <em>{renameReviewMessage(suggestion)}</em> : null}
             </div>
           </button>
         ))}
@@ -111,6 +112,26 @@ export function RenameSuggestionReceipt({
       )}
     </section>
   );
+}
+
+const RENAME_EVIDENCE_REVIEW_CODES = new Set([
+  'RENAME_DIFFERENCE_UNVERIFIED',
+  'TITLE_NOT_IN_EVIDENCE',
+  'TITLE_FROM_LATER_PAGE',
+  'PARSER_TITLE_CONFLICT',
+  'OCR_QUALITY_LOW',
+  'DOCUMENT_NUMBER_CONFLICT',
+  'DOCUMENT_DATE_CONFLICT',
+  'LLM_VALIDATION_UNAVAILABLE',
+  'LLM_VALIDATION_LIMIT_REACHED',
+]);
+
+function renameReviewMessage(suggestion: RenameSuggestion): string | null {
+  if (suggestion.status !== 'NEEDS_REVIEW') return null;
+  if ((suggestion.warnings ?? []).some((item) => RENAME_EVIDENCE_REVIEW_CODES.has(item))) {
+    return '名称差异较大，系统未能确认标题依据。';
+  }
+  return null;
 }
 
 function canLoadMore(

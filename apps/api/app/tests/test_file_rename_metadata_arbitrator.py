@@ -74,6 +74,37 @@ def test_arbitrator_prefers_native_title_over_docling_section_header():
     assert any(item["code"] == "RENAME_FIELD_FALLBACK_SELECTED" for item in result.warnings)
 
 
+def test_arbitrator_prefers_formal_docling_header_over_filename_fallback():
+    """Docling 首页正式标题应优先于原生 OCR 的文件名回退。"""
+
+    result = RenameMetadataArbitrator().arbitrate(
+        [
+            _metadata(
+                parser="docling",
+                title=_field(
+                    "关于崔杰等21位同志任职资格的通知",
+                    confidence=0.76,
+                    parser="docling",
+                    label="section_header",
+                    source="document_structure",
+                ),
+            ),
+            _metadata(
+                parser="native",
+                title=_field(
+                    "工程师资格-西理人事[2022]14号",
+                    confidence=0.65,
+                    parser="native",
+                    source="filename",
+                ),
+            ),
+        ]
+    )
+
+    assert result.metadata.title.value == "关于崔杰等21位同志任职资格的通知"
+    assert result.metadata.title.status == RenameFieldStatus.RESOLVED
+
+
 def test_arbitrator_marks_two_high_confidence_titles_ambiguous():
     """两个可靠主标题冲突时不得自动生成可执行名称。"""
 

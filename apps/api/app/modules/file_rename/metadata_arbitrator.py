@@ -143,6 +143,28 @@ _FIELD_LABELS = {
     "document_number": "文号",
     "title": "标题",
 }
+_FORMAL_TITLE_SUFFIXES = (
+    "通知",
+    "通报",
+    "公告",
+    "报告",
+    "总结",
+    "意见",
+    "办法",
+    "方案",
+    "决定",
+    "请示",
+    "批复",
+    "函",
+    "纪要",
+    "制度",
+    "规定",
+    "细则",
+    "说明",
+    "表",
+    "清单",
+    "台账",
+)
 
 
 def _effective_score(field_name: str, field_result: RenameFieldResult) -> float:
@@ -154,7 +176,10 @@ def _effective_score(field_name: str, field_result: RenameFieldResult) -> float:
         if "title" in labels:
             score += 0.03
         elif "section_header" in labels:
-            score -= 0.12
+            if (field_result.value or "").endswith(_FORMAL_TITLE_SUFFIXES):
+                score += 0.03
+            else:
+                score -= 0.12
     if field_result.source == "filename":
         score -= 0.08
     return max(0, min(1, score))

@@ -1467,7 +1467,7 @@ def test_classification_taxonomy_request_returns_fixed_catalog():
     assert result.intent == "LIST_CLASSIFICATION_TAXONOMY"
     assert result.selected_skills == ["classification-taxonomy-read"]
     assert [item.tool_name for item in result.tool_invocations] == ["read-classification-taxonomy"]
-    assert "学校文件归类表" in (result.final_response or "")
+    assert "学校文件统一分类体系" in (result.final_response or "")
     assert "学校" in (result.final_response or "")
     assert "学院" in (result.final_response or "")
 

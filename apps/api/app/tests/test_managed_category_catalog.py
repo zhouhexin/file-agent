@@ -95,13 +95,16 @@ def test_global_catalog_deduplicates_same_path_across_roots(tmp_path):
             filename="上传职称材料.txt",
             fallback_text="本材料用于教师职称评定。",
         )
-        assert managed_result["categories"][0]["category_id"] == category.category_id
-        assert uploaded_result["categories"][0]["category_id"] == category.category_id
-        assert (
-            managed_result["categories"][0]["taxonomy_version"]
-            == uploaded_result["categories"][0]["taxonomy_version"]
-            == catalog.taxonomy_version
-        )
+        managed_ids = {item["category_id"] for item in managed_result["categories"]}
+        uploaded_ids = {item["category_id"] for item in uploaded_result["categories"]}
+        assert "school.hr.title-review" in managed_ids
+        assert managed_ids == uploaded_ids
+        assert {
+            item["taxonomy_key"] for item in managed_result["categories"]
+        } == {"unified_school_file_classification"}
+        assert {
+            item["taxonomy_version"] for item in uploaded_result["categories"]
+        } == {"2026-07-v2"}
     finally:
         db.close()
 

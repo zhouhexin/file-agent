@@ -8,6 +8,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.modules.file_rename.validation_schemas import RenameValidationAudit
+
 
 class RenameFieldStatus(str, Enum):
     """重命名字段解析状态。"""
@@ -135,6 +137,7 @@ class RenameSuggestion(BaseModel):
     rename_parse_mode: str = ""
     rename_candidate_parsers: list[str] = Field(default_factory=list)
     arbitration_warnings: list[dict[str, Any]] = Field(default_factory=list)
+    rename_validation: RenameValidationAudit | None = None
     errors: list[dict[str, Any]] = Field(default_factory=list)
 
 

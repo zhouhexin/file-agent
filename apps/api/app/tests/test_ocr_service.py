@@ -98,3 +98,42 @@ def test_paddle_provider_sets_baidu_bos_model_source_before_loading(monkeypatch)
     PaddleOcrProvider(model_source="BOS")._load_ocr()
 
     assert captured["source"] == "BOS"
+
+
+def test_paddle_provider_supports_v3_result_structure(monkeypatch, tmp_path):
+    """PaddleOCR 3.x 初始化参数和字典结果必须转换为统一 OCR block。"""
+
+    captured: dict[str, object] = {}
+    fake_module = ModuleType("paddleocr")
+
+    class FakePaddleOCR:
+        """模拟 PaddleOCR 3.x API。"""
+
+        def __init__(self, **kwargs: object) -> None:
+            captured["kwargs"] = kwargs
+
+        def ocr(self, image_path: str):
+            captured["image_path"] = image_path
+            return [
+                {
+                    "rec_texts": ["西安理工大学文件", "西安理工人事〔2022】14号"],
+                    "rec_scores": [0.98, 0.96],
+                    "rec_polys": [
+                        [[0, 0], [10, 0], [10, 5], [0, 5]],
+                        [[0, 8], [10, 8], [10, 13], [0, 13]],
+                    ],
+                }
+            ]
+
+    fake_module.PaddleOCR = FakePaddleOCR
+    monkeypatch.setitem(sys.modules, "paddleocr", fake_module)
+    monkeypatch.setattr("app.modules.ocr.service.package_version", lambda _: "3.7.0")
+    image_path = tmp_path / "scan.png"
+    image_path.write_bytes(b"fake")
+
+    result = PaddleOcrProvider(model_source="BOS").extract_image(image_path=image_path)
+
+    assert "show_log" not in captured["kwargs"]
+    assert captured["kwargs"]["use_doc_unwarping"] is False
+    assert result["text"] == "西安理工大学文件\n西安理工人事〔2022】14号"
+    assert result["confidence"] == 0.97

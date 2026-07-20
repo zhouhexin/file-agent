@@ -9,7 +9,7 @@ from app.modules.classification.schemas import Taxonomy
 
 
 TAXONOMY_DIR = Path(__file__).resolve().parent / "taxonomies"
-DEFAULT_TAXONOMY_PATH = TAXONOMY_DIR / "school_file_classification.json"
+DEFAULT_TAXONOMY_PATH = TAXONOMY_DIR / "unified_school_file_classification.json"
 
 
 def load_taxonomy(path: Path) -> Taxonomy:
@@ -21,6 +21,6 @@ def load_taxonomy(path: Path) -> Taxonomy:
 
 
 def load_default_taxonomy() -> Taxonomy:
-    """加载当前系统默认启用的学校文件归类表，每次读取以便配置变更立即生效。"""
+    """加载统一分类体系，每次读取以便版本文件更新后立即生效。"""
 
     return load_taxonomy(DEFAULT_TAXONOMY_PATH)

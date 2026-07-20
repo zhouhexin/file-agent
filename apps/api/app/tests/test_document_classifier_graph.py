@@ -68,7 +68,10 @@ class SupportingSemanticContext:
             candidates=[
                 SemanticCategorySupport(
                     category_id="school.hr.title-review",
-                    graph_key="school_file_classification:2026-06-v2:school.hr.title-review",
+                    graph_key=(
+                        "unified_school_file_classification:2026-07-v2:"
+                        "school.hr.title-review"
+                    ),
                     category_path=["学校", "人事师资", "职称"],
                     semantic_score=0.9,
                     support_count=2,

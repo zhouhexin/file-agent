@@ -86,7 +86,7 @@ def test_taxonomy_projection_preserves_stable_ids_and_parent_relations():
 
     category_by_id = {item.category_id: item for item in repository.categories}
     assert category_by_id["school.hr.title-review"].graph_key == (
-        "school_file_classification:2026-06-v2:school.hr.title-review"
+        "unified_school_file_classification:2026-07-v2:school.hr.title-review"
     )
     assert any(
         relation.parent_graph_key.endswith(":school.hr")

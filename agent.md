@@ -643,7 +643,9 @@ Neo4j 图谱分类采用“可重建投影 + 只读候选增强”模式：
 - 受管目录必须通过版本化 Profile 区分 `DEPARTMENT`、`CATEGORY`、`YEAR`、`COLLECTION`、`TEMPORARY` 和 `UNKNOWN`；`PATH_AS_WEAK_LABEL` 只能生成 `PATH_SUGGESTS`，不得生成 `CONFIRMED_AS`。
 - `PATH_AS_CATEGORY` 只表示经 Profile 审核的目录路径可以成为全局分类候选来源，不表示目录内文件已确认属于该分类；`LOCATED_IN` 和父目录信息始终只能作为弱位置证据。
 - 所有分类来源根必须共同形成全局候选集，新上传文件和任意受管目录文件都必须使用同一候选空间，不能按文件当前所在根或父目录裁剪候选。
-- 配置了 `PATH_AS_CATEGORY` 分类来源根时，受管目录全局候选集是业务分类目录来源；不得静默混入或回退到另一套预置业务分类，目录为空或 Profile 无有效分类时必须进入 `NEEDS_REVIEW`。
+- 线上分类统一使用 `unified_school_file_classification.json`；预置 taxonomy 与受管目录快照都是该文件的离线构建输入，不得在请求运行时因存在 `PATH_AS_CATEGORY` 根而切换到另一套目录分类。
+- 第一版统一 taxonomy 只把 `CATEGORY`、`DEPARTMENT` 目录证据合并到已有稳定分类 ID 的别名和信号中；`YEAR`、`TEMPORARY`、`COLLECTION` 和 `UNKNOWN` 不得成为业务分类。目录位置仍只提供弱证据，不自动确认文件分类。
+- 反馈和新目录证据必须生成新的版本化统一 taxonomy，经过自动 schema、稳定 ID、回放和回滚校验后发布；不得直接修改正在运行的 taxonomy。
 - 文件与分类是多对多逻辑关系，一个文件必须允许同时保存和展示多个不同分支的 `SUGGESTED_AS` 或 `CONFIRMED_AS`；物理目录关系与逻辑分类关系必须分离。
 - 只有用户明确接受或更正后的分类才能投影为 `CONFIRMED_AS`，目录位置、未反馈建议和普通弱标签均不得自动提升为确认分类。
 - 图谱分类运行模式必须区分 `off`、`shadow` 和 `enabled`；`shadow` 只记录候选差异，不能改变用户结果。

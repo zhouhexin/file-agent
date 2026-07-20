@@ -8,13 +8,13 @@ from app.modules.classification.matcher import flatten_category_paths
 from app.modules.classification.schemas import Taxonomy
 
 
-def test_default_taxonomy_loads_school_file_classification():
-    """默认分类配置必须能加载学校文件归类表元数据。"""
+def test_default_taxonomy_loads_unified_school_file_classification():
+    """默认分类配置必须加载由预置目录和受管目录证据生成的统一体系。"""
 
     taxonomy = load_default_taxonomy()
 
-    assert taxonomy.key == "school_file_classification"
-    assert taxonomy.version == "2026-06-v2"
+    assert taxonomy.key == "unified_school_file_classification"
+    assert taxonomy.version == "2026-07-v2"
     assert taxonomy.categories[0].name == "学校"
 
 
@@ -73,6 +73,18 @@ def test_default_taxonomy_contains_v2_metadata_for_high_frequency_categories():
     assert "教师" in appointment.positive_signals
     assert "奖学金" in appointment.negative_signals
     assert appointment.examples
+
+
+def test_default_taxonomy_contains_live_managed_volume_signals():
+    """挂载卷 v2 快照中的有效目录词必须进入统一 taxonomy。"""
+
+    flattened = flatten_category_paths(load_default_taxonomy())
+    by_id = {item.category_id: item for item in flattened}
+
+    assert "辅修" in by_id["school.undergraduate-teaching"].positive_signals
+    assert "党员学习" in by_id["school.party.organization"].positive_signals
+    assert "劳资科" in by_id["school.hr.salary-social-security"].aliases
+    assert "实验室工作" in by_id["school.laboratory-management"].aliases
 
 
 def test_taxonomy_rejects_duplicate_category_ids():

@@ -90,21 +90,30 @@ class RenameParsingService:
         if needs_native:
             native_candidate = primary_candidate if primary_candidate and primary_candidate.parser_name == "native" else None
             if native_candidate is None and file_path is not None:
-                native_result = extract_document_text_native(
-                    file_path=file_path,
-                    filename=filename,
-                    content_type=content_type,
-                )
-                if native_result.get("ok"):
-                    native_candidate = _candidate_from_result(native_result, parser_name="native")
-                else:
-                    error = native_result.get("error") or {}
+                try:
+                    native_result = extract_document_text_native(
+                        file_path=file_path,
+                        filename=filename,
+                        content_type=content_type,
+                    )
+                except Exception as exc:
                     warnings.append(
                         {
-                            "code": str(error.get("code") or "NATIVE_RENAME_PARSE_FAILED"),
-                            "message": str(error.get("message") or "原生解析器未生成可用重命名候选。"),
+                            "code": "NATIVE_RENAME_PARSE_EXCEPTION",
+                            "message": f"原生解析器异常，已保留其他可用候选：{exc}",
                         }
                     )
+                else:
+                    if native_result.get("ok"):
+                        native_candidate = _candidate_from_result(native_result, parser_name="native")
+                    else:
+                        error = native_result.get("error") or {}
+                        warnings.append(
+                            {
+                                "code": str(error.get("code") or "NATIVE_RENAME_PARSE_FAILED"),
+                                "message": str(error.get("message") or "原生解析器未生成可用重命名候选。"),
+                            }
+                        )
             if native_candidate is not None and not any(item.parser_name == "native" for item in candidates):
                 candidates.append(native_candidate)
 

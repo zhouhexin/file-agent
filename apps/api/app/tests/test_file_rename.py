@@ -105,6 +105,36 @@ def test_filename_metadata_extractor_rejects_body_intro_merged_with_section_titl
     assert "通知如下" not in (result.title.value or "")
 
 
+def test_filename_metadata_extractor_rejects_merged_course_requirement_body():
+    """课程要求正文和章节序号不得合并成标题。"""
+
+    result = FilenameMetadataExtractor().extract(
+        filename="计算机技术工程硕士课程.doc",
+        pages=[{
+            "page_number": 1,
+            "text": (
+                "计算机技术工程硕士课程\n"
+                "工程硕士研究生学制为二年半到五年；总学分≥32，其中学位课学分≥18。\n"
+                "四、课程设置见附录。\n"
+                "五、开题报告"
+            ),
+        }],
+    )
+
+    assert result.title.value == "计算机技术工程硕士课程"
+
+
+def test_filename_metadata_extractor_keeps_short_business_title_candidate():
+    """短业务标题不再因为少于四个字符被直接丢弃。"""
+
+    result = FilenameMetadataExtractor().extract(
+        filename="附件1.docx",
+        pages=[{"page_number": 1, "text": "值班表"}],
+    )
+
+    assert result.title.value == "值班表"
+
+
 def test_filename_metadata_extractor_does_not_replace_first_page_title_with_later_page_template():
     """后页带强文种词的模板标题不得覆盖首页有效标题。"""
 
@@ -151,6 +181,80 @@ def test_filename_metadata_extractor_removes_attachment_title_prefixes():
         )
 
         assert result.title.value == "关于组织开展2024年寒假走访调研活动审批表"
+
+
+def test_filename_metadata_extractor_ignores_institution_masthead_before_document_number():
+    """学校文件版头不得覆盖文号后的正文标题。"""
+
+    result = FilenameMetadataExtractor().extract(
+        filename="扫描件.pdf",
+        pages=[
+            {
+                "page_number": 1,
+                "sheet_name": None,
+                "text": (
+                    "西安理工大学文件\n"
+                    "西安理工人事〔2022】14号\n"
+                    "关于崔杰等21位同志任职资格的通知\n"
+                    "校属相关单位："
+                ),
+            }
+        ],
+        elements=[
+            {
+                "element_index": 0,
+                "label": "title",
+                "text": "西安理工大学文件",
+                "page_number": 1,
+                "content_layer": "body",
+            },
+            {
+                "element_index": 1,
+                "label": "text",
+                "text": "西安理工人事〔2022】14号",
+                "page_number": 1,
+                "content_layer": "body",
+            },
+            {
+                "element_index": 2,
+                "label": "title",
+                "text": "关于崔杰等21位同志任职资格的通知",
+                "page_number": 1,
+                "content_layer": "body",
+            },
+        ],
+        parser_name="docling",
+    )
+
+    assert result.year.value == "2022"
+    assert result.document_number.value == "西安理工人事〔2022〕14号"
+    assert result.title.value == "关于崔杰等21位同志任职资格的通知"
+
+
+def test_filename_metadata_extractor_rejects_personnel_group_as_document_title():
+    """职称人员分组和后续姓名、单位不得被拼成文件标题。"""
+
+    result = FilenameMetadataExtractor().extract(
+        filename="工程师资格-西理人事[2022]14号.PDF",
+        pages=[
+            {
+                "page_number": 1,
+                "sheet_name": None,
+                "text": (
+                    "承（3Y）\n"
+                    "安院安房市\n"
+                    "委员会评审通过、校长办公会议批准，下列同志自评审通过之日\n"
+                    "高级工程师（5人）：\n"
+                    "崔杰\n"
+                    "材料科学与工程学院"
+                ),
+            }
+        ],
+        parser_name="native",
+    )
+
+    assert result.title.value != "高级工程师（5人）：崔杰材料科学与工程学院"
+    assert result.title.source == "filename"
 
 
 def test_filename_metadata_extractor_allows_missing_document_number():
@@ -659,6 +763,7 @@ def test_uploaded_attachment_rename_confirms_into_private_temporary_path(monkeyp
     assert plan["items"][0]["after"]["filename"] == "2026_春季学生活动总结.txt"
     assert plan["items"][0]["rename_metadata"]["parse_mode"] == "hybrid"
     assert plan["items"][0]["rename_metadata"]["candidate_parsers"] == ["native"]
+    assert plan["items"][0]["rename_metadata"]["rename_validation"]["validation_mode"] == "risk_based"
     assert shared_path.exists()
 
     confirm_response = client.post(
@@ -779,6 +884,7 @@ def test_managed_rename_chat_plan_and_confirm_executes_native_rename(monkeypatch
     )
     assert plan["items"][0]["rename_metadata"]["parse_mode"] == "hybrid"
     assert plan["items"][0]["rename_metadata"]["candidate_parsers"] == ["native"]
+    assert plan["items"][0]["rename_metadata"]["rename_validation"]["validation_mode"] == "risk_based"
 
     confirm_response = client.post(
         f"/api/operations/plans/{plan['id']}/confirm",
@@ -801,6 +907,8 @@ def test_managed_rename_chat_plan_and_confirm_executes_native_rename(monkeypatch
         operation_plan = db.get(OperationPlan, plan["id"])
         assert operation_plan is not None
         assert operation_plan.status == "EXECUTED"
+        batch_item = db.query(FileRenameBatchItem).one()
+        assert batch_item.metadata_json["rename_validation"]["validation_mode"] == "risk_based"
         change_item = db.query(ChangeItem).filter(ChangeItem.change_type == "FILENAME_CHANGED").one()
         assert change_item.before_value_json["filename"] == "扫描件.txt"
         assert change_item.after_value_json["filename"] == renamed_path.name
