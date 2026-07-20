@@ -1,0 +1,1118 @@
+{
+  "key": "unified_school_file_classification",
+  "name": "学校文件统一分类体系",
+  "version": "2026-07-v2",
+  "source": "文件归类(1).xlsx + managed-directory-inventory@managed-downloads-2026-07-15-v1 + managed-directory-inventory@managed-downloads-2026-07-18-v2",
+  "categories": [
+    {
+      "id": "school",
+      "name": "学校",
+      "children": [
+        {
+          "id": "school.admin",
+          "name": "行政综合管理类",
+          "children": [
+            {
+              "id": "school.admin.development-planning",
+              "name": "发展规划",
+              "description": "与学校中长期发展、专项规划、战略部署、改革方案相关的通知、方案、报告和支撑材料。",
+              "aliases": [
+                "规划",
+                "发展规划",
+                "专项规划",
+                "十四五",
+                "战略规划",
+                "发展规划处",
+                "发规处"
+              ],
+              "positive_signals": [
+                "发展",
+                "规划",
+                "建设",
+                "战略",
+                "目标",
+                "任务",
+                "发展规划"
+              ],
+              "negative_signals": [
+                "学生评优",
+                "奖学金",
+                "个人申请"
+              ],
+              "examples": [
+                "学校事业发展规划",
+                "专项建设规划编制通知",
+                "十四五规划中期评估报告"
+              ]
+            },
+            {
+              "id": "school.admin.annual-plan-summary",
+              "name": "年度计划、总结",
+              "description": "与学校年度工作计划、年度总结、重点任务台账、阶段性总结相关的文件。",
+              "aliases": [
+                "年度计划",
+                "工作计划",
+                "年度总结",
+                "工作总结",
+                "重点任务"
+              ],
+              "positive_signals": [
+                "年度",
+                "计划",
+                "总结",
+                "重点任务",
+                "完成情况"
+              ],
+              "negative_signals": [
+                "个人总结",
+                "学生证明",
+                "报销"
+              ],
+              "examples": [
+                "学校年度工作总结",
+                "年度重点工作任务安排",
+                "年度计划报送通知"
+              ]
+            },
+            {
+              "id": "school.admin.rules",
+              "name": "规章制度",
+              "description": "与学校层面制度、办法、规定、细则、管理办法修订和发布相关的正式文件。",
+              "aliases": [
+                "制度",
+                "办法",
+                "规定",
+                "细则",
+                "管理办法"
+              ],
+              "positive_signals": [
+                "制度",
+                "办法",
+                "规定",
+                "细则",
+                "修订",
+                "印发"
+              ],
+              "negative_signals": [
+                "会议通知",
+                "个人申请",
+                "新闻稿"
+              ],
+              "examples": [
+                "收入分配管理办法",
+                "教育服务收入分配管理办法",
+                "规章制度修订通知"
+              ]
+            },
+            {
+              "id": "school.admin.meeting-minutes",
+              "name": "会议纪要",
+              "description": "与学校党委会、校长办公会、专题会等会议纪要、会议记录和议定事项相关的文件。",
+              "aliases": [
+                "纪要",
+                "会议纪要",
+                "会议记录",
+                "议定事项",
+                "校办会议纪要"
+              ],
+              "positive_signals": [
+                "会议",
+                "纪要",
+                "议题",
+                "研究决定",
+                "审议",
+                "会议纪要"
+              ],
+              "negative_signals": [
+                "会议通知",
+                "参会回执",
+                "培训通知"
+              ],
+              "examples": [
+                "校长办公会会议纪要",
+                "党委会会议纪要",
+                "专题会议议定事项"
+              ]
+            }
+          ],
+          "aliases": [
+            "校办",
+            "校长办公室",
+            "学校办公室"
+          ],
+          "positive_signals": [
+            "校办",
+            "校长办公室"
+          ]
+        },
+        {
+          "id": "school.hr",
+          "name": "人事师资",
+          "description": "与学校人事、师资管理及人事部门发文相关的文件。",
+          "aliases": [
+            "人事",
+            "人事处",
+            "师资",
+            "人事文件"
+          ],
+          "positive_signals": [
+            "人事",
+            "人事处",
+            "师资"
+          ],
+          "negative_signals": [],
+          "examples": [
+            "西安理工人事〔2022〕14号"
+          ],
+          "children": [
+            {
+              "id": "school.hr.title-review",
+              "name": "职称",
+              "description": "与教师和专业技术人员职称评审、职称申报、岗位等级、评审材料和结果公示相关的文件。",
+              "aliases": [
+                "职称评审",
+                "职称申报",
+                "职称材料",
+                "专业技术职务",
+                "岗位等级",
+                "评审材料",
+                "任职资格",
+                "专业技术职务任职资格",
+                "职称评定",
+                "职称资格"
+              ],
+              "positive_signals": [
+                "职称",
+                "评审",
+                "申报",
+                "职称材料",
+                "专业技术",
+                "岗位等级",
+                "任职资格",
+                "专业技术职务",
+                "职称评定"
+              ],
+              "negative_signals": [
+                "学生评优",
+                "奖学金",
+                "科研项目结题"
+              ],
+              "examples": [
+                "2025年新职称条件整理",
+                "职称申报材料通知",
+                "职称材料审核通知",
+                "专业技术职务评审结果公示",
+                "关于某等同志任职资格的通知"
+              ]
+            },
+            {
+              "id": "school.hr.appointment-assessment",
+              "name": "考核聘任",
+              "description": "与教师岗位聘任、续聘、聘期考核、岗位考核、年度履职考核相关的通知、表格、材料和结果文件。",
+              "aliases": [
+                "岗位聘任",
+                "续聘",
+                "聘期考核",
+                "岗位考核",
+                "履职考核",
+                "考核与聘任",
+                "聘用合同"
+              ],
+              "positive_signals": [
+                "教师",
+                "岗位",
+                "聘期",
+                "考核",
+                "续聘",
+                "聘任",
+                "聘用合同"
+              ],
+              "negative_signals": [
+                "学生评优",
+                "奖学金",
+                "志愿服务"
+              ],
+              "examples": [
+                "2025年教师岗位聘期考核工作安排",
+                "专任教师续聘申请表",
+                "教师年度履职考核通知"
+              ]
+            },
+            {
+              "id": "school.hr.talent-work",
+              "name": "人才工作",
+              "description": "与高层次人才、人才计划、人才引进、人才项目申报和人才服务保障相关的文件。",
+              "aliases": [
+                "人才计划",
+                "人才引进",
+                "高层次人才",
+                "人才项目",
+                "人才工程科",
+                "双百人才",
+                "高人办"
+              ],
+              "positive_signals": [
+                "人才",
+                "引进",
+                "高层次",
+                "计划",
+                "项目申报",
+                "人才工程",
+                "双百人才",
+                "高层次人才"
+              ],
+              "negative_signals": [
+                "学生就业",
+                "财务报销",
+                "课程安排"
+              ],
+              "examples": [
+                "高层次人才引进工作方案",
+                "人才项目申报通知",
+                "人才服务保障材料"
+              ]
+            },
+            {
+              "id": "school.hr.faculty-recruitment",
+              "name": "师资招聘",
+              "description": "与教师招聘、岗位需求、招聘公告、面试考核、拟聘人员公示相关的文件。",
+              "aliases": [
+                "教师招聘",
+                "招聘公告",
+                "岗位需求",
+                "拟聘人员"
+              ],
+              "positive_signals": [
+                "招聘",
+                "岗位",
+                "面试",
+                "考核",
+                "拟聘"
+              ],
+              "negative_signals": [
+                "学生招生",
+                "志愿者招募",
+                "采购招标"
+              ],
+              "examples": [
+                "教师招聘岗位需求表",
+                "师资招聘公告",
+                "拟聘人员公示"
+              ]
+            },
+            {
+              "id": "school.hr.faculty-development",
+              "name": "教师发展",
+              "description": "与教师培训、教师能力提升、教学发展、进修访学和教师成长支持相关的文件。",
+              "aliases": [
+                "教师培训",
+                "教师发展",
+                "能力提升",
+                "进修访学",
+                "教师发展科",
+                "教师工作部",
+                "教师进修"
+              ],
+              "positive_signals": [
+                "教师",
+                "培训",
+                "发展",
+                "能力提升",
+                "访学",
+                "教师发展",
+                "教师进修"
+              ],
+              "negative_signals": [
+                "学生培训",
+                "干部培训",
+                "设备培训"
+              ],
+              "examples": [
+                "教师教学能力提升培训通知",
+                "青年教师发展计划",
+                "教师访学申请材料"
+              ]
+            },
+            {
+              "id": "school.hr.salary-social-security",
+              "name": "劳资社保",
+              "description": "与工资、绩效、社保、公积金、薪酬调整和劳动关系相关的学校人事文件。",
+              "aliases": [
+                "工资",
+                "绩效",
+                "社保",
+                "公积金",
+                "薪酬",
+                "劳资科",
+                "社保科",
+                "酬金"
+              ],
+              "positive_signals": [
+                "工资",
+                "绩效",
+                "社保",
+                "公积金",
+                "薪酬",
+                "劳资",
+                "酬金"
+              ],
+              "negative_signals": [
+                "学生资助",
+                "科研经费",
+                "财务报销"
+              ],
+              "examples": [
+                "绩效工资核算表",
+                "社保缴费通知",
+                "薪酬调整说明"
+              ]
+            },
+            {
+              "id": "school.hr.postdoc",
+              "name": "博士后",
+              "description": "与博士后进站、出站、考核、资助、合作导师和博士后管理相关的文件。",
+              "aliases": [
+                "博士后进站",
+                "博士后出站",
+                "博士后考核",
+                "博士后资助",
+                "博士后流动站"
+              ],
+              "positive_signals": [
+                "博士后",
+                "进站",
+                "出站",
+                "合作导师",
+                "考核",
+                "博士后流动站"
+              ],
+              "negative_signals": [
+                "博士研究生",
+                "博士招生",
+                "学位论文"
+              ],
+              "examples": [
+                "博士后进站申请",
+                "博士后出站考核表",
+                "博士后资助申报通知"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "school.finance",
+          "name": "财务",
+          "description": "与学校预算、决算、经费、收入分配、报销、财务管理和会计核算相关的文件。",
+          "aliases": [
+            "预算",
+            "决算",
+            "经费",
+            "报销",
+            "收入分配"
+          ],
+          "positive_signals": [
+            "财务",
+            "预算",
+            "经费",
+            "报销",
+            "收入",
+            "分配"
+          ],
+          "negative_signals": [
+            "学生奖学金",
+            "科研成果",
+            "教师考核"
+          ],
+          "examples": [
+            "教育服务收入分配管理办法",
+            "预算执行情况说明",
+            "经费报销通知"
+          ]
+        },
+        {
+          "id": "school.logistics-assets",
+          "name": "后勤资产",
+          "aliases": [
+            "后勤处",
+            "后勤",
+            "资产管理"
+          ],
+          "positive_signals": [
+            "后勤",
+            "资产"
+          ]
+        },
+        {
+          "id": "school.undergraduate-teaching",
+          "name": "本科教学",
+          "aliases": [
+            "教务处",
+            "教务",
+            "本科教学",
+            "教学评估",
+            "本科教学评估",
+            "辅修",
+            "辅修专业"
+          ],
+          "positive_signals": [
+            "教务",
+            "本科教学",
+            "教学评估",
+            "教学质量",
+            "辅修"
+          ]
+        },
+        {
+          "id": "school.postgraduate",
+          "name": "研究生",
+          "description": "与研究生培养、招生、学位、导师、奖助和研究生教育管理相关的学校文件。",
+          "aliases": [
+            "研究生培养",
+            "研究生招生",
+            "学位",
+            "导师遴选",
+            "研究生奖助",
+            "工程硕士",
+            "工程类硕士"
+          ],
+          "positive_signals": [
+            "研究生",
+            "培养",
+            "学位",
+            "导师",
+            "招生",
+            "奖助",
+            "工程硕士"
+          ],
+          "negative_signals": [
+            "本科教学",
+            "教师职称",
+            "博士后"
+          ],
+          "examples": [
+            "研究生培养方案修订通知",
+            "导师遴选材料",
+            "研究生奖助工作安排"
+          ]
+        },
+        {
+          "id": "school.discipline",
+          "name": "学科"
+        },
+        {
+          "id": "school.research",
+          "name": "科研",
+          "description": "与科研项目、科研成果、科研平台、论文专利、科研奖励和科研经费管理相关的学校文件。",
+          "aliases": [
+            "科研项目",
+            "科研成果",
+            "项目申报",
+            "论文",
+            "专利",
+            "科技处",
+            "科研管理"
+          ],
+          "positive_signals": [
+            "科研",
+            "项目",
+            "成果",
+            "论文",
+            "专利",
+            "结题",
+            "科技处"
+          ],
+          "negative_signals": [
+            "教学计划",
+            "学生资助",
+            "行政会议纪要"
+          ],
+          "examples": [
+            "科研项目申报通知",
+            "科研成果资助材料",
+            "学院科研成果资助"
+          ]
+        },
+        {
+          "id": "school.party",
+          "name": "党委相关",
+          "children": [
+            {
+              "id": "school.party.cadre-work",
+              "name": "干部工作",
+              "description": "与干部选拔任用、干部考核、干部培训、任前公示和干部管理相关的党委文件。",
+              "aliases": [
+                "干部任用",
+                "干部考核",
+                "干部培训",
+                "任前公示"
+              ],
+              "positive_signals": [
+                "干部",
+                "任用",
+                "考核",
+                "培训",
+                "公示"
+              ],
+              "negative_signals": [
+                "学生干部",
+                "班干部",
+                "社团干部"
+              ],
+              "examples": [
+                "干部任前公示",
+                "干部年度考核通知",
+                "干部培训工作安排"
+              ]
+            },
+            {
+              "id": "school.party.organization",
+              "name": "组织",
+              "description": "与基层党组织建设、党员发展、组织生活、党费和党内统计相关的文件。",
+              "aliases": [
+                "组织工作",
+                "党员发展",
+                "组织生活",
+                "党费",
+                "支部建设",
+                "党员学习",
+                "党员教育"
+              ],
+              "positive_signals": [
+                "组织",
+                "党员",
+                "党支部",
+                "组织生活",
+                "党费",
+                "党员学习",
+                "党员教育",
+                "理论学习"
+              ],
+              "negative_signals": [
+                "行政组织架构",
+                "学生社团",
+                "机构设置"
+              ],
+              "examples": [
+                "党员发展材料",
+                "基层党组织建设通知",
+                "组织生活安排"
+              ]
+            },
+            {
+              "id": "school.party.publicity",
+              "name": "宣传"
+            },
+            {
+              "id": "school.party.united-front",
+              "name": "统战"
+            },
+            {
+              "id": "school.party.discipline-inspection",
+              "name": "纪委",
+              "description": "与纪检监察、廉政教育、监督检查、违纪处理和纪委工作相关的文件。",
+              "aliases": [
+                "纪检",
+                "纪委",
+                "廉政",
+                "监督检查",
+                "违纪处理",
+                "纪委+廉政工作",
+                "廉政工作",
+                "纪检监察"
+              ],
+              "positive_signals": [
+                "纪委",
+                "纪检",
+                "廉政",
+                "监督",
+                "检查"
+              ],
+              "negative_signals": [
+                "质量检查",
+                "教学督导",
+                "实验室检查"
+              ],
+              "examples": [
+                "廉政风险排查通知",
+                "纪检监察工作安排",
+                "监督检查情况报告"
+              ]
+            },
+            {
+              "id": "school.party.union",
+              "name": "工会"
+            }
+          ],
+          "aliases": [
+            "党办",
+            "党委办公室"
+          ],
+          "positive_signals": [
+            "党委办公室"
+          ]
+        },
+        {
+          "id": "school.international-cooperation",
+          "name": "国际合作交流",
+          "aliases": [
+            "国际交流处",
+            "国际交流",
+            "国际合作"
+          ],
+          "positive_signals": [
+            "国际交流",
+            "国际合作"
+          ]
+        },
+        {
+          "id": "school.domestic-cooperation-alumni",
+          "name": "国内合作、校友"
+        },
+        {
+          "id": "school.audit",
+          "name": "审计"
+        },
+        {
+          "id": "school.student-affairs",
+          "name": "学生工作"
+        },
+        {
+          "id": "school.safety-stability",
+          "name": "安全稳定"
+        },
+        {
+          "id": "school.laboratory-management",
+          "name": "实验室管理",
+          "aliases": [
+            "实验室工作"
+          ],
+          "positive_signals": [
+            "实验室工作",
+            "实验实习用房"
+          ],
+          "negative_signals": [],
+          "examples": []
+        },
+        {
+          "id": "school.other",
+          "name": "其他",
+          "description": "无法明确归入学校既有高频分类，或证据不足需要人工复核的学校层面文件。",
+          "aliases": [
+            "其他",
+            "未分类",
+            "待分类"
+          ],
+          "positive_signals": [
+            "其他",
+            "综合材料",
+            "待确认"
+          ],
+          "negative_signals": [
+            "职称",
+            "科研",
+            "财务",
+            "会议纪要"
+          ],
+          "examples": [
+            "无法判断业务归属的综合材料",
+            "来源不明的临时文件",
+            "待人工复核文件"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "college",
+      "name": "学院",
+      "children": [
+        {
+          "id": "college.party-building",
+          "name": "党建"
+        },
+        {
+          "id": "college.admin",
+          "name": "行政管理",
+          "children": [
+            {
+              "id": "college.admin.development-planning",
+              "name": "发展规划",
+              "description": "与学院发展规划、建设目标、改革方案、学科专业布局相关的学院文件。",
+              "aliases": [
+                "学院规划",
+                "发展规划",
+                "建设方案",
+                "改革方案"
+              ],
+              "positive_signals": [
+                "学院",
+                "发展",
+                "规划",
+                "建设",
+                "改革"
+              ],
+              "negative_signals": [
+                "学校整体规划",
+                "个人计划",
+                "课程计划"
+              ],
+              "examples": [
+                "学院发展规划",
+                "学院建设方案",
+                "学院改革任务清单"
+              ]
+            },
+            {
+              "id": "college.admin.annual-plan-summary",
+              "name": "年度计划、总结",
+              "description": "与学院年度工作计划、年度总结、重点工作、阶段总结和目标责任相关的文件。",
+              "aliases": [
+                "学院年度计划",
+                "学院工作总结",
+                "年度总结",
+                "重点工作"
+              ],
+              "positive_signals": [
+                "学院",
+                "年度",
+                "计划",
+                "总结",
+                "重点工作"
+              ],
+              "negative_signals": [
+                "学校年度总结",
+                "个人总结",
+                "课程总结"
+              ],
+              "examples": [
+                "学院年度工作总结",
+                "学院年度工作计划",
+                "目标责任完成情况"
+              ]
+            },
+            {
+              "id": "college.admin.rules",
+              "name": "规章制度",
+              "description": "与学院内部管理办法、实施细则、规章制度制定和修订相关的文件。",
+              "aliases": [
+                "学院制度",
+                "实施细则",
+                "管理办法",
+                "院内规定"
+              ],
+              "positive_signals": [
+                "学院",
+                "制度",
+                "办法",
+                "细则",
+                "规定"
+              ],
+              "negative_signals": [
+                "学校制度",
+                "学生个人申请",
+                "会议通知"
+              ],
+              "examples": [
+                "学院科研奖励办法",
+                "学院内部管理规定",
+                "学院制度修订说明"
+              ]
+            },
+            {
+              "id": "college.admin.meeting-minutes",
+              "name": "会议纪要",
+              "description": "与学院党政联席会、院务会、专题会等会议纪要和议定事项相关的文件。",
+              "aliases": [
+                "学院会议纪要",
+                "党政联席会",
+                "院务会纪要",
+                "议定事项"
+              ],
+              "positive_signals": [
+                "学院",
+                "会议",
+                "纪要",
+                "党政联席",
+                "院务会"
+              ],
+              "negative_signals": [
+                "学校会议纪要",
+                "会议通知",
+                "参会名单"
+              ],
+              "examples": [
+                "学院党政联席会会议纪要",
+                "学院专题会议纪要",
+                "院务会议定事项"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "college.hr",
+          "name": "人事师资",
+          "children": [
+            {
+              "id": "college.hr.title-review",
+              "name": "职称",
+              "description": "与学院教师职称申报、材料审核、推荐排序和评审结果相关的文件。",
+              "aliases": [
+                "学院职称",
+                "职称推荐",
+                "职称材料",
+                "职称申报"
+              ],
+              "positive_signals": [
+                "学院",
+                "职称",
+                "申报",
+                "推荐",
+                "评审"
+              ],
+              "negative_signals": [
+                "学校职称政策",
+                "学生评优",
+                "科研项目",
+                "西安理工人事",
+                "学校人事文件"
+              ],
+              "examples": [
+                "学院职称申报推荐表",
+                "学院职称材料审核通知",
+                "职称推荐排序公示"
+              ]
+            },
+            {
+              "id": "college.hr.appointment-assessment",
+              "name": "考核聘任",
+              "description": "与学院教师考核、岗位聘任、续聘、聘期材料审核和学院推荐相关的文件。",
+              "aliases": [
+                "学院考核",
+                "岗位聘任",
+                "续聘审核",
+                "聘期考核"
+              ],
+              "positive_signals": [
+                "学院",
+                "教师",
+                "岗位",
+                "聘期",
+                "考核",
+                "续聘"
+              ],
+              "negative_signals": [
+                "学生考核",
+                "课程考核",
+                "学校总体通知"
+              ],
+              "examples": [
+                "学院教师聘期考核材料",
+                "学院岗位续聘审核表",
+                "教师年度考核汇总"
+              ]
+            },
+            {
+              "id": "college.hr.talent-work",
+              "name": "人才工作"
+            },
+            {
+              "id": "college.hr.faculty-recruitment",
+              "name": "师资招聘"
+            }
+          ],
+          "aliases": [],
+          "positive_signals": [],
+          "negative_signals": [
+            "西安理工人事",
+            "学校人事文件"
+          ],
+          "examples": []
+        },
+        {
+          "id": "college.request-report",
+          "name": "请示报告"
+        },
+        {
+          "id": "college.finance",
+          "name": "财务管理"
+        },
+        {
+          "id": "college.teaching",
+          "name": "教学",
+          "description": "与学院课程建设、教学安排、教学改革、质量评价、教材和实践教学相关的文件。",
+          "aliases": [
+            "课程",
+            "教学安排",
+            "教学改革",
+            "实践教学",
+            "教材"
+          ],
+          "positive_signals": [
+            "教学",
+            "课程",
+            "教材",
+            "实践",
+            "课堂",
+            "质量"
+          ],
+          "negative_signals": [
+            "科研项目",
+            "研究生学位",
+            "财务报销"
+          ],
+          "examples": [
+            "学院教学工作安排",
+            "课程建设申报材料",
+            "教学改革项目通知"
+          ]
+        },
+        {
+          "id": "college.research",
+          "name": "科研",
+          "description": "与学院科研项目、科研成果、科研平台、成果资助和科研统计相关的文件。",
+          "aliases": [
+            "学院科研",
+            "科研成果",
+            "科研项目",
+            "成果资助"
+          ],
+          "positive_signals": [
+            "学院",
+            "科研",
+            "项目",
+            "成果",
+            "资助",
+            "统计"
+          ],
+          "negative_signals": [
+            "学校科研制度",
+            "教学成果",
+            "学生资助"
+          ],
+          "examples": [
+            "2019年学院科研成果资助",
+            "学院科研项目统计表",
+            "学院成果资助申请"
+          ]
+        },
+        {
+          "id": "college.postgraduate",
+          "name": "研究生",
+          "description": "与学院研究生培养、导师管理、学位论文、研究生奖助和研究生教育日常管理相关的文件。",
+          "aliases": [
+            "研究生培养",
+            "导师",
+            "学位论文",
+            "研究生奖助"
+          ],
+          "positive_signals": [
+            "研究生",
+            "导师",
+            "学位",
+            "培养",
+            "论文",
+            "奖助"
+          ],
+          "negative_signals": [
+            "本科教学",
+            "博士后",
+            "教师职称"
+          ],
+          "examples": [
+            "学院研究生培养材料",
+            "导师招生资格审核",
+            "研究生奖助评审通知"
+          ]
+        },
+        {
+          "id": "college.discipline",
+          "name": "学科"
+        },
+        {
+          "id": "college.student-affairs",
+          "name": "学生工作",
+          "description": "与学院学生管理、评奖评优、资助、就业、心理健康、志愿服务和日常学生事务相关的文件。",
+          "aliases": [
+            "学生管理",
+            "评奖评优",
+            "学生资助",
+            "就业",
+            "志愿服务"
+          ],
+          "positive_signals": [
+            "学生",
+            "奖学金",
+            "资助",
+            "就业",
+            "志愿",
+            "评优"
+          ],
+          "negative_signals": [
+            "教师考核",
+            "科研项目",
+            "财务预算"
+          ],
+          "examples": [
+            "学生奖学金评审材料",
+            "学生就业工作安排",
+            "志愿服务证明"
+          ]
+        },
+        {
+          "id": "college.profile",
+          "name": "学院情况",
+          "children": [
+            {
+              "id": "college.profile.introduction",
+              "name": "学院介绍",
+              "description": "与学院概况、历史沿革、办学特色、师资队伍和宣传介绍相关的材料。",
+              "aliases": [
+                "学院概况",
+                "学院简介",
+                "学院介绍",
+                "办学特色"
+              ],
+              "positive_signals": [
+                "学院",
+                "简介",
+                "概况",
+                "历史",
+                "特色",
+                "师资队伍"
+              ],
+              "negative_signals": [
+                "工作总结",
+                "会议纪要",
+                "制度办法"
+              ],
+              "examples": [
+                "学院简介",
+                "学院宣传介绍材料",
+                "学院概况更新稿"
+              ]
+            },
+            {
+              "id": "college.profile.organization-structure",
+              "name": "机构设置"
+            },
+            {
+              "id": "college.profile.faculty-info",
+              "name": "教工信息"
+            }
+          ]
+        },
+        {
+          "id": "college.cadre-appointment",
+          "name": "干部任命"
+        },
+        {
+          "id": "college.news",
+          "name": "学院新闻"
+        },
+        {
+          "id": "college.safety-stability",
+          "name": "安全稳定"
+        }
+      ]
+    }
+  ]
+}

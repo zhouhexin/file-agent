@@ -1,0 +1,202 @@
+{
+  "snapshot_version": "managed-downloads-2026-07-18-v2",
+  "source_root_key": "downloads",
+  "source_note": "2026-07-18 挂载受管卷实时只读扫描；共 14695 个非隐藏文件、2491 个目录，最大相对深度 13",
+  "entries": [
+    {
+      "name": "人事处",
+      "role": "DEPARTMENT",
+      "file_count": 11703,
+      "merge_into_category_id": "school.hr",
+      "aliases": ["人事处", "人事文件"],
+      "positive_signals": ["人事"]
+    },
+    {
+      "name": "教务处",
+      "role": "DEPARTMENT",
+      "file_count": 1331,
+      "merge_into_category_id": "school.undergraduate-teaching",
+      "aliases": ["教务处", "教务", "本科教学"],
+      "positive_signals": ["教务", "本科教学"]
+    },
+    {
+      "name": "临时",
+      "role": "TEMPORARY",
+      "file_count": 534
+    },
+    {
+      "name": "校办",
+      "role": "DEPARTMENT",
+      "file_count": 375,
+      "merge_into_category_id": "school.admin",
+      "aliases": ["校办", "校长办公室", "学校办公室"],
+      "positive_signals": ["校办", "校长办公室"]
+    },
+    {
+      "name": "后勤处",
+      "role": "DEPARTMENT",
+      "file_count": 162,
+      "merge_into_category_id": "school.logistics-assets",
+      "aliases": ["后勤处", "后勤", "资产管理"],
+      "positive_signals": ["后勤", "资产"]
+    },
+    {
+      "name": "纪委+廉政工作",
+      "role": "DEPARTMENT",
+      "file_count": 155,
+      "merge_into_category_id": "school.party.discipline-inspection",
+      "aliases": ["纪委+廉政工作", "廉政工作", "纪检监察"],
+      "positive_signals": ["纪委", "纪检", "廉政"]
+    },
+    {
+      "name": "国际交流处",
+      "role": "DEPARTMENT",
+      "file_count": 117,
+      "merge_into_category_id": "school.international-cooperation",
+      "aliases": ["国际交流处", "国际交流", "国际合作"],
+      "positive_signals": ["国际交流", "国际合作"]
+    },
+    {
+      "name": "科技处",
+      "role": "DEPARTMENT",
+      "file_count": 93,
+      "merge_into_category_id": "school.research",
+      "aliases": ["科技处", "科研管理"],
+      "positive_signals": ["科技处", "科研"]
+    },
+    {
+      "name": "工程硕士",
+      "role": "CATEGORY",
+      "file_count": 65,
+      "merge_into_category_id": "school.postgraduate",
+      "aliases": ["工程硕士", "工程类硕士"],
+      "positive_signals": ["工程硕士"]
+    },
+    {
+      "name": "辅修",
+      "role": "CATEGORY",
+      "file_count": 49,
+      "merge_into_category_id": "school.undergraduate-teaching",
+      "aliases": ["辅修", "辅修专业"],
+      "positive_signals": ["辅修"]
+    },
+    {
+      "name": "曲江3期",
+      "role": "UNKNOWN",
+      "file_count": 32
+    },
+    {
+      "name": "教学评估",
+      "role": "CATEGORY",
+      "file_count": 27,
+      "merge_into_category_id": "school.undergraduate-teaching",
+      "aliases": ["教学评估", "本科教学评估"],
+      "positive_signals": ["教学评估", "教学质量"]
+    },
+    {
+      "name": "会议假条",
+      "role": "COLLECTION",
+      "file_count": 14
+    },
+    {
+      "name": "各种通知",
+      "role": "COLLECTION",
+      "file_count": 13
+    },
+    {
+      "name": "党办",
+      "role": "DEPARTMENT",
+      "file_count": 10,
+      "merge_into_category_id": "school.party",
+      "aliases": ["党办", "党委办公室"],
+      "positive_signals": ["党委办公室"]
+    },
+    {
+      "name": "发展规划处",
+      "role": "DEPARTMENT",
+      "file_count": 5,
+      "merge_into_category_id": "school.admin.development-planning",
+      "aliases": ["发展规划处", "发规处"],
+      "positive_signals": ["发展规划"]
+    },
+    {
+      "name": "党员学习",
+      "role": "CATEGORY",
+      "file_count": 3,
+      "merge_into_category_id": "school.party.organization",
+      "aliases": ["党员学习", "党员教育"],
+      "positive_signals": ["党员学习", "党员教育", "理论学习"]
+    },
+    {
+      "name": "档案馆",
+      "role": "UNKNOWN",
+      "file_count": 3
+    },
+    {
+      "name": "临时工作",
+      "role": "TEMPORARY",
+      "file_count": 2
+    },
+    {
+      "name": "曲江管理处",
+      "role": "UNKNOWN",
+      "file_count": 1
+    },
+    {
+      "name": "继教院",
+      "role": "UNKNOWN",
+      "file_count": 1
+    }
+  ],
+  "taxonomy_enrichments": [
+    {
+      "category_id": "school.hr.title-review",
+      "aliases": ["职称评定", "职称资格", "任职资格", "专业技术职务任职资格"],
+      "positive_signals": ["职称评定", "任职资格", "专业技术职务"],
+      "examples": ["关于某等同志任职资格的通知"]
+    },
+    {
+      "category_id": "school.hr.appointment-assessment",
+      "aliases": ["考核与聘任", "聘用合同"],
+      "positive_signals": ["考核", "聘任", "聘用合同"]
+    },
+    {
+      "category_id": "school.hr.talent-work",
+      "aliases": ["人才工程科", "双百人才", "高人办"],
+      "positive_signals": ["人才工程", "双百人才", "高层次人才"]
+    },
+    {
+      "category_id": "school.hr.faculty-development",
+      "aliases": ["教师发展科", "教师工作部", "教师进修"],
+      "positive_signals": ["教师发展", "教师进修"]
+    },
+    {
+      "category_id": "school.hr.salary-social-security",
+      "aliases": ["劳资科", "社保科", "工资", "酬金"],
+      "positive_signals": ["劳资", "社保", "工资", "酬金"]
+    },
+    {
+      "category_id": "school.hr.postdoc",
+      "aliases": ["博士后流动站"],
+      "positive_signals": ["博士后流动站"]
+    },
+    {
+      "category_id": "school.admin.meeting-minutes",
+      "aliases": ["校办会议纪要"],
+      "positive_signals": ["会议纪要"]
+    },
+    {
+      "category_id": "school.laboratory-management",
+      "aliases": ["实验室工作"],
+      "positive_signals": ["实验室工作", "实验实习用房"]
+    },
+    {
+      "category_id": "college.hr",
+      "negative_signals": ["西安理工人事", "学校人事文件"]
+    },
+    {
+      "category_id": "college.hr.title-review",
+      "negative_signals": ["西安理工人事", "学校人事文件"]
+    }
+  ]
+}
