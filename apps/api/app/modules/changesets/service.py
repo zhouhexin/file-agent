@@ -20,7 +20,7 @@ def persist_changeset_from_document_results(
 ) -> ChangeSet | None:
     """把 AgentRun 的逐文件结果转换为真实 ChangeSet。
 
-    当前阶段只覆盖解析正文、写入页面、生成分类建议和文件处理失败四类结果。
+    当前阶段覆盖派生件转换、解析正文、写入页面、生成分类建议和文件处理失败。
     """
 
     if not document_results:
@@ -191,6 +191,27 @@ def _append_items_for_result(
     pages_change_type = "DOCUMENT_PAGES_REUSED" if result.get("text_reused") else "DOCUMENT_PAGES_CREATED"
     category_change_type = "CATEGORY_SUGGESTION_REUSED" if result.get("classification_reused") else "CATEGORY_SUGGESTED"
 
+    if result.get("conversion_artifact_id") and isinstance(result.get("conversion_reused"), bool):
+        repository.create_item(
+            changeset_id=changeset_id,
+            target_type="document_artifact",
+            target_id=str(result.get("conversion_artifact_id")),
+            target_document_id=document_id,
+            change_type=(
+                "DOCX_DERIVATIVE_REUSED"
+                if result.get("conversion_reused")
+                else "DOCX_DERIVATIVE_CREATED"
+            ),
+            after_value={
+                "artifact_id": str(result.get("conversion_artifact_id")),
+                "converter": str(result.get("conversion_converter") or ""),
+                "converter_version": str(result.get("conversion_converter_version") or ""),
+                "source_format": str(result.get("conversion_source_format") or "doc"),
+                "parsed_format": str(result.get("conversion_parsed_format") or "docx"),
+            },
+            source=result_source,
+        )
+
     if int(result.get("char_count") or 0) > 0:
         repository.create_item(
             changeset_id=changeset_id,
@@ -251,6 +272,8 @@ def _count_change_items(document_results: list[dict[str, Any]]) -> int:
         if result.get("extraction_status") == "FAILED":
             total += 1
             continue
+        if result.get("conversion_artifact_id") and isinstance(result.get("conversion_reused"), bool):
+            total += 1
         if int(result.get("char_count") or 0) > 0:
             total += 1
         if int(result.get("page_count") or 0) > 0:

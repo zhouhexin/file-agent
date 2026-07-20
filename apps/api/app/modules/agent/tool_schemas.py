@@ -45,6 +45,7 @@ class DocumentToolInput(StrictToolInput):
 
     document_id: str = Field(min_length=1)
     force_reprocess: bool = False
+    force_reconvert: bool = False
 
 
 class SpreadsheetAnalysisInput(StrictToolInput):

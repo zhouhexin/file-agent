@@ -114,6 +114,7 @@ class Document(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
     file_objects: Mapped[List["FileObject"]] = relationship(back_populates="document")
+    artifacts: Mapped[List["DocumentArtifact"]] = relationship(back_populates="document")
     insights: Mapped[List["DocumentInsight"]] = relationship(back_populates="document")
     extraction_runs: Mapped[List["DocumentExtractionRun"]] = relationship(back_populates="document")
     pages: Mapped[List["DocumentPage"]] = relationship(back_populates="document")
@@ -134,6 +135,38 @@ class FileObject(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     document: Mapped[Document] = relationship(back_populates="file_objects")
+
+
+class DocumentArtifact(Base):
+    """由原始文档生成、可跨解析运行复用的文件派生件。"""
+
+    __tablename__ = "document_artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_id",
+            "artifact_type",
+            "source_sha256",
+            "converter_config_hash",
+            name="uq_document_artifacts_source_config",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    document_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False, index=True)
+    artifact_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    storage_backend: Mapped[str] = mapped_column(String(40), nullable=False, default="local")
+    storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    content_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    converter_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    converter_version: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    converter_config_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    document: Mapped[Document] = relationship(back_populates="artifacts")
 
 
 class DocumentInsight(Base):

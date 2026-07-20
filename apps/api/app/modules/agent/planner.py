@@ -360,6 +360,7 @@ class DeterministicPlanner:
                             message=message,
                             lowered=lowered,
                         ),
+                        force_reconvert=_should_force_reconvert(message=message, lowered=lowered),
                     )
                     for index, item in enumerate(document_ids, start=1)
                 ],
@@ -410,6 +411,7 @@ class DeterministicPlanner:
                             message=message,
                             lowered=lowered,
                         ),
+                        force_reconvert=_should_force_reconvert(message=message, lowered=lowered),
                     )
                     for index, item in enumerate(document_ids, start=1)
                 ],
@@ -443,6 +445,7 @@ class DeterministicPlanner:
                             message=message,
                             lowered=lowered,
                         ),
+                        force_reconvert=_should_force_reconvert(message=message, lowered=lowered),
                     )
                     for index, item in enumerate(document_ids, start=1)
                 ],
@@ -797,6 +800,7 @@ def build_plan_from_user_intent(
                         message=message,
                         lowered=lowered,
                     ),
+                    force_reconvert=_should_force_reconvert(message=message, lowered=lowered),
                 )
                 for index, document_id in enumerate(document_ids, start=1)
             ],
@@ -890,6 +894,7 @@ def build_plan_from_user_intent(
                         message=message,
                         lowered=lowered,
                     ),
+                    force_reconvert=_should_force_reconvert(message=message, lowered=lowered),
                 )
                 for index, document_id in enumerate(document_ids, start=1)
             ],
@@ -1490,13 +1495,18 @@ def _extract_document_text_step(
     document_id: str,
     index: int,
     force_reprocess: bool = False,
+    force_reconvert: bool = False,
 ) -> Dict[str, Any]:
     """为一个文件生成正文解析 Tool 步骤，支持多附件批量计划。"""
     return {
         "step_id": f"step-extract-{index}",
         "skill": "document-text-extract",
         "tool_name": "extract-document-text",
-        "input": {"document_id": document_id, "force_reprocess": force_reprocess},
+        "input": {
+            "document_id": document_id,
+            "force_reprocess": force_reprocess,
+            "force_reconvert": force_reconvert,
+        },
         "requires_confirmation": False,
         "risk_level": "low",
         "expected_outputs": ["document_pages", "extraction_run"],
@@ -1605,8 +1615,8 @@ def _spreadsheet_workbench_plan(
 
 def _should_extract_text(*, message: str, lowered: str) -> bool:
     """判断确定性模式下用户是否明确要求读取正文；读取优先于分类组合词。"""
-    extraction_keywords = ["读取", "解析", "正文", "内容", "OCR"]
-    english_keywords = ["read", "extract", "parse", "ocr"]
+    extraction_keywords = ["读取", "解析", "正文", "内容", "转换", "OCR"]
+    english_keywords = ["read", "extract", "parse", "convert", "ocr"]
     return any(keyword in message for keyword in extraction_keywords) or any(
         keyword in lowered for keyword in english_keywords
     )
@@ -1618,6 +1628,7 @@ def _should_force_reprocess(*, message: str, lowered: str) -> bool:
         "重新解析",
         "重新读取",
         "重新处理",
+        "重新转换",
         "重新分类",
         "重新归类",
         "重跑",
@@ -1629,6 +1640,14 @@ def _should_force_reprocess(*, message: str, lowered: str) -> bool:
     )
     return explicit_reclassification or any(keyword in message for keyword in chinese_keywords) or any(
         keyword in lowered for keyword in english_keywords
+    )
+
+
+def _should_force_reconvert(*, message: str, lowered: str) -> bool:
+    """仅在用户明确要求重新转换旧格式时绕过派生件缓存。"""
+
+    return any(keyword in message for keyword in ["重新转换", "重转格式"]) or any(
+        keyword in lowered for keyword in ["reconvert", "convert again", "force convert"]
     )
 
 

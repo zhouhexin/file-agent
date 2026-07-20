@@ -254,6 +254,22 @@ DOCLING_FORMATS=pdf,docx
 DOCLING_OCR_ENABLED=false
 ```
 
+旧版 `.doc` 的结构化读取还需要 LibreOffice。容器部署应在 API 镜像中安装 LibreOffice；非 Docker
+部署可使用系统安装：Windows 指向 `soffice.com`，macOS 指向 LibreOffice.app 内的 `soffice`，Linux
+指向 `/usr/bin/soffice`。生产配置：
+
+```text
+LEGACY_OFFICE_CONVERSION_ENABLED=true
+LEGACY_OFFICE_CONVERTER=libreoffice
+LIBREOFFICE_EXECUTABLE=
+LEGACY_OFFICE_CONVERSION_TIMEOUT_SECONDS=90
+LEGACY_OFFICE_MAX_FILE_SIZE_MB=100
+LEGACY_OFFICE_DERIVATIVE_DIR=derivatives/office
+```
+
+离线更新包必须同时包含带 LibreOffice 的 API 镜像或对应平台的 LibreOffice 离线安装包。仅更新源码不会
+自动安装系统程序。更新后执行迁移 `20260720_0001`，创建 `document_artifacts`。
+
 更新后必须执行数据库迁移，创建 `document_elements` 并增加解析器版本字段：
 
 ```powershell

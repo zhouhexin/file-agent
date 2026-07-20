@@ -42,6 +42,9 @@ DEFAULT_GRAPH_PROJECTION_BATCH_SIZE = 500
 DEFAULT_GRAPH_CLASSIFICATION_ROLLOUT_PERCENT = 10
 DEFAULT_GRAPH_FEEDBACK_EVAL_MIN_SAMPLES = 100
 DEFAULT_MANAGED_FILE_CLASSIFICATION_SYNC_LIMIT = 20
+DEFAULT_LEGACY_OFFICE_CONVERSION_TIMEOUT_SECONDS = 90
+DEFAULT_LEGACY_OFFICE_MAX_FILE_SIZE_MB = 100
+DEFAULT_LEGACY_OFFICE_DERIVATIVE_DIR = "derivatives/office"
 
 
 class Settings(BaseModel):
@@ -71,6 +74,12 @@ class Settings(BaseModel):
     docling_enabled: bool = True
     docling_formats: tuple[str, ...] = DEFAULT_DOCLING_FORMATS
     docling_ocr_enabled: bool = False
+    legacy_office_conversion_enabled: bool = True
+    legacy_office_converter: str = "libreoffice"
+    libreoffice_executable: str = ""
+    legacy_office_conversion_timeout_seconds: int = DEFAULT_LEGACY_OFFICE_CONVERSION_TIMEOUT_SECONDS
+    legacy_office_max_file_size_mb: int = DEFAULT_LEGACY_OFFICE_MAX_FILE_SIZE_MB
+    legacy_office_derivative_dir: str = DEFAULT_LEGACY_OFFICE_DERIVATIVE_DIR
     file_rename_executor: str = DEFAULT_FILE_RENAME_EXECUTOR
     file_rename_parse_mode: str = DEFAULT_FILE_RENAME_PARSE_MODE
     file_rename_max_batch_size: int = DEFAULT_FILE_RENAME_MAX_BATCH_SIZE
@@ -205,6 +214,33 @@ def get_settings() -> Settings:
             if item.strip()
         ),
         docling_ocr_enabled=os.getenv("DOCLING_OCR_ENABLED", "false").lower() == "true",
+        legacy_office_conversion_enabled=os.getenv(
+            "LEGACY_OFFICE_CONVERSION_ENABLED",
+            "true",
+        ).lower() == "true",
+        legacy_office_converter=_choice(
+            os.getenv("LEGACY_OFFICE_CONVERTER", "libreoffice"),
+            allowed={"libreoffice"},
+            default="libreoffice",
+        ),
+        libreoffice_executable=os.getenv("LIBREOFFICE_EXECUTABLE", "").strip(),
+        legacy_office_conversion_timeout_seconds=max(
+            1,
+            int(
+                os.getenv(
+                    "LEGACY_OFFICE_CONVERSION_TIMEOUT_SECONDS",
+                    str(DEFAULT_LEGACY_OFFICE_CONVERSION_TIMEOUT_SECONDS),
+                )
+            ),
+        ),
+        legacy_office_max_file_size_mb=max(
+            1,
+            int(os.getenv("LEGACY_OFFICE_MAX_FILE_SIZE_MB", str(DEFAULT_LEGACY_OFFICE_MAX_FILE_SIZE_MB))),
+        ),
+        legacy_office_derivative_dir=os.getenv(
+            "LEGACY_OFFICE_DERIVATIVE_DIR",
+            DEFAULT_LEGACY_OFFICE_DERIVATIVE_DIR,
+        ).strip(),
         file_rename_executor=os.getenv("FILE_RENAME_EXECUTOR", DEFAULT_FILE_RENAME_EXECUTOR),
         file_rename_parse_mode=_choice(
             os.getenv("FILE_RENAME_PARSE_MODE", DEFAULT_FILE_RENAME_PARSE_MODE),

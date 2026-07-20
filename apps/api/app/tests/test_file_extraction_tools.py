@@ -6,11 +6,12 @@ import subprocess
 import sys
 from types import SimpleNamespace
 from io import BytesIO
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from app.core import config
-from app.db.models import Document, DocumentElement, DocumentExtractionRun, DocumentPage
+from app.db.models import Document, DocumentArtifact, DocumentElement, DocumentExtractionRun, DocumentPage
 from app.modules.files.extractors import extract_document_text
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.docling_parser import try_parse_with_docling
@@ -147,6 +148,18 @@ def _upload_docx(client: TestClient, headers: dict[str, str]) -> str:
     return response.json()["document_id"]
 
 
+def _upload_doc(client: TestClient, headers: dict[str, str]) -> str:
+    """上传一个由测试转换器处理的旧版 doc 占位文件。"""
+
+    response = client.post(
+        "/api/files/upload",
+        headers=headers,
+        files={"file": ("legacy-notice.doc", b"legacy-doc-content", "application/msword")},
+    )
+    assert response.status_code == 200
+    return response.json()["document_id"]
+
+
 def test_extraction_tables_can_be_created():
     """文件解析运行表和页面表必须纳入 ORM metadata。"""
 
@@ -268,6 +281,79 @@ def test_extract_document_text_persists_docx_pages(monkeypatch, tmp_path):
         assert page.document_id == document_id
         assert "王五" in page.text_content
         assert "三等奖" in page.text_content
+    finally:
+        db.close()
+        clear_overrides()
+        config.get_settings.cache_clear()
+
+
+def test_extract_doc_creates_docx_artifact_and_reuses_it_on_reprocess(monkeypatch, tmp_path):
+    """重新解析 DOC 时应复用 DOCX 派生件，而不是重复启动 LibreOffice。"""
+
+    from docx import Document as DocxDocument
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("DOCLING_ENABLED", "false")
+    config.get_settings.cache_clear()
+    executable = tmp_path / "soffice"
+    executable.write_bytes(b"")
+    conversion_calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        "app.modules.files.office_conversion.resolve_libreoffice_executable",
+        lambda **_: executable,
+    )
+    monkeypatch.setattr(
+        "app.modules.files.office_conversion.libreoffice_runtime_version",
+        lambda _: "LibreOffice Test 1.0",
+    )
+
+    def fake_convert(command: list[str], *, timeout_seconds: int):
+        """模拟 LibreOffice 在隔离输出目录生成 DOCX。"""
+
+        conversion_calls.append(command)
+        output_dir = Path(command[command.index("--outdir") + 1])
+        converted = DocxDocument()
+        converted.add_heading("关于开展测试工作的通知", level=0)
+        converted.add_paragraph("转换后的正文内容。")
+        converted.save(output_dir / "source.docx")
+        return subprocess.CompletedProcess(command, 0, stdout=b"converted", stderr=b"")
+
+    monkeypatch.setattr(
+        "app.modules.files.office_conversion.run_libreoffice_command",
+        fake_convert,
+    )
+    client, SessionLocal = client_with_database()
+    headers = _auth_header(client, "legacy-doc-extractor")
+    document_id = _upload_doc(client, headers)
+    db = SessionLocal()
+    try:
+        user_id = client.get("/api/auth/me", headers=headers).json()["id"]
+        registry = ToolRegistry(db=db, user_id=user_id)
+
+        first = registry.invoke("extract-document-text", {"document_id": document_id})
+        second = registry.invoke(
+            "extract-document-text",
+            {"document_id": document_id, "force_reprocess": True},
+        )
+
+        assert first.output_json["ok"] is True
+        assert first.output_json["conversion_reused"] is False
+        assert first.output_json["conversion_source_format"] == "doc"
+        assert first.output_json["conversion_parsed_format"] == "docx"
+        assert first.output_json["conversion_converter"] == "libreoffice"
+        assert first.output_json["conversion_converter_version"] == "LibreOffice Test 1.0"
+        assert second.output_json["ok"] is True
+        assert second.output_json["conversion_reused"] is True
+        assert len(conversion_calls) == 1
+        assert db.query(DocumentArtifact).count() == 1
+        assert db.query(DocumentExtractionRun).count() == 2
+        assert db.query(DocumentPage).count() == 2
+        latest_page = db.query(DocumentPage).order_by(DocumentPage.created_at.desc()).first()
+        assert latest_page.metadata_json["source_format"] == "doc"
+        assert latest_page.metadata_json["parsed_format"] == "docx"
+        assert latest_page.metadata_json["conversion_reused"] is True
+        assert "关于开展测试工作的通知" in latest_page.text_content
     finally:
         db.close()
         clear_overrides()

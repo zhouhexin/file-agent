@@ -425,6 +425,30 @@ create table document_pages (
 
 ### 4.9 document_versions
 
+当前实现先以不可变 `Document.id + sha256` 作为源文件版本，并使用下表保存可跨解析运行复用的旧版 Office 派生件。后续正式引入 `document_versions` 时，再把 `document_artifacts.document_id` 平滑扩展为版本关联。
+
+```sql
+create table document_artifacts (
+  id varchar(36) primary key,
+  document_id varchar(36) not null references documents(id),
+  artifact_type varchar(50) not null,
+  storage_backend varchar(40) not null default 'local',
+  storage_path text not null,
+  content_type varchar(120) not null,
+  size_bytes bigint not null,
+  sha256 varchar(64) not null,
+  source_sha256 varchar(64) not null,
+  converter_name varchar(80) not null,
+  converter_version varchar(120) not null default '',
+  converter_config_hash varchar(64) not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (document_id, artifact_type, source_sha256, converter_config_hash)
+);
+```
+
+`CONVERTED_DOCX` 记录只保存相对 `FILE_STORAGE_ROOT` 的路径。相同源哈希和转换指纹可以跨 Document 复用同一物理文件，但每个 Document 必须保留独立记录；最后一个引用删除后才能删除物理派生件。
+
 ```sql
 create table document_versions (
   id uuid primary key default gen_random_uuid(),

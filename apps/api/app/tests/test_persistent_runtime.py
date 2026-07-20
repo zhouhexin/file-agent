@@ -821,6 +821,78 @@ def test_persist_changeset_skips_missing_document_ids():
         app.dependency_overrides.clear()
 
 
+def test_persist_changeset_records_docx_derivative_creation_and_reuse():
+    """DOC 转 DOCX 的创建和复用必须进入 ChangeSet 审计。"""
+
+    client = _client_with_database()
+    headers = _auth_header(client, username="docx-derivative-changeset-user")
+    document_id = _upload_document(
+        client,
+        headers,
+        filename="legacy.doc",
+        content=b"legacy-doc-content",
+        content_type="application/msword",
+    )
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(User.username == "docx-derivative-changeset-user").one()
+        message = ConversationRepository(db).create_user_message(
+            conversation_id="docx-derivative-changeset-conv",
+            user_id=user.id,
+            content="读取旧版 Word 文件",
+            attachments=[MessageAttachment(document_id=document_id)],
+        )
+        run = AgentRun(
+            conversation_id=message.conversation_id,
+            message_id=message.id,
+            user_id=user.id,
+            intent="EXTRACT_DOCUMENT_TEXT",
+            status="COMPLETED",
+        )
+        db.add(run)
+        db.flush()
+
+        base_result = {
+            "document_id": document_id,
+            "filename": "legacy.doc",
+            "extraction_status": "COMPLETED",
+            "char_count": 20,
+            "page_count": 1,
+            "categories": [],
+            "conversion_artifact_id": "artifact-id",
+            "conversion_converter": "libreoffice",
+            "conversion_converter_version": "test",
+            "conversion_source_format": "doc",
+            "conversion_parsed_format": "docx",
+        }
+        persist_changeset_from_document_results(
+            db=db,
+            run=run,
+            document_results=[{**base_result, "conversion_reused": False}],
+        )
+        created_types = [item.change_type for item in db.query(ChangeItem).all()]
+        assert "DOCX_DERIVATIVE_CREATED" in created_types
+
+        persist_changeset_from_document_results(
+            db=db,
+            run=run,
+            document_results=[{**base_result, "conversion_reused": True}],
+        )
+        reused_items = db.query(ChangeItem).filter(ChangeItem.change_type == "DOCX_DERIVATIVE_REUSED").all()
+        assert len(reused_items) == 1
+        assert reused_items[0].after_value_json == {
+            "artifact_id": "artifact-id",
+            "converter": "libreoffice",
+            "converter_version": "test",
+            "source_format": "doc",
+            "parsed_format": "docx",
+        }
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
 def test_persist_changeset_keeps_managed_file_failure_without_document():
     """受管快照创建前失败时应以 managed_file_id 生成失败 ChangeItem。"""
 

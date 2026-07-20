@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.core import config
-from app.db.models import Document, DocumentInsight, FileObject, ManagedFileSnapshot, User
+from app.db.models import Document, DocumentArtifact, DocumentInsight, FileObject, ManagedFileSnapshot, User
 from app.modules.agent.tool_registry import ToolRegistry
 from app.tests.helpers import clear_overrides, client_with_database
 
@@ -396,6 +396,70 @@ def test_delete_uploaded_file_removes_database_rows_and_local_file(monkeypatch, 
     try:
         assert db.get(Document, document_id) is None
         assert db.query(FileObject).filter(FileObject.document_id == document_id).count() == 0
+    finally:
+        db.close()
+        clear_overrides()
+        config.get_settings.cache_clear()
+
+
+def test_delete_uploaded_file_preserves_shared_derivative_until_last_reference(monkeypatch, tmp_path):
+    """共享派生文件必须在最后一个 Artifact 引用删除后才物理清理。"""
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
+    config.get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    first_header = _auth_header(client, username="derivative-delete-owner-a")
+    second_header = _auth_header(client, username="derivative-delete-owner-b")
+    upload_payload = {
+        "files": {"file": ("shared.doc", b"shared-legacy-doc", "application/msword")},
+    }
+    first_document_id = client.post("/api/files/upload", headers=first_header, **upload_payload).json()["document_id"]
+    second_document_id = client.post("/api/files/upload", headers=second_header, **upload_payload).json()["document_id"]
+
+    derivative_path = tmp_path / "derivatives" / "office" / "shared.docx"
+    derivative_path.parent.mkdir(parents=True)
+    derivative_path.write_bytes(b"shared-docx")
+    storage_path = derivative_path.relative_to(tmp_path).as_posix()
+    db = SessionLocal()
+    try:
+        for document_id in (first_document_id, second_document_id):
+            db.add(
+                DocumentArtifact(
+                    document_id=document_id,
+                    artifact_type="CONVERTED_DOCX",
+                    storage_backend="local",
+                    storage_path=storage_path,
+                    content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    size_bytes=derivative_path.stat().st_size,
+                    sha256="a" * 64,
+                    source_sha256="b" * 64,
+                    converter_name="libreoffice",
+                    converter_version="test",
+                    converter_config_hash="c" * 64,
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+
+    first_delete = client.delete(f"/api/files/{first_document_id}", headers=first_header)
+
+    assert first_delete.status_code == 200
+    assert derivative_path.exists()
+    db = SessionLocal()
+    try:
+        assert db.query(DocumentArtifact).count() == 1
+    finally:
+        db.close()
+
+    second_delete = client.delete(f"/api/files/{second_document_id}", headers=second_header)
+
+    assert second_delete.status_code == 200
+    assert not derivative_path.exists()
+    assert not derivative_path.parent.exists()
+    db = SessionLocal()
+    try:
+        assert db.query(DocumentArtifact).count() == 0
     finally:
         db.close()
         clear_overrides()

@@ -14,11 +14,12 @@ from sqlalchemy.orm import Session
 from app.db.models import AgentRun, Document, ManagedFileSnapshot, User
 from app.modules.file_rename.filename_builder import FilenameBuildError, FilenameBuilder
 from app.modules.file_rename.metadata_resolution_service import RenameMetadataResolutionService
-from app.modules.file_rename.parsing_service import extract_rename_primary, rename_primary_config_hash
+from app.modules.file_rename.parsing_service import extract_rename_primary
 from app.modules.file_rename.policy_loader import load_rename_policy
 from app.modules.file_rename.schemas import RenameFieldResult, RenameFieldStatus
 from app.modules.file_rename.validation_service import RenameValidationService
 from app.modules.files.extraction_repository import FileExtractionRepository
+from app.modules.files.readable_source import ReadableDocumentSourceResolver, apply_readable_source_metadata
 from app.modules.operations.repository import OperationPlanRepository
 
 
@@ -37,6 +38,7 @@ class UploadedRenameSuggestionService:
         self.user_id = user_id
         self.policy = load_rename_policy()
         self.metadata_resolution_service = RenameMetadataResolutionService()
+        self.readable_source_resolver = ReadableDocumentSourceResolver(db=db)
         self.filename_builder = FilenameBuilder()
         self.validation_service = validation_service or RenameValidationService()
         self._llm_validation_calls = 0
@@ -177,10 +179,19 @@ class UploadedRenameSuggestionService:
                     extraction_result,
                 )
             resolved_source = FileExtractionRepository(self.db, self.user_id).resolve_original_file_for_document(document)
+            readable_source = (
+                self.readable_source_resolver.resolve(
+                    document=document,
+                    original_path=resolved_source["file_path"],
+                    purpose="rename",
+                )
+                if resolved_source.get("ok")
+                else None
+            )
             metadata_resolution = self.metadata_resolution_service.resolve(
-                file_path=resolved_source.get("file_path") if resolved_source.get("ok") else None,
-                filename=document.original_filename,
-                content_type=document.content_type,
+                file_path=readable_source.parse_path if readable_source is not None else None,
+                filename=readable_source.parse_filename if readable_source is not None else document.original_filename,
+                content_type=readable_source.parse_content_type if readable_source is not None else document.content_type,
                 primary_result=extraction_result,
                 primary_pages=pages,
                 primary_elements=elements,
@@ -299,7 +310,10 @@ class UploadedRenameSuggestionService:
         """生成或复用 document_pages，并只把轻量摘要返回给 Graph State。"""
 
         repository = FileExtractionRepository(self.db, self.user_id)
-        parser_config_hash = rename_primary_config_hash(filename=document.original_filename)
+        parser_config_hash = self.readable_source_resolver.expected_parser_config_hash(
+            document=document,
+            purpose="rename",
+        )
         reusable = repository.get_latest_successful_extraction(
             document_id=document.id,
             parser_config_hash=parser_config_hash,
@@ -313,11 +327,17 @@ class UploadedRenameSuggestionService:
                     error=resolved.get("error") or {},
                 ), [], []
             try:
-                extraction = extract_rename_primary(
-                    file_path=resolved["file_path"],
-                    filename=document.original_filename,
-                    content_type=document.content_type,
+                readable_source = self.readable_source_resolver.resolve(
+                    document=document,
+                    original_path=resolved["file_path"],
+                    purpose="rename",
                 )
+                extraction = extract_rename_primary(
+                    file_path=readable_source.parse_path,
+                    filename=readable_source.parse_filename,
+                    content_type=readable_source.parse_content_type,
+                )
+                extraction = apply_readable_source_metadata(extraction, source=readable_source)
             except Exception as exc:
                 run = repository.create_extraction_run(
                     document_id=document.id,
@@ -336,7 +356,7 @@ class UploadedRenameSuggestionService:
                 extractor=str(extraction.get("extractor") or "uploaded-file-rename"),
                 parser_name=str(extraction.get("parser_name") or ""),
                 parser_version=str(extraction.get("parser_version") or ""),
-                parser_config_hash=str(extraction.get("parser_config_hash") or parser_config_hash),
+                parser_config_hash=str(extraction.get("parser_config_hash") or ""),
             )
             if not extraction.get("ok"):
                 error = extraction.get("error") or {}
@@ -357,7 +377,7 @@ class UploadedRenameSuggestionService:
             )
             reusable = repository.get_latest_successful_extraction(
                 document_id=document.id,
-                parser_config_hash=parser_config_hash,
+                parser_config_hash=run.parser_config_hash,
             )
         if reusable is None:
             return _failed_extraction_result(

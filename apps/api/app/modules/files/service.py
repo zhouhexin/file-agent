@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.models import Document, User
+from app.modules.files.artifact_repository import DocumentArtifactRepository
 from app.modules.files.repository import FileRepository
 from app.modules.files.schemas import FileDeleteResponse, FileUploadResponse
 
@@ -99,6 +100,22 @@ class FileUploadService:
             raise HTTPException(status_code=409, detail="Document already used in a message")
 
         storage_root = Path(get_settings().file_storage_root)
+        artifact_repository = DocumentArtifactRepository(self.db)
+        artifacts = artifact_repository.list_for_document(document_id=document.id)
+        for artifact in artifacts:
+            if artifact.storage_backend != "local":
+                continue
+            artifact_path = self._resolve_local_storage_path(
+                storage_root=storage_root,
+                storage_path=artifact.storage_path,
+            )
+            if artifact_path is None:
+                continue
+            reference_count = artifact_repository.count_by_storage_path(storage_path=artifact.storage_path)
+            if reference_count <= 1:
+                artifact_path.unlink(missing_ok=True)
+                self._remove_empty_parent_dirs(artifact_path.parent, stop_at=storage_root)
+
         file_objects = self.repository.list_file_objects(document_id=document.id)
         for file_object in file_objects:
             # 只删除本地存储文件；后续接对象存储时这里应抽成 StorageService。
@@ -115,6 +132,16 @@ class FileUploadService:
         self.repository.delete_document_with_objects(document)
         self.db.commit()
         return FileDeleteResponse(deleted=True)
+
+    @staticmethod
+    def _resolve_local_storage_path(*, storage_root: Path, storage_path: str) -> Path | None:
+        """把相对存储路径限制在本地存储根目录内。"""
+
+        resolved_root = storage_root.resolve()
+        candidate = (resolved_root / storage_path).resolve()
+        if candidate == resolved_root or resolved_root not in candidate.parents:
+            return None
+        return candidate
 
     def get_content_response(self, document_id: str, current_user: User) -> FileResponse:
         """按 document_id 返回原始文件内容。

@@ -12,12 +12,13 @@ from app.db.models import Document, ManagedFile, ManagedRoot, User
 from app.modules.file_rename.batch_service import RenameBatchService
 from app.modules.file_rename.filename_builder import FilenameBuildError, FilenameBuilder
 from app.modules.file_rename.metadata_resolution_service import RenameMetadataResolutionService
-from app.modules.file_rename.parsing_service import extract_rename_primary, rename_primary_config_hash
+from app.modules.file_rename.parsing_service import extract_rename_primary
 from app.modules.file_rename.policy_loader import load_rename_policy
 from app.modules.file_rename.review_service import RenameReviewService
 from app.modules.file_rename.schemas import RenameFieldResult, RenameFieldStatus, RenameSuggestion
 from app.modules.file_rename.validation_service import RenameValidationService
 from app.modules.files.extraction_repository import FileExtractionRepository
+from app.modules.files.readable_source import ReadableDocumentSourceResolver, apply_readable_source_metadata
 from app.modules.managed_files.directory_scope_resolver import (
     ManagedDirectoryScopeResolution,
     ManagedDirectoryScopeResolver,
@@ -45,6 +46,7 @@ class RenameSuggestionService:
         self.user_id = user_id
         self.policy = load_rename_policy()
         self.metadata_resolution_service = RenameMetadataResolutionService()
+        self.readable_source_resolver = ReadableDocumentSourceResolver(db=db)
         self.filename_builder = FilenameBuilder()
         self.validation_service = validation_service or RenameValidationService()
         self._llm_validation_calls = 0
@@ -333,10 +335,23 @@ class RenameSuggestionService:
                 if document is not None
                 else {"ok": False}
             )
+            readable_source = (
+                self.readable_source_resolver.resolve(
+                    document=document,
+                    original_path=resolved_source["file_path"],
+                    purpose="rename",
+                )
+                if document is not None and resolved_source.get("ok")
+                else None
+            )
             metadata_resolution = self.metadata_resolution_service.resolve(
-                file_path=resolved_source.get("file_path") if resolved_source.get("ok") else None,
-                filename=metadata_filename,
-                content_type=document.content_type if document is not None else "",
+                file_path=readable_source.parse_path if readable_source is not None else None,
+                filename=readable_source.parse_filename if readable_source is not None else metadata_filename,
+                content_type=(
+                    readable_source.parse_content_type
+                    if readable_source is not None
+                    else document.content_type if document is not None else ""
+                ),
                 primary_result=extraction_result,
                 primary_pages=pages,
                 primary_elements=elements,
@@ -473,7 +488,10 @@ class RenameSuggestionService:
             root=root,
         )
         repository = FileExtractionRepository(self.db, self.user_id)
-        parser_config_hash = rename_primary_config_hash(filename=resolution.document.original_filename)
+        parser_config_hash = self.readable_source_resolver.expected_parser_config_hash(
+            document=resolution.document,
+            purpose="rename",
+        )
         reusable = repository.get_latest_successful_extraction(
             document_id=resolution.document.id,
             parser_config_hash=parser_config_hash,
@@ -496,11 +514,17 @@ class RenameSuggestionService:
                     resolution.document.original_filename,
                 )
             try:
-                extraction = extract_rename_primary(
-                    file_path=resolved["file_path"],
-                    filename=resolution.document.original_filename,
-                    content_type=resolution.document.content_type,
+                readable_source = self.readable_source_resolver.resolve(
+                    document=resolution.document,
+                    original_path=resolved["file_path"],
+                    purpose="rename",
                 )
+                extraction = extract_rename_primary(
+                    file_path=readable_source.parse_path,
+                    filename=readable_source.parse_filename,
+                    content_type=readable_source.parse_content_type,
+                )
+                extraction = apply_readable_source_metadata(extraction, source=readable_source)
             except Exception as exc:
                 # 单个损坏文件不能中断整个重命名批次；异常需落入解析运行和逐文件回执。
                 run = repository.create_extraction_run(
@@ -542,7 +566,7 @@ class RenameSuggestionService:
                 )
                 reusable = repository.get_latest_successful_extraction(
                     document_id=resolution.document.id,
-                    parser_config_hash=parser_config_hash,
+                    parser_config_hash=run.parser_config_hash,
                 )
             else:
                 repository.fail_extraction_run(

@@ -112,6 +112,28 @@ def test_settings_defaults_paddleocr_model_source_to_baidu_bos(monkeypatch, tmp_
     assert settings.ocr_paddle_model_source == "BOS"
 
 
+def test_settings_loads_legacy_office_conversion_options(monkeypatch, tmp_path):
+    """旧版 Office 转换配置必须由统一 Settings 读取。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.setenv("LEGACY_OFFICE_CONVERSION_ENABLED", "false")
+    monkeypatch.setenv("LIBREOFFICE_EXECUTABLE", "/opt/libreoffice/program/soffice")
+    monkeypatch.setenv("LEGACY_OFFICE_CONVERSION_TIMEOUT_SECONDS", "45")
+    monkeypatch.setenv("LEGACY_OFFICE_MAX_FILE_SIZE_MB", "64")
+    monkeypatch.setenv("LEGACY_OFFICE_DERIVATIVE_DIR", "derived/legacy-office")
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.legacy_office_conversion_enabled is False
+    assert settings.legacy_office_converter == "libreoffice"
+    assert settings.libreoffice_executable == "/opt/libreoffice/program/soffice"
+    assert settings.legacy_office_conversion_timeout_seconds == 45
+    assert settings.legacy_office_max_file_size_mb == 64
+    assert settings.legacy_office_derivative_dir == "derived/legacy-office"
+
+
 @pytest.mark.parametrize("mode", ["hybrid", "native", "docling"])
 def test_settings_loads_file_rename_parse_mode(monkeypatch, tmp_path, mode):
     """重命名解析模式必须接受三个受控配置值。"""

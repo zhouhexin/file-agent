@@ -165,10 +165,12 @@ class FileRepository:
         return insight
 
     def delete_document_with_objects(self, document: Document) -> None:
-        """删除 Document 及其 FileObject 记录。"""
+        """删除 Document、派生件及其 FileObject 记录。"""
 
         for insight in list(document.insights):
             self.db.delete(insight)
+        for artifact in list(document.artifacts):
+            self.db.delete(artifact)
         for file_object in self.list_file_objects(document.id):
             self.db.delete(file_object)
         self.db.delete(document)

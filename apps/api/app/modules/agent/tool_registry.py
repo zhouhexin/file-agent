@@ -51,6 +51,7 @@ from app.modules.agent.tool_schemas import (
 from app.modules.classification.taxonomy_service import read_default_taxonomy_catalog
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text, extraction_config_hash
+from app.modules.files.readable_source import ReadableDocumentSourceResolver, apply_readable_source_metadata
 from app.modules.file_rename.suggestion_service import RenameSuggestionService
 from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
 from app.modules.file_rename.review_service import RenameReviewService
@@ -1115,7 +1116,9 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
             return _failed_extraction_output(document_id=document_id, error=error)
 
         force_reprocess = bool(getattr(tool_input, "force_reprocess", False))
-        expected_parser_config_hash = extraction_config_hash(filename=document.original_filename)
+        force_reconvert = bool(getattr(tool_input, "force_reconvert", False))
+        readable_source_resolver = ReadableDocumentSourceResolver(db=db)
+        expected_parser_config_hash = readable_source_resolver.expected_parser_config_hash(document=document)
         reusable = (
             None
             if force_reprocess
@@ -1126,6 +1129,11 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
         )
         if reusable is not None:
             run = reusable["run"]
+            persisted_metadata = (
+                dict(reusable["pages"][0].metadata_json or {})
+                if reusable["pages"]
+                else {}
+            )
             log_event(
                 "file.extract.completed",
                 document_id=document.id,
@@ -1145,6 +1153,12 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
                 "read_quality": _read_quality_from_persisted_pages(pages=reusable["pages"]),
                 "read_profile": _read_profile_from_persisted_pages(extractor=run.extractor, pages=reusable["pages"]),
                 "structured_element_count": len(reusable.get("elements", [])),
+                "conversion_artifact_id": persisted_metadata.get("conversion_artifact_id"),
+                "conversion_reused": None,
+                "conversion_source_format": persisted_metadata.get("source_format"),
+                "conversion_parsed_format": persisted_metadata.get("parsed_format"),
+                "conversion_converter": persisted_metadata.get("converter"),
+                "conversion_converter_version": persisted_metadata.get("converter_version"),
                 "pages": [
                     {
                         "page_number": page.page_number,
@@ -1172,11 +1186,17 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
             )
             return _failed_extraction_output(document_id=document.id, error=error)
 
-        extraction = extract_document_text(
-            file_path=resolved["file_path"],
-            filename=document.original_filename,
-            content_type=document.content_type,
+        readable_source = readable_source_resolver.resolve(
+            document=document,
+            original_path=resolved["file_path"],
+            force_reconvert=force_reconvert,
         )
+        extraction = extract_document_text(
+            file_path=readable_source.parse_path,
+            filename=readable_source.parse_filename,
+            content_type=readable_source.parse_content_type,
+        )
+        extraction = apply_readable_source_metadata(extraction, source=readable_source)
         run = repository.create_extraction_run(
             document_id=document.id,
             extractor=extraction["extractor"],
@@ -1236,6 +1256,12 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
             "read_quality": extraction.get("read_quality"),
             "read_profile": extraction.get("read_profile"),
             "structured_element_count": len(extraction.get("elements", [])),
+            "conversion_artifact_id": extraction.get("conversion_artifact_id"),
+            "conversion_reused": extraction.get("conversion_reused"),
+            "conversion_source_format": extraction.get("conversion_source_format"),
+            "conversion_parsed_format": extraction.get("conversion_parsed_format"),
+            "conversion_converter": extraction.get("conversion_converter"),
+            "conversion_converter_version": extraction.get("conversion_converter_version"),
             "warnings": extraction.get("warnings", []),
             "pages": [
                 {

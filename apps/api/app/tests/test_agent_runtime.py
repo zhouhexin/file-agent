@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from app.main import app
 from app.modules.agent.capabilities.service import load_agent_capabilities
 from app.modules.agent.capability_router import route_user_intent
+from app.modules.classification.result_builder import build_document_results_from_extraction_results
 from app.modules.llm.schemas import UserIntentPlan
 from app.modules.agent.graph import _build_document_results_response, response
 from app.modules.agent.repository import _safe_graph_state_snapshot
@@ -318,6 +319,26 @@ def test_deterministic_planner_parses_action_first_managed_classification_scope(
     assert plan.intent == "CLASSIFY_MANAGED_FILES"
     assert plan.steps[0].input["path_prefix"] == "党办"
     assert plan.steps[0].input["force_reprocess"] is True
+
+
+def test_deterministic_planner_routes_explicit_reconversion_to_extraction():
+    """用户明确要求重新转换时必须跳过解析缓存和 DOCX 派生件缓存。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conversation-doc-reconvert",
+        user_id="user-doc-reconvert",
+        message_id="message-doc-reconvert",
+        message="重新转换这个文件",
+        attachments=[{"document_id": "legacy-doc-id", "filename": "legacy.doc"}],
+    )
+
+    assert plan.intent == "EXTRACT_DOCUMENT_TEXT"
+    assert plan.steps[0].tool_name == "extract-document-text"
+    assert plan.steps[0].input == {
+        "document_id": "legacy-doc-id",
+        "force_reprocess": True,
+        "force_reconvert": True,
+    }
 
 
 def test_deterministic_planner_routes_nested_managed_file_subdirectory():
@@ -1116,6 +1137,43 @@ def test_document_results_include_read_profile_and_quality():
     assert result.document_results[0]["read_profile"]["requires_ocr"] is False
     assert result.document_results[0]["categories"] == []
     assert "分类建议" not in (result.final_response or "")
+
+
+def test_document_results_preserve_docx_conversion_audit_fields():
+    """通用结果聚合必须保留 DOCX 派生件审计字段。"""
+
+    class FakeClassificationService:
+        """不执行分类的测试替身。"""
+
+        def classify(self, **kwargs):
+            """返回空分类。"""
+
+            return {"categories": []}
+
+    results = build_document_results_from_extraction_results(
+        extraction_results=[
+            {
+                "document_id": "legacy-doc-id",
+                "status": "COMPLETED",
+                "extractor": "docx-python-docx",
+                "conversion_artifact_id": "artifact-id",
+                "conversion_reused": True,
+                "conversion_source_format": "doc",
+                "conversion_parsed_format": "docx",
+                "conversion_converter": "libreoffice",
+                "conversion_converter_version": "test",
+                "pages": [{"page_number": 1, "text_preview": "正文", "char_count": 2}],
+            }
+        ],
+        context_documents=[{"document_id": "legacy-doc-id", "filename": "legacy.doc"}],
+        classification_service=FakeClassificationService(),
+        include_categories=False,
+    )
+
+    assert results[0]["conversion_artifact_id"] == "artifact-id"
+    assert results[0]["conversion_reused"] is True
+    assert results[0]["conversion_converter"] == "libreoffice"
+    assert results[0]["conversion_converter_version"] == "test"
 
 
 def test_read_and_classify_keeps_document_categories_in_receipt():
