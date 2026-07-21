@@ -68,6 +68,7 @@ from app.modules.managed_files.service import (
     sync_configured_managed_roots,
 )
 from app.modules.managed_files.snapshot_service import ManagedFileSnapshotService
+from app.modules.retrieval.summary_search import WorkingCopySummarySearchService
 from app.modules.skills.managed_file_query_feedback import (
     SKILL_ID as MANAGED_FILE_QUERY_SKILL_ID,
     record_managed_file_query_feedback_sample,
@@ -248,14 +249,30 @@ def _document_handler(tool_name: str) -> ToolHandler:
     return handler
 
 
-def _search_handler(tool_input: BaseModel) -> Dict[str, Any]:
-    """在真实混合检索接入前返回空检索结果。"""
+def _search_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """创建摘要优先的工作副本文档级检索 handler。
 
-    return {
-        "ok": True,
-        "results": [],
-        "query": getattr(tool_input, "query"),
-    }
+    当前实现完成文档级候选召回；原文 Chunk 级混合检索接入后仍必须保留这层路由，
+    且 evidence-answer 不得把摘要当成最终事实证据。
+    """
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """在当前用户边界内按最终文件名、分类和持久化摘要检索。"""
+
+        if db is None or user_id is None:
+            return {
+                "kind": "workspace_file_search",
+                "ok": False,
+                "query": getattr(tool_input, "query"),
+                "results": [],
+                "error": {"code": "RUNTIME_CONTEXT_REQUIRED", "message": "检索上下文不可用"},
+            }
+        return WorkingCopySummarySearchService(db=db, user_id=user_id).search(
+            query=getattr(tool_input, "query"),
+            document_ids=list(getattr(tool_input, "document_ids", [])),
+        )
+
+    return handler
 
 
 def _evidence_answer_handler(tool_input: BaseModel) -> Dict[str, Any]:
@@ -1567,7 +1584,7 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("intent-summary", "Record LLM-understood user intent without side effects.", IntentSummaryInput, False, False, [], _intent_summary_handler),
         _tool("read-agent-capabilities", "Read fixed File Agent capability catalog.", AgentCapabilitiesReadInput, False, False, [], _agent_capabilities_handler),
         _tool("read-classification-taxonomy", "Read fixed classification taxonomy catalog.", ClassificationTaxonomyReadInput, False, False, [], _classification_taxonomy_handler),
-        _tool("hybrid-search", "Run workspace hybrid retrieval.", SearchToolInput, False, False, [], _search_handler),
+        _tool("hybrid-search", "Run summary-first workspace retrieval.", SearchToolInput, False, False, [], _search_handler(db, user_id)),
         _tool("evidence-answer", "Answer from retrieved evidence.", EvidenceAnswerInput, True, False, ["qa_answers", "answer_references"], _evidence_answer_handler),
         _tool("change-report", "Build per-file receipt from changes.", ChangeReportInput, True, False, ["change_sets"], _change_report_handler),
         _tool("operation-plan-create", "Create high-risk operation plan.", OperationPlanCreateInput, True, False, ["operation_plans"], _operation_plan_handler),

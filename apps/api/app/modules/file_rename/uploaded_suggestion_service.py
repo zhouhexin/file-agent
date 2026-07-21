@@ -167,6 +167,21 @@ class UploadedRenameSuggestionService:
             "query": {"document_ids": document_ids},
         }
 
+    def suggest_for_initial_import(
+        self,
+        *,
+        document: Document,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """为尚未发布的工作副本生成首次命名建议，不创建 OperationPlan。
+
+        该入口只供系统生命周期 worker 使用。首次名称属于工作副本创建参数；文件发布为
+        活动工作副本后的任何重命名仍必须走 ``generate_plan`` 和用户确认。
+        """
+
+        if document.user_id != self.user_id:
+            return _error("DOCUMENT_NOT_FOUND", "文件不存在或不属于当前用户。"), None
+        return self._suggest_one(document=document)
+
     def _resolve_working_copy(self, *, source_document: Document) -> WorkingCopy | None:
         """把上传 Document 或工作副本 Document 唯一解析为活动工作副本。"""
 

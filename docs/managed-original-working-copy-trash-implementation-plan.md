@@ -1,6 +1,6 @@
 # 受管原始目录、工作副本目录与回收站目录实施方案
 
-- 状态：待实现
+- 状态：第一阶段已实现，后续继续补充独立分析队列和摘要检索索引
 - 编写日期：2026-07-20
 - 修订日期：2026-07-21
 - 适用范围：受管原始目录中的文件导入、同步，以及工作副本的增删改查
@@ -764,8 +764,9 @@ IMPORT_WORKING_COPIES
 → 为每个启用的受管原始目录创建 RECONCILE_MANAGED_ROOT 任务
 → 扫描并索引全部原始文件
 → 为每个尚无主导入工作副本的原始文件创建 IMPORT_WORKING_COPIES 任务
-→ 独立 import worker 分批复制原始文件
-→ 创建 WorkingCopy 和初始 DocumentVersion
+→ 独立 import worker 在隐藏临时文件上解析、生成双摘要、分类和规范名称
+→ 原子提交最终名称和最终分类目录
+→ 创建 WorkingCopy、初始 DocumentVersion 和初始路径记录
 → 写入 ChangeSet 和逐文件 ChangeItem
 → 更新启动同步状态和监控指标
 ```
@@ -788,15 +789,18 @@ IMPORT_WORKING_COPIES
 3. 校验目标 WorkingCopyRoot 与 workspace 的系统配置关系。
 4. 通过 PathPolicy 解析原始文件路径。
 5. 读取复制前的大小、修改时间和 SHA-256。
-6. 在工作副本目录内创建同文件系统临时文件。
+6. 在工作副本目录的隐藏内部路径创建同文件系统临时文件；该文件不是用户可见WorkingCopy。
 7. 复制原始文件内容到临时文件。
 8. 校验临时文件 SHA-256。
 9. 再次检查原始文件的大小和修改时间。
 10. 如果原始文件在复制期间发生变化，删除临时文件并重试或标记失败。
-11. 使用原子移动把临时文件提交为工作副本。
-12. 创建 Document、DocumentVersion 和 WorkingCopy。
-13. 写入 `WORKING_COPY_IMPORTED` ChangeItem。
-14. 返回工作副本路径、内容哈希、原始文件是否变化和执行状态。
+11. 对临时文件执行受控解析，生成普通文档摘要和分类主题摘要。
+12. 根据分类主题摘要生成主分类建议，并根据正文命名字段生成规范文件名。
+13. 后端根据固定taxonomy和命名策略生成最终路径；LLM不得返回物理路径。
+14. 使用原子移动把临时文件直接提交到最终名称和最终分类目录。
+15. 创建 Document、DocumentVersion、WorkingCopy和`INITIAL_IMPORT`路径记录。
+16. 写入`WORKING_COPY_IMPORTED`、双摘要和分类建议ChangeItem。
+17. 返回工作副本稳定ID和最终文件信息；普通用户界面不展示原文件名、内部状态、Skill或Tool。
 
 批量规则：
 
@@ -804,7 +808,7 @@ IMPORT_WORKING_COPIES
 - 每个原始文件使用独立 savepoint 或等价隔离边界。
 - 同一原始文件、workspace 和内容哈希的重复自动导入任务必须幂等。
 - 批量导入必须分页处理并记录进度。
-- 目标路径冲突时不得覆盖既有工作副本。自动导入必须使用基于 `managed_file_id` 的稳定备用路径，例如 `unclassified/<managed_file_id>/<filename>`；仍无法提交时标记 `CONFLICT` 并由周期同步重试或进入人工处理。
+- 目标路径冲突时不得覆盖既有工作副本。低置信度或冲突降级必须使用基于`managed_file_id`的稳定内部路径，例如`待整理/<managed_file_id>/<filename>`；仍无法提交时标记`CONFLICT`并由周期同步重试或进入人工处理。
 
 ## 8. 受管原始目录同步
 

@@ -72,6 +72,32 @@ class FileLifecycleStorageService:
         target = self.working_copy_path(relative_path)
         return self._atomic_copy(source=source, target=target, expected_sha256=expected_sha256)
 
+    def publish_working_copy(
+        self,
+        *,
+        staged_relative_path: str,
+        target_relative_path: str,
+        expected_sha256: str,
+    ) -> tuple[Path, bool]:
+        """把内部临时文件原子提交为首次工作副本。
+
+        该方法只用于首次导入，不能替代活动工作副本的 OperationPlan 重命名或移动。
+        """
+
+        staged = self.working_copy_path(staged_relative_path)
+        target = self.working_copy_path(target_relative_path)
+        if not staged.is_file() or self.sha256_file(staged) != expected_sha256:
+            raise ValueError("内部临时工作副本不存在或哈希不一致")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if self.sha256_file(target) == expected_sha256:
+                # worker 在文件提交后、数据库提交前中断时允许幂等收敛，但绝不覆盖不同内容。
+                staged.unlink(missing_ok=True)
+                return target, False
+            raise FileExistsError("最终工作副本路径已存在，禁止覆盖")
+        os.replace(staged, target)
+        return target, True
+
     @staticmethod
     def sanitize_filename(filename: str) -> str:
         """清理用户文件名中的路径和控制字符，同时保留中文与阿拉伯数字。"""

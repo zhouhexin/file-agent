@@ -28,6 +28,7 @@ def persist_document_results_classifications(
         if not document_id:
             continue
         categories = [item for item in result.get("categories", []) if isinstance(item, dict)]
+        document_version_id = str(result.get("document_version_id") or document_id)
         if not categories:
             # 纯读取/总结任务不会生成分类建议；此时不创建空分类运行，避免把读取误记为分类。
             continue
@@ -44,12 +45,24 @@ def persist_document_results_classifications(
             status=status,
             source=source,
             classifier_version=_classifier_version(categories),
+            classification_summary_id=(
+                str(result.get("classification_summary_id"))
+                if result.get("classification_summary_id")
+                else None
+            ),
+            classification_basis=(
+                "CLASSIFICATION_TOPIC_SUMMARY"
+                if result.get("classification_summary_id")
+                else "FULL_TEXT_FALLBACK"
+            ),
+            summary_status=str(result.get("summary_status") or "DISABLED"),
             error_message=error_message,
         )
         for rank, category in enumerate(categories, start=1):
             suggestion = repository.create_suggestion(
                 classification_run_id=classification_run.id,
                 document_id=document_id,
+                document_version_id=document_version_id,
                 category=category,
                 rank=rank,
             )

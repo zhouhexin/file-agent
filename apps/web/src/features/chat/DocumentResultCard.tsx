@@ -46,7 +46,6 @@ export function DocumentResultCard({
                 {attachment ? formatFileSize(attachment.size_bytes) : '文件不可用'}
               </span>
             </div>
-            <span className="document-result-status document-result-status--failed">失败</span>
           </header>
           <div className="document-result-failure">
             <p>失败原因：{getFailureMessage(result.errors)}</p>
@@ -80,7 +79,6 @@ export function DocumentResultCard({
             <span className="document-result-confidence">
               {primaryCategory ? `置信度 ${primaryCategory.confidence.toFixed(2)}` : '未分类'}
             </span>
-            <span className="document-result-status">成功</span>
           </header>
           {result.categories.length > 1 ? (
             <div className="document-result-categories">

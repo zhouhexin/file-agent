@@ -62,6 +62,7 @@ MANAGED_FILE_CLASSIFICATION_HINTS = {
     "classify_managed_files",
 }
 MCP_FILESYSTEM_HINTS = {"mcp_filesystem_read", "mcp-filesystem-list", "mcp-filesystem-search", "mcp-filesystem-info"}
+FILE_SEARCH_HINTS = {"file_search", "file-search", "hybrid_search", "hybrid-search"}
 SPREADSHEET_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".csv", ".tsv"}
 MANAGED_EXTENSION_ALIASES = {
     "pdf": "pdf",
@@ -263,6 +264,13 @@ class DeterministicPlanner:
                 filename_contains=managed_read_filters.get("filename_contains"),
                 requested_outputs=_requested_outputs_for_message(message=message, lowered=lowered),
                 route_source="deterministic_planner",
+            )
+
+        if _has_file_search_intent(message=message, lowered=lowered):
+            return _file_search_plan(
+                user_goal=message,
+                query=message,
+                document_ids=_document_ids(attachments),
             )
 
         needs_file_scope = (
@@ -659,6 +667,21 @@ def build_plan_from_user_intent(
             route_source="capability_router" if capability_route else "llm_planner",
         )
 
+    if (
+        intent_plan.intent in {"SEARCH_FILES", "FIND_FILES"}
+        or requested_capabilities.intersection(FILE_SEARCH_HINTS)
+        or (capability_route is not None and capability_route.tool_name == "hybrid-search")
+        or _has_file_search_intent(message=message, lowered=lowered)
+    ):
+        return _file_search_plan(
+            user_goal=intent_plan.user_goal or message,
+            query=intent_plan.managed_query or message,
+            document_ids=attachment_document_ids,
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
+
     managed_root_key = intent_plan.managed_root_key or _managed_root_key_from_list_request(message)
     managed_path_prefix = intent_plan.managed_path_prefix or _managed_path_prefix_from_list_request(
         message=message,
@@ -978,6 +1001,47 @@ def _general_chat_plan(*, intent: str, user_goal: str) -> PlannerOutput:
                 "requires_confirmation": False,
                 "risk_level": "low",
                 "expected_outputs": ["intent"],
+                "writes": [],
+            }
+        ],
+        evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+        confirmation_policy={"operation_plan_required": False},
+    )
+
+
+def _file_search_plan(
+    *,
+    user_goal: str,
+    query: str,
+    document_ids: List[str] | None = None,
+    response_style: str = "concise",
+    clarification_question: str | None = None,
+    llm_intent_plan: Dict[str, Any] | None = None,
+) -> PlannerOutput:
+    """生成面向当前用户工作副本的摘要优先文件检索计划。"""
+
+    scoped_document_ids = document_ids or []
+    return PlannerOutput(
+        intent="SEARCH_FILES",
+        user_goal=user_goal,
+        slots={
+            "document_ids": scoped_document_ids,
+            "query": query,
+            "requested_outputs": ["file_search_results"],
+            "response_style": response_style,
+            "clarification_question": clarification_question,
+            "llm_intent_plan": llm_intent_plan or {},
+        },
+        selected_skills=["file-search"],
+        steps=[
+            {
+                "step_id": "step-file-search",
+                "skill": "file-search",
+                "tool_name": "hybrid-search",
+                "input": {"query": query, "document_ids": scoped_document_ids},
+                "requires_confirmation": False,
+                "risk_level": "low",
+                "expected_outputs": ["ranked_working_copies"],
                 "writes": [],
             }
         ],
@@ -1682,6 +1746,24 @@ def _has_classification_intent(*, message: str, lowered: str) -> bool:
     return any(keyword in message for keyword in classification_keywords) or any(
         keyword in lowered for keyword in english_keywords
     )
+
+
+def _has_file_search_intent(*, message: str, lowered: str) -> bool:
+    """识别用户按内容主题查找已整理工作副本的意图。"""
+
+    if any(keyword in message for keyword in ["受管目录", "服务器目录", "服务器工作目录"]):
+        return False
+    object_keywords = ["文件", "文档", "材料", "证明", "通知", "表格", "报告"]
+    explicit_actions = ["找", "查找", "搜索", "检索", "寻找"]
+    existence_objects = ["文件", "文档", "材料", "证明", "通知", "报告"]
+    english_actions = ["find file", "search file", "search document", "find document"]
+    return (
+        any(keyword in message for keyword in explicit_actions)
+        and any(keyword in message for keyword in object_keywords)
+    ) or (
+        any(keyword in message for keyword in ["有没有", "哪些"])
+        and any(keyword in message for keyword in existence_objects)
+    ) or any(keyword in lowered for keyword in english_actions)
 
 
 def _has_capability_help_intent(*, message: str, lowered: str) -> bool:

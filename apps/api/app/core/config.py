@@ -54,6 +54,7 @@ DEFAULT_FILESYSTEM_JOB_LEASE_SECONDS = 120
 DEFAULT_WORKING_COPY_IMPORT_BATCH_SIZE = 100
 DEFAULT_WORKING_COPY_OPERATION_BATCH_SIZE = 20
 DEFAULT_TRASH_RETENTION_DAYS = 30
+DEFAULT_INITIAL_ORGANIZATION_CONFIDENCE = 0.60
 
 
 class Settings(BaseModel):
@@ -73,6 +74,14 @@ class Settings(BaseModel):
     llm_timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS
     llm_classification_mode: str = "rule_only"
     llm_classification_allow_free_paths: bool = False
+    document_summary_enabled: bool = True
+    document_summary_prompt_version: str = "document-summary-v1"
+    document_summary_schema_version: str = "document-summary-schema-v1"
+    llm_classification_summary_enabled: bool = True
+    llm_classification_summary_prompt_version: str = "classification-topic-summary-v1"
+    classification_summary_schema_version: str = "classification-topic-summary-schema-v1"
+    initial_working_copy_organization_enabled: bool = True
+    initial_organization_confidence: float = DEFAULT_INITIAL_ORGANIZATION_CONFIDENCE
     log_dir: str = DEFAULT_LOG_DIR
     log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
     log_level: str = "INFO"
@@ -225,6 +234,37 @@ def get_settings() -> Settings:
         llm_timeout_seconds=int(os.getenv("LLM_TIMEOUT_SECONDS", str(DEFAULT_LLM_TIMEOUT_SECONDS))),
         llm_classification_mode=os.getenv("LLM_CLASSIFICATION_MODE", "rule_only").lower(),
         llm_classification_allow_free_paths=os.getenv("LLM_CLASSIFICATION_ALLOW_FREE_PATHS", "false").lower() == "true",
+        document_summary_enabled=os.getenv("DOCUMENT_SUMMARY_ENABLED", "true").lower() == "true",
+        document_summary_prompt_version=os.getenv(
+            "DOCUMENT_SUMMARY_PROMPT_VERSION", "document-summary-v1"
+        ).strip() or "document-summary-v1",
+        document_summary_schema_version=os.getenv(
+            "DOCUMENT_SUMMARY_SCHEMA_VERSION", "document-summary-schema-v1"
+        ).strip() or "document-summary-schema-v1",
+        llm_classification_summary_enabled=os.getenv(
+            "LLM_CLASSIFICATION_SUMMARY_ENABLED", "true"
+        ).lower() == "true",
+        llm_classification_summary_prompt_version=os.getenv(
+            "LLM_CLASSIFICATION_SUMMARY_PROMPT_VERSION", "classification-topic-summary-v1"
+        ).strip() or "classification-topic-summary-v1",
+        classification_summary_schema_version=os.getenv(
+            "CLASSIFICATION_SUMMARY_SCHEMA_VERSION", "classification-topic-summary-schema-v1"
+        ).strip() or "classification-topic-summary-schema-v1",
+        initial_working_copy_organization_enabled=os.getenv(
+            "INITIAL_WORKING_COPY_ORGANIZATION_ENABLED", "true"
+        ).lower() == "true",
+        initial_organization_confidence=max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    os.getenv(
+                        "INITIAL_ORGANIZATION_CONFIDENCE",
+                        str(DEFAULT_INITIAL_ORGANIZATION_CONFIDENCE),
+                    )
+                ),
+            ),
+        ),
         log_dir=os.getenv("LOG_DIR", DEFAULT_LOG_DIR),
         log_retention_days=int(os.getenv("LOG_RETENTION_DAYS", str(DEFAULT_LOG_RETENTION_DAYS))),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),

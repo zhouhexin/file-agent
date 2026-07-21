@@ -273,6 +273,89 @@ class DocumentPage(Base):
     extraction_run: Mapped[DocumentExtractionRun] = relationship(back_populates="pages")
 
 
+class DocumentSummary(Base):
+    """面向文档概览、文档级召回和问答路由的持久化普通文档摘要。
+
+    摘要只用于缩小检索范围，不能替代 ``document_pages`` 原文证据。
+    """
+
+    __tablename__ = "document_summaries"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_version_id",
+            "extraction_run_id",
+            "input_sha256",
+            "model_provider",
+            "model_name",
+            "prompt_version",
+            "schema_version",
+            name="uq_document_summaries_cache_key",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    document_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    extraction_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_extraction_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    input_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    summary_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    summary_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    coverage_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    model_provider: Mapped[str] = mapped_column(String(80), nullable=False, default="deterministic")
+    model_name: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    prompt_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="COMPLETED", index=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class DocumentClassificationSummary(Base):
+    """分类候选召回使用的结构化主题摘要，不代表正式分类关系。"""
+
+    __tablename__ = "document_classification_summaries"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_version_id",
+            "extraction_run_id",
+            "input_sha256",
+            "model_provider",
+            "model_name",
+            "prompt_version",
+            "schema_version",
+            name="uq_document_classification_summaries_cache_key",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    document_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    extraction_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_extraction_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    input_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    summary_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    model_provider: Mapped[str] = mapped_column(String(80), nullable=False, default="deterministic")
+    model_name: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    prompt_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="COMPLETED", index=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class DocumentElement(Base):
     """Docling 等结构化解析器生成的可定位文档元素。"""
 
@@ -327,6 +410,18 @@ class DocumentClassificationRun(Base):
     taxonomy_key: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     taxonomy_version: Mapped[str] = mapped_column(String(80), nullable=False, default="")
     classifier_version: Mapped[str] = mapped_column(String(80), nullable=False, default="taxonomy-rule-v1")
+    classification_summary_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("document_classification_summaries.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    classification_basis: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="FULL_TEXT", index=True
+    )
+    summary_status: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="DISABLED", index=True
+    )
     source: Mapped[str] = mapped_column(String(40), nullable=False, default="rule")
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="COMPLETED")
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

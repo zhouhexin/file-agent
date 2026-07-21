@@ -6,6 +6,8 @@ from app.core import config
 from app.db.models import (
     ChangeItem,
     Document,
+    DocumentClassificationSummary,
+    DocumentSummary,
     DocumentVersion,
     ManagedFile,
     TrashEntry,
@@ -104,6 +106,14 @@ def test_upload_is_archived_then_imported_by_separate_jobs(monkeypatch, tmp_path
         assert original_path != working_path
         assert working_copy.managed_file_id == original.id
         assert version.source_managed_file_id == original.id
+        assert ".internal" not in version.storage_path
+        assert db.query(DocumentSummary).filter_by(document_id=working_copy.document_id).count() == 1
+        assert db.query(DocumentClassificationSummary).filter_by(document_id=working_copy.document_id).count() == 1
+        initial_path = db.query(WorkingCopyPathRecord).filter_by(
+            working_copy_id=working_copy.id,
+            operation_type="INITIAL_IMPORT",
+        ).one()
+        assert initial_path.after_filename == working_copy.filename
         source_document = db.get(Document, upload["document_id"])
         resolved = UploadedRenameSuggestionService(
             db=db,
@@ -282,9 +292,10 @@ def test_rename_move_trash_and_restore_only_change_working_copy(monkeypatch, tmp
         assert copy.status == "ACTIVE"
         assert work_document.original_filename == "2004级工程硕士开课通知.doc"
         assert db.query(DocumentVersion).filter_by(document_id=copy.document_id).count() == 1
-        assert len(records) == 1
-        assert records[0].status == "COMPLETED"
-        assert records[0].after_filename == "2004级工程硕士开课通知.doc"
+        assert len(records) == 2
+        rename_record = sorted(records, key=lambda item: item.sequence_number)[-1]
+        assert rename_record.status == "COMPLETED"
+        assert rename_record.after_filename == "2004级工程硕士开课通知.doc"
         assert (tmp_path / "originals" / original.relative_path).read_bytes() == b"legacy document"
         assert db.query(TrashEntry).filter_by(working_copy_id=copy.id, status="RESTORED").count() == 1
     finally:

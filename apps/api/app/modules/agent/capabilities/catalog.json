@@ -1,5 +1,5 @@
 {
-  "version": "2026-07-03",
+  "version": "2026-07-21",
   "capabilities": [
     {
       "id": "file_upload_read",
@@ -81,6 +81,15 @@
       "intents": ["LIST_CLASSIFICATION_TAXONOMY"],
       "capability_keys": ["read_classification_taxonomy", "read-classification-taxonomy"],
       "tool_names": ["read-classification-taxonomy"]
+    },
+    {
+      "id": "file_search",
+      "name": "对话查找已整理文件",
+      "description": "按整理后的文件名、分类和持久化摘要查找当前用户工作副本；精确事实继续回到原文证据核验。",
+      "examples": ["找我去年活动相关的奖学金材料", "有没有干部考察结果报告"],
+      "intents": ["SEARCH_FILES", "FIND_FILES"],
+      "capability_keys": ["file_search", "file-search", "hybrid_search", "hybrid-search"],
+      "tool_names": ["hybrid-search"]
     },
     {
       "id": "managed_file_query",

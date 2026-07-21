@@ -400,6 +400,7 @@ def _aggregate_tool_results(
         "capability_catalog": _capability_catalog_from_results(tool_results),
         "classification_taxonomy": _classification_taxonomy_from_results(tool_results),
         "managed_file_list": _managed_file_list_from_results(tool_results),
+        "workspace_file_search": _workspace_file_search_from_results(tool_results),
         "mcp_filesystem_result": _mcp_filesystem_result_from_results(tool_results),
         "rename_plan": _rename_plan_from_results(tool_results),
         "rename_review_resolution": _rename_review_resolution_from_results(tool_results),
@@ -567,6 +568,13 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
             "final_response": _build_managed_file_list_response(managed_file_list),
         }
 
+    workspace_file_search = result_summary.get("workspace_file_search", {})
+    if workspace_file_search:
+        return {
+            "status": "COMPLETED",
+            "final_response": _build_workspace_file_search_response(workspace_file_search),
+        }
+
     mcp_filesystem_result = result_summary.get("mcp_filesystem_result", {})
     if mcp_filesystem_result:
         return {
@@ -730,6 +738,23 @@ def _managed_file_list_from_results(tool_results: List[Dict[str, Any]]) -> Dict[
                 "query": result.get("query") if isinstance(result.get("query"), dict) else {},
                 "files": [item for item in result_files if isinstance(item, dict)],
             }
+    return {}
+
+
+def _workspace_file_search_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """提取工作副本摘要优先检索载荷，空结果也必须生成明确回复。"""
+
+    for result in tool_results:
+        if result.get("kind") != "workspace_file_search":
+            continue
+        return {
+            "ok": bool(result.get("ok")),
+            "query": str(result.get("query") or ""),
+            "results": [
+                item for item in result.get("results", []) if isinstance(item, dict)
+            ],
+            "error": result.get("error") if isinstance(result.get("error"), dict) else {},
+        }
     return {}
 
 
@@ -901,6 +926,32 @@ def _build_managed_file_list_response(payload: Dict[str, Any]) -> str:
     lines.extend(_format_managed_file_tree(files[:50]))
     if len(files) > 50:
         lines.append(f"仅展示前 50 个文件，其余 {len(files) - 50} 个可继续筛选查看。")
+    return "\n".join(lines)
+
+
+def _build_workspace_file_search_response(payload: Dict[str, Any]) -> str:
+    """格式化对话文件检索结果，不展示原文件名、内部状态或 Tool 信息。"""
+
+    if not payload.get("ok"):
+        message = str((payload.get("error") or {}).get("message") or "文件检索暂不可用")
+        return f"暂时无法查找文件：{message}。"
+    results = [item for item in payload.get("results", []) if isinstance(item, dict)]
+    if not results:
+        return "没有找到与这段描述明确相关的已整理文件。你可以补充主题、年份、单位或文件类型后再找。"
+    lines = [f"找到 {len(results)} 个相关文件："]
+    for index, item in enumerate(results, start=1):
+        filename = str(item.get("filename") or "未命名文件")
+        category_path = "/".join(str(value) for value in item.get("category_path", []) if value)
+        summary = str(item.get("summary") or "").strip()
+        reasons = [str(value) for value in item.get("match_reasons", []) if value]
+        line = f"{index}. {filename}"
+        if category_path:
+            line += f"（{category_path}）"
+        lines.append(line)
+        if summary:
+            lines.append(f"   {summary}")
+        if reasons:
+            lines.append(f"   推荐依据：{reasons[0]}")
     return "\n".join(lines)
 
 

@@ -49,6 +49,9 @@ class ClassificationRepository:
         status: str,
         source: str = "rule",
         classifier_version: str = "taxonomy-rule-v1",
+        classification_summary_id: str | None = None,
+        classification_basis: str = "FULL_TEXT",
+        summary_status: str = "DISABLED",
         error_message: str | None = None,
     ) -> DocumentClassificationRun:
         """创建一个文件在本次 AgentRun 中的分类运行记录。"""
@@ -59,6 +62,9 @@ class ClassificationRepository:
             taxonomy_key=taxonomy_key,
             taxonomy_version=taxonomy_version,
             classifier_version=classifier_version,
+            classification_summary_id=classification_summary_id,
+            classification_basis=classification_basis,
+            summary_status=summary_status,
             source=source,
             status=status,
             error_message=error_message,
@@ -72,6 +78,7 @@ class ClassificationRepository:
         *,
         classification_run_id: str,
         document_id: str,
+        document_version_id: str,
         category: dict[str, Any],
         rank: int,
     ) -> DocumentCategorySuggestion:
@@ -80,7 +87,8 @@ class ClassificationRepository:
         suggestion = DocumentCategorySuggestion(
             classification_run_id=classification_run_id,
             document_id=document_id,
-            document_version_id=document_id,
+            # 旧的受管快照可能没有 DocumentVersion，此时调用方明确回退 document_id。
+            document_version_id=document_version_id,
             category_id=str(category.get("category_id") or ""),
             category_name=str(category.get("name") or "其他"),
             category_path_json=list(category.get("category_path") or [category.get("name") or "其他"]),

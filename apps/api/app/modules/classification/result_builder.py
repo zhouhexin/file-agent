@@ -62,6 +62,12 @@ def build_document_results_from_extraction_results(
                 "classification_reused": bool(
                     classification_result.get("classification_reused", False)
                 ),
+                "document_version_id": (
+                    classification_result.get("document_version_id") or document_id
+                ),
+                "document_summary_id": classification_result.get("document_summary_id"),
+                "classification_summary_id": classification_result.get("classification_summary_id"),
+                "summary_status": classification_result.get("summary_status"),
                 "source_kind": result.get("source_kind"),
                 "managed_file_id": result.get("managed_file_id"),
                 "root_key": result.get("root_key"),

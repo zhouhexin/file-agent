@@ -34,10 +34,12 @@ from app.db.models import (
     TrashEntry,
     User,
     WorkingCopy,
+    WorkingCopyPathRecord,
     WorkingCopyRoot,
     utcnow,
 )
 from app.modules.file_lifecycle.repository import FileLifecycleRepository
+from app.modules.file_lifecycle.organizer import InitialWorkingCopyOrganizer
 from app.modules.file_lifecycle.schemas import (
     ArchiveStatusResponse,
     DocumentVersionResponse,
@@ -53,6 +55,7 @@ from app.modules.file_lifecycle.schemas import (
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.path_policy import resolve_managed_relative_path
+from app.modules.classification.service import persist_document_results_classifications
 
 
 class UploadLifecycleService:
@@ -669,7 +672,10 @@ class FileLifecycleJobProcessor:
         )
 
     def _import_working_copy(self, job: FilesystemJob) -> None:
-        """从原始文件创建独立工作副本、Document 和初始版本。"""
+        """分析原始文件并只以最终名称和分类目录创建工作副本。
+
+        内部临时文件不会形成 WorkingCopy 业务对象；正式文件提交后才写入活动工作副本。
+        """
 
         payload = dict(job.payload_json or {})
         managed_file = self.db.get(ManagedFile, str(payload.get("managed_file_id") or ""))
@@ -694,101 +700,223 @@ class FileLifecycleJobProcessor:
         )
         source_stat_before = source.stat()
         source_sha256 = managed_file.content_sha256 or self.storage.sha256_file(source)
-        relative_path = self._working_relative_path(
-            working_root=working_root,
-            managed_file=managed_file,
+        staged_filename = self.storage.sanitize_filename(managed_file.filename)
+        staged_relative_path = "/".join(
+            [working_root.relative_storage_path, ".internal", job.id, managed_file.id, staged_filename]
         )
-        storage_relative_path = f"{working_root.relative_storage_path}/{relative_path}"
-        target = self.storage.import_working_copy(
-            source=source,
-            relative_path=storage_relative_path,
-            expected_sha256=source_sha256,
-        )
-        source_stat_after = source.stat()
-        if (source_stat_before.st_size, source_stat_before.st_mtime_ns) != (source_stat_after.st_size, source_stat_after.st_mtime_ns):
-            target.unlink(missing_ok=True)
-            raise RuntimeError("原始文件在导入期间发生变化")
-        document = Document(
-            user_id=user_id,
-            workspace_id=workspace_id,
-            original_filename=managed_file.filename,
-            content_type=_guess_content_type(managed_file.extension),
-            size_bytes=managed_file.size_bytes,
-            sha256=source_sha256,
-            status="WORKING_COPY",
-            ingest_status="UPLOADED",
-        )
-        self.db.add(document)
-        self.db.flush()
-        working_copy = WorkingCopy(
-            working_copy_root_id=working_root.id,
-            workspace_id=workspace_id,
-            managed_file_id=managed_file.id,
-            document_id=document.id,
-            relative_path=relative_path,
-            relative_path_hash=hashlib.sha256(relative_path.encode("utf-8")).hexdigest(),
-            filename=managed_file.filename,
-            extension=managed_file.extension,
-            size_bytes=managed_file.size_bytes,
-            content_sha256=source_sha256,
-            imported_source_sha256=source_sha256,
-            is_primary_import=True,
-            status="ACTIVE",
-            sync_status="SYNCED",
-        )
-        self.db.add(working_copy)
-        self.db.flush()
-        version = DocumentVersion(
-            document_id=document.id,
-            version_number=1,
-            working_copy_id=working_copy.id,
-            storage_tier="WORKING_COPY",
-            storage_path=storage_relative_path,
-            filename=managed_file.filename,
-            content_type=document.content_type,
-            size_bytes=managed_file.size_bytes,
-            sha256=source_sha256,
-            source_type="IMPORT",
-            source_managed_file_id=managed_file.id,
-            created_by=user_id,
-        )
-        self.db.add(version)
-        self.db.flush()
-        working_copy.current_version_id = version.id
-        working_root.status = "READY"
-        working_root.last_imported_at = utcnow()
-        self.db.add(
-            FileObject(
+        final_storage_relative_path = ""
+        final_target: Path | None = None
+        final_target_created = False
+        try:
+            self.storage.import_working_copy(
+                source=source,
+                relative_path=staged_relative_path,
+                expected_sha256=source_sha256,
+            )
+            source_stat_after = source.stat()
+            if (source_stat_before.st_size, source_stat_before.st_mtime_ns) != (
+                source_stat_after.st_size,
+                source_stat_after.st_mtime_ns,
+            ):
+                raise RuntimeError("原始文件在导入期间发生变化")
+
+            document = Document(
+                user_id=user_id,
+                workspace_id=workspace_id,
+                original_filename=managed_file.filename,
+                content_type=_guess_content_type(managed_file.extension),
+                size_bytes=managed_file.size_bytes,
+                sha256=source_sha256,
+                status="WORKING_COPY",
+                ingest_status="INGESTING",
+            )
+            self.db.add(document)
+            self.db.flush()
+            file_object = FileObject(
                 document_id=document.id,
                 storage_backend="working_copy_local",
-                storage_path=storage_relative_path,
+                storage_path=staged_relative_path,
                 size_bytes=managed_file.size_bytes,
                 sha256=source_sha256,
             )
-        )
-        create_lifecycle_audit(
-            db=self.db,
-            user_id=user_id,
-            workspace_id=workspace_id,
-            conversation_id=self._conversation_for_upload(managed_file),
-            tool_name="working-copy-import",
-            message_content=f"文件“{managed_file.filename}”的工作副本已创建。",
-            change_type="WORKING_COPY_IMPORTED",
-            target_type="working_copy",
-            target_id=working_copy.id,
-            target_document_id=document.id,
-            after_value={
-                "working_copy_id": working_copy.id,
-                "managed_file_id": managed_file.id,
-                "relative_path": relative_path,
-                "document_version_id": version.id,
-                "managed_original_unchanged": True,
-            },
-        )
-        FilesystemJobQueue(self.db).mark_completed(
-            job=job,
-            result={"working_copy_id": working_copy.id, "document_id": document.id, "document_version_id": version.id},
-        )
+            self.db.add(file_object)
+            version = DocumentVersion(
+                document_id=document.id,
+                version_number=1,
+                working_copy_id=None,
+                storage_tier="WORKING_COPY",
+                storage_path=staged_relative_path,
+                filename=managed_file.filename,
+                content_type=document.content_type,
+                size_bytes=managed_file.size_bytes,
+                sha256=source_sha256,
+                source_type="IMPORT",
+                source_managed_file_id=managed_file.id,
+                created_by=user_id,
+            )
+            self.db.add(version)
+            self.db.flush()
+
+            decision = InitialWorkingCopyOrganizer(
+                db=self.db,
+                user_id=user_id,
+                settings=self.settings,
+            ).decide(document=document, version=version, managed_file=managed_file)
+            relative_path = self._working_relative_path(
+                working_root=working_root,
+                managed_file=managed_file,
+                preferred_relative_path=decision.relative_path,
+            )
+            final_storage_relative_path = f"{working_root.relative_storage_path}/{relative_path}"
+            final_target, final_target_created = self.storage.publish_working_copy(
+                staged_relative_path=staged_relative_path,
+                target_relative_path=final_storage_relative_path,
+                expected_sha256=source_sha256,
+            )
+
+            document.original_filename = decision.filename
+            document.ingest_status = "INGESTED"
+            version.storage_path = final_storage_relative_path
+            version.filename = decision.filename
+            file_object.storage_path = final_storage_relative_path
+            working_copy = WorkingCopy(
+                working_copy_root_id=working_root.id,
+                workspace_id=workspace_id,
+                managed_file_id=managed_file.id,
+                document_id=document.id,
+                relative_path=relative_path,
+                relative_path_hash=hashlib.sha256(relative_path.encode("utf-8")).hexdigest(),
+                filename=decision.filename,
+                extension=Path(decision.filename).suffix.lower(),
+                size_bytes=managed_file.size_bytes,
+                content_sha256=source_sha256,
+                imported_source_sha256=source_sha256,
+                is_primary_import=True,
+                status="ACTIVE",
+                sync_status="SYNCED",
+            )
+            self.db.add(working_copy)
+            self.db.flush()
+            version.working_copy_id = working_copy.id
+            working_copy.current_version_id = version.id
+            working_root.status = "READY"
+            working_root.last_imported_at = utcnow()
+
+            category_name = (
+                "/".join(str(item) for item in decision.primary_category.get("category_path", []))
+                if decision.primary_category is not None
+                else "待整理"
+            )
+            changeset, _ = create_lifecycle_audit(
+                db=self.db,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                conversation_id=self._conversation_for_upload(managed_file),
+                tool_name="working-copy-initial-organize",
+                message_content=f"已整理文件：{decision.filename}\n分类：{category_name}",
+                change_type="WORKING_COPY_IMPORTED",
+                target_type="working_copy",
+                target_id=working_copy.id,
+                target_document_id=document.id,
+                after_value={
+                    "working_copy_id": working_copy.id,
+                    "managed_file_id": managed_file.id,
+                    "relative_path": relative_path,
+                    "document_version_id": version.id,
+                    "document_summary_id": decision.document_summary_id,
+                    "classification_summary_id": decision.classification_summary_id,
+                    "primary_category": category_name,
+                    "rename_status": decision.rename_status,
+                    "managed_original_unchanged": True,
+                },
+            )
+            persist_document_results_classifications(
+                db=self.db,
+                agent_run_id=changeset.agent_run_id,
+                document_results=[
+                    decision.document_result(
+                        document_id=document.id,
+                        document_version_id=version.id,
+                    )
+                ],
+            )
+            if decision.document_summary_id:
+                self.db.add(
+                    ChangeItem(
+                        changeset_id=changeset.id,
+                        target_type="document_summary",
+                        target_id=decision.document_summary_id,
+                        target_document_id=document.id,
+                        change_type="DOCUMENT_SUMMARY_CREATED",
+                        before_value_json={},
+                        after_value_json={"document_summary_id": decision.document_summary_id},
+                        source="working-copy-initial-organize",
+                        confidence=1.0,
+                        evidence_json={},
+                        execution_status="COMPLETED",
+                    )
+                )
+            if decision.classification_summary_id:
+                self.db.add(
+                    ChangeItem(
+                        changeset_id=changeset.id,
+                        target_type="classification_summary",
+                        target_id=decision.classification_summary_id,
+                        target_document_id=document.id,
+                        change_type="CLASSIFICATION_SUMMARY_CREATED",
+                        before_value_json={},
+                        after_value_json={
+                            "classification_summary_id": decision.classification_summary_id,
+                            "primary_category": category_name,
+                        },
+                        source="working-copy-initial-organize",
+                        confidence=(
+                            float(decision.primary_category.get("confidence") or 0)
+                            if decision.primary_category is not None
+                            else None
+                        ),
+                        evidence_json=(
+                            {"items": list(decision.primary_category.get("evidence_items") or [])}
+                            if decision.primary_category is not None
+                            else {}
+                        ),
+                        execution_status="COMPLETED",
+                    )
+                )
+            self.db.add(
+                WorkingCopyPathRecord(
+                    working_copy_id=working_copy.id,
+                    sequence_number=1,
+                    operation_type="INITIAL_IMPORT",
+                    before_relative_path=managed_file.relative_path,
+                    after_relative_path=relative_path,
+                    before_filename=managed_file.filename,
+                    after_filename=decision.filename,
+                    document_version_id=version.id,
+                    content_sha256=source_sha256,
+                    agent_run_id=changeset.agent_run_id,
+                    changeset_id=changeset.id,
+                    status="COMPLETED",
+                    executed_by=user_id,
+                )
+            )
+            FilesystemJobQueue(self.db).mark_completed(
+                job=job,
+                result={
+                    "working_copy_id": working_copy.id,
+                    "document_id": document.id,
+                    "document_version_id": version.id,
+                    "filename": decision.filename,
+                    "relative_path": relative_path,
+                    "primary_category": category_name,
+                },
+            )
+        except Exception:
+            # 数据库事务失败时清理本任务创建的隐藏临时文件或未登记最终文件，避免孤儿文件。
+            self.storage.working_copy_path(staged_relative_path).unlink(missing_ok=True)
+            if final_target is not None and final_storage_relative_path and final_target_created:
+                final_target.unlink(missing_ok=True)
+            raise
 
     def _cleanup_upload_temp(self, job: FilesystemJob) -> None:
         """异步清理已取消或已经使用已有文件的上传暂存。"""
@@ -948,10 +1076,17 @@ class FileLifecycleJobProcessor:
         if archive:
             archive.changeset_id = changeset.id
 
-    def _working_relative_path(self, *, working_root: WorkingCopyRoot, managed_file: ManagedFile) -> str:
-        """选择不覆盖活动工作副本的相对路径，冲突时使用稳定备用路径。"""
+    def _working_relative_path(
+        self,
+        *,
+        working_root: WorkingCopyRoot,
+        managed_file: ManagedFile,
+        preferred_relative_path: str | None = None,
+    ) -> str:
+        """选择不覆盖活动工作副本的最终相对路径，冲突时使用稳定备用路径。"""
 
-        path_hash = hashlib.sha256(managed_file.relative_path.encode("utf-8")).hexdigest()
+        candidate = preferred_relative_path or managed_file.relative_path
+        path_hash = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
         conflict = (
             self.db.query(WorkingCopy)
             .filter(
@@ -961,9 +1096,19 @@ class FileLifecycleJobProcessor:
             )
             .first()
         )
+        storage_candidate = self.storage.working_copy_path(
+            f"{working_root.relative_storage_path}/{candidate}"
+        )
         if conflict is None:
-            return managed_file.relative_path
-        return f"unclassified/{managed_file.id}/{managed_file.filename}"
+            if not storage_candidate.exists():
+                return candidate
+            if (
+                managed_file.content_sha256
+                and self.storage.sha256_file(storage_candidate) == managed_file.content_sha256
+            ):
+                # 上一次尝试可能已提交文件但数据库事务未完成，继续采用同一路径幂等收敛。
+                return candidate
+        return f"待整理/{managed_file.id}/{Path(candidate).name}"
 
     def _conversation_for_upload(self, managed_file: ManagedFile) -> str | None:
         """从上传归档关系恢复原会话，部署文件没有会话时返回 None。"""

@@ -19,6 +19,10 @@ from app.db.models import (
 from app.modules.classification.loader import load_default_taxonomy
 from app.modules.classification.managed_catalog import GlobalManagedCategoryCatalogService
 from app.modules.classification.matcher import match_document_text
+from app.modules.classification.summary_service import (
+    DocumentSummaryService,
+    resolve_document_version_id,
+)
 from app.modules.knowledge_graph.candidate_retriever import retrieve_graph_candidates
 from app.modules.knowledge_graph.classification_context import NoOpGraphClassificationContext
 from app.modules.knowledge_graph.managed_path_profile import ManagedPathProfileRegistry
@@ -40,6 +44,7 @@ class DocumentClassificationService:
         graph_mode: str = "enabled",
         semantic_context: Any = None,
         managed_catalog_service: GlobalManagedCategoryCatalogService | None = None,
+        summary_service: DocumentSummaryService | None = None,
     ) -> None:
         """保存请求级数据库会话；无数据库时仅支持 fallback_text。"""
 
@@ -52,6 +57,9 @@ class DocumentClassificationService:
         self.semantic_context = semantic_context or NoOpSemanticClassificationContext()
         self.graph_reranker = GraphClassificationReranker()
         self.managed_catalog_service = managed_catalog_service or self._default_managed_catalog_service()
+        self.summary_service = summary_service or (
+            DocumentSummaryService(db=db) if db is not None else None
+        )
 
     def classify(
         self,
@@ -61,6 +69,7 @@ class DocumentClassificationService:
         filename: str = "",
         fallback_text: str = "",
         force_reprocess: bool = False,
+        document_version_id: str = "",
     ) -> dict[str, Any]:
         """读取完整页面正文并返回分类结果。
 
@@ -70,10 +79,39 @@ class DocumentClassificationService:
 
         start = time.perf_counter()
         try:
+            pages = self._load_pages(extraction_run_id=extraction_run_id)
+            full_text = "\n".join(page.text_content for page in pages if page.text_content)
+            resolved_version_id = document_version_id or (
+                resolve_document_version_id(self.db, document_id=document_id)
+                if self.db is not None and document_id
+                else ""
+            )
+            summaries = (
+                self.summary_service.generate_or_reuse(
+                    document_id=document_id,
+                    document_version_id=resolved_version_id,
+                    extraction_run_id=extraction_run_id,
+                    filename=filename,
+                )
+                if self.summary_service is not None
+                and (
+                    get_settings().document_summary_enabled
+                    or get_settings().llm_classification_summary_enabled
+                )
+                else None
+            )
+            classification_text = (
+                summaries.classification_text
+                if summaries is not None
+                and get_settings().llm_classification_summary_enabled
+                and summaries.classification_text.strip()
+                else full_text or fallback_text
+            )
             taxonomy_key, taxonomy_version = self._taxonomy_identity()
             if not force_reprocess:
                 cached_categories = self._load_cached_categories(
                     document_id=document_id,
+                    document_version_id=resolved_version_id or document_id,
                     taxonomy_key=taxonomy_key,
                     taxonomy_version=taxonomy_version,
                 )
@@ -81,9 +119,17 @@ class DocumentClassificationService:
                     return {
                         "status": "COMPLETED",
                         "document_id": document_id,
+                        "document_version_id": resolved_version_id,
                         "extraction_run_id": extraction_run_id,
                         "categories": cached_categories,
                         "text_source": "classification_cache",
+                        "classification_summary_id": (
+                            summaries.classification_summary.id if summaries is not None else None
+                        ),
+                        "document_summary_id": (
+                            summaries.document_summary.id if summaries is not None else None
+                        ),
+                        "summary_status": "REUSED" if summaries is not None else "FULL_TEXT_FALLBACK",
                         "graph_status": "REUSED",
                         "graph_warnings": [],
                         "semantic_status": "REUSED",
@@ -92,9 +138,6 @@ class DocumentClassificationService:
                         "classification_reused": True,
                         "classifier_version": self.classifier_version,
                     }
-            pages = self._load_pages(extraction_run_id=extraction_run_id)
-            full_text = "\n".join(page.text_content for page in pages if page.text_content)
-            classification_text = full_text or fallback_text
             base_categories = self._classify_with_unified_taxonomy(
                 filename=filename,
                 classification_text=classification_text,
@@ -127,7 +170,8 @@ class DocumentClassificationService:
                 categories = base_categories
             categories = self._judge_categories(
                 filename=filename,
-                classification_text=classification_text,
+                # 候选由主题摘要召回，但受限判定和引用校验仍读取完整原文。
+                classification_text=full_text or fallback_text,
                 rule_categories=categories,
             )
             categories = [
@@ -165,9 +209,21 @@ class DocumentClassificationService:
         return {
             "status": "COMPLETED",
             "document_id": document_id,
+            "document_version_id": resolved_version_id,
             "extraction_run_id": extraction_run_id,
             "categories": categories,
-            "text_source": "document_pages" if full_text else "fallback",
+            "text_source": "classification_topic_summary" if (
+                summaries is not None and get_settings().llm_classification_summary_enabled
+            ) else (
+                "document_pages" if full_text else "fallback"
+            ),
+            "classification_summary_id": (
+                summaries.classification_summary.id if summaries is not None else None
+            ),
+            "document_summary_id": summaries.document_summary.id if summaries is not None else None,
+            "summary_status": (
+                "REUSED" if summaries is not None and summaries.reused else "CREATED"
+            ) if summaries is not None else "FULL_TEXT_FALLBACK",
             "graph_status": graph_result.status,
             "graph_warnings": [] if graph_result.status == "DISABLED" else list(graph_result.warnings),
             "semantic_status": semantic_result.status,
@@ -281,7 +337,8 @@ class DocumentClassificationService:
     def classifier_version(self) -> str:
         """返回会影响分类结果的受控实现版本。"""
 
-        return f"taxonomy-{self.mode}-graph-{self.graph_mode}-v3"
+        summary_mode = "summary" if get_settings().llm_classification_summary_enabled else "fulltext"
+        return f"taxonomy-{summary_mode}-first-{self.mode}-graph-{self.graph_mode}-v4"
 
     def _taxonomy_identity(self) -> tuple[str, str]:
         """返回当前统一 taxonomy 身份，用于分类结果缓存隔离。"""
@@ -293,6 +350,7 @@ class DocumentClassificationService:
         self,
         *,
         document_id: str,
+        document_version_id: str,
         taxonomy_key: str,
         taxonomy_version: str,
     ) -> list[dict[str, Any]]:
@@ -302,7 +360,12 @@ class DocumentClassificationService:
             return []
         run = (
             self.db.query(DocumentClassificationRun)
+            .join(
+                DocumentCategorySuggestion,
+                DocumentCategorySuggestion.classification_run_id == DocumentClassificationRun.id,
+            )
             .filter(DocumentClassificationRun.document_id == document_id)
+            .filter(DocumentCategorySuggestion.document_version_id == document_version_id)
             .filter(DocumentClassificationRun.taxonomy_key == taxonomy_key)
             .filter(DocumentClassificationRun.taxonomy_version == taxonomy_version)
             .filter(DocumentClassificationRun.classifier_version == self.classifier_version)
@@ -315,6 +378,7 @@ class DocumentClassificationService:
         suggestions = (
             self.db.query(DocumentCategorySuggestion)
             .filter(DocumentCategorySuggestion.classification_run_id == run.id)
+            .filter(DocumentCategorySuggestion.document_version_id == document_version_id)
             .order_by(
                 DocumentCategorySuggestion.rank.asc(),
                 DocumentCategorySuggestion.confidence.desc(),

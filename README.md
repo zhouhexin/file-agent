@@ -45,7 +45,7 @@ cd apps/web && npm install && npm run dev
 旧版 `.xls` 默认由 `xlrd>=2.0.1` 直接只读解析；只有 xlrd 无法处理非标准或损坏文件时才尝试本机 LibreOffice/`soffice` 转换。当前部署不强制安装 LibreOffice，转换器缺失时返回结构化失败或在重命名场景使用受控文件名回退，始终不覆盖原件。
 PDF、DOCX 默认启用本地 Docling 结构化解析，并把文档元素和位置写入 `document_elements`；Docling 不可用时自动回退现有解析器，扫描件仍由现有 OCR 链路处理。
 文件重命名统一生成 `RENAME_WORKING_COPIES` OperationPlan，确认后由工作副本执行器执行；旧的受管原始文件 Native/F2 执行通道和上传暂存重命名通道不再对 Agent 开放。
-上传附件通过查重后由独立 worker 归档到受管原始目录，再自动创建工作副本。当前分类目录落位尚未启用，工作副本先保持原始相对路径；后续重命名、移动和删除计划必须以 `working_copy_id` 为对象，不能再修改受管原始目录。
+上传附件通过查重后由独立 worker 归档到受管原始目录；导入 worker 在隐藏临时文件上完成解析、双摘要、分类和首次命名，再把文件原子提交到最终工作副本路径。普通用户只看到整理后的文件名和分类，不展示原文件名、内部状态、Skill或Tool。对话找文件先按最终文件名、分类和普通文档摘要召回当前用户的工作副本；精确问答仍必须回到原文取证。后续重命名、移动和删除计划必须以 `working_copy_id` 为对象，不能再修改受管原始目录。
 默认不启用真实 LLM 调用；如需让对话阶段使用大模型理解用户需求，请在 `.env` 中配置 `LLM_ENABLED=true`、`LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_CHAT_MODEL`。当前 LLM 客户端使用 OpenAI-compatible Chat Completions 接口。
 分类判定默认仍为 `LLM_CLASSIFICATION_MODE=rule_only`。如需让 LLM 在候选分类内做语义判定，可设置 `LLM_CLASSIFICATION_MODE=hybrid`；如需允许 LLM 自由提出新分类路径，还必须显式设置 `LLM_CLASSIFICATION_ALLOW_FREE_PATHS=true`，该类结果只会以 `NEEDS_REVIEW` 保存，不会自动写入正式分类目录。
 Neo4j 图谱增强分类默认关闭。第二版本支持目录角色 Profile、完整正文本地 Embedding、固定 `VectorCypherRetriever`、`off/shadow/enabled`、投影运行审计和分类反馈样本；无标注阶段只允许小范围展示建议，连接失败会自动回退现有分类。具体步骤见 `docs/runbook.md`。
