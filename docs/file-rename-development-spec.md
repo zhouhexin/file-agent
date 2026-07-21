@@ -1,5 +1,7 @@
 # 文件智能重命名开发规格
 
+> 历史规格：`RENAME_FILES` 与 `RENAME_UPLOADED_FILES` 已退役，当前重命名只作用于工作副本。实现边界以 `docs/managed-original-working-copy-trash-implementation-plan.md` 为准。
+
 ## 1. 文档目的
 
 本文是“年份 + 文号 + 正文标题”文件智能重命名功能的开发规格。受管文件闭环已实现；2026-07-14 起新增上传附件私有临时存储重命名阶段。

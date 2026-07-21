@@ -1133,7 +1133,7 @@ def _managed_file_rename_plan(
     llm_intent_plan: Dict[str, Any] | None = None,
     route_source: str = "legacy_planner",
 ) -> PlannerOutput:
-    """生成受管文件重命名建议计划；此阶段不直接修改文件。"""
+    """按受管原始目录范围选择对应工作副本并生成重命名建议计划。"""
 
     input_json: Dict[str, Any] = {}
     if root_key:
@@ -1167,6 +1167,7 @@ def _managed_file_rename_plan(
             "clarification_question": clarification_question,
             "llm_intent_plan": llm_intent_plan or {},
             "route_source": route_source,
+            "target_storage": "working_copy",
         },
         selected_skills=["file-rename", "operation-plan"],
         steps=[
@@ -1195,7 +1196,7 @@ def _uploaded_document_rename_plan(
     llm_intent_plan: Dict[str, Any] | None = None,
     route_source: str = "legacy_planner",
 ) -> PlannerOutput:
-    """为上传附件生成临时存储重命名计划，不推断分类或受管目录。"""
+    """为上传附件归档后生成工作副本重命名计划，不推断分类目录。"""
 
     return PlannerOutput(
         intent="SUGGEST_RENAME",
@@ -1207,7 +1208,7 @@ def _uploaded_document_rename_plan(
             "clarification_question": clarification_question,
             "llm_intent_plan": llm_intent_plan or {},
             "route_source": route_source,
-            "target_storage": "temporary",
+            "target_storage": "working_copy",
         },
         selected_skills=["file-rename", "operation-plan"],
         steps=[

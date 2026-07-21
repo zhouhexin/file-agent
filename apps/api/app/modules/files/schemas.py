@@ -16,9 +16,15 @@ class FileUploadResponse(BaseModel):
     status: str
     ingest_status: str
     deduplicated: bool = False
+    upload_document_version_id: str
+    duplicate_review_id: str
+    filesystem_job_id: str
+    archive_status: str
+    duplicate_review_status: str
 
 
 class FileDeleteResponse(BaseModel):
     """文件删除成功后的响应。"""
 
     deleted: bool
+    cleanup_job_id: str | None = None

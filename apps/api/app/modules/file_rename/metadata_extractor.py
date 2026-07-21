@@ -44,6 +44,13 @@ _ATTACHMENT_TITLE_PREFIX_PATTERN = re.compile(
     r"^附件(?:\s*[（(]?\s*(?:\d+|[一二三四五六七八九十]+)\s*[）)]?\s*[：:、._\-—]?\s*"
     r"|[：:、._\-—]\s*|\s+|(?=关于))"
 )
+_LEADING_TITLE_SEQUENCE_PATTERN = re.compile(
+    r"^(?:"
+    r"[〔\[（(]\s*\d+\s*[〕\]）)]\s*号?"
+    r"|\d+\s*号"
+    r"|\d+\s*[、：:]"
+    r")\s*"
+)
 _INSTITUTION_DOCUMENT_MASTHEAD_PATTERN = re.compile(
     r"^(?!关于).{2,30}(?:大学|学院|学校|委员会|办公室)文件$"
 )
@@ -669,7 +676,9 @@ def _clean_title(value: str, *, document_number: str | None, year: str | None) -
         cleaned = cleaned.replace(document_number, "")
     if year:
         cleaned = re.sub(rf"^{re.escape(year)}\s*年?\s*", "", cleaned)
-    cleaned = re.sub(r"^[〔\[（(]?\d+[〕\]）)]?\s*号?\s*", "", cleaned)
+    # 只移除“（1）”“12号”“1、”等带明确格式的标题序号；“04级”“05级”
+    # 和“04年度”等数字属于业务标题证据，不能因为位于标题开头就被清除。
+    cleaned = _LEADING_TITLE_SEQUENCE_PATTERN.sub("", cleaned, count=1)
     return cleaned.strip(" \t-_—:：，,。")
 
 

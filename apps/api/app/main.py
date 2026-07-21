@@ -16,6 +16,8 @@ from app.modules.classification.router import router as classification_router
 from app.modules.conversations.router import router as conversations_router
 from app.modules.files.router import router as files_router
 from app.modules.file_rename.router import router as file_rename_router
+from app.modules.file_lifecycle.router import router as file_lifecycle_router
+from app.modules.file_lifecycle.scheduler import enqueue_reconciliation_jobs
 from app.modules.managed_files.router import router as managed_files_router
 from app.modules.operations.router import router as operations_router
 from app.modules.knowledge_graph.classification_context import close_graph_resources
@@ -33,6 +35,11 @@ async def lifespan(app: FastAPI):
     init_database()
     cleanup_old_logs()
     settings = get_settings()
+    if settings.managed_root_reconcile_on_startup and settings.filesystem_async_jobs_enabled:
+        # 启动钩子只提交持久化任务；全量扫描、归档和复制由独立 worker 完成。
+        with SessionLocal() as db:
+            enqueue_reconciliation_jobs(db=db)
+            db.commit()
     if settings.neo4j_sync_enabled:
         with SessionLocal() as db:
             sync_graph_projection_if_enabled(db=db, settings=settings)
@@ -107,6 +114,7 @@ app.include_router(classification_router)
 app.include_router(conversations_router)
 app.include_router(files_router)
 app.include_router(file_rename_router)
+app.include_router(file_lifecycle_router)
 app.include_router(managed_files_router)
 app.include_router(operations_router)
 

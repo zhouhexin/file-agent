@@ -11,7 +11,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app.db.models import FilesystemScanRun, ManagedFile, ManagedRoot, utcnow
+from app.db.models import FilesystemScanRun, ManagedFile, ManagedRoot, WorkingCopy, utcnow
 from app.modules.managed_files.path_policy import PathPolicyError, resolve_managed_relative_path
 
 
@@ -35,6 +35,11 @@ class ManagedFileScanner:
             file.relative_path: file
             for file in self.db.query(ManagedFile).filter(ManagedFile.root_id == root.id).all()
         }
+        existing_by_identity = {
+            file.file_identity: file
+            for file in existing_by_path.values()
+            if file.file_identity
+        }
         seen_paths: set[str] = set()
         files_updated = 0
         errors = 0
@@ -52,8 +57,24 @@ class ManagedFileScanner:
                 stat = resolved.stat()
                 relative_path_hash = _path_hash(relative_path)
                 fingerprint = _fingerprint(relative_path=relative_path, size_bytes=stat.st_size, modified_at=stat.st_mtime)
-                category_path = _category_path_for(root=root, relative_path=relative_path)
+                file_identity = f"{stat.st_dev}:{stat.st_ino}"
                 existing = existing_by_path.get(relative_path)
+                if existing is None:
+                    # 同一设备和 inode 在本轮出现在新路径时视为原始文件重命名/移动，
+                    # 继续沿用 ManagedFile 稳定 ID，工作副本路径保持不变。
+                    identity_match = existing_by_identity.get(file_identity)
+                    if identity_match is not None and identity_match.relative_path not in seen_paths:
+                        existing = identity_match
+                # 全量内容哈希只在异步扫描 worker 中计算；元数据未变化时复用既有哈希，
+                # 避免查询请求承担大文件 I/O，同时保证查重不用轻量 fingerprint 冒充内容事实。
+                content_sha256 = (
+                    existing.content_sha256
+                    if existing is not None
+                    and existing.fingerprint == fingerprint
+                    and existing.content_sha256
+                    else _sha256_file(resolved)
+                )
+                category_path = _category_path_for(root=root, relative_path=relative_path)
                 if existing is None:
                     existing = ManagedFile(
                         root_id=root.id,
@@ -65,6 +86,9 @@ class ManagedFileScanner:
                         size_bytes=stat.st_size,
                         modified_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
                         fingerprint=fingerprint,
+                        content_sha256=content_sha256,
+                        file_identity=file_identity,
+                        source_type="DEPLOYED_FILE",
                         status="ACTIVE",
                         last_seen_scan_run_id=scan_run.id,
                     )
@@ -77,26 +101,54 @@ class ManagedFileScanner:
                     existing.size_bytes = stat.st_size
                     existing.modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
                     existing.fingerprint = fingerprint
+                    existing.content_sha256 = content_sha256
+                    existing.file_identity = file_identity
                     existing.status = "ACTIVE"
                     existing.last_seen_scan_run_id = scan_run.id
                     existing.updated_at = utcnow()
+                    self._sync_working_copy_status(managed_file=existing, source_sha256=content_sha256)
                 seen_paths.add(relative_path)
                 files_updated += 1
 
-        missing_count = (
+        missing_files = (
             self.db.query(ManagedFile)
             .filter(ManagedFile.root_id == root.id, ManagedFile.status == "ACTIVE")
             .filter(~ManagedFile.relative_path.in_(seen_paths) if seen_paths else ManagedFile.relative_path != "")
-            .update({"status": "MISSING", "updated_at": utcnow()}, synchronize_session=False)
+            .all()
         )
+        for missing in missing_files:
+            missing.status = "MISSING"
+            missing.updated_at = utcnow()
+            self.db.query(WorkingCopy).filter(WorkingCopy.managed_file_id == missing.id).update(
+                {"sync_status": "ORIGINAL_MISSING", "updated_at": utcnow()},
+                synchronize_session=False,
+            )
+        missing_count = len(missing_files)
         scan_run.status = "COMPLETED"
         scan_run.files_discovered = len(seen_paths)
         scan_run.files_updated = files_updated
         scan_run.files_missing = int(missing_count or 0)
         scan_run.errors = errors
         scan_run.finished_at = utcnow()
+        root.last_reconciled_at = scan_run.finished_at
         self.db.flush()
         return scan_run
+
+    def _sync_working_copy_status(self, *, managed_file: ManagedFile, source_sha256: str) -> None:
+        """根据原始文件内容变化更新工作副本同步状态，但绝不覆盖工作副本。"""
+
+        working_copies = (
+            self.db.query(WorkingCopy)
+            .filter(WorkingCopy.managed_file_id == managed_file.id)
+            .all()
+        )
+        for working_copy in working_copies:
+            working_copy.sync_status = (
+                "SYNCED"
+                if working_copy.imported_source_sha256 == source_sha256
+                else "ORIGINAL_CHANGED"
+            )
+            working_copy.updated_at = utcnow()
 
 
 def _fingerprint(*, relative_path: str, size_bytes: int, modified_at: float) -> str:
@@ -110,6 +162,16 @@ def _path_hash(relative_path: str) -> str:
     """生成相对路径唯一性哈希，避免把长路径放进唯一索引。"""
 
     return hashlib.sha256(relative_path.encode("utf-8")).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    """流式计算原始文件完整 SHA-256，供同步状态和重复检查使用。"""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _is_hidden_relative_path(relative_path: str) -> bool:

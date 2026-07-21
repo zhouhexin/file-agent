@@ -255,7 +255,7 @@ class ManagedFileClassificationInput(StrictToolInput):
 
 
 class GenerateRenameSuggestionsInput(StrictToolInput):
-    """为上传附件或受管文件生成重命名建议并持久化 OperationPlan。"""
+    """把附件或受管范围解析为工作副本并持久化重命名 OperationPlan。"""
 
     document_ids: List[str] = Field(default_factory=list, max_length=50)
     root_key: Optional[str] = None

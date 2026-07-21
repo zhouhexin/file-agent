@@ -3,8 +3,32 @@
 from datetime import datetime, timezone
 
 from app.db.models import Document, DocumentExtractionRun, DocumentPage, FileObject, ManagedFile, ManagedRoot
-from app.modules.agent.tool_registry import ToolRegistry
+from app.modules.agent.tool_registry import ToolRegistry as RuntimeToolRegistry
+from app.modules.managed_files.scanner import ManagedFileScanner
+from app.modules.managed_files.service import resolve_managed_file_query_scope, sync_configured_managed_roots
 from app.tests.helpers import clear_overrides, client_with_database
+
+
+class ToolRegistry(RuntimeToolRegistry):
+    """测试适配器：显式模拟 reconcile worker 已在 Tool 调用前完成索引。"""
+
+    def invoke(self, name, payload):
+        """先建立异步同步产物，再验证 Tool 只读取数据库索引。"""
+
+        if self.db is not None:
+            requested_root_key = payload.get("root_key") if isinstance(payload, dict) else None
+            scope = resolve_managed_file_query_scope(
+                root_key=requested_root_key,
+                path_prefix=payload.get("path_prefix") if isinstance(payload, dict) else None,
+            )
+            for root in sync_configured_managed_roots(
+                self.db,
+                root_key=scope.root_key,
+                scan=False,
+            ):
+                ManagedFileScanner(self.db).scan_root(root)
+            self.db.commit()
+        return super().invoke(name, payload)
 
 
 def test_managed_file_list_tool_returns_logical_paths_only(monkeypatch, tmp_path):

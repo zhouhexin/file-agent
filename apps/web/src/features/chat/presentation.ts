@@ -13,6 +13,8 @@ export type ChatTurn = {
   attachments: ChatAttachment[];
   response?: import('../../types').SendMessageResponse;
   status: 'sending' | 'completed' | 'failed';
+  role?: 'user' | 'assistant' | string;
+  metadata?: Record<string, unknown>[];
 };
 
 export type AttachmentListProps = {

@@ -1,7 +1,7 @@
-"""上传附件临时存储重命名建议服务。
+"""上传来源文件的工作副本重命名建议服务。
 
-本模块只读取当前用户明确附件对应的 Document，通过受控解析结果生成 basename 建议和
-OperationPlan。它不推断分类、不选择受管目录，也不在确认前修改 FileObject 或物理文件。
+本模块把当前用户明确附件解析为已经异步归档并导入的工作副本，通过受控解析结果生成
+basename 建议和 OperationPlan。它不推断分类、不修改上传暂存或受管原始目录。
 """
 
 from __future__ import annotations
@@ -10,8 +10,18 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
-from app.db.models import AgentRun, Document, ManagedFileSnapshot, User
+from app.db.models import (
+    AgentRun,
+    Document,
+    DocumentVersion,
+    ManagedFileSnapshot,
+    UploadArchiveRecord,
+    User,
+    WorkingCopy,
+)
+from app.modules.file_lifecycle.operations import WorkingCopyOperationService
 from app.modules.file_rename.filename_builder import FilenameBuildError, FilenameBuilder
 from app.modules.file_rename.metadata_resolution_service import RenameMetadataResolutionService
 from app.modules.file_rename.parsing_service import extract_rename_primary
@@ -20,11 +30,11 @@ from app.modules.file_rename.schemas import RenameFieldResult, RenameFieldStatus
 from app.modules.file_rename.validation_service import RenameValidationService
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.readable_source import ReadableDocumentSourceResolver, apply_readable_source_metadata
-from app.modules.operations.repository import OperationPlanRepository
+from app.modules.operations.schemas import OperationPlanCreateRequest, OperationPlanItem
 
 
 class UploadedRenameSuggestionService:
-    """为上传附件生成只作用于临时存储的待确认重命名计划。"""
+    """为上传来源文件生成只作用于工作副本的待确认重命名计划。"""
 
     def __init__(
         self,
@@ -51,7 +61,7 @@ class UploadedRenameSuggestionService:
         document_ids: list[str],
         limit: int = 20,
     ) -> dict[str, Any]:
-        """解析明确附件并创建 RENAME_UPLOADED_FILES OperationPlan。"""
+        """解析明确附件对应的工作副本并创建重命名 OperationPlan。"""
 
         user = self.db.get(User, self.user_id)
         if user is None or not user.default_workspace_id:
@@ -60,9 +70,9 @@ class UploadedRenameSuggestionService:
         if run is None or run.user_id != self.user_id or run.conversation_id != conversation_id:
             return _error("AGENT_RUN_SCOPE_INVALID", "重命名计划与当前 AgentRun 范围不一致。")
         if not document_ids:
-            return _error("DOCUMENT_SCOPE_REQUIRED", "请先选择要重命名的上传附件。")
+            return _error("DOCUMENT_SCOPE_REQUIRED", "请先选择要重命名的文件。")
         if len(document_ids) > limit:
-            return _error("RENAME_BATCH_TOO_LARGE", f"单次最多处理 {limit} 个上传附件。")
+            return _error("RENAME_BATCH_TOO_LARGE", f"单次最多处理 {limit} 个工作副本。")
         self._llm_validation_calls = 0
 
         documents = (
@@ -75,10 +85,38 @@ class UploadedRenameSuggestionService:
         if missing_ids:
             return _error("DOCUMENT_NOT_FOUND", "部分附件不存在或不属于当前用户。")
 
+        resolved: list[tuple[str, WorkingCopy, Document]] = []
+        waiting: list[str] = []
+        for source_document_id in document_ids:
+            working_copy = self._resolve_working_copy(source_document=documents_by_id[source_document_id])
+            if working_copy is None:
+                waiting.append(source_document_id)
+                continue
+            working_document = self.db.get(Document, working_copy.document_id)
+            if working_document is None or working_document.user_id != self.user_id:
+                waiting.append(source_document_id)
+                continue
+            resolved.append((source_document_id, working_copy, working_document))
+        if waiting:
+            result = _error(
+                "WORKING_COPY_NOT_READY",
+                "文件仍在异步归档或导入工作副本，请稍后再生成重命名建议。",
+            )
+            result["status"] = "WAITING_FOR_ASYNC_JOB"
+            result["pending_document_ids"] = waiting
+            return result
+
         suggestions: list[dict[str, Any]] = []
         extraction_results: list[dict[str, Any]] = []
-        for document_id in document_ids:
-            suggestion, extraction_result = self._suggest_one(document=documents_by_id[document_id])
+        for source_document_id, working_copy, working_document in resolved:
+            suggestion, extraction_result = self._suggest_one(document=working_document)
+            suggestion.update(
+                {
+                    "source_kind": "working_copy",
+                    "working_copy_id": working_copy.id,
+                    "source_document_id": source_document_id,
+                }
+            )
             suggestions.append(suggestion)
             if extraction_result is not None:
                 extraction_results.append(extraction_result)
@@ -87,28 +125,38 @@ class UploadedRenameSuggestionService:
         skipped = [item for item in suggestions if item.get("status") != "READY"]
         plan = None
         if ready:
-            plan = OperationPlanRepository(self.db).create_plan(
-                workspace_id=user.default_workspace_id,
-                conversation_id=conversation_id,
-                agent_run_id=agent_run_id,
-                user_id=self.user_id,
-                operation_type="RENAME_UPLOADED_FILES",
-                risk_level="medium",
-                reason="按年份、文号和正文标题重命名上传附件的临时文件",
-                plan_json={
-                    "storage_scope": "temporary",
-                    "policy_key": self.policy.policy_key,
-                    "policy_version": self.policy.version,
-                    "items": [_operation_plan_item(item) for item in ready],
-                    "skipped_items": skipped,
-                },
+            plan = WorkingCopyOperationService(self.db).create_plan(
+                current_user=user,
+                request=OperationPlanCreateRequest(
+                    conversation_id=conversation_id,
+                    operation_type="RENAME_WORKING_COPIES",
+                    risk_level="medium",
+                    reason="按年份、文号和正文标题重命名工作副本",
+                    items=[
+                        OperationPlanItem(
+                            document_id=str(item["document_id"]),
+                            working_copy_id=str(item["working_copy_id"]),
+                            after={"filename": item["proposed_filename"]},
+                            rename_metadata=_rename_metadata(item),
+                        )
+                        for item in ready
+                    ],
+                ),
             )
+            plan.agent_run_id = agent_run_id
+            plan.plan_json = {
+                **plan.plan_json,
+                "policy_key": self.policy.policy_key,
+                "policy_version": self.policy.version,
+                "skipped_items": skipped,
+            }
+            flag_modified(plan, "plan_json")
         self.db.flush()
         return {
             "ok": True,
             "kind": "rename_plan",
-            "source_kind": "uploaded_document",
-            "storage_scope": "temporary",
+            "source_kind": "working_copy",
+            "storage_scope": "working_copy",
             "status": "WAITING_CONFIRMATION" if plan is not None else "NEEDS_REVIEW",
             "operation_plan_id": plan.id if plan is not None else None,
             "matched_count": len(suggestions),
@@ -119,12 +167,59 @@ class UploadedRenameSuggestionService:
             "query": {"document_ids": document_ids},
         }
 
+    def _resolve_working_copy(self, *, source_document: Document) -> WorkingCopy | None:
+        """把上传 Document 或工作副本 Document 唯一解析为活动工作副本。"""
+
+        direct = (
+            self.db.query(WorkingCopy)
+            .filter(
+                WorkingCopy.document_id == source_document.id,
+                WorkingCopy.workspace_id == source_document.workspace_id,
+                WorkingCopy.status == "ACTIVE",
+            )
+            .one_or_none()
+        )
+        if direct is not None:
+            return direct
+        upload_version = (
+            self.db.query(DocumentVersion)
+            .filter(
+                DocumentVersion.document_id == source_document.id,
+                DocumentVersion.storage_tier == "UPLOAD",
+            )
+            .order_by(DocumentVersion.version_number.desc())
+            .first()
+        )
+        if upload_version is None:
+            return None
+        archive = (
+            self.db.query(UploadArchiveRecord)
+            .filter(
+                UploadArchiveRecord.upload_document_version_id == upload_version.id,
+                UploadArchiveRecord.status == "ARCHIVED",
+            )
+            .one_or_none()
+        )
+        if archive is None or not archive.managed_file_id:
+            return None
+        return (
+            self.db.query(WorkingCopy)
+            .join(Document, Document.id == WorkingCopy.document_id)
+            .filter(
+                WorkingCopy.managed_file_id == archive.managed_file_id,
+                WorkingCopy.workspace_id == source_document.workspace_id,
+                WorkingCopy.status == "ACTIVE",
+                Document.user_id == self.user_id,
+            )
+            .one_or_none()
+        )
+
     def _suggest_one(self, *, document: Document) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        """为一个上传 Document 生成建议；单文件失败不会扩大到其他附件。"""
+        """为一个工作副本 Document 生成建议；单文件失败不会扩大到其他文件。"""
 
         empty_field = RenameFieldResult(status=RenameFieldStatus.MISSING)
         base = {
-            "source_kind": "uploaded_document",
+            "source_kind": "working_copy",
             "document_id": document.id,
             "filename": document.original_filename,
             "extension": Path(document.original_filename).suffix.lower(),
@@ -150,7 +245,7 @@ class UploadedRenameSuggestionService:
                     "warnings": [],
                     "errors": [{
                         "code": "MANAGED_SNAPSHOT_IMMUTABLE",
-                        "message": "该 Document 是受管文件快照，不能作为上传临时文件重命名。",
+                        "message": "该 Document 是受管原始文件快照，不能作为工作副本重命名。",
                     }],
                 },
                 None,
@@ -281,7 +376,7 @@ class UploadedRenameSuggestionService:
         metadata: Any,
         arbitration_warnings: list[dict[str, Any]],
     ) -> Any:
-        """对上传附件复用同一质量门禁和批次模型额度。"""
+        """对工作副本复用同一质量门禁和批次模型额度。"""
 
         needs_llm = self.validation_service.would_call_llm(
             original_filename=original_filename,
@@ -407,7 +502,7 @@ class UploadedRenameSuggestionService:
                     for page in pages
                 ],
                 "source": "generate-rename-suggestions",
-                "source_kind": "uploaded_document",
+                "source_kind": "working_copy",
                 "source_sha256": document.sha256,
                 "structured_element_count": len(elements),
             },
@@ -416,32 +511,21 @@ class UploadedRenameSuggestionService:
         )
 
 
-def _operation_plan_item(suggestion: dict[str, Any]) -> dict[str, Any]:
-    """把 READY 上传附件建议转换为不含任意路径的 OperationPlan item。"""
+def _rename_metadata(suggestion: dict[str, Any]) -> dict[str, Any]:
+    """提取可审计的重命名依据，路径仍由工作副本服务确定。"""
 
     return {
-        "document_id": suggestion["document_id"],
-        "before": {
-            "source_kind": "uploaded_document",
-            "filename": suggestion["filename"],
-            "source_sha256": suggestion["source_sha256"],
-            "size_bytes": suggestion["size_bytes"],
-        },
-        "after": {"filename": suggestion["proposed_filename"]},
-        "rename_metadata": {
-            "policy_key": suggestion["policy_key"],
-            "policy_version": suggestion["policy_version"],
-            "template_key": suggestion["template_key"],
-            "document_date": suggestion["document_date"],
-            "year": suggestion["year"],
-            "document_number": suggestion["document_number"],
-            "title": suggestion["title"],
-            "parse_mode": suggestion.get("rename_parse_mode", ""),
-            "candidate_parsers": suggestion.get("rename_candidate_parsers", []),
-            "arbitration_warnings": suggestion.get("arbitration_warnings", []),
-            "rename_validation": suggestion.get("rename_validation"),
-        },
-        "execution_status": "PLANNED",
+        "policy_key": suggestion["policy_key"],
+        "policy_version": suggestion["policy_version"],
+        "template_key": suggestion["template_key"],
+        "document_date": suggestion["document_date"],
+        "year": suggestion["year"],
+        "document_number": suggestion["document_number"],
+        "title": suggestion["title"],
+        "parse_mode": suggestion.get("rename_parse_mode", ""),
+        "candidate_parsers": suggestion.get("rename_candidate_parsers", []),
+        "arbitration_warnings": suggestion.get("arbitration_warnings", []),
+        "rename_validation": suggestion.get("rename_validation"),
     }
 
 
@@ -452,7 +536,7 @@ def _failed_extraction_result(
     extraction_run_id: str = "",
     extractor: str = "uploaded-file-rename",
 ) -> dict[str, Any]:
-    """构造 Graph 可聚合的上传附件解析失败结果。"""
+    """构造 Graph 可聚合的工作副本解析失败结果。"""
 
     return {
         "ok": False,
@@ -466,19 +550,19 @@ def _failed_extraction_result(
             "message": str(error.get("message") or "文件解析失败。"),
         },
         "source": "generate-rename-suggestions",
-        "source_kind": "uploaded_document",
+        "source_kind": "working_copy",
         "source_sha256": document.sha256,
     }
 
 
 def _error(code: str, message: str) -> dict[str, Any]:
-    """构造上传附件重命名 Tool 的结构化错误。"""
+    """构造工作副本重命名 Tool 的结构化错误。"""
 
     return {
         "ok": False,
         "kind": "rename_plan",
-        "source_kind": "uploaded_document",
-        "storage_scope": "temporary",
+        "source_kind": "working_copy",
+        "storage_scope": "working_copy",
         "status": "FAILED",
         "error": {"code": code, "message": message},
         "suggestions": [],

@@ -11,6 +11,12 @@ type FileCardProps = {
 
 export function FileCard({ file, onOpen, onRemove, showStatus = true }: FileCardProps) {
   const missing = file.status === 'MISSING';
+  const waitingForDuplicateDecision = file.duplicate_review_status === 'WAITING_CONFIRMATION';
+  const lifecyclePending = Boolean(
+    file.upload_document_version_id
+      && !file.working_copy_id
+      && !['EXISTING_FILE_SELECTED', 'CANCELLED'].includes(file.archive_status ?? ''),
+  );
   const getFileType = () => {
     const name = file.filename.toLowerCase();
     if (name.endsWith('.docx') || name.endsWith('.doc')) return 'docx';
@@ -45,11 +51,17 @@ export function FileCard({ file, onOpen, onRemove, showStatus = true }: FileCard
           {file.filename}
         </p>
         <p className="file-card-size">
-          {missing ? '文件不存在' : formatFileSize(file.size_bytes)}
+          {missing
+            ? '文件不存在'
+            : waitingForDuplicateDecision
+              ? '等待重复文件确认'
+              : lifecyclePending
+                ? `${formatFileSize(file.size_bytes)} · 后台处理中`
+                : formatFileSize(file.size_bytes)}
         </p>
       </div>
       {showStatus && (
-        file.deleting ? (
+        file.deleting || lifecyclePending ? (
           <Loader2 className={statusClass} />
         ) : (
           <CheckCircle2 className={statusClass} />

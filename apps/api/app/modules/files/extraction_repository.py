@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.models import Document, DocumentElement, DocumentExtractionRun, DocumentPage, FileObject, utcnow
+from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 
 
 class FileExtractionRepository:
@@ -67,14 +68,18 @@ class FileExtractionRepository:
 
         file_object = (
             self.db.query(FileObject)
-            .filter(FileObject.document_id == document.id, FileObject.storage_backend == "local")
+            .filter(
+                FileObject.document_id == document.id,
+                FileObject.storage_backend.in_({"local", "working_copy_local", "trash_local"}),
+            )
             .order_by(FileObject.created_at.asc())
             .first()
         )
         if file_object is None:
             return _error("FILE_OBJECT_NOT_FOUND", "文件对象不存在。")
-        file_path = (self.storage_root / file_object.storage_path).resolve()
-        if not _is_relative_to(file_path, self.storage_root):
+        try:
+            file_path = FileLifecycleStorageService().file_object_path(file_object)
+        except ValueError:
             return _error("UNSAFE_STORAGE_PATH", "文件存储路径越界，已拒绝读取。")
         if not file_path.exists():
             return _error("FILE_NOT_FOUND_ON_DISK", "本地文件不存在。")

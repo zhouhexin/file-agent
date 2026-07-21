@@ -5,7 +5,7 @@ P0 只提供只读目录配置、异步扫描任务创建和文件元数据查�
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,7 @@ from app.db.models import User
 from app.modules.auth.dependencies import get_current_user
 from app.modules.managed_files.schemas import (
     FilesystemJobResponse,
+    FilesystemJobEventResponse,
     ManagedCategoryResponse,
     ManagedFileResponse,
     ManagedRootCreateRequest,
@@ -46,7 +47,11 @@ def list_managed_roots(
     return ManagedFileService(db).list_roots(current_user=current_user)
 
 
-@router.post("/api/admin/managed-roots/{root_id}/scan", response_model=FilesystemJobResponse)
+@router.post(
+    "/api/admin/managed-roots/{root_id}/scan",
+    response_model=FilesystemJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def create_scan_job(
     root_id: str,
     current_user: User = Depends(get_current_user),
@@ -55,6 +60,24 @@ def create_scan_job(
     """创建异步扫描任务。"""
 
     return ManagedFileService(db).create_scan_job(root_id=root_id, current_user=current_user)
+
+
+@router.post(
+    "/api/admin/managed-roots/{root_id}/reconcile",
+    response_model=FilesystemJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_reconcile_job(
+    root_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> FilesystemJobResponse:
+    """创建受管原始目录异步全量同步任务。"""
+
+    return ManagedFileService(db).create_reconcile_job(
+        root_id=root_id,
+        current_user=current_user,
+    )
 
 
 @router.get("/api/admin/filesystem-jobs/{job_id}", response_model=FilesystemJobResponse)
@@ -80,6 +103,28 @@ def get_user_filesystem_job(
         job_id=job_id,
         current_user=current_user,
     )
+
+
+@router.get("/api/jobs/{job_id}", response_model=FilesystemJobResponse)
+def get_job(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> FilesystemJobResponse:
+    """按统一任务 API 查询当前用户可见的持久化异步任务。"""
+
+    return ManagedFileService(db).get_user_job(job_id=job_id, current_user=current_user)
+
+
+@router.get("/api/jobs/{job_id}/events", response_model=list[FilesystemJobEventResponse])
+def list_job_events(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[FilesystemJobEventResponse]:
+    """列出任务事件；普通用户只能看到自己创建任务的脱敏状态摘要。"""
+
+    return ManagedFileService(db).get_user_job_events(job_id=job_id, current_user=current_user)
 
 
 @router.get("/api/managed-files", response_model=list[ManagedFileResponse])

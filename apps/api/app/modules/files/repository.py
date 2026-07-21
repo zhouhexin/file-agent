@@ -202,6 +202,9 @@ class FileRepository:
             raise HTTPException(status_code=404, detail="Document not found")
 
         for document in documents:
+            if document.status == "WORKING_COPY":
+                # 工作副本可以被多条消息引用；消息生命周期不能把它锁成不可操作的上传附件。
+                continue
             if document.status == "USED_IN_MESSAGE":
                 continue
             if document.status != "UPLOADED":

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import Any, List
 
 from pydantic import BaseModel, Field
 
@@ -64,6 +64,7 @@ class ConversationHistoryMessage(BaseModel):
     role: str
     content: str
     attachments: List[ConversationAttachmentSummary]
+    metadata: List[dict[str, Any]] = Field(default_factory=list)
     agent_run: AgentRunResult | None = None
 
 

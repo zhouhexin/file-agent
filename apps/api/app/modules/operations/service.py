@@ -7,9 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Conversation, OperationPlan, User
 from app.modules.conversations.repository import ConversationRepository
-from app.modules.file_rename.execution_service import ConfirmedRenameService
-from app.modules.file_rename.batch_service import RenameBatchService
-from app.modules.file_rename.uploaded_execution_service import ConfirmedUploadedRenameService
+from app.modules.file_lifecycle.operations import WORKING_COPY_OPERATION_TYPES, WorkingCopyOperationService
 from app.modules.operations.repository import OperationPlanRepository
 from app.modules.operations.schemas import (
     OperationConfirmRequest,
@@ -44,6 +42,14 @@ class OperationPlanService:
             user_id=current_user.id,
         )
         _ensure_conversation_workspace(conversation=conversation, workspace_id=current_user.default_workspace_id)
+        if request.operation_type in WORKING_COPY_OPERATION_TYPES:
+            plan = WorkingCopyOperationService(self.db).create_plan(
+                request=request,
+                current_user=current_user,
+            )
+            self.db.commit()
+            self.db.refresh(plan)
+            return self.to_response(plan)
         plan = self.repository.create_plan(
             workspace_id=current_user.default_workspace_id,
             conversation_id=request.conversation_id,
@@ -72,63 +78,35 @@ class OperationPlanService:
         request: OperationConfirmRequest,
         current_user: User,
     ) -> OperationConfirmResponse:
-        """确认 OperationPlan；重命名计划确认后执行真实 Native 文件动作。"""
+        """确认 OperationPlan；文件路径动作只能由工作副本白名单执行器执行。"""
 
         plan = self.repository.get_owned_plan(plan_id=plan_id, user_id=current_user.id)
         if plan is None:
             raise HTTPException(status_code=404, detail="OperationPlan not found")
         if plan.status not in {"PLANNED", "WAITING_CONFIRMATION"}:
             raise HTTPException(status_code=409, detail="OperationPlan is not waiting for confirmation")
-        if plan.operation_type not in {"RENAME_FILES", "RENAME_UPLOADED_FILES"}:
+        if plan.operation_type not in WORKING_COPY_OPERATION_TYPES:
             # 没有白名单执行器时必须保持待确认，不能只改状态来伪造真实文件动作。
             raise HTTPException(
                 status_code=409,
                 detail="Operation type does not have a controlled executor",
-            )
-        if plan.operation_type == "RENAME_FILES":
-            scope = plan.plan_json.get("scope", {}) if isinstance(plan.plan_json, dict) else {}
-            batch_id = scope.get("rename_batch_id") if isinstance(scope, dict) else None
-            batch_service = None
-            batch = None
-            if batch_id:
-                batch_service = RenameBatchService(self.db, current_user.id)
-                batch = batch_service.get_owned_batch(str(batch_id))
-                batch_service.apply_plan_exclusions(
-                    batch=batch,
-                    plan=plan,
-                    excluded_item_ids=set(request.excluded_rename_batch_item_ids),
-                )
-            elif request.excluded_rename_batch_item_ids:
-                raise HTTPException(status_code=400, detail="Rename selection requires a managed-file batch")
-            self.repository.confirm_plan(
-                plan=plan,
-                user_id=current_user.id,
-                confirmation_text=request.confirmation,
-            )
-            result, changeset = ConfirmedRenameService(self.db).execute(plan=plan)
-            if batch_service is not None and batch is not None:
-                batch_service.record_execution_result(batch, result)
-            self.db.commit()
-            self.db.refresh(plan)
-            return OperationConfirmResponse(
-                id=plan.id,
-                status=plan.status,
-                changeset_id=changeset.id,
-                result=result.model_dump(mode="json"),
             )
         self.repository.confirm_plan(
             plan=plan,
             user_id=current_user.id,
             confirmation_text=request.confirmation,
         )
-        result, changeset = ConfirmedUploadedRenameService(self.db).execute(plan=plan)
+        result, changeset_id = WorkingCopyOperationService(self.db).execute(
+            plan=plan,
+            current_user=current_user,
+        )
         self.db.commit()
         self.db.refresh(plan)
         return OperationConfirmResponse(
             id=plan.id,
             status=plan.status,
-            changeset_id=changeset.id,
-            result=result.model_dump(mode="json"),
+            changeset_id=changeset_id,
+            result=result,
         )
 
     @staticmethod

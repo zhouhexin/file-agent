@@ -74,7 +74,8 @@ class RenameSuggestionService:
         scope = resolve_managed_file_query_scope(root_key=root_key, path_prefix=path_prefix)
         if scope.unresolved_root_key:
             return _error("MANAGED_ROOT_NOT_CONFIGURED", "未找到对应的受管目录配置。")
-        sync_configured_managed_roots(self.db, root_key=scope.root_key, scan=True)
+        # 建议生成只能读取异步同步结果，不能在 AgentRun 中阻塞式扫描受管原始目录。
+        sync_configured_managed_roots(self.db, root_key=scope.root_key, scan=False)
         repository = ManagedFileRepository(self.db)
         directory_resolution = ManagedDirectoryScopeResolver(repository).resolve(
             root_key=scope.root_key,

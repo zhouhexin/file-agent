@@ -4,6 +4,9 @@ import type {
   ChangeSetResponse,
   ClassificationFeedbackResponse,
   ConversationDetailResponse,
+  DuplicateDecisionResponse,
+  DuplicateReview,
+  UploadArchiveStatus,
   FilesystemJobResponse,
   OperationConfirmResponse,
   OperationPlanResponse,
@@ -143,10 +146,11 @@ export async function fetchManagedFileBlob(
   return response.blob();
 }
 
-export async function uploadFile(token: string, file: File): Promise<UploadedFile> {
+export async function uploadFile(token: string, file: File, conversationId: string): Promise<UploadedFile> {
   // 文件上传必须使用 FormData，不能复用 JSON 请求封装。
   const formData = new FormData();
   formData.append('file', file);
+  formData.append('conversation_id', conversationId);
 
   const response = await fetch(`${API_BASE_URL}/files/upload`, {
     method: 'POST',
@@ -162,6 +166,38 @@ export async function uploadFile(token: string, file: File): Promise<UploadedFil
     throw new ApiError(response.status, String(message));
   }
   return data as UploadedFile;
+}
+
+export async function getDuplicateReview(
+  token: string,
+  uploadVersionId: string,
+): Promise<DuplicateReview> {
+  // 查重 worker 完成后只读取后端已经脱敏的候选，不在前端推断重复关系。
+  return request<DuplicateReview>(`/uploads/${uploadVersionId}/duplicate-review`, { token });
+}
+
+export async function getUploadArchiveStatus(
+  token: string,
+  uploadVersionId: string,
+): Promise<UploadArchiveStatus> {
+  // 归档与导入均在 worker 中执行，前端只轮询脱敏业务状态。
+  return request<UploadArchiveStatus>(`/uploads/${uploadVersionId}/archive-status`, { token });
+}
+
+export async function decideDuplicateReview(
+  token: string,
+  uploadVersionId: string,
+  payload: {
+    duplicate_review_id: string;
+    decision: 'CONTINUE_UPLOAD' | 'USE_EXISTING_FILE' | 'CANCEL_UPLOAD';
+    selected_existing_working_copy_id?: string | null;
+  },
+): Promise<DuplicateDecisionResponse> {
+  // 重复上传确认使用独立受控接口；它不能被普通消息或 OperationPlan 确认替代。
+  return request<DuplicateDecisionResponse>(`/uploads/${uploadVersionId}/duplicate-review/decision`, {
+    token,
+    body: payload,
+  });
 }
 
 export async function deleteUploadedFile(token: string, documentId: string): Promise<void> {

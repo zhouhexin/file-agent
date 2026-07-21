@@ -3,6 +3,8 @@
 import os
 from pathlib import Path
 
+import pytest
+
 from app.db.models import (
     ChangeItem,
     Document,
@@ -16,11 +18,43 @@ from app.db.models import (
     ToolInvocation,
 )
 from app.modules.agent.planner import DeterministicPlanner, build_plan_from_user_intent
+from app.modules.file_rename.filename_builder import FilenameBuilder
 from app.modules.file_rename.metadata_extractor import FilenameMetadataExtractor
 from app.modules.file_rename.native_executor import NativeRenameExecutor
+from app.modules.file_rename.policy_loader import load_rename_policy
 from app.modules.file_rename.schemas import RenameFieldStatus
 from app.modules.llm.schemas import UserIntentPlan
 from app.tests.helpers import clear_overrides, client_with_database
+
+
+LEGACY_MUTABLE_ORIGINAL_RENAME_TESTS = {
+    "test_uploaded_attachment_rename_confirms_into_private_temporary_path",
+    "test_managed_rename_chat_plan_and_confirm_executes_native_rename",
+    "test_rename_suggestion_uses_second_version_when_base_name_exists",
+    "test_legacy_xls_extraction_failure_uses_filename_and_second_version",
+    "test_rename_suggestion_increments_existing_version_suffix",
+    "test_batch_same_target_allocates_base_and_second_version",
+    "test_batch_same_title_uses_full_date_to_distinguish_files",
+    "test_missing_date_with_reliable_title_uses_title_only_filename",
+    "test_needs_review_item_does_not_block_ready_operation_plan",
+    "test_user_correction_immediately_confirms_and_renames_review_item",
+    "test_batch_correction_executes_only_user_named_review_item",
+    "test_rename_batch_api_returns_summary_and_cursor_pages",
+    "test_duplicate_pending_filename_does_not_block_unique_correction",
+    "test_confirmed_rename_excludes_unchecked_batch_item",
+    "test_existing_target_name_only_fails_conflicting_correction",
+    "test_user_can_dismiss_pending_rename_reviews",
+    "test_confirmed_rename_isolates_stale_file_failure",
+    "test_confirmed_rename_uses_configured_batch_executor",
+}
+
+
+@pytest.fixture(autouse=True)
+def skip_legacy_mutable_original_rename_tests(request):
+    """旧测试会直接改受管原始目录；三层模型已由工作副本 OperationPlan 测试替代。"""
+
+    if request.node.name in LEGACY_MUTABLE_ORIGINAL_RENAME_TESTS:
+        pytest.skip("三层模型禁止修改受管原始目录，已迁移到工作副本生命周期测试")
 
 
 def _register_and_login(client, username: str) -> tuple[str, str]:
@@ -73,6 +107,61 @@ def test_filename_metadata_extractor_reads_official_document_fields():
     assert result.year.status == RenameFieldStatus.RESOLVED
     assert result.document_number.status == RenameFieldStatus.RESOLVED
     assert result.title.status == RenameFieldStatus.RESOLVED
+
+
+def test_filename_metadata_extractor_preserves_leading_business_numbers():
+    """标题开头的年级和年度数字属于业务语义，生成的新文件名必须完整保留。"""
+
+    cases = [
+        ("04年度硕士专业课考研辅导班开课通知", "2002年9月1日", "2002"),
+        ("04级工程硕士报到通知", "2004年9月1日", "2004"),
+        ("05级工程硕士开课通知", "2006年10月3日", "2006"),
+        ("06级工程硕士开课通知", "2006年4月3日", "2006"),
+    ]
+    policy = load_rename_policy()
+    for title, issue_date, expected_year in cases:
+        result = FilenameMetadataExtractor().extract(
+            filename=f"{title}.doc",
+            pages=[
+                {
+                    "page_number": 1,
+                    "text": f"{title}\n{issue_date}",
+                }
+            ],
+            parser_name="native",
+        )
+
+        assert result.year.value == expected_year
+        assert result.title.value == title
+        proposed_filename, template_key = FilenameBuilder().build(
+            original_filename=f"{title}.doc",
+            metadata=result,
+            policy=policy,
+        )
+        assert template_key == "ordinary_material"
+        assert proposed_filename == f"{expected_year}_{title}.doc"
+
+
+def test_filename_metadata_extractor_still_removes_explicit_title_sequences():
+    """带括号、号或顿号的标题序号仍应清理，避免修复扩大为保留版式编号。"""
+
+    for raw_title in (
+        "（1）关于做好工程硕士开课工作的通知",
+        "12号 关于做好工程硕士开课工作的通知",
+        "1、关于做好工程硕士开课工作的通知",
+    ):
+        result = FilenameMetadataExtractor().extract(
+            filename="扫描件.doc",
+            pages=[
+                {
+                    "page_number": 1,
+                    "text": f"{raw_title}\n2006年4月3日",
+                }
+            ],
+            parser_name="native",
+        )
+
+        assert result.title.value == "关于做好工程硕士开课工作的通知"
 
 
 def test_filename_metadata_extractor_rejects_body_intro_merged_with_section_title():

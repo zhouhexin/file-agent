@@ -2,6 +2,7 @@
 import { Bot } from 'lucide-react';
 import { AgentRunReceipt } from './AgentRunReceipt';
 import { AttachmentRail } from './AttachmentRail';
+import { DuplicateUploadReviewLoader } from './DuplicateUploadReviewCard';
 import type { ChatAttachment, ChatTurn } from './presentation';
 import type { ManagedFileResult } from '../../types';
 
@@ -14,6 +15,26 @@ type ChatTurnViewProps = {
 
 export function ChatTurnView({ token, turn, onOpenAttachment, onOpenManagedFile }: ChatTurnViewProps) {
   // 文件任务按"附件上下文 -> 用户指令 -> 助手结果"展示，减少阅读跳跃。
+  if (turn.role === 'assistant') {
+    const duplicateMetadata = turn.metadata?.find((item) => item.type === 'duplicate_upload_review');
+    const uploadVersionId = String(duplicateMetadata?.upload_document_version_id ?? '');
+    return (
+      <section className="chat-turn chat-turn-system">
+        <div className="message-row message-row-assistant">
+          <div className="avatar avatar-assistant"><Bot size={15} /></div>
+          <div className="message-content">
+            {uploadVersionId ? (
+              <DuplicateUploadReviewLoader token={token} uploadVersionId={uploadVersionId} />
+            ) : turn.response ? (
+              <AgentRunReceipt agentRun={turn.response.agent_run} token={token} />
+            ) : (
+              <p className="agent-chat-response">{turn.userText}</p>
+            )}
+          </div>
+        </div>
+      </section>
+    );
+  }
   const shouldShowUserAttachments = turn.attachments.length > 0 && !isInferredContextFileRequest(turn.userText);
 
   return (

@@ -1220,6 +1220,78 @@
   }
 }
 
+.duplicate-review-card {
+  display: grid;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 14px;
+  border: 1px solid #f6c86f;
+  border-radius: 14px;
+  background: #fffbeb;
+  color: #713f12;
+}
+
+.duplicate-review-card header,
+.duplicate-review-card article,
+.duplicate-review-card footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.duplicate-review-card header > div,
+.duplicate-review-card article > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.duplicate-review-card span,
+.duplicate-review-card small {
+  color: #854d0e;
+  overflow-wrap: anywhere;
+}
+
+.duplicate-review-candidates {
+  display: grid;
+  gap: 8px;
+}
+
+.duplicate-review-card article {
+  padding: 10px;
+  border-radius: 10px;
+  background: rgb(255 255 255 / 0.72);
+}
+
+.duplicate-review-card article > div {
+  flex: 1;
+}
+
+.duplicate-review-card button {
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 9px;
+  background: #2563eb;
+  color: white;
+  cursor: pointer;
+}
+
+.duplicate-review-card button.secondary {
+  background: #fff;
+  color: #92400e;
+  border: 1px solid #f6c86f;
+}
+
+.duplicate-review-card button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.duplicate-review-error {
+  margin: 0;
+  color: #b91c1c;
+}
+
 /* 左侧功能菜单：保持贴近聊天背景的简约浅色样式。 */
 .chat-sidebar {
   display: flex;

@@ -113,7 +113,7 @@ def _upload_text(client: TestClient, headers: dict[str, str], filename: str = "n
         headers=headers,
         files={"file": (filename, "学生姓名：张三\n奖学金：一等奖\n".encode("utf-8"), "text/plain")},
     )
-    assert response.status_code == 200
+    assert response.status_code == 202
     return response.json()["document_id"]
 
 
@@ -144,7 +144,7 @@ def _upload_docx(client: TestClient, headers: dict[str, str]) -> str:
             )
         },
     )
-    assert response.status_code == 200
+    assert response.status_code == 202
     return response.json()["document_id"]
 
 
@@ -156,7 +156,7 @@ def _upload_doc(client: TestClient, headers: dict[str, str]) -> str:
         headers=headers,
         files={"file": ("legacy-notice.doc", b"legacy-doc-content", "application/msword")},
     )
-    assert response.status_code == 200
+    assert response.status_code == 202
     return response.json()["document_id"]
 
 

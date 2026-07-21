@@ -18,9 +18,9 @@ from app.db.models import FilesystemJob, ManagedFile, ManagedRoot, User
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.path_policy import PathPolicyError, resolve_managed_relative_path
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
-from app.modules.managed_files.scanner import ManagedFileScanner
 from app.modules.managed_files.schemas import (
     FilesystemJobResponse,
+    FilesystemJobEventResponse,
     ManagedCategoryResponse,
     ManagedFileResponse,
     ManagedRootCreateRequest,
@@ -90,6 +90,26 @@ class ManagedFileService:
         self.db.refresh(job)
         return self.to_job_response(job)
 
+    def create_reconcile_job(self, *, root_id: str, current_user: User) -> FilesystemJobResponse:
+        """创建受管原始目录全量同步任务，HTTP 请求不等待扫描或导入。"""
+
+        _require_role(current_user, {"admin", "ops"})
+        root = self.repository.get_root(root_id)
+        if root is None or not root.enabled:
+            raise HTTPException(status_code=404, detail="Managed root not found")
+        job = FilesystemJobQueue(self.db).create_job(
+            job_type="RECONCILE_MANAGED_ROOT",
+            queue_name="RECONCILE",
+            root_id=root.id,
+            created_by=current_user.id,
+            deduplication_key=f"reconcile-managed-root:{root.id}",
+            reuse_completed=True,
+            payload={"root_key": root.root_key, "reason": "manual"},
+        )
+        self.db.commit()
+        self.db.refresh(job)
+        return self.to_job_response(job)
+
     def get_job(self, *, job_id: str, current_user: User) -> FilesystemJobResponse:
         """查询文件系统任务状态。"""
 
@@ -110,6 +130,23 @@ class ManagedFileService:
             raise HTTPException(status_code=404, detail="Filesystem job not found")
         return self.to_job_response(job)
 
+    def get_user_job_events(self, *, job_id: str, current_user: User) -> list[FilesystemJobEventResponse]:
+        """读取有权限任务的持久化事件，复用任务所有权边界。"""
+
+        self.get_user_job(job_id=job_id, current_user=current_user)
+        events = FilesystemJobRepository(self.db).list_events(job_id)
+        return [
+            FilesystemJobEventResponse(
+                id=event.id,
+                job_id=event.job_id,
+                level=event.level,
+                message=event.message,
+                details=event.details_json or {},
+                created_at=event.created_at,
+            )
+            for event in events
+        ]
+
     def list_files(
         self,
         *,
@@ -128,7 +165,8 @@ class ManagedFileService:
 
         _require_role(current_user, {"user", "ops", "admin"})
         scope = resolve_managed_file_query_scope(root_key=root_key, path_prefix=path_prefix)
-        sync_configured_managed_roots(self.db, root_key=scope.root_key, scan=True)
+        # 查询请求只同步部署配置，不遍历目录；目录扫描由启动、watcher 或 scheduler 创建异步任务。
+        sync_configured_managed_roots(self.db, root_key=scope.root_key, scan=False)
         self.db.commit()
         if scope.unresolved_root_key:
             return []
@@ -150,7 +188,7 @@ class ManagedFileService:
         """列出父目录作为分类的受管目录分类树。"""
 
         _require_role(current_user, {"user", "ops", "admin"})
-        sync_configured_managed_roots(self.db, root_key=root_key, scan=True)
+        sync_configured_managed_roots(self.db, root_key=root_key, scan=False)
         self.db.commit()
         return [
             ManagedCategoryResponse(
@@ -212,12 +250,18 @@ class ManagedFileService:
         return FilesystemJobResponse(
             id=job.id,
             job_type=job.job_type,
+            queue_name=job.queue_name,
             root_id=job.root_id,
             status=job.status,
             progress_current=job.progress_current,
             progress_total=job.progress_total,
             result=job.result_json or {},
             error_message=job.error_message,
+            attempt_count=job.attempt_count,
+            max_attempts=job.max_attempts,
+            available_at=job.available_at,
+            started_at=job.started_at,
+            finished_at=job.finished_at,
         )
 
     @staticmethod
@@ -301,7 +345,7 @@ def sync_configured_managed_roots(
     scan: bool = False,
     created_by: str | None = None,
 ) -> list[ManagedRoot]:
-    """把 env 中声明的受管目录同步到数据库，并按需执行只读扫描。
+    """把 env 中声明的受管目录同步到数据库，并按需创建只读扫描任务。
 
     env 是受管目录的唯一配置入口；数据库只保存运行时索引和扫描结果。
     因此普通用户查询时也会自动同步，避免必须先由管理员手动登记。
@@ -331,7 +375,14 @@ def sync_configured_managed_roots(
         )
         roots.append(root)
         if scan and (config_changed or not _has_active_managed_files(db, root_id=root.id)):
-            ManagedFileScanner(db).scan_root(root)
+            FilesystemJobQueue(db).create_job(
+                job_type="SCAN_MANAGED_ROOT",
+                queue_name="RECONCILE",
+                root_id=root.id,
+                created_by=created_by,
+                deduplication_key=f"startup-scan:{root.id}:{root.updated_at.isoformat()}",
+                payload={"root_key": root.root_key, "reason": "configured-root-sync"},
+            )
     db.flush()
     return roots
 
@@ -346,14 +397,14 @@ def _root_config_changed(
 ) -> bool:
     """判断 env 配置是否相对数据库索引发生变化。"""
 
-    expected_read_only = not allow_rename
+    expected_read_only = True
     return (
         root.display_name != display_name
         or root.container_path != container_path
         or root.classification_mode != classification_mode
         or root.enabled is not True
         or root.read_only is not expected_read_only
-        or ("rename" in set(root.allowed_operations_json or [])) is not allow_rename
+        or set(root.allowed_operations_json or []) != {"scan", "list", "search", "read"}
     )
 
 
@@ -376,9 +427,21 @@ def _configured_root_keys(*, root_key: str | None = None) -> list[str]:
 
     prefix = "MANAGED_ROOT_"
     ignored_suffixes = {"_CLASSIFICATION_MODE", "_NAME", "_DISPLAY_NAME", "_ALLOW_RENAME"}
+    global_config_keys = {
+        "MANAGED_ROOT_WATCH_ENABLED",
+        "MANAGED_ROOT_WATCH_POLL_SECONDS",
+        "MANAGED_ROOT_RECONCILE_INTERVAL_SECONDS",
+        "MANAGED_ROOT_RECONCILE_ON_STARTUP",
+    }
     keys: list[str] = []
     for env_key in os.environ:
         if not env_key.startswith(prefix):
+            continue
+        if env_key in global_config_keys:
+            # 全局监听/对账开关不是目录定义，不能被误注册成名为 watch_enabled 的受管根。
+            continue
+        if env_key.startswith("MANAGED_ROOT_ARCHIVE_"):
+            # 归档 worker 独占写入口不是普通受管根，绝不能被用户查询或扫描接口暴露。
             continue
         if any(env_key.endswith(suffix) for suffix in ignored_suffixes):
             continue
@@ -397,10 +460,9 @@ def _configured_classification_mode(root_key: str) -> str:
 
 
 def _configured_allow_rename(root_key: str) -> bool:
-    """读取受管目录重命名开关；只有显式 true 才允许写操作。"""
+    """兼容旧配置字段；三层模型中受管原始目录始终禁止重命名。"""
 
-    env_key = f"MANAGED_ROOT_{root_key.upper()}_ALLOW_RENAME"
-    return os.getenv(env_key, "false").strip().lower() in {"1", "true", "yes", "on"}
+    return False
 
 
 def _require_role(current_user: User, allowed_roles: set[str]) -> None:

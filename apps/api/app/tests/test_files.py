@@ -1,10 +1,17 @@
-"""文件上传和 Document 持久化测试。"""
+"""上传暂存、异步生命周期和附件删除边界测试。"""
 
 from __future__ import annotations
 
 from app.core import config
-from app.db.models import Document, DocumentArtifact, DocumentInsight, FileObject, ManagedFileSnapshot, User
-from app.modules.agent.tool_registry import ToolRegistry
+from app.db.models import (
+    Document,
+    DocumentVersion,
+    FileObject,
+    FilesystemJob,
+    UploadArchiveRecord,
+    UploadDuplicateReview,
+)
+from app.modules.managed_files.worker import process_next_filesystem_job
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -22,484 +29,187 @@ def _auth_header(client, username: str = "file-user") -> dict[str, str]:
     return {"Authorization": f"Bearer {login_response.json()['access_token']}"}
 
 
-def test_upload_file_creates_document_and_file_object(monkeypatch, tmp_path):
-    """上传文件后必须创建 Document、FileObject，并把原始文件保存到本地存储。"""
+def _configure_storage(monkeypatch, tmp_path) -> None:
+    """把三层存储全部隔离到当前测试目录。"""
 
-    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "uploads"))
+    monkeypatch.setenv("MANAGED_ROOT_ARCHIVE_WRITE_PATH", str(tmp_path / "originals"))
+    monkeypatch.setenv("WORKING_COPY_STORAGE_ROOT", str(tmp_path / "working"))
+    monkeypatch.setenv("TRASH_STORAGE_ROOT", str(tmp_path / "trash"))
     config.get_settings.cache_clear()
-    client, SessionLocal = client_with_database()
 
+
+def _drain_jobs(SessionLocal, *, maximum: int = 20) -> list[str]:
+    """同步驱动测试数据库中的 worker；生产环境仍由独立进程消费。"""
+
+    processed: list[str] = []
+    for _ in range(maximum):
+        job_id = process_next_filesystem_job(session_factory=SessionLocal, worker_id="test-worker")
+        if job_id is None:
+            break
+        processed.append(job_id)
+    return processed
+
+
+def test_upload_creates_version_review_and_persistent_job(monkeypatch, tmp_path):
+    """上传请求只保存暂存和创建任务，不得同步归档或导入。"""
+
+    _configure_storage(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
     response = client.post(
         "/api/files/upload",
         headers=_auth_header(client),
         files={"file": ("student.xlsx", b"student-file-content", "application/vnd.ms-excel")},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     data = response.json()
-    assert data["document_id"]
-    assert data["filename"] == "student.xlsx"
-    assert data["content_type"] == "application/vnd.ms-excel"
-    assert data["size_bytes"] == len(b"student-file-content")
     assert data["status"] == "UPLOADED"
-    assert data["ingest_status"] == "INGESTED"
+    assert data["ingest_status"] == "DUPLICATE_CHECK_PENDING"
+    assert data["deduplicated"] is False
+    assert data["upload_document_version_id"]
+    assert data["duplicate_review_id"]
+    assert data["filesystem_job_id"]
 
     db = SessionLocal()
     try:
         document = db.get(Document, data["document_id"])
-        assert document is not None
-        assert document.original_filename == "student.xlsx"
-        assert document.size_bytes == len(b"student-file-content")
-        assert document.ingest_status == "INGESTED"
-
-        file_object = db.query(FileObject).filter(FileObject.document_id == document.id).one()
-        assert file_object.storage_backend == "local"
-        assert (tmp_path / file_object.storage_path).read_bytes() == b"student-file-content"
-        insight = db.query(DocumentInsight).filter(DocumentInsight.document_id == document.id).one()
-        assert "student" in insight.keywords_json
-        assert insight.labels_json
+        version = db.get(DocumentVersion, data["upload_document_version_id"])
+        review = db.get(UploadDuplicateReview, data["duplicate_review_id"])
+        archive = db.query(UploadArchiveRecord).filter_by(upload_document_version_id=version.id).one()
+        job = db.get(FilesystemJob, data["filesystem_job_id"])
+        file_object = db.query(FileObject).filter_by(document_id=document.id).one()
+        assert version.storage_tier == "UPLOAD"
+        assert review.status == "CHECKING"
+        assert archive.status == "DUPLICATE_CHECK_PENDING"
+        assert job.status == "PENDING"
+        assert (tmp_path / "uploads" / file_object.storage_path).read_bytes() == b"student-file-content"
+        assert not (tmp_path / "originals").exists()
+        assert not (tmp_path / "working").exists()
     finally:
         db.close()
         clear_overrides()
-        config.get_settings.cache_clear()
 
 
-def test_upload_same_content_with_different_filename_creates_distinct_draft(monkeypatch, tmp_path):
-    """同一内容但文件名不同的上传必须保留独立草稿生命周期，只复用物理对象。"""
+def test_same_content_uploads_remain_distinct_until_dialog_decision(monkeypatch, tmp_path):
+    """同内容上传不能在请求线程静默复用 Document 或物理暂存文件。"""
 
-    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
-    config.get_settings.cache_clear()
+    _configure_storage(monkeypatch, tmp_path)
     client, SessionLocal = client_with_database()
-    auth_header = _auth_header(client, username="dedupe-owner")
-
-    first_response = client.post(
+    headers = _auth_header(client, "distinct-upload-owner")
+    first = client.post(
         "/api/files/upload",
-        headers=auth_header,
+        headers=headers,
         files={"file": ("first.txt", b"same-content", "text/plain")},
     )
-    second_response = client.post(
+    second = client.post(
         "/api/files/upload",
-        headers=auth_header,
+        headers=headers,
         files={"file": ("second.txt", b"same-content", "text/plain")},
     )
 
-    assert first_response.status_code == 200
-    assert second_response.status_code == 200
-    assert second_response.json()["document_id"] != first_response.json()["document_id"]
-    assert second_response.json()["filename"] == "second.txt"
-    assert second_response.json()["status"] == "UPLOADED"
-    assert second_response.json()["deduplicated"] is True
-
+    assert first.status_code == second.status_code == 202
+    assert first.json()["document_id"] != second.json()["document_id"]
     db = SessionLocal()
     try:
-        assert db.query(Document).count() == 2
-        assert db.query(FileObject).count() == 2
-        assert db.query(DocumentInsight).count() == 2
-        file_objects = db.query(FileObject).order_by(FileObject.created_at.asc()).all()
-        assert file_objects[0].storage_path == file_objects[1].storage_path
+        objects = db.query(FileObject).order_by(FileObject.created_at.asc()).all()
+        assert len(objects) == 2
+        assert objects[0].storage_path != objects[1].storage_path
     finally:
         db.close()
         clear_overrides()
-        config.get_settings.cache_clear()
 
 
-def test_exact_duplicate_unsent_upload_reuses_same_draft(monkeypatch, tmp_path):
-    """完全相同且尚未发送的同名上传可以幂等复用同一个草稿 Document。"""
+def test_get_file_content_enforces_owner(monkeypatch, tmp_path):
+    """暂存附件读取必须校验所属用户，不能因为内容相同跨用户共享路径。"""
 
-    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
-    config.get_settings.cache_clear()
-    client, SessionLocal = client_with_database()
-    auth_header = _auth_header(client, username="exact-dedupe-owner")
-
-    first_response = client.post(
-        "/api/files/upload",
-        headers=auth_header,
-        files={"file": ("same.txt", b"same-content", "text/plain")},
-    )
-    second_response = client.post(
-        "/api/files/upload",
-        headers=auth_header,
-        files={"file": ("same.txt", b"same-content", "text/plain")},
-    )
-
-    assert second_response.status_code == 200
-    assert second_response.json()["document_id"] == first_response.json()["document_id"]
-    assert second_response.json()["status"] == "UPLOADED"
-    assert second_response.json()["deduplicated"] is True
-
-    db = SessionLocal()
-    try:
-        assert db.query(Document).count() == 1
-        assert db.query(FileObject).count() == 1
-    finally:
-        db.close()
-        clear_overrides()
-        config.get_settings.cache_clear()
-
-
-def test_upload_matching_managed_snapshot_creates_deletable_draft(monkeypatch, tmp_path):
-    """受管快照内容命中去重时也必须新建可删除草稿，不能返回已锁定快照 Document。"""
-
-    managed_root = tmp_path / "managed"
-    managed_root.mkdir()
-    managed_source = managed_root / "制度.txt"
-    managed_source.write_text("制度正文", encoding="utf-8")
-    storage_root = tmp_path / "storage"
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
-    monkeypatch.setenv("FILE_STORAGE_ROOT", str(storage_root))
-    config.get_settings.cache_clear()
-    client, SessionLocal = client_with_database()
-    auth_header = _auth_header(client, username="managed-snapshot-upload-owner")
-
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.username == "managed-snapshot-upload-owner").one()
-        snapshot_result = ToolRegistry(db=db, user_id=user.id).invoke(
-            "managed-file-read-document",
-            {"root_key": "downloads", "filename_contains": "制度"},
-        )
-        assert snapshot_result.output_json["status"] == "COMPLETED"
-        snapshot_document_id = snapshot_result.output_json["document_id"]
-        snapshot_file_object = db.query(FileObject).filter_by(document_id=snapshot_document_id).one()
-        snapshot_path = storage_root / snapshot_file_object.storage_path
-        db.commit()
-    finally:
-        db.close()
-
-    upload_response = client.post(
-        "/api/files/upload",
-        headers=auth_header,
-        files={"file": ("待发送制度.txt", "制度正文".encode(), "text/plain")},
-    )
-
-    assert upload_response.status_code == 200
-    draft_document_id = upload_response.json()["document_id"]
-    assert draft_document_id != snapshot_document_id
-    assert upload_response.json()["filename"] == "待发送制度.txt"
-    assert upload_response.json()["status"] == "UPLOADED"
-    assert upload_response.json()["deduplicated"] is True
-
-    delete_response = client.delete(f"/api/files/{draft_document_id}", headers=auth_header)
-
-    assert delete_response.status_code == 200
-    assert delete_response.json() == {"deleted": True}
-    db = SessionLocal()
-    try:
-        assert db.get(Document, draft_document_id) is None
-        assert db.get(Document, snapshot_document_id) is not None
-        assert db.query(ManagedFileSnapshot).filter_by(document_id=snapshot_document_id).count() == 1
-        assert snapshot_path.exists()
-        assert snapshot_path.read_text(encoding="utf-8") == "制度正文"
-    finally:
-        db.close()
-        clear_overrides()
-        config.get_settings.cache_clear()
-
-
-def test_cross_user_duplicate_file_reuses_global_file_object(monkeypatch, tmp_path):
-    """不同用户上传相同内容时，Document 隔离，但底层物理文件应全局复用。"""
-
-    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
-    config.get_settings.cache_clear()
-    client, SessionLocal = client_with_database()
-    first_header = _auth_header(client, username="dedupe-user-a")
-    second_header = _auth_header(client, username="dedupe-user-b")
-
-    first_response = client.post(
-        "/api/files/upload",
-        headers=first_header,
-        files={"file": ("shared-a.txt", b"same-content", "text/plain")},
-    )
-    second_response = client.post(
-        "/api/files/upload",
-        headers=second_header,
-        files={"file": ("shared-b.txt", b"same-content", "text/plain")},
-    )
-
-    assert first_response.status_code == 200
-    assert second_response.status_code == 200
-    first_document_id = first_response.json()["document_id"]
-    second_document_id = second_response.json()["document_id"]
-    assert second_document_id != first_document_id
-    assert second_response.json()["deduplicated"] is True
-
-    db = SessionLocal()
-    try:
-        assert db.query(Document).count() == 2
-        assert db.query(FileObject).count() == 2
-        assert db.query(DocumentInsight).count() == 2
-        first_file_object = db.query(FileObject).filter(FileObject.document_id == first_document_id).one()
-        second_file_object = db.query(FileObject).filter(FileObject.document_id == second_document_id).one()
-        assert second_file_object.storage_path == first_file_object.storage_path
-        shared_path = tmp_path / first_file_object.storage_path
-        assert shared_path.exists()
-        assert shared_path.read_bytes() == b"same-content"
-    finally:
-        db.close()
-
-    delete_response = client.delete(f"/api/files/{first_document_id}", headers=first_header)
-    assert delete_response.status_code == 200
-    assert shared_path.exists()
-
-    content_response = client.get(f"/api/files/{second_document_id}/content", headers=second_header)
-    assert content_response.status_code == 200
-    assert content_response.content == b"same-content"
-
-    db = SessionLocal()
-    try:
-        assert db.query(Document).count() == 1
-        assert db.query(FileObject).count() == 1
-        assert db.query(DocumentInsight).count() == 1
-    finally:
-        db.close()
-        clear_overrides()
-        config.get_settings.cache_clear()
-
-
-def test_cross_user_duplicate_file_reads_after_source_document_locked(monkeypatch, tmp_path):
-    """源用户文件进入对话锁定后，其他用户重传同内容仍应读取自己的 Document。"""
-
-    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
-    config.get_settings.cache_clear()
-    client, SessionLocal = client_with_database()
-    first_header = _auth_header(client, username="locked-source-a")
-    second_header = _auth_header(client, username="locked-source-b")
-
-    first_response = client.post(
-        "/api/files/upload",
-        headers=first_header,
-        files={"file": ("source.txt", b"locked-source-content", "text/plain")},
-    )
-    first_document_id = first_response.json()["document_id"]
-    message_response = client.post(
-        "/api/conversations/source-lock/messages",
-        headers=first_header,
-        json={"content": "读取这个文件", "attachments": [{"document_id": first_document_id}]},
-    )
-    assert message_response.status_code == 200
-
-    second_response = client.post(
-        "/api/files/upload",
-        headers=second_header,
-        files={"file": ("source-copy.txt", b"locked-source-content", "text/plain")},
-    )
-
-    assert second_response.status_code == 200
-    assert second_response.json()["deduplicated"] is True
-    second_document_id = second_response.json()["document_id"]
-    assert second_document_id != first_document_id
-
-    content_response = client.get(f"/api/files/{second_document_id}/content", headers=second_header)
-
-    assert content_response.status_code == 200
-    assert content_response.content == b"locked-source-content"
-
-    db = SessionLocal()
-    try:
-        first_document = db.get(Document, first_document_id)
-        second_document = db.get(Document, second_document_id)
-        assert first_document.status == "USED_IN_MESSAGE"
-        assert second_document.status == "UPLOADED"
-    finally:
-        db.close()
-        clear_overrides()
-        config.get_settings.cache_clear()
-
-
-def test_get_file_content_returns_original_file(monkeypatch, tmp_path):
-    """点击附件时应能通过 document_id 读取原始文件内容。"""
-
-    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
-    config.get_settings.cache_clear()
+    _configure_storage(monkeypatch, tmp_path)
     client, _ = client_with_database()
-    auth_header = _auth_header(client, username="content-owner")
-
-    upload_response = client.post(
+    owner = _auth_header(client, "content-owner")
+    viewer = _auth_header(client, "content-viewer")
+    upload = client.post(
         "/api/files/upload",
-        headers=auth_header,
+        headers=owner,
         files={"file": ("preview.txt", b"preview-content", "text/plain")},
     )
-    document_id = upload_response.json()["document_id"]
+    document_id = upload.json()["document_id"]
 
-    response = client.get(f"/api/files/{document_id}/content", headers=auth_header)
+    own_response = client.get(f"/api/files/{document_id}/content", headers=owner)
+    cross_response = client.get(f"/api/files/{document_id}/content", headers=viewer)
 
-    assert response.status_code == 200
-    assert response.content == b"preview-content"
-    assert response.headers["content-type"].startswith("text/plain")
-    assert "preview.txt" in response.headers["content-disposition"]
+    assert own_response.status_code == 200
+    assert own_response.content == b"preview-content"
+    assert cross_response.status_code == 404
     clear_overrides()
-    config.get_settings.cache_clear()
 
 
-def test_get_file_content_rejects_other_user_document(monkeypatch, tmp_path):
-    """文件内容读取必须限制当前用户自己的 Document，避免跨用户下载附件。"""
+def test_delete_unsent_upload_cancels_lifecycle_and_cleans_asynchronously(monkeypatch, tmp_path):
+    """未发送附件可删除；保留审计记录，但物理暂存由 worker 异步清理。"""
 
-    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
-    config.get_settings.cache_clear()
-    client, _ = client_with_database()
-    owner_header = _auth_header(client, username="content-owner-a")
-    viewer_header = _auth_header(client, username="content-viewer-b")
-
-    upload_response = client.post(
-        "/api/files/upload",
-        headers=owner_header,
-        files={"file": ("shared.txt", b"shared-content", "text/plain")},
-    )
-    document_id = upload_response.json()["document_id"]
-
-    response = client.get(f"/api/files/{document_id}/content", headers=viewer_header)
-
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Document not found"
-    clear_overrides()
-    config.get_settings.cache_clear()
-
-
-def test_delete_uploaded_file_removes_database_rows_and_local_file(monkeypatch, tmp_path):
-    """发送消息前删除上传文件时，必须同时删除数据库记录和本地文件。"""
-
-    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
-    config.get_settings.cache_clear()
+    _configure_storage(monkeypatch, tmp_path)
     client, SessionLocal = client_with_database()
-    auth_header = _auth_header(client, username="delete-owner")
-
-    upload_response = client.post(
+    headers = _auth_header(client, "delete-owner")
+    upload = client.post(
         "/api/files/upload",
-        headers=auth_header,
+        headers=headers,
         files={"file": ("delete-me.png", b"image-content", "image/png")},
     )
-    document_id = upload_response.json()["document_id"]
-
+    document_id = upload.json()["document_id"]
     db = SessionLocal()
     try:
-        file_object = db.query(FileObject).filter(FileObject.document_id == document_id).one()
-        stored_path = tmp_path / file_object.storage_path
-        document_dir = stored_path.parent
-        user_dir = document_dir.parent
+        file_object = db.query(FileObject).filter_by(document_id=document_id).one()
+        stored_path = tmp_path / "uploads" / file_object.storage_path
         assert stored_path.exists()
-        assert document_dir.exists()
-        assert user_dir.exists()
     finally:
         db.close()
 
-    delete_response = client.delete(f"/api/files/{document_id}", headers=auth_header)
+    deleted = client.delete(f"/api/files/{document_id}", headers=headers)
 
-    assert delete_response.status_code == 200
-    assert delete_response.json() == {"deleted": True}
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+    assert deleted.json()["cleanup_job_id"]
+    assert stored_path.exists()
+    _drain_jobs(SessionLocal)
     assert not stored_path.exists()
-    assert not document_dir.exists()
-    assert not user_dir.exists()
-    assert tmp_path.exists()
-
     db = SessionLocal()
     try:
-        assert db.get(Document, document_id) is None
-        assert db.query(FileObject).filter(FileObject.document_id == document_id).count() == 0
+        # Document/版本承担取消审计，不因清理暂存而被物理删除。
+        assert db.get(Document, document_id).status == "UPLOAD_CANCELLED"
+        review = db.query(UploadDuplicateReview).filter_by(
+            upload_document_version_id=upload.json()["upload_document_version_id"]
+        ).one()
+        assert review.decision == "CANCEL_UPLOAD"
     finally:
         db.close()
         clear_overrides()
-        config.get_settings.cache_clear()
-
-
-def test_delete_uploaded_file_preserves_shared_derivative_until_last_reference(monkeypatch, tmp_path):
-    """共享派生文件必须在最后一个 Artifact 引用删除后才物理清理。"""
-
-    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
-    config.get_settings.cache_clear()
-    client, SessionLocal = client_with_database()
-    first_header = _auth_header(client, username="derivative-delete-owner-a")
-    second_header = _auth_header(client, username="derivative-delete-owner-b")
-    upload_payload = {
-        "files": {"file": ("shared.doc", b"shared-legacy-doc", "application/msword")},
-    }
-    first_document_id = client.post("/api/files/upload", headers=first_header, **upload_payload).json()["document_id"]
-    second_document_id = client.post("/api/files/upload", headers=second_header, **upload_payload).json()["document_id"]
-
-    derivative_path = tmp_path / "derivatives" / "office" / "shared.docx"
-    derivative_path.parent.mkdir(parents=True)
-    derivative_path.write_bytes(b"shared-docx")
-    storage_path = derivative_path.relative_to(tmp_path).as_posix()
-    db = SessionLocal()
-    try:
-        for document_id in (first_document_id, second_document_id):
-            db.add(
-                DocumentArtifact(
-                    document_id=document_id,
-                    artifact_type="CONVERTED_DOCX",
-                    storage_backend="local",
-                    storage_path=storage_path,
-                    content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    size_bytes=derivative_path.stat().st_size,
-                    sha256="a" * 64,
-                    source_sha256="b" * 64,
-                    converter_name="libreoffice",
-                    converter_version="test",
-                    converter_config_hash="c" * 64,
-                )
-            )
-        db.commit()
-    finally:
-        db.close()
-
-    first_delete = client.delete(f"/api/files/{first_document_id}", headers=first_header)
-
-    assert first_delete.status_code == 200
-    assert derivative_path.exists()
-    db = SessionLocal()
-    try:
-        assert db.query(DocumentArtifact).count() == 1
-    finally:
-        db.close()
-
-    second_delete = client.delete(f"/api/files/{second_document_id}", headers=second_header)
-
-    assert second_delete.status_code == 200
-    assert not derivative_path.exists()
-    assert not derivative_path.parent.exists()
-    db = SessionLocal()
-    try:
-        assert db.query(DocumentArtifact).count() == 0
-    finally:
-        db.close()
-        clear_overrides()
-        config.get_settings.cache_clear()
 
 
 def test_delete_file_after_message_is_rejected(monkeypatch, tmp_path):
-    """文件进入对话后必须被锁定，不能再通过删除接口移除。"""
+    """附件真正进入消息后必须保留引用，不能再作为未发送暂存删除。"""
 
-    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
-    config.get_settings.cache_clear()
+    _configure_storage(monkeypatch, tmp_path)
     client, SessionLocal = client_with_database()
-    auth_header = _auth_header(client, username="locked-owner")
-
-    upload_response = client.post(
+    headers = _auth_header(client, "locked-owner")
+    upload = client.post(
         "/api/files/upload",
-        headers=auth_header,
+        headers=headers,
         files={"file": ("locked.png", b"locked-image", "image/png")},
     )
-    document_id = upload_response.json()["document_id"]
-
-    message_response = client.post(
+    document_id = upload.json()["document_id"]
+    sent = client.post(
         "/api/conversations/locked-conv/messages",
-        headers=auth_header,
+        headers=headers,
         json={"content": "处理这张图片", "attachments": [{"document_id": document_id}]},
     )
 
-    assert message_response.status_code == 200
-
-    delete_response = client.delete(f"/api/files/{document_id}", headers=auth_header)
-
-    assert delete_response.status_code == 409
+    assert sent.status_code == 200
+    deleted = client.delete(f"/api/files/{document_id}", headers=headers)
+    assert deleted.status_code == 409
     db = SessionLocal()
     try:
         document = db.get(Document, document_id)
-        assert document is not None
         assert document.status == "USED_IN_MESSAGE"
-        assert document.locked_message_id == message_response.json()["message"]["id"]
-        assert document.locked_conversation_id == "locked-conv"
+        assert document.locked_message_id == sent.json()["message"]["id"]
     finally:
         db.close()
         clear_overrides()
-        config.get_settings.cache_clear()

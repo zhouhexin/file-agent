@@ -46,12 +46,13 @@ class ManagedFileRepository:
         created_by: str | None,
         allow_rename: bool = False,
     ) -> ManagedRoot:
-        """创建或更新受管目录配置。"""
+        """创建或更新受管原始目录配置。
 
-        read_only = not allow_rename
-        allowed_operations = ["scan", "list", "search"]
-        if allow_rename:
-            allowed_operations.append("rename")
+        `allow_rename` 仅保留旧调用签名兼容；三层模型启用后原始目录始终只读。
+        """
+
+        read_only = True
+        allowed_operations = ["scan", "list", "search", "read"]
         root = self.get_root_by_key(root_key)
         if root is None:
             root = ManagedRoot(
@@ -319,3 +320,13 @@ class FilesystemJobRepository:
         """按 id 查询任务。"""
 
         return self.db.get(FilesystemJob, job_id)
+
+    def list_events(self, job_id: str) -> list[FilesystemJobEvent]:
+        """按时间顺序读取任务事件，供状态卡展示持久化进度。"""
+
+        return (
+            self.db.query(FilesystemJobEvent)
+            .filter(FilesystemJobEvent.job_id == job_id)
+            .order_by(FilesystemJobEvent.created_at.asc(), FilesystemJobEvent.id.asc())
+            .all()
+        )

@@ -36,7 +36,7 @@ MVP Skill 只保留业务编排边界。文件读取、表格读取、chunk、em
 | `file-search` | 使用开源检索 adapter：LangChain、LlamaIndex、pgvector | 用户请求查找文件或材料 | `hybrid-search`, `document-lineage-read` | 分层检索结果、推荐理由 |
 | `managed-file-query` | 不直接使用开源 Skill；自研受管目录元数据查询编排 | 用户请求列出、查看或搜索服务器受管目录文件 | `managed-file-list`, `managed-file-search`, `feedback-record` | 受管目录文件清单、元数据过滤条件、解析反馈样本 |
 | `managed-file-classification` | 分类编排自研；正文解析使用现有 adapter，图谱增强可使用 Neo4j/neo4j-graphrag-python | 用户要求对受管目录范围内的文件分类或重新分类 | `classify-managed-files`, `job-status-read`, `feedback-record` | 同步逐文件多标签结果或异步 Job、分类建议、证据、ChangeSet |
-| `file-rename` | 参考 tfeldmann/organize 与 F2 的规则化批处理思想；第一版使用自研 Native 执行器 | 用户要求按年份、文号和正文标题生成受管文件改名建议 | `generate-rename-suggestions`, `confirmed-file-action` | 字段证据、重命名建议、OperationPlan、确认后的 ChangeSet |
+| `file-rename` | 参考 tfeldmann/organize 的规则化命名与预览思想；工作副本执行器自研 | 用户要求按年份、文号和正文标题生成工作副本改名建议 | `generate-rename-suggestions`, `confirmed-file-action` | 字段证据、`RENAME_WORKING_COPIES` OperationPlan、工作副本路径记录、确认后的 ChangeSet |
 | `spreadsheet-workbench` | 使用 openpyxl、pandas 和可选 LibreOffice adapter | 用户请求表格 Profile、统计、校验、编辑、重算或格式转换 | `profile-spreadsheet`, `analyze-spreadsheet`, `validate-spreadsheet`, `operation-plan-create`；后续 `edit-spreadsheet`, `recalculate-spreadsheet` | 表结构、只读分析结果、校验报告、待确认编辑计划 |
 | `evidence-answer` | 使用 LangGraph/LangChain 编排和结构化输出；业务证据规则自研 | 用户提出需要回答的问题 | `hybrid-search`, `evidence-answer` | answer、references、无依据说明 |
 | `change-report` | 不直接使用开源 Skill；自研审计输出 | Tool 执行后需要回执 | `change-report` | ChangeSet 摘要、逐文件明细 |

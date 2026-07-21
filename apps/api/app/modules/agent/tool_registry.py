@@ -14,7 +14,14 @@ from pydantic import BaseModel, ValidationError
 
 from app.core.config import get_settings
 from app.core.logging import log_event
-from app.db.models import Document, DocumentCategorySuggestion, DocumentClassificationRun, DocumentInsight
+from app.db.models import (
+    Document,
+    DocumentCategorySuggestion,
+    DocumentClassificationRun,
+    DocumentInsight,
+    User,
+    WorkingCopy,
+)
 from app.modules.agent.capabilities.service import load_agent_capabilities
 from app.modules.agent.mcp_filesystem_bridge import MCPFilesystemError, get_mcp_filesystem
 from app.modules.agent.state import ToolInvocationRecord
@@ -52,9 +59,7 @@ from app.modules.classification.taxonomy_service import read_default_taxonomy_ca
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text, extraction_config_hash
 from app.modules.files.readable_source import ReadableDocumentSourceResolver, apply_readable_source_metadata
-from app.modules.file_rename.suggestion_service import RenameSuggestionService
 from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
-from app.modules.file_rename.review_service import RenameReviewService
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
 from app.modules.managed_files.service import (
@@ -525,7 +530,7 @@ def _managed_file_list_handler(db: Any) -> ToolHandler:
         sync_configured_managed_roots(
             db,
             root_key=scope.root_key,
-            scan=True,
+            scan=False,
         )
         db.commit()
         rows = []
@@ -581,7 +586,7 @@ def _managed_file_search_handler(db: Any) -> ToolHandler:
         sync_configured_managed_roots(
             db,
             root_key=scope.root_key,
-            scan=True,
+            scan=False,
         )
         db.commit()
         rows = []
@@ -607,7 +612,7 @@ def _managed_file_search_handler(db: Any) -> ToolHandler:
 
 
 def _generate_rename_suggestions_handler(db: Any, user_id: str | None) -> ToolHandler:
-    """创建上传附件或受管文件重命名建议 Tool handler。"""
+    """创建仅作用于工作副本的重命名建议 Tool handler。"""
 
     def handler(tool_input: BaseModel) -> Dict[str, Any]:
         """读取正文并生成待确认计划，不在此阶段修改源文件。"""
@@ -624,37 +629,114 @@ def _generate_rename_suggestions_handler(db: Any, user_id: str | None) -> ToolHa
                 document_ids=document_ids,
                 limit=int(getattr(tool_input, "limit", 500)),
             )
-        return RenameSuggestionService(db=db, user_id=user_id).generate_plan(
-            conversation_id=str(getattr(tool_input, "conversation_id")),
-            agent_run_id=str(getattr(tool_input, "agent_run_id")),
+        candidates = sorted({
+            str(value).replace("\\", "/").strip("/")
+            for value in list(getattr(tool_input, "path_candidates", []) or [])
+            if str(value).strip("/")
+        })
+        if len(candidates) > 1:
+            return _working_copy_scope_error(
+                code="AMBIGUOUS_MANAGED_PATH",
+                message="受管目录范围存在多个候选，请提供完整相对目录后再重命名。",
+            )
+        scope = resolve_managed_file_query_scope(
             root_key=getattr(tool_input, "root_key", None),
-            path_prefix=getattr(tool_input, "path_prefix", None),
-            relative_path=getattr(tool_input, "relative_path", None),
-            path_candidates=list(getattr(tool_input, "path_candidates", []) or []),
-            scope_confidence=getattr(tool_input, "scope_confidence", None),
+            path_prefix=candidates[0] if candidates else getattr(tool_input, "path_prefix", None),
+        )
+        if scope.unresolved_root_key:
+            return _working_copy_scope_error(
+                code="MANAGED_ROOT_NOT_FOUND",
+                message="受管原始目录无法唯一解析，请提供完整逻辑目录。",
+            )
+        sync_configured_managed_roots(db, root_key=scope.root_key, scan=False)
+        db.commit()
+        rows = ManagedFileRepository(db).list_files(
+            root_key=scope.root_key,
+            root_keys=scope.configured_root_keys if scope.root_key is None else None,
+            path_prefix=scope.path_prefix,
             extension=getattr(tool_input, "extension", None),
             filename_contains=getattr(tool_input, "filename_contains", None),
+            status="ACTIVE",
+            limit=int(getattr(tool_input, "limit", 500)),
+            offset=0,
+        )
+        if not rows:
+            return _working_copy_scope_error(
+                code="MANAGED_FILE_SCOPE_EMPTY",
+                message="指定受管原始目录范围内没有找到文件。",
+            )
+        user = db.get(User, user_id)
+        if user is None or not user.default_workspace_id:
+            return _working_copy_scope_error(
+                code="USER_WORKSPACE_REQUIRED",
+                message="当前用户缺少默认工作区。",
+            )
+        managed_file_ids = [managed_file.id for managed_file, _root in rows]
+        working_copies = (
+            db.query(WorkingCopy)
+            .join(Document, Document.id == WorkingCopy.document_id)
+            .filter(
+                WorkingCopy.managed_file_id.in_(managed_file_ids),
+                WorkingCopy.workspace_id == user.default_workspace_id,
+                WorkingCopy.status == "ACTIVE",
+                Document.user_id == user_id,
+            )
+            .all()
+        )
+        copy_by_managed_file = {working_copy.managed_file_id: working_copy for working_copy in working_copies}
+        pending_managed_file_ids = [value for value in managed_file_ids if value not in copy_by_managed_file]
+        if pending_managed_file_ids:
+            result = _working_copy_scope_error(
+                code="WORKING_COPY_NOT_READY",
+                message="所选原始文件仍在异步导入工作副本，请稍后重试。",
+            )
+            result["status"] = "WAITING_FOR_ASYNC_JOB"
+            result["pending_count"] = len(pending_managed_file_ids)
+            return result
+        return UploadedRenameSuggestionService(db=db, user_id=user_id).generate_plan(
+            conversation_id=str(getattr(tool_input, "conversation_id")),
+            agent_run_id=str(getattr(tool_input, "agent_run_id")),
+            document_ids=[copy_by_managed_file[value].document_id for value in managed_file_ids],
             limit=int(getattr(tool_input, "limit", 500)),
         )
 
     return handler
 
 
+def _working_copy_scope_error(*, code: str, message: str) -> Dict[str, Any]:
+    """构造受管原始目录到工作副本解析阶段的安全失败结果。"""
+
+    return {
+        "ok": False,
+        "kind": "rename_plan",
+        "source_kind": "working_copy",
+        "storage_scope": "working_copy",
+        "status": "FAILED",
+        "error": {"code": code, "message": message},
+        "suggestions": [],
+        "extraction_results": [],
+    }
+
+
 def _resolve_rename_reviews_handler(db: Any, user_id: str | None) -> ToolHandler:
-    """创建重命名待复核项处理 Tool handler。"""
+    """拒绝旧受管原始文件待复核链路，避免重新创建已退役计划。"""
 
     def handler(tool_input: BaseModel) -> Dict[str, Any]:
-        """把用户明确更正视为确认，并通过 OperationPlan 立即执行。"""
+        """提示重新选择工作副本生成计划，不执行历史原地重命名。"""
 
         if db is None:
             return {"ok": False, "status": "FAILED", "error": {"code": "DB_REQUIRED", "message": "处理重命名更正需要数据库会话。"}}
         if user_id is None:
             return {"ok": False, "status": "FAILED", "error": {"code": "AUTH_REQUIRED", "message": "处理重命名更正需要当前用户。"}}
-        return RenameReviewService(db=db, user_id=user_id).resolve_message(
-            conversation_id=str(getattr(tool_input, "conversation_id")),
-            agent_run_id=str(getattr(tool_input, "agent_run_id")),
-            message=str(getattr(tool_input, "message")),
-        )
+        return {
+            "ok": False,
+            "kind": "rename_review_resolution",
+            "status": "FAILED",
+            "error": {
+                "code": "LEGACY_RENAME_REVIEW_RETIRED",
+                "message": "旧待复核项已失效，请重新选择文件生成工作副本重命名计划。",
+            },
+        }
 
     return handler
 
@@ -674,8 +756,8 @@ def _managed_file_read_document_handler(db: Any, user_id: str | None) -> ToolHan
             root_key=getattr(tool_input, "root_key", None),
             path_prefix=getattr(tool_input, "path_prefix", None) or getattr(tool_input, "relative_path", None),
         )
-        if bool(getattr(tool_input, "scan_before_read", True)):
-            sync_configured_managed_roots(db, root_key=scope.root_key, scan=True)
+        # 文件读取只能消费 worker 已建立的索引；Tool 调用不得同步遍历受管原始目录。
+        sync_configured_managed_roots(db, root_key=scope.root_key, scan=False)
         db.flush()
         if scope.unresolved_root_key:
             return {
@@ -780,7 +862,7 @@ def _managed_file_classification_handler(db: Any, user_id: str | None) -> ToolHa
             root_key=getattr(tool_input, "root_key", None),
             path_prefix=getattr(tool_input, "path_prefix", None),
         )
-        sync_configured_managed_roots(db, root_key=scope.root_key, scan=True)
+        sync_configured_managed_roots(db, root_key=scope.root_key, scan=False)
         db.flush()
         if scope.unresolved_root_key:
             return {
@@ -1498,7 +1580,7 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("managed-file-search", "Search server managed files by filename keyword.", ManagedFileSearchInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_search_handler(db)),
         _tool("managed-file-read-document", "Read one server managed file by logical filters, snapshot it as a document, and extract text.", ManagedFileReadDocumentInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages"], _managed_file_read_document_handler(db, user_id)),
         _tool("classify-managed-files", "Snapshot, extract and classify files selected from a server managed directory.", ManagedFileClassificationInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages", "document_classification_runs", "document_category_suggestions", "change_sets", "change_items"], _managed_file_classification_handler(db, user_id)),
-        _tool("generate-rename-suggestions", "Generate controlled rename suggestions for uploaded attachments or managed files and persist an OperationPlan without changing source files.", GenerateRenameSuggestionsInput, True, False, ["document_pages", "operation_plans"], _generate_rename_suggestions_handler(db, user_id)),
+        _tool("generate-rename-suggestions", "Resolve uploaded attachments or managed-original scope to working copies, then persist controlled rename suggestions without changing original files.", GenerateRenameSuggestionsInput, True, False, ["document_pages", "operation_plans"], _generate_rename_suggestions_handler(db, user_id)),
         _tool("resolve-rename-reviews", "Resolve pending rename reviews from explicit user corrections and immediately execute a confirmed OperationPlan.", ResolveRenameReviewsInput, True, False, ["operation_plans", "operation_confirmations", "change_sets", "change_items"], _resolve_rename_reviews_handler(db, user_id)),
         _tool("managed-root-scan", "Create an async scan job for a managed logical root.", ManagedRootScanInput, True, False, ["filesystem_jobs", "filesystem_job_events"], _managed_root_scan_handler(db, user_id)),
         _tool("mcp-filesystem-list", "List files and directories in the server managed filesystem root without database scan.", MCPFilesystemListInput, False, False, [], _mcp_filesystem_list_handler()),

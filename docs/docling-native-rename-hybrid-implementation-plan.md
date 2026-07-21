@@ -1,5 +1,7 @@
 # Docling 与原生解析混合重命名实施计划
 
+> 兼容说明：本文的字段解析策略仍可复用，但执行目标已统一切换为工作副本；旧 `RENAME_FILES` / `RENAME_UPLOADED_FILES` 执行链路不再有效。
+
 ## 1. 目标
 
 在保持 `DOCLING_ENABLED=true` 的前提下，将文件重命名从“Docling 整体优先”改为“Docling 与原生解析器生成候选，按标题、日期、年份和文号逐字段仲裁”。

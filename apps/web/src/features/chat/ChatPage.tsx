@@ -5,6 +5,8 @@ import { BookOpen, LogOut, MessageSquare, Paperclip, Send, User as UserIcon } fr
 import {
   ApiError,
   deleteUploadedFile,
+  getDuplicateReview,
+  getUploadArchiveStatus,
   fetchManagedFileBlob,
   fetchUploadedFileBlob,
   getConversationDetail,
@@ -13,9 +15,10 @@ import {
   uploadFile,
 } from '../../api/client';
 import { formatError } from '../../api/errors';
-import type { ConversationHistoryMessage, ManagedFileResult, User } from '../../types';
+import type { ConversationHistoryMessage, DuplicateDecisionResponse, DuplicateReview, ManagedFileResult, User } from '../../types';
 import { AttachmentRail } from './AttachmentRail';
 import { ChatTurnView } from './ChatTurnView';
+import { DuplicateUploadReviewCard } from './DuplicateUploadReviewCard';
 import { canPreviewFileInfo, canPreviewInBrowser } from './presentation';
 import type { ChatAttachment, ChatTurn } from './presentation';
 
@@ -75,6 +78,8 @@ function historyMessagesToTurns(messages: ConversationHistoryMessage[]): ChatTur
         }
       : undefined,
     status: 'completed',
+    role: historyMessage.role,
+    metadata: historyMessage.metadata,
   }));
 }
 
@@ -88,6 +93,7 @@ export function ChatPage({
   // ChatPage 管理对话工作台状态；具体展示交给 features/chat 下的展示组件。
   const [message, setMessage] = useState('');
   const [draftAttachments, setDraftAttachments] = useState<ChatAttachment[]>([]);
+  const [duplicateReviews, setDuplicateReviews] = useState<Record<string, DuplicateReview>>({});
   const [chatTurns, setChatTurns] = useState<ChatTurn[]>([]);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -98,6 +104,7 @@ export function ChatPage({
   const previewUrls = useRef<Set<string>>(new Set());
   const pageActiveRef = useRef(true);
   const pollingAgentRunsRef = useRef<Set<string>>(new Set());
+  const pollingUploadReviewsRef = useRef<Set<string>>(new Set());
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const hasTurns = chatTurns.length > 0;
   const primaryConversationId = getWebConversationId(user.id);
@@ -379,24 +386,141 @@ export function ChatPage({
     setError('');
     setUploading(true);
     try {
-      const results: ChatAttachment[] = [];
       for (const file of files) {
-        const uploadedFile = await uploadFile(token, file);
+        const uploadedFile = await uploadFile(token, file, conversationId);
         const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined;
         if (previewUrl) {
           previewUrls.current.add(previewUrl);
         }
-        results.push({
+        const attachment = {
           ...uploadedFile,
           preview_url: previewUrl,
-        });
+        };
+        // 先把单文件加入状态再启动轮询，避免小文件查重瞬间完成时回写不到附件。
+        setDraftAttachments((current) => [...current, attachment]);
+        if (uploadedFile.filesystem_job_id && uploadedFile.upload_document_version_id) {
+          void pollUploadDuplicateReview(attachment);
+        }
       }
-      setDraftAttachments((current) => [...current, ...results]);
     } catch (err) {
       setError(formatError(err));
     } finally {
       setUploading(false);
       event.target.value = '';
+    }
+  }
+
+  async function pollUploadDuplicateReview(file: ChatAttachment) {
+    // 上传请求只入队；前端轮询查重任务，不占用上传 HTTP 连接等待归档或导入。
+    const jobId = file.filesystem_job_id;
+    const uploadVersionId = file.upload_document_version_id;
+    if (!jobId || !uploadVersionId || pollingUploadReviewsRef.current.has(uploadVersionId)) {
+      return;
+    }
+    pollingUploadReviewsRef.current.add(uploadVersionId);
+    try {
+      while (pageActiveRef.current) {
+        const job = await getFilesystemJob(token, jobId);
+        if (job.status === 'FAILED') {
+          setError(job.error_message || `文件“${file.filename}”查重失败，请稍后重试。`);
+          return;
+        }
+        if (job.status === 'COMPLETED') {
+          const review = await getDuplicateReview(token, uploadVersionId);
+          setDraftAttachments((current) => current.map((item) => (
+            item.upload_document_version_id === uploadVersionId
+              ? { ...item, duplicate_review_status: review.status }
+              : item
+          )));
+          if (review.status === 'WAITING_CONFIRMATION') {
+            setDuplicateReviews((current) => ({ ...current, [review.id]: review }));
+          } else if (review.decision === 'CONTINUE_UPLOAD') {
+            void pollUploadArchiveStatus(uploadVersionId, file.filename);
+          }
+          return;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 1200));
+      }
+    } catch (err) {
+      if (pageActiveRef.current) {
+        setError(formatError(err));
+      }
+    } finally {
+      pollingUploadReviewsRef.current.delete(uploadVersionId);
+    }
+  }
+
+  async function pollUploadArchiveStatus(uploadVersionId: string, filename: string) {
+    // 归档完成不等于工作副本已创建；直到 working_copy_id 出现才结束状态跟踪。
+    while (pageActiveRef.current) {
+      try {
+        const archive = await getUploadArchiveStatus(token, uploadVersionId);
+        setDraftAttachments((current) => current.map((item) => (
+          item.upload_document_version_id === uploadVersionId
+            ? {
+                ...item,
+                archive_status: archive.status,
+                working_copy_id: archive.working_copy_id,
+              }
+            : item
+        )));
+        if (archive.status === 'FAILED') {
+          setError(archive.error_message || `文件“${filename}”归档失败，系统将按策略重试。`);
+          return;
+        }
+        if (archive.status === 'ARCHIVED' && archive.working_copy_id) {
+          return;
+        }
+        if (['CANCELLED', 'EXISTING_FILE_SELECTED'].includes(archive.status)) {
+          return;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      } catch (err) {
+        if (pageActiveRef.current) setError(formatError(err));
+        return;
+      }
+    }
+  }
+
+  function resolveDuplicateReview(result: DuplicateDecisionResponse) {
+    // 用户决策按文件生效；取消或使用已有文件不会影响同批其他附件。
+    const review = result.review;
+    setDuplicateReviews((current) => {
+      const next = { ...current };
+      delete next[review.id];
+      return next;
+    });
+    if (review.decision === 'CANCEL_UPLOAD') {
+      setDraftAttachments((current) => current.filter(
+        (item) => item.upload_document_version_id !== review.upload_document_version_id,
+      ));
+      return;
+    }
+    if (review.decision === 'USE_EXISTING_FILE' && result.selected_existing_document_id) {
+      const selectedCandidate = review.candidates.find(
+        (candidate) => candidate.existing_document_id === result.selected_existing_document_id,
+      );
+      setDraftAttachments((current) => current.map((item) => (
+        item.upload_document_version_id === review.upload_document_version_id
+          ? {
+              ...item,
+              document_id: result.selected_existing_document_id as string,
+              filename: String(selectedCandidate?.summary.filename ?? item.filename),
+              status: 'WORKING_COPY',
+              archive_status: result.archive_status,
+              duplicate_review_status: 'RESOLVED',
+            }
+          : item
+      )));
+      return;
+    }
+    setDraftAttachments((current) => current.map((item) => (
+      item.upload_document_version_id === review.upload_document_version_id
+        ? { ...item, archive_status: result.archive_status, duplicate_review_status: 'RESOLVED' }
+        : item
+    )));
+    if (review.decision === 'CONTINUE_UPLOAD') {
+      void pollUploadArchiveStatus(review.upload_document_version_id, review.filename);
     }
   }
 
@@ -417,6 +541,9 @@ export function ChatPage({
         }
         return current.filter((file) => file.document_id !== documentId);
       });
+      setDuplicateReviews((current) => Object.fromEntries(
+        Object.entries(current).filter(([, review]) => review.document_id !== documentId),
+      ));
     } catch (err) {
       setDraftAttachments((current) => current.map((file) => (
         file.document_id === documentId ? { ...file, deleting: false } : file
@@ -560,6 +687,14 @@ export function ChatPage({
               onOpen={openAttachment}
               onRemove={removeDraftAttachment}
             />
+            {Object.values(duplicateReviews).map((review) => (
+              <DuplicateUploadReviewCard
+                key={review.id}
+                token={token}
+                review={review}
+                onResolved={resolveDuplicateReview}
+              />
+            ))}
             <textarea
               value={message}
               onChange={(event) => setMessage(event.target.value)}

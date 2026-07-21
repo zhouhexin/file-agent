@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.logging import log_context, log_event, new_request_id
-from app.db.models import AgentRun, FilesystemJob, ToolInvocation, utcnow
+from app.db.models import AgentRun, FilesystemJob, ManagedFile, ToolInvocation, Workspace, utcnow
+from app.modules.file_lifecycle.repository import FileLifecycleRepository
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.changesets.service import persist_changeset_from_document_results
 from app.modules.classification.classifier_service import DocumentClassificationService
@@ -24,6 +25,7 @@ from app.modules.classification.result_builder import (
     format_document_results_response,
 )
 from app.modules.classification.service import persist_document_results_classifications
+from app.modules.file_lifecycle.service import FileLifecycleJobProcessor
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
 from app.modules.managed_files.scanner import ManagedFileScanner
@@ -33,13 +35,14 @@ def process_next_filesystem_job(
     *,
     session_factory: Callable[[], Session] = SessionLocal,
     worker_id: str = "filesystem-worker",
+    queue_names: set[str] | None = None,
 ) -> str | None:
-    """处理一个待执行文件系统任务，没有任务时返回 None。"""
+    """处理一个指定队列中的待执行任务，没有任务时返回 None。"""
 
     db = session_factory()
     try:
         queue = FilesystemJobQueue(db)
-        job = queue.claim_next(worker_id=worker_id)
+        job = queue.claim_next(worker_id=worker_id, queue_names=queue_names)
         if job is None:
             db.commit()
             return None
@@ -70,10 +73,24 @@ def process_next_filesystem_job(
                     failed_job = failed_db.get(FilesystemJob, job_id)
                     if failed_job is not None:
                         public_error = _public_job_error_message(job=failed_job, error=exc)
-                        FilesystemJobQueue(failed_db).mark_failed(
-                            job=failed_job,
-                            error_message=public_error,
-                        )
+                        queue = FilesystemJobQueue(failed_db)
+                        if FileLifecycleJobProcessor.supports(failed_job.job_type):
+                            retrying = failed_job.attempt_count < failed_job.max_attempts
+                            FileLifecycleJobProcessor(failed_db).record_failure(
+                                job=failed_job,
+                                error_message=public_error,
+                                retrying=retrying,
+                            )
+                            if retrying:
+                                queue.mark_retry(
+                                    job=failed_job,
+                                    error_message=public_error,
+                                    retry_after_seconds=get_settings().upload_archive_retry_interval_seconds,
+                                )
+                            else:
+                                queue.mark_failed(job=failed_job, error_message=public_error)
+                        else:
+                            queue.mark_failed(job=failed_job, error_message=public_error)
                         _mark_agent_run_failed_for_job(
                             db=failed_db,
                             job=failed_job,
@@ -102,11 +119,16 @@ def run_filesystem_worker(
     session_factory: Callable[[], Session] = SessionLocal,
     worker_id: str = "filesystem-worker",
     poll_seconds: float = 3.0,
+    queue_names: set[str] | None = None,
 ) -> None:
-    """持续轮询数据库任务队列。"""
+    """持续轮询指定数据库任务队列，实现归档、导入与 API 资源隔离。"""
 
     while True:
-        processed = process_next_filesystem_job(session_factory=session_factory, worker_id=worker_id)
+        processed = process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id=worker_id,
+            queue_names=queue_names,
+        )
         if processed is None:
             time.sleep(poll_seconds)
 
@@ -114,6 +136,10 @@ def run_filesystem_worker(
 def _process_job(*, db: Session, job: FilesystemJob) -> None:
     """按任务类型执行具体处理逻辑。"""
 
+    # 上传查重、归档、导入和清理属于系统生命周期任务，必须先由专用处理器识别，
+    # 不能落入 Planner 或普通受管目录 Tool。
+    if FileLifecycleJobProcessor(db).process(job):
+        return
     if job.job_type == "CLASSIFY_MANAGED_FILES":
         _process_managed_file_classification_job(db=db, job=job)
         return
@@ -125,6 +151,17 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
     if root is None or not root.enabled:
         raise ValueError("Managed root not found")
     scan_run = ManagedFileScanner(db).scan_root(root, job_id=job.id)
+    # watcher 只记录轻量事件；完成全量扫描后统一标记为已处理，事件本身仍永久保留用于审计。
+    from app.db.models import ManagedFileEvent
+
+    db.query(ManagedFileEvent).filter(
+        ManagedFileEvent.root_id == root.id,
+        ManagedFileEvent.status == "PENDING",
+    ).update(
+        {"status": "PROCESSED", "processed_at": utcnow()},
+        synchronize_session=False,
+    )
+    import_job_ids = _enqueue_import_jobs_for_root(db=db, root_id=root.id)
     FilesystemJobQueue(db).mark_completed(
         job=job,
         result={
@@ -133,8 +170,47 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
             "files_updated": scan_run.files_updated,
             "files_missing": scan_run.files_missing,
             "errors": scan_run.errors,
+            "import_job_ids": import_job_ids,
         },
     )
+
+
+def _enqueue_import_jobs_for_root(*, db: Session, root_id: str) -> list[str]:
+    """扫描完成后只创建导入任务，不在当前 worker 调用栈复制工作副本。"""
+
+    queue = FilesystemJobQueue(db)
+    lifecycle_repository = FileLifecycleRepository(db)
+    files = (
+        db.query(ManagedFile)
+        .filter(ManagedFile.root_id == root_id, ManagedFile.status == "ACTIVE")
+        .order_by(ManagedFile.created_at.asc())
+        .all()
+    )
+    workspaces = db.query(Workspace).filter(Workspace.owner_id.isnot(None)).all()
+    job_ids: list[str] = []
+    for managed_file in files:
+        targets: list[tuple[str, str]] = []
+        if managed_file.source_type == "UPLOAD_ARCHIVE" and managed_file.source_upload_version_id:
+            review = lifecycle_repository.get_review_by_version(managed_file.source_upload_version_id)
+            if review is not None:
+                targets = [(review.workspace_id, review.user_id)]
+        else:
+            targets = [(workspace.id, str(workspace.owner_id)) for workspace in workspaces if workspace.owner_id]
+        for workspace_id, user_id in targets:
+            import_job = queue.create_job(
+                job_type="IMPORT_WORKING_COPIES",
+                queue_name="IMPORT",
+                root_id=root_id,
+                created_by=user_id,
+                deduplication_key=f"working-copy-import:{workspace_id}:{managed_file.id}",
+                payload={
+                    "managed_file_id": managed_file.id,
+                    "workspace_id": workspace_id,
+                    "user_id": user_id,
+                },
+            )
+            job_ids.append(import_job.id)
+    return job_ids
 
 
 def _mark_agent_run_failed_for_job(
@@ -365,6 +441,8 @@ def _public_job_error_message(*, job: FilesystemJob, error: Exception) -> str:
 
     if job.job_type == "CLASSIFY_MANAGED_FILES":
         return "受管文件后台分类失败，请稍后重试或联系管理员。"
+    if FileLifecycleJobProcessor.supports(job.job_type):
+        return "文件后台处理失败，系统将按策略重试；达到上限后请联系管理员。"
     return str(error)[:2000] or "文件系统任务执行失败。"
 
 
@@ -373,7 +451,16 @@ def main() -> None:
 
     worker_id = os.getenv("FILESYSTEM_WORKER_ID", "filesystem-worker")
     poll_seconds = float(os.getenv("FILESYSTEM_WORKER_POLL_SECONDS", "3"))
-    run_filesystem_worker(worker_id=worker_id, poll_seconds=poll_seconds)
+    configured_queues = {
+        value.strip().upper()
+        for value in os.getenv("FILESYSTEM_WORKER_QUEUES", "").split(",")
+        if value.strip()
+    }
+    run_filesystem_worker(
+        worker_id=worker_id,
+        poll_seconds=poll_seconds,
+        queue_names=configured_queues or None,
+    )
 
 
 if __name__ == "__main__":

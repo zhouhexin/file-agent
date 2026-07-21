@@ -300,6 +300,12 @@ class ConversationRepository:
                     attachments=[
                         self._attachment_to_summary(item=item, document_map=document_map)
                         for item in message.attachments_json
+                        if isinstance(item, dict) and item.get("document_id")
+                    ],
+                    metadata=[
+                        dict(item)
+                        for item in message.attachments_json
+                        if isinstance(item, dict) and not item.get("document_id")
                     ],
                     agent_run=(
                         agent_repository.to_result(agent_run_map[message.id])

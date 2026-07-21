@@ -45,6 +45,15 @@ DEFAULT_MANAGED_FILE_CLASSIFICATION_SYNC_LIMIT = 20
 DEFAULT_LEGACY_OFFICE_CONVERSION_TIMEOUT_SECONDS = 90
 DEFAULT_LEGACY_OFFICE_MAX_FILE_SIZE_MB = 100
 DEFAULT_LEGACY_OFFICE_DERIVATIVE_DIR = "derivatives/office"
+DEFAULT_MANAGED_ROOT_RECONCILE_INTERVAL_SECONDS = 300
+DEFAULT_UPLOAD_ARCHIVE_RETRY_INTERVAL_SECONDS = 300
+DEFAULT_UPLOAD_DUPLICATE_SIMILARITY_THRESHOLD = 0.90
+DEFAULT_UPLOAD_DUPLICATE_MAX_CANDIDATES = 5
+DEFAULT_UPLOAD_DUPLICATE_CONFIRMATION_TTL_HOURS = 168
+DEFAULT_FILESYSTEM_JOB_LEASE_SECONDS = 120
+DEFAULT_WORKING_COPY_IMPORT_BATCH_SIZE = 100
+DEFAULT_WORKING_COPY_OPERATION_BATCH_SIZE = 20
+DEFAULT_TRASH_RETENTION_DAYS = 30
 
 
 class Settings(BaseModel):
@@ -123,6 +132,27 @@ class Settings(BaseModel):
     managed_path_vector_pilot_limit: int = 1000
     managed_file_classification_sync_limit: int = DEFAULT_MANAGED_FILE_CLASSIFICATION_SYNC_LIMIT
     managed_file_classification_batch_size: int = 20
+    managed_root_archive_write_path: str = ""
+    managed_root_archive_enabled: bool = True
+    working_copy_storage_root: str = "./storage/working-copies"
+    trash_storage_root: str = "./storage/trash"
+    managed_root_watch_enabled: bool = True
+    managed_root_reconcile_interval_seconds: int = DEFAULT_MANAGED_ROOT_RECONCILE_INTERVAL_SECONDS
+    managed_root_reconcile_on_startup: bool = True
+    upload_archive_enabled: bool = True
+    upload_archive_retry_interval_seconds: int = DEFAULT_UPLOAD_ARCHIVE_RETRY_INTERVAL_SECONDS
+    upload_duplicate_check_enabled: bool = True
+    upload_duplicate_similarity_threshold: float = DEFAULT_UPLOAD_DUPLICATE_SIMILARITY_THRESHOLD
+    upload_duplicate_max_candidates: int = DEFAULT_UPLOAD_DUPLICATE_MAX_CANDIDATES
+    upload_duplicate_confirmation_ttl_hours: int = DEFAULT_UPLOAD_DUPLICATE_CONFIRMATION_TTL_HOURS
+    filesystem_async_jobs_enabled: bool = True
+    filesystem_job_lease_seconds: int = DEFAULT_FILESYSTEM_JOB_LEASE_SECONDS
+    archive_worker_concurrency: int = 2
+    import_worker_concurrency: int = 2
+    working_copy_import_batch_size: int = DEFAULT_WORKING_COPY_IMPORT_BATCH_SIZE
+    working_copy_operation_batch_size: int = DEFAULT_WORKING_COPY_OPERATION_BATCH_SIZE
+    trash_retention_days: int = DEFAULT_TRASH_RETENTION_DAYS
+    trash_auto_purge_enabled: bool = False
 
 
 def find_dotenv_file() -> Path | None:
@@ -398,6 +428,70 @@ def get_settings() -> Settings:
             1,
             min(200, int(os.getenv("MANAGED_FILE_CLASSIFICATION_BATCH_SIZE", "20"))),
         ),
+        managed_root_archive_write_path=os.getenv("MANAGED_ROOT_ARCHIVE_WRITE_PATH", "").strip(),
+        managed_root_archive_enabled=os.getenv("MANAGED_ROOT_ARCHIVE_ENABLED", "true").lower() == "true",
+        working_copy_storage_root=os.getenv("WORKING_COPY_STORAGE_ROOT", "./storage/working-copies").strip(),
+        trash_storage_root=os.getenv("TRASH_STORAGE_ROOT", "./storage/trash").strip(),
+        managed_root_watch_enabled=os.getenv("MANAGED_ROOT_WATCH_ENABLED", "true").lower() == "true",
+        managed_root_reconcile_interval_seconds=max(
+            30,
+            int(
+                os.getenv(
+                    "MANAGED_ROOT_RECONCILE_INTERVAL_SECONDS",
+                    str(DEFAULT_MANAGED_ROOT_RECONCILE_INTERVAL_SECONDS),
+                )
+            ),
+        ),
+        managed_root_reconcile_on_startup=os.getenv("MANAGED_ROOT_RECONCILE_ON_STARTUP", "true").lower() == "true",
+        upload_archive_enabled=os.getenv("UPLOAD_ARCHIVE_ENABLED", "true").lower() == "true",
+        upload_archive_retry_interval_seconds=max(
+            30,
+            int(os.getenv("UPLOAD_ARCHIVE_RETRY_INTERVAL_SECONDS", str(DEFAULT_UPLOAD_ARCHIVE_RETRY_INTERVAL_SECONDS))),
+        ),
+        upload_duplicate_check_enabled=os.getenv("UPLOAD_DUPLICATE_CHECK_ENABLED", "true").lower() == "true",
+        upload_duplicate_similarity_threshold=max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    os.getenv(
+                        "UPLOAD_DUPLICATE_SIMILARITY_THRESHOLD",
+                        str(DEFAULT_UPLOAD_DUPLICATE_SIMILARITY_THRESHOLD),
+                    )
+                ),
+            ),
+        ),
+        upload_duplicate_max_candidates=max(
+            1,
+            min(50, int(os.getenv("UPLOAD_DUPLICATE_MAX_CANDIDATES", str(DEFAULT_UPLOAD_DUPLICATE_MAX_CANDIDATES)))),
+        ),
+        upload_duplicate_confirmation_ttl_hours=max(
+            1,
+            int(
+                os.getenv(
+                    "UPLOAD_DUPLICATE_CONFIRMATION_TTL_HOURS",
+                    str(DEFAULT_UPLOAD_DUPLICATE_CONFIRMATION_TTL_HOURS),
+                )
+            ),
+        ),
+        filesystem_async_jobs_enabled=os.getenv("FILESYSTEM_ASYNC_JOBS_ENABLED", "true").lower() == "true",
+        filesystem_job_lease_seconds=max(
+            30,
+            int(os.getenv("FILESYSTEM_JOB_LEASE_SECONDS", str(DEFAULT_FILESYSTEM_JOB_LEASE_SECONDS))),
+        ),
+        archive_worker_concurrency=max(1, int(os.getenv("ARCHIVE_WORKER_CONCURRENCY", "2"))),
+        import_worker_concurrency=max(1, int(os.getenv("IMPORT_WORKER_CONCURRENCY", "2"))),
+        working_copy_import_batch_size=max(
+            1,
+            int(os.getenv("WORKING_COPY_IMPORT_BATCH_SIZE", str(DEFAULT_WORKING_COPY_IMPORT_BATCH_SIZE))),
+        ),
+        working_copy_operation_batch_size=max(
+            1,
+            int(os.getenv("WORKING_COPY_OPERATION_BATCH_SIZE", str(DEFAULT_WORKING_COPY_OPERATION_BATCH_SIZE))),
+        ),
+        trash_retention_days=max(1, int(os.getenv("TRASH_RETENTION_DAYS", str(DEFAULT_TRASH_RETENTION_DAYS)))),
+        # MVP 明确禁止自动永久删除；即使误配 true 也保持 false，避免回收站绕过 OperationPlan。
+        trash_auto_purge_enabled=False,
     )
 
 

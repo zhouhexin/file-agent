@@ -14,6 +14,8 @@ from app.db.models import (
     ManagedRoot,
 )
 from app.modules.managed_files.worker import process_next_filesystem_job
+from app.modules.managed_files.scanner import ManagedFileScanner
+from app.modules.managed_files.service import sync_configured_managed_roots
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -89,6 +91,14 @@ def test_worker_completes_async_managed_file_classification(monkeypatch, tmp_pat
         json={"username": "managed-classification-worker-user", "password": "password123"},
     )
     headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    db = SessionLocal()
+    try:
+        # 模拟 RECONCILE worker 已先完成索引；聊天分类入口不得同步扫描目录。
+        for root in sync_configured_managed_roots(db, scan=False):
+            ManagedFileScanner(db).scan_root(root)
+        db.commit()
+    finally:
+        db.close()
 
     response = client.post(
         "/api/conversations/managed-classification-worker-conv/messages",

@@ -11,10 +11,14 @@ from pydantic import BaseModel, Field
 class OperationPlanItem(BaseModel):
     """单个计划项。"""
 
-    document_id: str = Field(min_length=1)
+    document_id: str = Field(default="")
+    working_copy_id: str | None = None
+    managed_file_id: str | None = None
+    operation: str | None = None
     before: dict[str, Any] = Field(default_factory=dict)
     after: dict[str, Any] = Field(default_factory=dict)
     rename_metadata: dict[str, Any] = Field(default_factory=dict)
+    protection: dict[str, Any] = Field(default_factory=dict)
     execution_status: str = "PLANNED"
 
 

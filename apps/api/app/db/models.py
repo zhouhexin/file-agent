@@ -119,6 +119,10 @@ class Document(Base):
     extraction_runs: Mapped[List["DocumentExtractionRun"]] = relationship(back_populates="document")
     pages: Mapped[List["DocumentPage"]] = relationship(back_populates="document")
     elements: Mapped[List["DocumentElement"]] = relationship(back_populates="document")
+    versions: Mapped[List["DocumentVersion"]] = relationship(
+        back_populates="document",
+        foreign_keys="DocumentVersion.document_id",
+    )
 
 
 class FileObject(Base):
@@ -135,6 +139,50 @@ class FileObject(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     document: Mapped[Document] = relationship(back_populates="file_objects")
+
+
+class DocumentVersion(Base):
+    """文档内容版本。
+
+    上传暂存和工作副本共用版本表，但文件只能由 StorageService 通过相对路径定位；
+    重命名或移动不得创建新版本。
+    """
+
+    __tablename__ = "document_versions"
+    __table_args__ = (
+        UniqueConstraint("document_id", "version_number", name="uq_document_versions_document_number"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    document_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    parent_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    working_copy_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("working_copies.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    storage_tier: Mapped[str] = mapped_column(String(40), nullable=False, default="UPLOAD", index=True)
+    storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    content_type: Mapped[str] = mapped_column(String(120), nullable=False, default="application/octet-stream")
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_type: Mapped[str] = mapped_column(String(40), nullable=False, default="UPLOAD", index=True)
+    source_managed_file_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("managed_files.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    operation_plan_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("operation_plans.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_by: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    document: Mapped[Document] = relationship(back_populates="versions", foreign_keys=[document_id])
 
 
 class DocumentArtifact(Base):
@@ -519,7 +567,9 @@ class ManagedRoot(Base):
     classification_mode: Mapped[str] = mapped_column(String(40), nullable=False, default="NONE")
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
     read_only: Mapped[bool] = mapped_column(default=True, nullable=False)
+    archive_write_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
     allowed_operations_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    last_reconciled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
@@ -546,10 +596,164 @@ class ManagedFile(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     modified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    content_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    file_identity: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)
+    source_type: Mapped[str] = mapped_column(String(40), nullable=False, default="DEPLOYED_FILE", index=True)
+    source_upload_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="RESTRICT"), nullable=True, unique=True, index=True
+    )
+    archived_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="ACTIVE", index=True)
     last_seen_scan_run_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class WorkingCopyRoot(Base):
+    """工作副本目录映射。
+
+    每个工作区和受管原始目录只有一个工作副本根，防止导入任务越过工作区边界。
+    """
+
+    __tablename__ = "working_copy_roots"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "managed_root_id", name="uq_working_copy_roots_workspace_managed"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    managed_root_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("managed_roots.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    root_key: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    relative_storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="INITIALIZING", index=True)
+    last_imported_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_reconciled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class WorkingCopy(Base):
+    """Agent 可操作的工作副本。
+
+    `managed_file_id` 始终非空，保证任何增删改都能追溯到不可变原始文件。
+    """
+
+    __tablename__ = "working_copies"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    working_copy_root_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("working_copy_roots.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    managed_file_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("managed_files.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    document_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    current_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    relative_path_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    extension: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    imported_source_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    is_primary_import: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="IMPORTING", index=True)
+    sync_status: Mapped[str] = mapped_column(String(40), nullable=False, default="SYNCED", index=True)
+    last_operation_plan_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("operation_plans.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class WorkingCopyPathRecord(Base):
+    """工作副本不可变路径审计记录。"""
+
+    __tablename__ = "working_copy_path_records"
+    __table_args__ = (
+        UniqueConstraint("working_copy_id", "sequence_number", name="uq_working_copy_path_sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    working_copy_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("working_copies.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    before_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    after_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    before_filename: Mapped[str] = mapped_column(Text, nullable=False)
+    after_filename: Mapped[str] = mapped_column(Text, nullable=False)
+    document_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    operation_plan_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("operation_plans.id"), nullable=True, index=True)
+    operation_confirmation_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("operation_confirmations.id"), nullable=True, index=True)
+    agent_run_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("agent_runs.id"), nullable=True, index=True)
+    tool_invocation_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("tool_invocations.id"), nullable=True, index=True)
+    changeset_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("change_sets.id"), nullable=True, index=True)
+    change_item_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("change_items.id"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="PLANNED", index=True)
+    error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    executed_by: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class TrashEntry(Base):
+    """可恢复的工作副本删除或版本替换记录。"""
+
+    __tablename__ = "trash_entries"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False, index=True)
+    working_copy_id: Mapped[str] = mapped_column(String(36), ForeignKey("working_copies.id"), nullable=False, index=True)
+    document_version_id: Mapped[str] = mapped_column(String(36), ForeignKey("document_versions.id"), nullable=False, index=True)
+    entry_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    original_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    trash_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="ACTIVE", index=True)
+    operation_plan_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("operation_plans.id"), nullable=True, index=True)
+    deleted_by: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    retention_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    restored_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    purged_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class ManagedFileEvent(Base):
+    """watcher 记录的轻量文件系统事件；回调自身不得执行批量业务逻辑。"""
+
+    __tablename__ = "managed_file_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    root_id: Mapped[str] = mapped_column(String(36), ForeignKey("managed_roots.id"), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    source_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    target_relative_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    observed_size: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    observed_mtime: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    origin: Mapped[str] = mapped_column(String(40), nullable=False, default="EXTERNAL", index=True)
+    deduplication_key: Mapped[str] = mapped_column(String(160), nullable=False, unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="PENDING", index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class ManagedFileSnapshot(Base):
@@ -715,6 +919,115 @@ class FileRenameBatchItem(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class UploadArchiveRecord(Base):
+    """上传附件从暂存区归档为原始文件的状态机。"""
+
+    __tablename__ = "upload_archive_records"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    upload_document_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+    )
+    managed_root_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("managed_roots.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    managed_file_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("managed_files.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    archive_relative_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="DUPLICATE_CHECK_PENDING", index=True
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    last_error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    filesystem_job_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("filesystem_jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    changeset_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("change_sets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    archived_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class UploadDuplicateReview(Base):
+    """重复上传的逐文件对话确认记录。
+
+    该确认不是 OperationPlan，但必须绑定确定的上传版本和用户，不能让 LLM 猜测对象。
+    """
+
+    __tablename__ = "upload_duplicate_reviews"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    upload_document_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+    )
+    conversation_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="CHECKING", index=True)
+    decision: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    selected_existing_working_copy_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("working_copies.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    notification_message_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("messages.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    confirmation_message_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("messages.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    duplicate_check_job_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("filesystem_jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class UploadDuplicateCandidate(Base):
+    """精确重复或近似重复候选；跨用户候选对外必须脱敏。"""
+
+    __tablename__ = "upload_duplicate_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "duplicate_review_id",
+            "candidate_managed_file_id",
+            "candidate_working_copy_id",
+            "match_type",
+            name="uq_upload_duplicate_candidate_target",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    duplicate_review_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("upload_duplicate_reviews.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    candidate_managed_file_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("managed_files.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    candidate_working_copy_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("working_copies.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    match_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    match_scope: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    similarity_score: Mapped[float] = mapped_column(Float, nullable=False)
+    match_evidence_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    user_visible_summary_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class FilesystemJob(Base):
     """文件系统异步任务表。
 
@@ -725,6 +1038,9 @@ class FilesystemJob(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     job_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    queue_name: Mapped[str] = mapped_column(String(40), nullable=False, default="RECONCILE", index=True)
+    deduplication_key: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, unique=True, index=True)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100, index=True)
     root_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("managed_roots.id", ondelete="CASCADE"), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="PENDING", index=True)
     progress_current: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -732,10 +1048,18 @@ class FilesystemJob(Base):
     payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     result_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+    lease_owner: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     locked_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 

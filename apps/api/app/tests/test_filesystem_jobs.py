@@ -59,6 +59,6 @@ def test_admin_scan_api_creates_pending_job(monkeypatch):
         headers={"Authorization": f"Bearer {token}"},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     assert response.json()["status"] == "PENDING"
     clear_overrides()

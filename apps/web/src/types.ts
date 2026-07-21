@@ -142,6 +142,52 @@ export type UploadedFile = {
   status: string;
   ingest_status: string;
   deduplicated: boolean;
+  upload_document_version_id?: string;
+  duplicate_review_id?: string;
+  filesystem_job_id?: string;
+  archive_status?: string;
+  duplicate_review_status?: string;
+  working_copy_id?: string | null;
+};
+
+export type DuplicateCandidate = {
+  id: string;
+  match_type: 'EXACT_SHA256' | 'NEAR_DUPLICATE' | string;
+  match_scope: 'SAME_WORKSPACE' | 'SAME_USER' | 'CROSS_USER' | string;
+  similarity_score: number;
+  summary: Record<string, unknown>;
+  existing_working_copy_id: string | null;
+  existing_document_id: string | null;
+};
+
+export type DuplicateReview = {
+  id: string;
+  upload_document_version_id: string;
+  document_id: string;
+  filename: string;
+  status: string;
+  decision: string | null;
+  expires_at: string;
+  candidates: DuplicateCandidate[];
+  allowed_decisions: string[];
+  duplicate_check_job_id: string | null;
+};
+
+export type DuplicateDecisionResponse = {
+  review: DuplicateReview;
+  archive_status: string;
+  filesystem_job_id: string | null;
+  selected_existing_document_id: string | null;
+};
+
+export type UploadArchiveStatus = {
+  upload_document_version_id: string;
+  status: string;
+  managed_file_id: string | null;
+  working_copy_id: string | null;
+  filesystem_job_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
 };
 
 export type ConversationHistoryMessage = {
@@ -151,6 +197,7 @@ export type ConversationHistoryMessage = {
   role: string;
   content: string;
   attachments: UploadedFile[];
+  metadata: Record<string, unknown>[];
   agent_run: AgentRun | null;
 };
 
@@ -182,12 +229,18 @@ export type SendMessageResponse = {
 export type FilesystemJobResponse = {
   id: string;
   job_type: string;
+  queue_name: string;
   root_id: string | null;
   status: string;
   progress_current: number;
   progress_total: number;
   result: Record<string, unknown>;
   error_message: string | null;
+  attempt_count: number;
+  max_attempts: number;
+  available_at: string;
+  started_at: string | null;
+  finished_at: string | null;
 };
 
 export type DocumentCategory = {

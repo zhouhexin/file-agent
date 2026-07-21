@@ -1,5 +1,7 @@
 # 文件智能重命名实施计划
 
+> 历史文档：其中受管原始目录原地重命名和上传暂存重命名方案已由三层文件生命周期方案取代。当前只允许 `RENAME_WORKING_COPIES`，以 `docs/managed-original-working-copy-trash-implementation-plan.md` 为准。
+
 ## 1. 文档状态
 
 - 状态：受管文件闭环和上传附件临时存储重命名已实现。

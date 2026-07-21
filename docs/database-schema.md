@@ -998,3 +998,24 @@ Wiki 页面生成和治理
 ```
 
 注意：`change_sets`、`change_items`、`operation_plans`、`categories`、`document_categories` 不再是 deferred tables，它们属于 MVP。
+
+## 9. Three-tier File Lifecycle Extension
+
+迁移 `20260721_0001` 正式启用三层文件生命周期，名词固定为 `受管原始目录`、`工作副本目录` 和 `回收站目录`。新增或扩展：
+
+```text
+document_versions
+working_copy_roots
+working_copies
+working_copy_path_records
+trash_entries
+managed_file_events
+upload_archive_records
+upload_duplicate_reviews
+upload_duplicate_candidates
+filesystem_jobs queue/lease/idempotency fields
+```
+
+`working_copies.managed_file_id` 不为空；每个主导入工作副本必须追溯到 `managed_files`。重命名和移动只更新 `working_copies.relative_path`、当前版本的存储路径缓存和 `working_copy_path_records`，不能创建新版本。删除只把当前版本移动到回收站并创建 `trash_entries`，不得删除受管原始文件或消息引用。
+
+完整字段、状态机、唯一约束和权限边界以 `docs/managed-original-working-copy-trash-implementation-plan.md` 为准。

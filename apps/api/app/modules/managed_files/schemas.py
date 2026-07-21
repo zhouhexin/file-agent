@@ -38,12 +38,29 @@ class FilesystemJobResponse(BaseModel):
 
     id: str
     job_type: str
+    queue_name: str
     root_id: Optional[str]
     status: str
     progress_current: int
     progress_total: int
     result: dict
     error_message: Optional[str]
+    attempt_count: int
+    max_attempts: int
+    available_at: datetime
+    started_at: Optional[datetime]
+    finished_at: Optional[datetime]
+
+
+class FilesystemJobEventResponse(BaseModel):
+    """文件系统任务事件响应；事件只包含状态摘要，不包含文件正文或绝对路径。"""
+
+    id: str
+    job_id: str
+    level: str
+    message: str
+    details: dict
+    created_at: datetime
 
 
 class ManagedFileResponse(BaseModel):

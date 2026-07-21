@@ -44,6 +44,8 @@ from app.modules.conversations.schemas import MessageAttachment, SendMessageRequ
 from app.modules.conversations.service import ConversationMessageService
 from app.modules.llm.schemas import UserIntentPlan
 from app.modules.managed_files.worker import _process_job
+from app.modules.managed_files.scanner import ManagedFileScanner
+from app.modules.managed_files.service import sync_configured_managed_roots
 from app.modules.knowledge_graph.managed_path_profile import (
     ManagedPathProfileRegistry,
     ManagedPathRule,
@@ -87,6 +89,18 @@ def _auth_header(client: TestClient, username: str = "persist-user") -> dict[str
         json={"username": username, "password": "password123"},
     )
     return {"Authorization": f"Bearer {login_response.json()['access_token']}"}
+
+
+def _run_reconcile_worker_for_configured_roots(root_key: str) -> None:
+    """测试中显式生成受管原始目录索引，Agent 请求本身不得同步扫描。"""
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        for root in sync_configured_managed_roots(db, root_key=root_key, scan=False):
+            ManagedFileScanner(db).scan_root(root)
+        db.commit()
+    finally:
+        db.close()
 
 
 def _upload_document(
@@ -960,6 +974,7 @@ def test_managed_file_snapshot_reuse_persists_changeset_items(monkeypatch, tmp_p
     monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
     client = _client_with_database()
     headers = _auth_header(client, username="managed-snapshot-changeset-user")
+    _run_reconcile_worker_for_configured_roots("downloads")
 
     first_response = client.post(
         "/api/conversations/managed-snapshot-conv/messages",
@@ -1022,6 +1037,7 @@ def test_managed_file_partial_batch_persists_partial_changeset(monkeypatch, tmp_
     monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
     client = _client_with_database()
     headers = _auth_header(client, username="managed-partial-changeset-user")
+    _run_reconcile_worker_for_configured_roots("downloads")
 
     response = client.post(
         "/api/conversations/managed-partial-conv/messages",
@@ -1101,6 +1117,7 @@ def test_managed_directory_classification_uses_global_catalog_and_persists_sugge
     get_settings.cache_clear()
     client = _client_with_database()
     headers = _auth_header(client, username="managed-classification-user")
+    _run_reconcile_worker_for_configured_roots("classified_library")
 
     response = client.post(
         "/api/conversations/managed-classification-conv/messages",
@@ -1205,6 +1222,7 @@ def test_large_managed_directory_classification_job_updates_original_agent_run(
     get_settings.cache_clear()
     client = _client_with_database()
     headers = _auth_header(client, username="managed-async-classification-user")
+    _run_reconcile_worker_for_configured_roots("classified_library")
 
     response = client.post(
         "/api/conversations/managed-async-classification-conv/messages",

@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.models import Document, User
+from app.modules.file_lifecycle.service import UploadLifecycleService
+from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.files.artifact_repository import DocumentArtifactRepository
 from app.modules.files.repository import FileRepository
 from app.modules.files.schemas import FileDeleteResponse, FileUploadResponse
@@ -26,32 +28,21 @@ class FileUploadService:
         self.db = db
         self.repository = FileRepository(db)
 
-    async def upload(self, file: UploadFile, current_user: User) -> FileUploadResponse:
-        """保存上传文件，并创建 Document 和 FileObject。"""
+    async def upload(
+        self,
+        file: UploadFile,
+        current_user: User,
+        conversation_id: str | None = None,
+    ) -> FileUploadResponse:
+        """保存上传暂存，并在同一事务登记异步查重任务。
+
+        上传请求不得同步执行归档、导入或分类，也不能因为哈希相同直接复用其他 Document。
+        """
 
         content = await file.read()
         filename = Path(file.filename or "uploaded-file").name
         content_type = file.content_type or "application/octet-stream"
         sha256 = hashlib.sha256(content).hexdigest()
-        storage_root = Path(get_settings().file_storage_root)
-        existing_document = self.repository.get_reusable_draft_document(
-            user_id=current_user.id,
-            workspace_id=current_user.default_workspace_id,
-            sha256=sha256,
-            original_filename=filename,
-        )
-        if existing_document is not None:
-            return self._to_upload_response(existing_document, deduplicated=True)
-
-        existing_file_object = self.repository.get_existing_file_object_by_hash(
-            sha256=sha256,
-            size_bytes=len(content),
-        )
-        reusable_storage_path = (
-            existing_file_object.storage_path
-            if existing_file_object and (storage_root / existing_file_object.storage_path).exists()
-            else None
-        )
         document = self.repository.create_document(
             user_id=current_user.id,
             workspace_id=current_user.default_workspace_id,
@@ -60,7 +51,7 @@ class FileUploadService:
             size_bytes=len(content),
             sha256=sha256,
         )
-        relative_path = reusable_storage_path or self._write_local_file(
+        relative_path = self._write_local_file(
             document=document,
             filename=filename,
             content=content,
@@ -71,12 +62,38 @@ class FileUploadService:
             size_bytes=len(content),
             sha256=sha256,
         )
-        self._run_deterministic_ingest(document=document, content=content)
-        self.db.commit()
+        try:
+            version, archive, review, job = UploadLifecycleService(self.db).register_upload(
+                document=document,
+                storage_path=relative_path,
+                conversation_id=conversation_id,
+            )
+            document.ingest_status = "DUPLICATE_CHECK_PENDING"
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            (Path(get_settings().file_storage_root) / relative_path).unlink(missing_ok=True)
+            raise
         self.db.refresh(document)
-        return self._to_upload_response(document=document, deduplicated=reusable_storage_path is not None)
+        return self._to_upload_response(
+            document=document,
+            version_id=version.id,
+            review_id=review.id,
+            job_id=job.id,
+            archive_status=archive.status,
+            review_status=review.status,
+        )
 
-    def _to_upload_response(self, document: Document, deduplicated: bool) -> FileUploadResponse:
+    def _to_upload_response(
+        self,
+        *,
+        document: Document,
+        version_id: str,
+        review_id: str,
+        job_id: str,
+        archive_status: str,
+        review_status: str,
+    ) -> FileUploadResponse:
         """把 Document 转换为上传响应。"""
 
         return FileUploadResponse(
@@ -87,7 +104,12 @@ class FileUploadService:
             sha256=document.sha256,
             status=document.status,
             ingest_status=document.ingest_status,
-            deduplicated=deduplicated,
+            deduplicated=False,
+            upload_document_version_id=version_id,
+            duplicate_review_id=review_id,
+            filesystem_job_id=job_id,
+            archive_status=archive_status,
+            duplicate_review_status=review_status,
         )
 
     def delete(self, document_id: str, current_user: User) -> FileDeleteResponse:
@@ -96,42 +118,19 @@ class FileUploadService:
         document = self.repository.get_document_for_user(document_id=document_id, user_id=current_user.id)
         if document is None:
             raise HTTPException(status_code=404, detail="Document not found")
-        if document.status != "UPLOADED":
+        if document.status == "USED_IN_MESSAGE":
             raise HTTPException(status_code=409, detail="Document already used in a message")
-
-        storage_root = Path(get_settings().file_storage_root)
-        artifact_repository = DocumentArtifactRepository(self.db)
-        artifacts = artifact_repository.list_for_document(document_id=document.id)
-        for artifact in artifacts:
-            if artifact.storage_backend != "local":
-                continue
-            artifact_path = self._resolve_local_storage_path(
-                storage_root=storage_root,
-                storage_path=artifact.storage_path,
-            )
-            if artifact_path is None:
-                continue
-            reference_count = artifact_repository.count_by_storage_path(storage_path=artifact.storage_path)
-            if reference_count <= 1:
-                artifact_path.unlink(missing_ok=True)
-                self._remove_empty_parent_dirs(artifact_path.parent, stop_at=storage_root)
-
-        file_objects = self.repository.list_file_objects(document_id=document.id)
-        for file_object in file_objects:
-            # 只删除本地存储文件；后续接对象存储时这里应抽成 StorageService。
-            if file_object.storage_backend == "local":
-                file_path = storage_root / file_object.storage_path
-                reference_count = self.repository.count_file_objects_by_storage_path(
-                    storage_backend=file_object.storage_backend,
-                    storage_path=file_object.storage_path,
-                )
-                if reference_count <= 1:
-                    file_path.unlink(missing_ok=True)
-                    self._remove_empty_parent_dirs(file_path.parent, stop_at=storage_root)
-
-        self.repository.delete_document_with_objects(document)
+        if document.status not in {"UPLOADED", "UPLOAD_CANCELLED"}:
+            raise HTTPException(status_code=409, detail="Document is not an upload draft")
+        if document.status == "UPLOAD_CANCELLED":
+            return FileDeleteResponse(deleted=True)
+        cleanup_job = UploadLifecycleService(self.db).cancel_unsent_upload(document=document)
+        document.status = "UPLOAD_CANCELLED"
         self.db.commit()
-        return FileDeleteResponse(deleted=True)
+        return FileDeleteResponse(
+            deleted=True,
+            cleanup_job_id=cleanup_job.id if cleanup_job else None,
+        )
 
     @staticmethod
     def _resolve_local_storage_path(*, storage_root: Path, storage_path: str) -> Path | None:
@@ -154,13 +153,20 @@ class FileUploadService:
             raise HTTPException(status_code=404, detail="Document not found")
 
         file_object = next(
-            (item for item in self.repository.list_file_objects(document_id=document.id) if item.storage_backend == "local"),
+            (
+                item
+                for item in self.repository.list_file_objects(document_id=document.id)
+                if item.storage_backend in {"local", "working_copy_local", "trash_local"}
+            ),
             None,
         )
         if file_object is None:
             raise HTTPException(status_code=404, detail="File object not found")
 
-        file_path = Path(get_settings().file_storage_root) / file_object.storage_path
+        try:
+            file_path = FileLifecycleStorageService().file_object_path(file_object)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="Stored file not found") from exc
         if not file_path.exists():
             raise HTTPException(status_code=404, detail="Stored file not found")
 

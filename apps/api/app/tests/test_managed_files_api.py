@@ -3,6 +3,8 @@
 from datetime import datetime, timezone
 
 from app.db.models import ManagedFile, ManagedRoot, User
+from app.modules.managed_files.scanner import ManagedFileScanner
+from app.modules.managed_files.service import sync_configured_managed_roots
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -33,6 +35,18 @@ def _make_admin(SessionLocal, user_id: str) -> None:
     try:
         user = db.get(User, user_id)
         user.role = "admin"
+        db.commit()
+    finally:
+        db.close()
+
+
+def _run_reconcile_worker(SessionLocal, root_key: str) -> None:
+    """显式生成查询所需索引，保护 HTTP 请求不做同步目录扫描。"""
+
+    db = SessionLocal()
+    try:
+        for root in sync_configured_managed_roots(db, root_key=root_key, scan=False):
+            ManagedFileScanner(db).scan_root(root)
         db.commit()
     finally:
         db.close()
@@ -147,6 +161,7 @@ def test_managed_files_query_returns_logical_metadata_only(monkeypatch, tmp_path
     monkeypatch.setenv("MANAGED_ROOT_STUDENT_AFFAIRS", str(managed_root))
     client, SessionLocal = client_with_database()
     _, token = _register_and_login(client, "managed-file-reader")
+    _run_reconcile_worker(SessionLocal, "student_affairs")
 
     response = client.get(
         "/api/managed-files?root_key=student_affairs&extension=pdf",
@@ -213,6 +228,7 @@ def test_user_query_auto_reads_env_managed_root_without_admin_registration(monke
     monkeypatch.setenv("MANAGED_ROOT_FILE_AGENT_SPREADSHEET_PATCH_FILES", str(managed_root))
     client, SessionLocal = client_with_database()
     _, token = _register_and_login(client, "managed-env-reader")
+    _run_reconcile_worker(SessionLocal, "file_agent_spreadsheet_patch_files")
 
     response = client.get(
         "/api/managed-files?root_key=file_agent_spreadsheet_patch_files",
@@ -245,8 +261,9 @@ def test_managed_files_query_filters_path_prefix(monkeypatch, tmp_path):
     (managed_root / "deploy" / "a.ps1").write_text("deploy", encoding="utf-8")
     (nested_dir / "b.txt").write_text("nested", encoding="utf-8")
     monkeypatch.setenv("MANAGED_ROOT_FILE_AGENT_SPREADSHEET_PATCH_FILES", str(managed_root))
-    client, _ = client_with_database()
+    client, SessionLocal = client_with_database()
     _, token = _register_and_login(client, "managed-path-reader")
+    _run_reconcile_worker(SessionLocal, "file_agent_spreadsheet_patch_files")
 
     response = client.get(
         "/api/managed-files"
@@ -304,6 +321,8 @@ def test_managed_files_query_treats_unknown_root_as_single_configured_subdirecto
         db.commit()
     finally:
         db.close()
+
+    _run_reconcile_worker(SessionLocal, "downloads")
 
     response = client.get(
         "/api/managed-files?root_key=file_agent_spreadsheet_patch_files",

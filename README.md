@@ -14,6 +14,8 @@ File Agent 不是传统网盘，也不是只会问答的知识库系统。用户
 - `docs/langgraph-runtime-issues.md`：LangGraph Runtime 当前问题与改造路线。
 - `docs/langgraph-framework-decision.md`：选择 LangGraph 作为 Agent Runtime 底层编排框架的架构决策。
 - `docs/file-rename-llm-validation-implementation-plan.md`：重命名差异风险、LLM 证据校验、降级和验收计划。
+- `docs/classification-topic-summary-implementation-plan.md`：分类主题摘要优先的候选召回、原文证据校验、开源选型和Shadow上线方案。
+- `docs/managed-original-working-copy-trash-implementation-plan.md`：受管原始目录、工作副本目录、回收站目录、重复上传确认和异步归档导入方案。
 - `docs/skills-catalog.md`：项目内 Agent Skill 清单。
 - `docs/neo4j-graph-classification-overall-plan.md`：Neo4j 图谱增强分类整体方案。
 - `docs/neo4j-graph-classification-v1-implementation-plan.md`：轻量第一版本实施和验收方案。
@@ -37,17 +39,32 @@ cd apps/web && npm install && npm run dev
 后端服务数据库必须使用 PostgreSQL；如果未配置 `DATABASE_URL`，或配置为 SQLite，服务会直接启动失败。
 从项目根目录启动后端时必须设置 `PYTHONPATH=apps/api`，否则 Python 无法找到 `apps/api/app` 包。
 如果在项目根目录直接执行 `python -m uvicorn app.main:app ...` 且没有设置 `PYTHONPATH=apps/api`，会报 `ModuleNotFoundError: No module named 'app'`。
-上传文件默认保存到 `FILE_STORAGE_ROOT=./storage/uploads`。
+上传文件先保存到 `FILE_STORAGE_ROOT=./storage/uploads` 暂存目录并创建异步查重任务。无重复候选时自动异步归档；发现相同或高度相似文件时，聊天页逐文件要求用户选择“继续上传”“使用已有文件”或“取消上传”。
+文件生命周期固定使用三层名词：`受管原始目录`保存不可变原始文件，`工作副本目录`承载 Agent 的增删改查，`回收站目录`保存可恢复的工作副本删除结果。重命名和移动只改变工作副本路径，不新增 `DocumentVersion`；原始文件始终不变。
 服务端结构化日志默认保存到 `LOG_DIR=./logs`，按天生成 `file-agent-YYYY-MM-DD.log`，启动时会删除超过 `LOG_RETENTION_DAYS=7` 天的日志。
 旧版 `.xls` 默认由 `xlrd>=2.0.1` 直接只读解析；只有 xlrd 无法处理非标准或损坏文件时才尝试本机 LibreOffice/`soffice` 转换。当前部署不强制安装 LibreOffice，转换器缺失时返回结构化失败或在重命名场景使用受控文件名回退，始终不覆盖原件。
 PDF、DOCX 默认启用本地 Docling 结构化解析，并把文档元素和位置写入 `document_elements`；Docling 不可用时自动回退现有解析器，扫描件仍由现有 OCR 链路处理。
-受管文件确认重命名默认使用 `FILE_RENAME_EXECUTOR=native`。可选 F2 v2.2.2 执行器只负责批量执行 OperationPlan 已固定的文件名映射；启用前必须通过离线包部署并校验二进制版本和 SHA-256，具体配置见 `docs/runbook.md`。
-聊天上传附件也可通过 `generate-rename-suggestions` 生成 `RENAME_UPLOADED_FILES` 计划；用户确认后只在该 Document 的私有临时存储目录内改名，并写入 ChangeSet。当前不执行分类、受管目录选择或正式归档；共享物理内容会使用写时复制，避免影响其他 Document 或受管快照。
+文件重命名统一生成 `RENAME_WORKING_COPIES` OperationPlan，确认后由工作副本执行器执行；旧的受管原始文件 Native/F2 执行通道和上传暂存重命名通道不再对 Agent 开放。
+上传附件通过查重后由独立 worker 归档到受管原始目录，再自动创建工作副本。当前分类目录落位尚未启用，工作副本先保持原始相对路径；后续重命名、移动和删除计划必须以 `working_copy_id` 为对象，不能再修改受管原始目录。
 默认不启用真实 LLM 调用；如需让对话阶段使用大模型理解用户需求，请在 `.env` 中配置 `LLM_ENABLED=true`、`LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_CHAT_MODEL`。当前 LLM 客户端使用 OpenAI-compatible Chat Completions 接口。
 分类判定默认仍为 `LLM_CLASSIFICATION_MODE=rule_only`。如需让 LLM 在候选分类内做语义判定，可设置 `LLM_CLASSIFICATION_MODE=hybrid`；如需允许 LLM 自由提出新分类路径，还必须显式设置 `LLM_CLASSIFICATION_ALLOW_FREE_PATHS=true`，该类结果只会以 `NEEDS_REVIEW` 保存，不会自动写入正式分类目录。
 Neo4j 图谱增强分类默认关闭。第二版本支持目录角色 Profile、完整正文本地 Embedding、固定 `VectorCypherRetriever`、`off/shadow/enabled`、投影运行审计和分类反馈样本；无标注阶段只允许小范围展示建议，连接失败会自动回退现有分类。具体步骤见 `docs/runbook.md`。
 
 消息接口需要先注册、登录并携带 `Authorization: Bearer <access_token>`。示例见 `docs/runbook.md`。
+
+除 API 外，三层文件生命周期至少需要独立启动 worker 和 scheduler；需要近实时同步时再启动 watcher：
+
+```bash
+# 可在不同进程中分别设置 FILESYSTEM_WORKER_QUEUES，以隔离查重、归档、导入和对账资源。
+PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE \
+  /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
+PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=IMPORT,FILE_OPERATION \
+  /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
+PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=RECONCILE \
+  /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
+PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.file_lifecycle.scheduler
+PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.file_lifecycle.watcher
+```
 
 当前服务地址：
 
