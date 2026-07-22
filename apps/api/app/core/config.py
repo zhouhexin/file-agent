@@ -57,6 +57,10 @@ DEFAULT_TRASH_RETENTION_DAYS = 30
 DEFAULT_INITIAL_ORGANIZATION_CONFIDENCE = 0.60
 DEFAULT_UPLOAD_MAX_FILE_SIZE_MB = 1024
 DEFAULT_UPLOAD_CHUNK_SIZE_BYTES = 1024 * 1024
+DEFAULT_DOCUMENT_CHUNK_MAX_CHARS = 1200
+DEFAULT_DOCUMENT_CHUNK_OVERLAP_CHARS = 120
+DEFAULT_DOCUMENT_INDEX_MAX_CHARS = 50_000_000
+DEFAULT_DOCUMENT_INDEX_MAX_CHUNKS = 50_000
 DEFAULT_UPLOAD_ALLOWED_EXTENSIONS = (
     ".pdf",
     ".doc",
@@ -104,6 +108,14 @@ class Settings(BaseModel):
     upload_max_file_size_mb: int = DEFAULT_UPLOAD_MAX_FILE_SIZE_MB
     upload_chunk_size_bytes: int = DEFAULT_UPLOAD_CHUNK_SIZE_BYTES
     upload_allowed_extensions: tuple[str, ...] = DEFAULT_UPLOAD_ALLOWED_EXTENSIONS
+    retrieval_mode: str = "lexical"
+    chinese_tokenizer: str = "jieba"
+    document_chunk_max_chars: int = DEFAULT_DOCUMENT_CHUNK_MAX_CHARS
+    document_chunk_overlap_chars: int = DEFAULT_DOCUMENT_CHUNK_OVERLAP_CHARS
+    document_index_max_chars: int = DEFAULT_DOCUMENT_INDEX_MAX_CHARS
+    document_index_max_chunks: int = DEFAULT_DOCUMENT_INDEX_MAX_CHUNKS
+    embedding_enabled: bool = False
+    embedding_provider: str = "disabled"
     log_dir: str = DEFAULT_LOG_DIR
     log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
     log_level: str = "INFO"
@@ -309,6 +321,38 @@ def get_settings() -> Settings:
                     if item.strip()
                 }
             )
+        ),
+        retrieval_mode=_choice(
+            os.getenv("RETRIEVAL_MODE", "lexical"),
+            allowed={"lexical", "hybrid"},
+            default="lexical",
+        ),
+        chinese_tokenizer=_choice(
+            os.getenv("CHINESE_TOKENIZER", "jieba"),
+            allowed={"jieba"},
+            default="jieba",
+        ),
+        document_chunk_max_chars=max(
+            200,
+            min(8000, int(os.getenv("DOCUMENT_CHUNK_MAX_CHARS", str(DEFAULT_DOCUMENT_CHUNK_MAX_CHARS)))),
+        ),
+        document_chunk_overlap_chars=max(
+            0,
+            min(1000, int(os.getenv("DOCUMENT_CHUNK_OVERLAP_CHARS", str(DEFAULT_DOCUMENT_CHUNK_OVERLAP_CHARS)))),
+        ),
+        document_index_max_chars=max(
+            1_000_000,
+            min(500_000_000, int(os.getenv("DOCUMENT_INDEX_MAX_CHARS", str(DEFAULT_DOCUMENT_INDEX_MAX_CHARS)))),
+        ),
+        document_index_max_chunks=max(
+            1_000,
+            min(500_000, int(os.getenv("DOCUMENT_INDEX_MAX_CHUNKS", str(DEFAULT_DOCUMENT_INDEX_MAX_CHUNKS)))),
+        ),
+        embedding_enabled=os.getenv("EMBEDDING_ENABLED", "false").lower() == "true",
+        embedding_provider=_choice(
+            os.getenv("EMBEDDING_PROVIDER", "disabled"),
+            allowed={"disabled", "openai_compatible", "local_service"},
+            default="disabled",
         ),
         log_dir=os.getenv("LOG_DIR", DEFAULT_LOG_DIR),
         log_retention_days=int(os.getenv("LOG_RETENTION_DAYS", str(DEFAULT_LOG_RETENTION_DAYS))),

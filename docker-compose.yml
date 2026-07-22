@@ -1,4 +1,4 @@
-# 本地 PostgreSQL + pgvector 服务；当前后端默认可用 SQLite 开发库，设置 DATABASE_URL 后可切到此服务。
+# 本地 PostgreSQL + pgvector 与 Neo4j 图谱服务；后端业务数据库仍必须使用 PostgreSQL。
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -8,9 +8,38 @@ services:
       POSTGRES_USER: file_agent
       POSTGRES_PASSWORD: file_agent_dev
     ports:
-      - "5432:5432"
+      # 本地开发数据库只监听回环地址，禁止使用示例凭据向局域网暴露。
+      - "127.0.0.1:5432:5432"
     volumes:
       - file_agent_postgres_data:/var/lib/postgresql/data
 
+  neo4j:
+    # Neo4j 只保存可重建图投影，PostgreSQL 和 taxonomy 仍是业务事实源。
+    image: neo4j:5.26-community
+    container_name: file-agent-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be configured in .env}
+      # 限制本地开发内存，避免图谱服务挤占文件解析和 OCR worker 资源。
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_server_memory_pagecache_size: 512m
+    ports:
+      # Neo4j 管理页和 Bolt 仅供本机开发访问；远程部署应走独立防火墙和最小权限账号。
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    volumes:
+      - file_agent_neo4j_data:/data
+      - file_agent_neo4j_logs:/logs
+    healthcheck:
+      # 密码只在容器内从 NEO4J_AUTH 解析，不写入命令行配置或仓库文件。
+      test: ["CMD-SHELL", "cypher-shell -a bolt://127.0.0.1:7687 -u neo4j -p \"$${NEO4J_AUTH#*/}\" 'RETURN 1;' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
 volumes:
   file_agent_postgres_data:
+  file_agent_neo4j_data:
+  file_agent_neo4j_logs:

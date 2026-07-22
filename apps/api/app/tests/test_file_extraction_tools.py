@@ -583,6 +583,12 @@ def test_extract_document_text_always_converts_xls_before_reading(monkeypatch, t
     assert result["status"] == "COMPLETED"
     assert result["extractor"] == "excel-xls-converted"
     assert [page["sheet_name"] for page in result["pages"]] == ["汇总", "明细"]
+    # 临时 XLSX 的每个非空行必须携带真实坐标，供阶段三 Evidence 精确引用。
+    assert result["pages"][0]["metadata"]["line_cell_ranges"] == [
+        {"line_index": 0, "row_number": 1, "cell_range": "A1:B1"},
+        {"line_index": 1, "row_number": 2, "cell_range": "A2:B2"},
+    ]
+    assert result["pages"][1]["metadata"]["used_cell_range"] == "A1:B2"
     assert "赵六\t一等奖" in result["pages"][0]["text"]
     assert result["pages"][0]["metadata"]["converted_from"] == ".xls"
     assert xls_path.read_bytes() == original_bytes

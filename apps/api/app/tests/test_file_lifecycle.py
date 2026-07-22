@@ -7,6 +7,8 @@ from app.db.models import (
     ChangeItem,
     Document,
     DocumentClassificationSummary,
+    DocumentChunk,
+    DocumentIndexRun,
     DocumentSummary,
     DocumentVersion,
     FileRenameReviewItem,
@@ -33,6 +35,11 @@ def _configure(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("WORKING_COPY_STORAGE_ROOT", str(tmp_path / "working"))
     monkeypatch.setenv("TRASH_STORAGE_ROOT", str(tmp_path / "trash"))
     monkeypatch.setenv("MANAGED_ROOT_RECONCILE_ON_STARTUP", "false")
+    # 生命周期测试只验证确定性的本地 CPU 文件链路，不能继承 IDE 中启用的外部索引或图谱开关。
+    monkeypatch.setenv("EMBEDDING_ENABLED", "false")
+    monkeypatch.setenv("GRAPH_CLASSIFICATION_ENABLED", "false")
+    monkeypatch.setenv("GRAPH_EMBEDDING_ENABLED", "false")
+    monkeypatch.setenv("NEO4J_SYNC_ENABLED", "false")
     config.get_settings.cache_clear()
 
 
@@ -113,6 +120,11 @@ def test_upload_is_archived_then_imported_by_separate_jobs(monkeypatch, tmp_path
         assert ".internal" not in version.storage_path
         assert db.query(DocumentSummary).filter_by(document_id=working_copy.document_id).count() == 1
         assert db.query(DocumentClassificationSummary).filter_by(document_id=working_copy.document_id).count() == 1
+        # 首次工作副本在 ACTIVE 前必须完成 CPU 原文索引，embedding 默认关闭。
+        index_run = db.query(DocumentIndexRun).filter_by(document_version_id=version.id).one()
+        assert index_run.status == "COMPLETED"
+        assert index_run.embedding_status == "DISABLED"
+        assert db.query(DocumentChunk).filter_by(document_version_id=version.id).count() >= 1
         initial_path = db.query(WorkingCopyPathRecord).filter_by(
             working_copy_id=working_copy.id,
             operation_type="INITIAL_IMPORT",
@@ -128,6 +140,7 @@ def test_upload_is_archived_then_imported_by_separate_jobs(monkeypatch, tmp_path
         assert resolved.id == working_copy.id
         assert db.query(ChangeItem).filter(ChangeItem.change_type == "ORIGINAL_FILE_ARCHIVED").count() == 1
         assert db.query(ChangeItem).filter(ChangeItem.change_type == "WORKING_COPY_IMPORTED").count() == 1
+        assert db.query(ChangeItem).filter(ChangeItem.change_type == "DOCUMENT_INDEX_CREATED").count() == 1
     finally:
         db.close()
         clear_overrides()

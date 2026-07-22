@@ -1,6 +1,7 @@
-"""File Agent MVP 运行时 ORM 模型。
+"""File Agent MVP 统一 ORM 模型。
 
-本文件只包含当前持久化闭环需要的表：用户、工作区、会话、消息、AgentRun 和 ToolInvocation。
+本文件集中声明文件版本、解析、索引、Agent 审计、工作副本和高风险操作等持久化事实；运行时服务对象
+和文件正文不得写入 AgentGraphState 代替这些表。
 """
 
 from __future__ import annotations
@@ -9,8 +10,10 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.types import UserDefinedType
 
 from app.db.base import Base
 
@@ -25,6 +28,21 @@ def utcnow() -> datetime:
     """生成带时区的 UTC 时间，统一审计时间字段。"""
 
     return datetime.now(timezone.utc)
+
+
+class Vector1536(UserDefinedType):
+    """声明 PostgreSQL ``vector(1536)`` 扩展列，同时允许 SQLite 测试使用 JSON 变体。
+
+    第三阶段默认不写入向量；保留该类型只是为了让后续独立 GPU provider 可以异步回填，不能据此
+    在应用进程启动模型推理。
+    """
+
+    cache_ok = True
+
+    def get_col_spec(self, **_: object) -> str:
+        """返回 pgvector 的固定维度声明，避免运行时任意修改索引维度。"""
+
+        return "vector(1536)"
 
 
 class User(Base):
@@ -119,6 +137,8 @@ class Document(Base):
     extraction_runs: Mapped[List["DocumentExtractionRun"]] = relationship(back_populates="document")
     pages: Mapped[List["DocumentPage"]] = relationship(back_populates="document")
     elements: Mapped[List["DocumentElement"]] = relationship(back_populates="document")
+    index_runs: Mapped[List["DocumentIndexRun"]] = relationship(back_populates="document")
+    chunks: Mapped[List["DocumentChunk"]] = relationship(back_populates="document")
     versions: Mapped[List["DocumentVersion"]] = relationship(
         back_populates="document",
         foreign_keys="DocumentVersion.document_id",
@@ -151,6 +171,12 @@ class DocumentVersion(Base):
     __tablename__ = "document_versions"
     __table_args__ = (
         UniqueConstraint("document_id", "version_number", name="uq_document_versions_document_number"),
+        Index(
+            "ix_document_versions_filename_trgm",
+            "filename",
+            postgresql_using="gin",
+            postgresql_ops={"filename": "gin_trgm_ops"},
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
@@ -241,6 +267,9 @@ class DocumentExtractionRun(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     document_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False, index=True)
+    document_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="RUNNING")
     extractor: Mapped[str] = mapped_column(String(80), nullable=False, default="")
     parser_name: Mapped[str] = mapped_column(String(80), nullable=False, default="")
@@ -384,6 +413,186 @@ class DocumentElement(Base):
 
     document: Mapped[Document] = relationship(back_populates="elements")
     extraction_run: Mapped[DocumentExtractionRun] = relationship(back_populates="elements")
+
+
+class DocumentIndexRun(Base):
+    """一个文档内容版本在固定切分与分词配置下的原文索引运行。
+
+    幂等键包含文档版本、解析运行和配置指纹；重命名、移动不会改变这些事实，因此不得重复建索引。
+    """
+
+    __tablename__ = "document_index_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_version_id",
+            "extraction_run_id",
+            "config_hash",
+            name="uq_document_index_runs_version_extraction_config",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    document_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    extraction_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_extraction_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    index_version: Mapped[str] = mapped_column(String(80), nullable=False, default="chunk-index-v1")
+    tokenizer: Mapped[str] = mapped_column(String(40), nullable=False, default="jieba")
+    tokenizer_version: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    config_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="RUNNING", index=True)
+    chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    evidence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    embedding_status: Mapped[str] = mapped_column(String(40), nullable=False, default="DISABLED", index=True)
+    error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    document: Mapped[Document] = relationship(back_populates="index_runs")
+
+
+class DocumentChunk(Base):
+    """绑定不可变内容版本和真实定位信息的原文检索块。"""
+
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        UniqueConstraint("index_run_id", "chunk_index", name="uq_document_chunks_run_index"),
+        Index("ix_document_chunks_search_vector_gin", "search_vector", postgresql_using="gin"),
+        Index(
+            "ix_document_chunks_search_text_trgm",
+            "search_text",
+            postgresql_using="gin",
+            postgresql_ops={"search_text": "gin_trgm_ops"},
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    index_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_index_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    extraction_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_extraction_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_type: Mapped[str] = mapped_column(String(40), nullable=False, default="text")
+    text_content: Mapped[str] = mapped_column(Text, nullable=False)
+    search_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    search_vector: Mapped[Optional[str]] = mapped_column(
+        TSVECTOR().with_variant(Text(), "sqlite"), nullable=True
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    location_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    char_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    page_start: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    page_end: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    sheet_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    cell_range: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    element_ids_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    embedding: Mapped[Optional[list]] = mapped_column(
+        Vector1536().with_variant(JSON(), "sqlite"), nullable=True
+    )
+    embedding_status: Mapped[str] = mapped_column(String(40), nullable=False, default="DISABLED", index=True)
+    embedding_provider: Mapped[str] = mapped_column(String(80), nullable=False, default="disabled")
+    embedding_model: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    document: Mapped[Document] = relationship(back_populates="chunks")
+
+
+class EvidenceSpan(Base):
+    """从 Chunk 原文截取且带真实页码或单元格范围的可引用证据。"""
+
+    __tablename__ = "evidence_spans"
+    __table_args__ = (
+        UniqueConstraint("chunk_id", "span_index", name="uq_evidence_spans_chunk_index"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    chunk_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_chunks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    extraction_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_extraction_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    span_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    evidence_type: Mapped[str] = mapped_column(String(40), nullable=False, default="text_quote")
+    quote: Mapped[str] = mapped_column(Text, nullable=False)
+    start_offset: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    end_offset: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    page_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    sheet_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    cell_range: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    source: Mapped[str] = mapped_column(String(80), nullable=False, default="document_chunk")
+    metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class QAAnswer(Base):
+    """阶段五证据回答的持久化边界；阶段三只建表，不生成猜测性回答。"""
+
+    __tablename__ = "qa_answers"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    conversation_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    agent_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer_text: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="COMPLETED", index=True)
+    retrieval_trace_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class AnswerReference(Base):
+    """回答与已校验证据之间的稳定引用关系。"""
+
+    __tablename__ = "answer_references"
+    __table_args__ = (
+        UniqueConstraint("qa_answer_id", "reference_index", name="uq_answer_references_answer_index"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    qa_answer_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("qa_answers.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    evidence_span_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("evidence_spans.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    document_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    document_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    reference_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    label: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class DocumentClassificationRun(Base):

@@ -35,11 +35,12 @@ user:
 - 新建会话
 - 发送文件工作指令
 - 上传文件
-- 查看 AgentRun、ChangeSet、引用和 OperationPlan
+- 查看自己的 UserTaskReceipt、文件结果、引用和 OperationPlan
 - 确认自己的 OperationPlan
 - 提交反馈
 
 admin / ops:
+- 查看 AgentRun、ToolInvocation 和 ChangeSet 审计
 - 查看文件处理状态
 - 触发重新解析/重新索引
 - 处理反馈
@@ -887,22 +888,32 @@ Response:
 
 ```json
 {
-  "items": [
+  "document_id": "document-uuid",
+  "document_version_id": "version-uuid",
+  "status": "COMPLETED",
+  "embedding_status": "DISABLED",
+  "chunk_count": 1,
+  "evidence_count": 1,
+  "chunks": [
     {
-      "id": "chunk-uuid",
+      "chunk_id": "chunk-uuid",
       "chunk_index": 0,
-      "text": "申请国家励志奖学金需要提交申请表、成绩证明和相关审核材料。",
-      "page_no": 1,
+      "chunk_type": "page",
+      "char_count": 31,
+      "token_count": 12,
+      "page_start": 1,
+      "page_end": 1,
       "sheet_name": null,
       "cell_range": null,
-      "metadata": {
-        "source_type": "pdf_page"
-      }
+      "evidence_count": 1
     }
-  ],
-  "next_cursor": null
+  ]
 }
 ```
+
+该接口只返回当前用户文档的安全定位元数据。`text_content`、`search_text`、`search_vector`、
+`embedding` 和服务器路径不属于普通用户响应；完整 quote 只能在后续 EvidenceValidator 校验后作为回答引用
+展示。没有索引时返回 `status=NOT_INDEXED` 和空 `chunks`，不能伪造索引成功。
 
 ### 7.6 Get Document Lineage
 

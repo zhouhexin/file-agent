@@ -152,7 +152,7 @@ def _extract_csv_text(file_path: Path) -> str:
 
 
 def _extract_excel_text(file_path: Path) -> Dict[str, Any]:
-    """使用 openpyxl 读取 Excel 文本。"""
+    """使用 openpyxl 读取 Excel 文本，并保存每个非空行的真实单元格范围。"""
 
     try:
         import openpyxl
@@ -163,16 +163,35 @@ def _extract_excel_text(file_path: Path) -> Dict[str, Any]:
     pages: List[Dict[str, Any]] = []
     for sheet_index, sheet in enumerate(workbook.worksheets, start=1):
         lines = []
-        for row in sheet.iter_rows(values_only=True):
-            values = ["" if value is None else str(value) for value in row]
+        line_cell_ranges: List[Dict[str, Any]] = []
+        for row in sheet.iter_rows(values_only=False):
+            values = ["" if cell.value is None else str(cell.value) for cell in row]
             if any(values):
                 lines.append("\t".join(values))
+                non_empty_cells = [cell for cell in row if cell.value is not None]
+                # 坐标直接来自 openpyxl 解析事实，后续 Evidence 不允许根据文本位置猜测单元格。
+                line_cell_ranges.append(
+                    {
+                        "line_index": len(lines) - 1,
+                        "row_number": int(non_empty_cells[0].row),
+                        "cell_range": f"{non_empty_cells[0].coordinate}:{non_empty_cells[-1].coordinate}",
+                    }
+                )
         pages.append(
             {
                 "page_number": sheet_index,
                 "sheet_name": sheet.title,
                 "text": "\n".join(lines),
-                "metadata": {"sheet_index": sheet_index},
+                "metadata": {
+                    "sheet_index": sheet_index,
+                    "line_cell_ranges": line_cell_ranges,
+                    "used_cell_range": (
+                        f"{line_cell_ranges[0]['cell_range'].split(':', 1)[0]}:"
+                        f"{line_cell_ranges[-1]['cell_range'].split(':', 1)[1]}"
+                        if line_cell_ranges
+                        else None
+                    ),
+                },
             }
         )
     workbook.close()

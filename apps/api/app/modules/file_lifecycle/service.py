@@ -59,6 +59,7 @@ from app.modules.file_lifecycle.risk import inspect_basic_file_risks
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.path_policy import resolve_managed_relative_path
 from app.modules.classification.service import persist_document_results_classifications
+from app.modules.chunks.service import DocumentIndexService
 
 
 @dataclass(slots=True)
@@ -839,6 +840,23 @@ class FileLifecycleJobProcessor:
                 user_id=user_id,
                 settings=self.settings,
             ).decide(document=document, version=version, managed_file=managed_file)
+            extraction_run_id = str((decision.extraction_result or {}).get("extraction_run_id") or "")
+            index_result = (
+                DocumentIndexService(db=self.db, settings=self.settings).build(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    extraction_run_id=extraction_run_id,
+                )
+                if extraction_run_id
+                else {
+                    "ok": False,
+                    "status": "FAILED",
+                    "chunk_count": 0,
+                    "evidence_count": 0,
+                    "embedding_status": "DISABLED",
+                    "error": {"code": "EXTRACTION_NOT_READY", "message": "正文解析未完成，检索索引尚未建立。"},
+                }
+            )
             path_resolution = self._working_path_resolution(
                 working_root=working_root,
                 managed_file=managed_file,
@@ -905,7 +923,9 @@ class FileLifecycleJobProcessor:
                 "filename": decision.filename,
                 "page_count": len(extraction_pages),
                 "char_count": sum(int(item.get("char_count") or 0) for item in extraction_pages),
-                "organization_status": "NEEDS_REVIEW" if pending_decision else "READY",
+                "organization_status": "NEEDS_REVIEW" if pending_decision or not index_result.get("ok") else "READY",
+                "search_status": "READY" if index_result.get("ok") else "NEEDS_REVIEW",
+                "evidence_count": int(index_result.get("evidence_count") or 0),
                 "year": decision.rename_metadata.get("year"),
                 "document_type": decision.summary_metadata.get("document_type"),
                 "keywords": list(decision.summary_metadata.get("keywords") or []),
@@ -937,6 +957,11 @@ class FileLifecycleJobProcessor:
                     "document_version_id": version.id,
                     "document_summary_id": decision.document_summary_id,
                     "classification_summary_id": decision.classification_summary_id,
+                    "document_index_run_id": index_result.get("index_run_id"),
+                    "search_status": file_receipt["search_status"],
+                    "chunk_count": int(index_result.get("chunk_count") or 0),
+                    "evidence_count": int(index_result.get("evidence_count") or 0),
+                    "embedding_status": index_result.get("embedding_status") or "DISABLED",
                     "primary_category": category_name,
                     "rename_status": decision.rename_status,
                     "organization_status": file_receipt["organization_status"],
@@ -949,6 +974,32 @@ class FileLifecycleJobProcessor:
                     "managed_original_unchanged": True,
                 },
                 graph_document_results=[file_receipt],
+            )
+            index_error = index_result.get("error") if isinstance(index_result.get("error"), dict) else {}
+            # 即使预校验失败且尚未创建 index_run，也必须以 DocumentVersion 为目标留下失败审计。
+            self.db.add(
+                ChangeItem(
+                    changeset_id=changeset.id,
+                    target_type="document_index_run" if index_result.get("index_run_id") else "document_version",
+                    target_id=str(index_result.get("index_run_id") or version.id),
+                    target_document_id=document.id,
+                    change_type=(
+                        "DOCUMENT_INDEX_CREATED" if index_result.get("ok") else "DOCUMENT_INDEX_FAILED"
+                    ),
+                    before_value_json={},
+                    after_value_json={
+                        "document_version_id": version.id,
+                        "chunk_count": int(index_result.get("chunk_count") or 0),
+                        "evidence_count": int(index_result.get("evidence_count") or 0),
+                        "embedding_status": index_result.get("embedding_status") or "DISABLED",
+                        # 审计只保存安全错误码，不能把内部异常消息或正文写入 ChangeSet。
+                        "error_code": index_error.get("code"),
+                    },
+                    source="document-index-service",
+                    confidence=1.0 if index_result.get("ok") else 0.0,
+                    evidence_json={},
+                    execution_status="COMPLETED" if index_result.get("ok") else "FAILED",
+                )
             )
             if pending_decision:
                 self.db.add(

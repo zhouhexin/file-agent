@@ -243,6 +243,10 @@ export type DocumentResult = {
   working_copy_id?: string;
   filename: string;
   organization_status?: 'READY' | 'NEEDS_REVIEW' | string;
+  /** 用户可理解的原文检索准备状态，不暴露内部索引、Skill 或 Tool。 */
+  search_status?: 'READY' | 'NEEDS_REVIEW' | string;
+  /** 当前文件可定位证据数量，只用于说明检索准备度。 */
+  evidence_count?: number;
   extraction_status: 'COMPLETED' | 'FAILED' | string;
   extractor?: string;
   page_count: number;

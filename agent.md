@@ -738,6 +738,20 @@ Neo4j 图谱分类采用“可重建投影 + 只读候选增强”模式：
 
 ### 11.3 检索顺序
 
+当前无 GPU 的第三阶段采用 CPU-only 原文索引基线：应用层使用 Jieba 对中文正文和查询进行确定性分词，
+PostgreSQL 使用 `simple` 配置的全文索引保存已经分词的词项，并用 `pg_trgm` 提供文件名和短语的模糊
+匹配。`document_chunks.embedding` 只保留可空的 `vector(1536)` 扩展槽，默认
+`EMBEDDING_ENABLED=false`、`EMBEDDING_PROVIDER=disabled`，不得在应用服务器下载模型、启动本地推理
+进程或要求 GPU。embedding 关闭或失败时，Chunk/Evidence 建立和词法检索必须正常完成；后续部署独立
+GPU 推理服务时，只允许通过受控 provider 异步回填向量，不得改变已有 Chunk、Evidence、引用 ID 或
+历史回答。
+
+Chunk 和 Evidence 必须绑定 `document_version_id` 与成功的 `extraction_run_id`。PDF 必须保留真实页码，
+Excel 必须保留真实 Sheet 和单元格范围；无法从解析事实获得位置时可以保存空位置并进入待复核，但不得
+伪造页码或单元格。重命名和移动只改变工作副本路径，不得重复构建同一内容版本索引；新内容版本或新的
+解析配置必须生成新索引运行。正文、分词文本、embedding 和全文索引列只属于 Persistent Stores，不得
+进入 AgentGraphState、日志或普通用户回执。
+
 长期检索顺序按外部方案设计：
 
 ```text

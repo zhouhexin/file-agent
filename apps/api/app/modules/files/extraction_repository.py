@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import Document, DocumentElement, DocumentExtractionRun, DocumentPage, FileObject, utcnow
+from app.db.models import Document, DocumentElement, DocumentExtractionRun, DocumentPage, DocumentVersion, FileObject, utcnow
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 
 
@@ -93,11 +93,23 @@ class FileExtractionRepository:
         parser_name: str = "",
         parser_version: str = "",
         parser_config_hash: str = "",
+        document_version_id: str | None = None,
     ) -> DocumentExtractionRun:
-        """创建 RUNNING 状态的解析运行记录。"""
+        """创建 RUNNING 状态的解析运行记录，并尽量固化正文所属内容版本。"""
+
+        resolved_version_id = document_version_id
+        if resolved_version_id is None:
+            latest_version = (
+                self.db.query(DocumentVersion)
+                .filter(DocumentVersion.document_id == document_id)
+                .order_by(DocumentVersion.version_number.desc(), DocumentVersion.created_at.desc())
+                .first()
+            )
+            resolved_version_id = latest_version.id if latest_version is not None else None
 
         run = DocumentExtractionRun(
             document_id=document_id,
+            document_version_id=resolved_version_id,
             status="RUNNING",
             extractor=extractor,
             parser_name=parser_name,

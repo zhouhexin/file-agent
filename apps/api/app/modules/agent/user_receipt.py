@@ -120,6 +120,8 @@ def _safe_document_result(value: dict[str, Any]) -> dict[str, Any]:
         "working_copy_id",
         "filename",
         "organization_status",
+        "search_status",
+        "evidence_count",
         "extraction_status",
         "page_count",
         "char_count",

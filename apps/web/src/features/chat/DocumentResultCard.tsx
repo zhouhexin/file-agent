@@ -1,3 +1,4 @@
+// 逐文件任务回执卡只展示用户可理解的整理与检索状态，不暴露内部 Agent、Skill、Tool 或索引载荷。
 import type { DocumentResult } from '../../types';
 import { CategoryChip } from './CategoryChip';
 import { FileTypeIcon } from './FileTypeIcon';
@@ -12,6 +13,7 @@ type DocumentResultCardProps = {
   onOpenFile?: (file: ChatAttachment) => void;
 };
 
+/** 展示一个文件的安全处理回执，并把文件打开动作交给受控上层回调。 */
 export function DocumentResultCard({
   result,
   index,
@@ -79,6 +81,15 @@ export function DocumentResultCard({
             <span className="document-result-confidence">
               {primaryCategory ? `置信度 ${primaryCategory.confidence.toFixed(2)}` : '未分类'}
             </span>
+            {result.search_status ? (
+              <span
+                className="document-result-confidence"
+                title={result.evidence_count ? `已建立 ${result.evidence_count} 条可定位证据` : undefined}
+              >
+                {/* 普通用户只看“是否可检索”，不展示 Chunk、Tool 或 embedding 等内部实现。 */}
+                {result.search_status === 'READY' ? '可对话检索' : '检索内容待处理'}
+              </span>
+            ) : null}
           </header>
           {result.categories.length > 1 ? (
             <div className="document-result-categories">

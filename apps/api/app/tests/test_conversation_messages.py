@@ -117,6 +117,9 @@ def test_post_message_starts_agent_run():
     assert "tool_results" not in task_result
     assert "extractor" not in task_result["document_results"][0]
     assert "relative_path" not in task_result["document_results"][0]
+    assert "index_run_id" not in task_result["document_results"][0]
+    assert "search_text" not in task_result["document_results"][0]
+    assert "embedding" not in task_result["document_results"][0]
     clear_overrides()
 
 

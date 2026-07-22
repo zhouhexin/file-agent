@@ -57,6 +57,7 @@ from app.modules.agent.tool_schemas import (
     ToolInputValidationError,
 )
 from app.modules.classification.taxonomy_service import read_default_taxonomy_catalog
+from app.modules.chunks.service import DocumentIndexService
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text, extraction_config_hash
 from app.modules.files.readable_source import ReadableDocumentSourceResolver, apply_readable_source_metadata
@@ -250,6 +251,44 @@ def _document_handler(tool_name: str) -> ToolHandler:
         }
 
     return handler
+
+
+def _chunk_build_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """创建真实 Chunk/Evidence 建索引 handler，正文只在持久化服务内部流转。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """在当前用户所有权边界内建立或复用最新文档版本索引。"""
+
+        if db is None or user_id is None:
+            return {
+                "ok": False,
+                "status": "FAILED",
+                "error": {"code": "RUNTIME_CONTEXT_REQUIRED", "message": "原文索引上下文不可用。"},
+            }
+        return DocumentIndexService(db=db).build_latest_for_user(
+            document_id=str(getattr(tool_input, "document_id")),
+            user_id=user_id,
+        )
+
+    return handler
+
+
+def _embedding_generate_handler(tool_input: BaseModel) -> Dict[str, Any]:
+    """明确拒绝阶段三的真实向量推理，避免占位 Tool 伪造已生成 embedding。"""
+
+    settings = get_settings()
+    code = "EMBEDDING_DISABLED" if not settings.embedding_enabled else "EMBEDDING_PROVIDER_NOT_IMPLEMENTED"
+    message = (
+        "当前部署使用 CPU 词法检索，embedding 已关闭。"
+        if code == "EMBEDDING_DISABLED"
+        else "向量 provider 尚未接入，未写入任何 embedding。"
+    )
+    return {
+        "ok": False,
+        "status": "FAILED",
+        "document_id": str(getattr(tool_input, "document_id")),
+        "error": {"code": code, "message": message},
+    }
 
 
 def _search_handler(db: Any, user_id: str | None) -> ToolHandler:
@@ -1282,6 +1321,11 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
         )
         if reusable is not None:
             run = reusable["run"]
+            index_result = (
+                DocumentIndexService(db=db).build_latest_for_user(document_id=document.id, user_id=user_id)
+                if user_id is not None
+                else {"ok": False, "status": "FAILED", "chunk_count": 0, "evidence_count": 0}
+            )
             persisted_metadata = (
                 dict(reusable["pages"][0].metadata_json or {})
                 if reusable["pages"]
@@ -1312,6 +1356,9 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
                 "conversion_parsed_format": persisted_metadata.get("parsed_format"),
                 "conversion_converter": persisted_metadata.get("converter"),
                 "conversion_converter_version": persisted_metadata.get("converter_version"),
+                "search_status": "READY" if index_result.get("ok") else "NEEDS_REVIEW",
+                "chunk_count": int(index_result.get("chunk_count") or 0),
+                "evidence_count": int(index_result.get("evidence_count") or 0),
                 "pages": [
                     {
                         "page_number": page.page_number,
@@ -1365,6 +1412,11 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
             )
         else:
             repository.fail_extraction_run(run=run, error_message=extraction["error"]["message"])
+        index_result = (
+            DocumentIndexService(db=db).build_latest_for_user(document_id=document.id, user_id=user_id)
+            if extraction["ok"] and user_id is not None
+            else {"ok": False, "status": "FAILED", "chunk_count": 0, "evidence_count": 0}
+        )
         extraction_status = "COMPLETED" if extraction["ok"] else "FAILED"
         event_name = "file.extract.completed" if extraction["ok"] else "file.extract.failed"
         error = extraction.get("error") or {}
@@ -1415,6 +1467,9 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
             "conversion_parsed_format": extraction.get("conversion_parsed_format"),
             "conversion_converter": extraction.get("conversion_converter"),
             "conversion_converter_version": extraction.get("conversion_converter_version"),
+            "search_status": "READY" if index_result.get("ok") else "NEEDS_REVIEW",
+            "chunk_count": int(index_result.get("chunk_count") or 0),
+            "evidence_count": int(index_result.get("evidence_count") or 0),
             "warnings": extraction.get("warnings", []),
             "pages": [
                 {
@@ -1627,8 +1682,8 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("document-convert", "Extract document text and structure through adapters.", DocumentToolInput, True, False, ["document_pages", "artifacts", "change_items"], _document_handler("document-convert")),
         _tool("table-extract", "Extract spreadsheet sheets and cells.", DocumentToolInput, True, False, ["document_pages", "artifacts"], _document_handler("table-extract")),
         _tool("artifact-write", "Write derivative artifact records.", DocumentToolInput, True, False, ["artifacts"], _document_handler("artifact-write")),
-        _tool("chunk-build", "Build chunks and evidence spans.", DocumentToolInput, True, False, ["document_chunks", "evidence_spans"], _document_handler("chunk-build")),
-        _tool("embedding-generate", "Generate and store embeddings.", DocumentToolInput, True, False, ["document_chunks.embedding"], _document_handler("embedding-generate")),
+        _tool("chunk-build", "Build chunks and evidence spans.", DocumentToolInput, True, False, ["document_chunks", "evidence_spans"], _chunk_build_handler(db, user_id)),
+        _tool("embedding-generate", "Generate and store embeddings.", DocumentToolInput, True, False, ["document_chunks.embedding"], _embedding_generate_handler),
         _tool("metadata-extract", "Extract metadata candidates.", DocumentToolInput, True, False, ["documents.metadata"], _document_handler("metadata-extract")),
         _tool("multi-label-classify", "Generate multi-label classifications with evidence.", DocumentToolInput, True, False, ["document_categories"], _document_handler("multi-label-classify")),
         _tool("read-document-insights", "Read deterministic ingest insights for uploaded documents.", DocumentInsightsReadInput, False, False, [], _document_insights_handler(db, user_id)),

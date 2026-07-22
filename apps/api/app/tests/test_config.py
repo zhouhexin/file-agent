@@ -134,6 +134,32 @@ def test_settings_loads_legacy_office_conversion_options(monkeypatch, tmp_path):
     assert settings.legacy_office_derivative_dir == "derived/legacy-office"
 
 
+def test_settings_defaults_document_index_to_cpu_lexical_mode(monkeypatch, tmp_path):
+    """第三阶段默认不得启用 embedding 或要求 GPU。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost/test")
+    for name in (
+        "RETRIEVAL_MODE",
+        "CHINESE_TOKENIZER",
+        "DOCUMENT_INDEX_MAX_CHARS",
+        "DOCUMENT_INDEX_MAX_CHUNKS",
+        "EMBEDDING_ENABLED",
+        "EMBEDDING_PROVIDER",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.retrieval_mode == "lexical"
+    assert settings.chinese_tokenizer == "jieba"
+    assert settings.document_index_max_chars == 50_000_000
+    assert settings.document_index_max_chunks == 50_000
+    assert settings.embedding_enabled is False
+    assert settings.embedding_provider == "disabled"
+
+
 @pytest.mark.parametrize("mode", ["hybrid", "native", "docling"])
 def test_settings_loads_file_rename_parse_mode(monkeypatch, tmp_path, mode):
     """重命名解析模式必须接受三个受控配置值。"""
@@ -183,9 +209,17 @@ def test_settings_defaults_graph_classification_to_disabled(monkeypatch, tmp_pat
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
-    monkeypatch.delenv("GRAPH_CLASSIFICATION_ENABLED", raising=False)
-    monkeypatch.delenv("GRAPH_CLASSIFICATION_MODE", raising=False)
-    monkeypatch.delenv("NEO4J_SYNC_ENABLED", raising=False)
+    # 该测试验证“没有配置时”的默认值，必须隔离 IDE、Shell 和真实 .env 中所有被断言的图谱变量。
+    for name in (
+        "GRAPH_CLASSIFICATION_ENABLED",
+        "GRAPH_CLASSIFICATION_MODE",
+        "NEO4J_SYNC_ENABLED",
+        "GRAPH_CLASSIFICATION_MAX_HOPS",
+        "GRAPH_CLASSIFICATION_TOP_K",
+        "GRAPH_EMBEDDING_ENABLED",
+        "GRAPH_CLASSIFICATION_ROLLOUT_PERCENT",
+    ):
+        monkeypatch.delenv(name, raising=False)
     _reset_settings_cache()
 
     settings = config.get_settings()

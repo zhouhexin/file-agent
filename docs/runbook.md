@@ -38,7 +38,7 @@ cp .env.example .env
 当前期望结果：
 
 ```text
-405 passed, 19 skipped
+420 passed, 19 skipped
 ```
 
 当前跳过项是需要真实外部执行器或独立环境的既有集成测试。Paddle、PyMuPDF 等依赖可能输出弃用或
@@ -61,11 +61,17 @@ postgresql+psycopg2://fileagent_user:<password>@212.64.14.158:5432/fileAgent
 如需使用项目自带 Docker PostgreSQL + pgvector：
 
 ```bash
-docker compose up -d postgres
+docker compose up -d postgres neo4j
 export DATABASE_URL='postgresql+psycopg2://file_agent:file_agent_dev@127.0.0.1:5432/file_agent'
 export AUTO_CREATE_TABLES=false
 /opt/homebrew/anaconda3/envs/py311/bin/python -m alembic -c apps/api/alembic.ini upgrade head
 ```
+
+本地 Neo4j 使用 `.env` 中的 `NEO4J_PASSWORD`，HTTP 管理页为 `http://127.0.0.1:7474`，Bolt 地址为
+`bolt://127.0.0.1:7687`。启动后先执行 `docker compose ps`，确认 `file-agent-neo4j` 为 `healthy`；
+Neo4j 容器只保存可重建图投影，不能替代 PostgreSQL 事实源。示例 compose 只绑定 `127.0.0.1`，且
+`.env.example` 不提供默认 Neo4j 密码；复制配置后必须先填写强密码，不能把数据库端口直接暴露到公网或
+局域网。
 
 对当前 `.env` 指向的 PostgreSQL 执行 migration：
 
@@ -115,6 +121,26 @@ http://127.0.0.1:8000
 message、AgentRun 和 ToolInvocation 会写入当前 `DATABASE_URL` 指向的数据库。
 上传文件会写入 `FILE_STORAGE_ROOT`，默认是 `./storage/uploads`。
 `extract-document-text` 会把解析结果写入 `document_extraction_runs` 和 `document_pages`。
+
+成功解析的活动工作副本会继续建立 `document_index_runs`、`document_chunks` 和 `evidence_spans`。
+当前阶段不需要 GPU，默认配置为：
+
+```dotenv
+RETRIEVAL_MODE=lexical
+CHINESE_TOKENIZER=jieba
+DOCUMENT_CHUNK_MAX_CHARS=1200
+DOCUMENT_CHUNK_OVERLAP_CHARS=120
+DOCUMENT_INDEX_MAX_CHARS=50000000
+DOCUMENT_INDEX_MAX_CHUNKS=50000
+EMBEDDING_ENABLED=false
+EMBEDDING_PROVIDER=disabled
+```
+
+`DOCUMENT_INDEX_MAX_CHARS` 和 `DOCUMENT_INDEX_MAX_CHUNKS` 是可调整的 worker 资源预算，不是上传业务
+限制；超出预算时原件和工作副本保持不变，检索状态进入待处理，后续可由分批索引 worker 接管。
+Jieba 在应用层生成中文词项，PostgreSQL 使用 `simple` FTS/GIN 和 `pg_trgm`；不要在 File Agent API
+进程安装或加载 embedding 模型。后续如接独立 GPU 推理服务，先实现受控 provider 和异步回填任务，
+再把 `RETRIEVAL_MODE` 调整为 `hybrid`。关闭或回填失败时必须继续使用词法索引。
 
 上传接口使用临时文件和分块流式写入，不会把整份文件一次性读入内存。以下参数只用于部署资源保护，
 可以根据磁盘、并发和 worker 容量调整，不应被解释为学校业务文件的固定大小限制：

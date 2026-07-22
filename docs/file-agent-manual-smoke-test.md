@@ -1,6 +1,6 @@
 # File Agent 整项目手工烟测手册
 
-本文用于在阶段三开发前以及后续版本发布前，对 File Agent 当前已经实现的普通用户入口、上传自动整理、
+本文用于在阶段三开发完成后以及后续版本发布前，对 File Agent 当前已经实现的普通用户入口、上传自动整理、
 文件生命周期、权限、审计和真实工作副本副作用进行手工验证。自动化测试通过不能替代本文的真实文件
 系统烟测。
 
@@ -19,7 +19,6 @@
 
 以下能力当前不作为通过条件：
 
-- 阶段三尚未实现的 DocumentVersion Chunk、Evidence 和 CPU-only 全文索引。
 - 阶段四、阶段五的两阶段 RAG、正式 Evidence Answer 和持久化引用。
 - 阶段六的文件名冲突自然语言决策执行；当前只验收冲突提示和待决策持久化。
 - 尚未提供的 `/admin/documents`、`/admin/feedback`、`/admin/settings/llm` 前端页面。
@@ -68,9 +67,9 @@ git diff --check
 当前阶段期望：
 
 ```text
-后端：405 passed, 19 skipped
+后端：420 passed, 19 skipped
 前端：TypeScript 检查和 Vite build 成功
-Alembic：单一 head 20260722_0001
+Alembic：单一 head 20260723_0001
 Python：No broken requirements found
 ```
 
@@ -364,7 +363,42 @@ curl -sS http://127.0.0.1:8000/api/working-copies/<working_copy_id>/versions \
 - F12 显示宏风险，但系统不执行宏、脚本、链接或嵌入对象。
 - 页面和日志不得出现“病毒扫描通过”或同义表述。
 
-### SMOKE-008 对话访问和表格计算
+### SMOKE-008 DocumentVersion 原文索引（CPU-only）
+
+步骤：
+
+1. 确认 `.env` 使用 `RETRIEVAL_MODE=lexical`、`CHINESE_TOKENIZER=jieba`、
+   `EMBEDDING_ENABLED=false`、`EMBEDDING_PROVIDER=disabled`，并按 worker 容量配置
+   `DOCUMENT_INDEX_MAX_CHARS`、`DOCUMENT_INDEX_MAX_CHUNKS`；服务器无需安装 GPU。
+2. 上传 F01、F05 和 F06，完成查重决策并等待工作副本导入任务结束。
+3. 从工作副本 lineage 取得各自 `document_id`，分别请求：
+
+```bash
+curl -sS http://127.0.0.1:8000/api/documents/<document_id>/chunks \
+  -H "Authorization: Bearer ${FILE_AGENT_SMOKE_TOKEN}" | jq
+```
+
+4. 对同一文件再次触发读取/整理，重复查询 Chunk 概览。
+5. 使用另一个普通用户的 token 请求第 3 步 URL。
+
+通过标准：
+
+- F01/F06 的 `status=COMPLETED`，`chunk_count`、`evidence_count` 均大于 0，PDF Chunk 有真实页码。
+- F05 的每个工作表都有独立定位；证据包含真实 `sheet_name` 和 `cell_range`，不能只用页码代替。
+- 所有结果的 `embedding_status=DISABLED`；没有模型下载、GPU 进程或外部 embedding 请求。
+- 重复处理复用同一版本索引，不增加同一 `document_version_id + extraction_run_id + config_hash` 的运行。
+- 重命名或移动工作副本后索引仍复用；只有正文产生新 DocumentVersion 或解析配置变化才建立新索引。
+- API 响应不包含 `text_content`、`search_text`、`search_vector`、`embedding`、绝对路径或全文。
+- 其他用户请求返回 404，不能探测文件是否存在。
+- 原文件和工作副本 SHA-256 未因建索引发生变化。
+
+失败标准：
+
+- embedding 关闭导致 Chunk/Evidence 失败。
+- 页码、Sheet 或单元格范围由文件名/文本猜测，或为空时伪造坐标。
+- 重复运行生成重复 Chunk，或者移动/改名导致历史引用失效。
+
+### SMOKE-009 对话访问和表格计算
 
 在 `/chat` 依次输入：
 
@@ -383,9 +417,9 @@ curl -sS http://127.0.0.1:8000/api/working-copies/<working_copy_id>/versions \
 - 最终文件名、分类和摘要能够参与当前轻量召回。
 - Excel 数字汇总由确定性表格服务完成，不能让 LLM 心算。
 - 重命名请求只生成 OperationPlan，确认前文件不变。
-- 阶段三以前不要求返回正式 Chunk 引用或 Evidence Answer。
+- 当前阶段只要求 Chunk/Evidence 持久化边界，不要求返回阶段五的正式引用或 Evidence Answer。
 
-### SMOKE-009 工作副本重命名确认
+### SMOKE-010 工作副本重命名确认
 
 步骤：
 
@@ -410,7 +444,7 @@ curl -sS http://127.0.0.1:8000/api/working-copies/<working_copy_id>/path-records
 - 新增不可变路径记录和 `FILENAME_CHANGED` ChangeItem。
 - 受管原件文件名、路径和 SHA-256 始终不变。
 
-### SMOKE-010 回收站和恢复
+### SMOKE-011 回收站和恢复
 
 取得一个活动 `working_copy_id`，创建回收站计划：
 
@@ -472,7 +506,7 @@ curl -sS -X POST \
 - 原路径冲突时恢复到稳定备用路径，不覆盖其他工作副本。
 - `TRASH_AUTO_PURGE_ENABLED=false`，没有永久删除。
 
-### SMOKE-011 分类反馈
+### SMOKE-012 分类反馈
 
 步骤：
 
@@ -492,7 +526,7 @@ curl -sS http://127.0.0.1:8000/api/classification/feedback/summary \
 - 更正同时表达原分类负样本和目标分类正样本。
 - 反馈不会直接修改 ACTIVE taxonomy 或正式 `document_categories`。
 
-### SMOKE-012 用户隔离和内部审计权限
+### SMOKE-013 用户隔离和内部审计权限
 
 步骤：
 
@@ -508,7 +542,7 @@ curl -sS http://127.0.0.1:8000/api/classification/feedback/summary \
 - 普通用户访问 `/api/changesets/{changeset_id}` 返回 403。
 - 普通消息接口只返回 `task_result`，不返回 AgentRun、ToolInvocation、Planner 或原始 Tool 输出。
 
-### SMOKE-013 ops/admin 审计接口
+### SMOKE-014 ops/admin 审计接口
 
 当前没有 admin 前端页面。先通过 `/login` 注册专用用户 `smoke_admin`，烟测密码使用
 `password123`。随后仅在隔离测试数据库中把该用户提升为 admin：
@@ -535,7 +569,7 @@ GET /api/changesets/{changeset_id}
 - 未确认或未执行的物理计划不能显示为 `EXECUTED`。
 - 普通用户仍然不能访问这些接口。
 
-### SMOKE-014 日志和敏感信息
+### SMOKE-015 日志和敏感信息
 
 检查当天 JSONL 日志：
 
