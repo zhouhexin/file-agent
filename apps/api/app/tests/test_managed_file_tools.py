@@ -457,22 +457,47 @@ def test_managed_file_list_tool_filters_keyword_in_filename_or_relative_path(mon
     """年份等关键字应同时匹配文件名和相对路径，支持“党办 2026”组合条件。"""
 
     managed_root = tmp_path / "downloads"
-    party_2026_dir = managed_root / "党办" / "2026"
-    party_2025_dir = managed_root / "党办" / "2025"
-    office_dir = managed_root / "教务处"
-    party_2026_dir.mkdir(parents=True)
-    party_2025_dir.mkdir(parents=True)
-    office_dir.mkdir(parents=True)
-    (party_2026_dir / "通知.pdf").write_text("notice", encoding="utf-8")
-    (party_2025_dir / "通知.pdf").write_text("old notice", encoding="utf-8")
-    (managed_root / "党办2026工作计划.docx").write_text("plan", encoding="utf-8")
-    (office_dir / "2026通知.pdf").write_text("other", encoding="utf-8")
+    managed_root.mkdir()
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
     client, SessionLocal = client_with_database()
     db = SessionLocal()
     try:
-        result = ToolRegistry(db=db, user_id="user-1").invoke(
+        # 本用例只验证数据库索引上的组合过滤，不应借测试适配器执行真实目录全量扫描和 SHA-256。
+        # 扫描器行为由 test_managed_file_scanner.py 独立保护，避免 Windows 开发机配置污染时读取真实 Downloads。
+        root = ManagedRoot(
+            root_key="downloads",
+            display_name="downloads",
+            container_path=str(managed_root),
+            classification_mode="NONE",
+        )
+        db.add(root)
+        db.flush()
+        for index, (relative_path, filename, extension) in enumerate(
+            [
+                ("党办/2026/通知.pdf", "通知.pdf", ".pdf"),
+                ("党办/2025/通知.pdf", "通知.pdf", ".pdf"),
+                ("党办2026工作计划.docx", "党办2026工作计划.docx", ".docx"),
+                ("教务处/2026通知.pdf", "2026通知.pdf", ".pdf"),
+            ],
+            start=1,
+        ):
+            db.add(
+                ManagedFile(
+                    root_id=root.id,
+                    relative_path=relative_path,
+                    category_path=None,
+                    filename=filename,
+                    extension=extension,
+                    size_bytes=index,
+                    modified_at=datetime.now(timezone.utc),
+                    fingerprint=f"filter-{index}",
+                    status="ACTIVE",
+                )
+            )
+        db.commit()
+
+        result = RuntimeToolRegistry(db=db, user_id="user-1").invoke(
             "managed-file-list",
             {"path_prefix": "党办", "filename_contains": "2026"},
         )
