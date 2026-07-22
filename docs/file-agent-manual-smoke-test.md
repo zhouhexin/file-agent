@@ -67,7 +67,9 @@ git diff --check
 当前阶段期望：
 
 ```text
-后端：422 passed, 19 skipped
+后端（macOS/Linux）：422 passed, 19 skipped
+后端（Windows 有 symlink 权限）：422 passed, 19 skipped
+后端（Windows 无 symlink 权限）：421 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
 前端：TypeScript 检查和 Vite build 成功
 Alembic：单一 head 20260723_0001
 Python：No broken requirements found
@@ -75,20 +77,43 @@ Python：No broken requirements found
 
 后续新增测试后，测试数量可以增加，但不能出现失败项或新增未说明的跳过项。
 
-### 3.1 Windows 生命周期路径回归检查
+### 3.1 Windows 全量回归与生命周期路径检查
 
-Windows 烟测必须先在已经配置好的 Python 环境中执行以下定向测试：
+从仓库根目录使用当前已配置的 Python 环境执行：
 
 ```powershell
-cd apps\api
+python -m pytest -v
+
+python -m alembic -c apps/api/alembic.ini heads
+python -m pip check
+git diff --check
+
+Set-Location apps/web
+npm run build
+Set-Location ../..
+```
+
+Windows 测试基础设施会自动使用当前 `%TEMP%` 下的短 pytest 根目录，避免 pytest 自动附加用户名、轮次和
+完整测试函数名后制造非业务路径。业务长路径没有因此被跳过：下面的专项测试会独立重建曾经达到 267 字符
+的工作副本路径，继续保护 StorageService 的路径长度边界。
+
+全量失败时先执行以下定向测试：
+
+```powershell
 python -m pytest -v `
-  app/tests/test_file_lifecycle_storage.py `
-  app/tests/test_file_lifecycle.py::test_upload_is_archived_then_imported_by_separate_jobs
+  apps/api/app/tests/test_file_lifecycle_storage.py `
+  apps/api/app/tests/test_file_lifecycle.py::test_upload_is_archived_then_imported_by_separate_jobs
 ```
 
 通过标准：3 项测试全部通过。该检查会重建曾经达到 267 字符的 pytest 工作副本路径，验证内部暂存路径
-不再重复完整任务 UUID、文件 UUID 和原文件名，并验证原子复制的 `.part` 文件使用短排他名称。失败时不得
-通过缩短测试临时目录来掩盖问题。
+不再重复完整任务 UUID、文件 UUID 和原文件名，并验证原子复制的 `.part` 文件使用短排他名称。
+
+测试套件默认忽略项目 `.env` 中的受管目录、Neo4j、Embedding、MCP、OCR 和外部 LLM 开关；需要验证这些
+能力的用例必须显式注入 deterministic fake 或单独启用集成测试。这样 Windows 开发机不会在普通 pytest
+期间递归扫描真实 Downloads、连接 Neo4j、下载 OCR 模型或调用外部服务。
+
+`test_path_policy_rejects_symlink_escape` 需要操作系统允许创建符号链接。Windows 未启用开发者模式且当前
+终端无管理员权限时，该项会以明确原因跳过；启用开发者模式后必须通过，不能把真实 PathPolicy 断言删除。
 
 ## 4. 隔离环境准备
 

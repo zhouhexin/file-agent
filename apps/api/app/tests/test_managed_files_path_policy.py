@@ -3,6 +3,8 @@
 P0 只允许 root_key + relative_path，不允许用户或 LLM 传入宿主机绝对路径。
 """
 
+import errno
+import os
 from pathlib import Path
 
 import pytest
@@ -45,7 +47,16 @@ def test_path_policy_rejects_symlink_escape(tmp_path: Path):
     outside.mkdir()
     try:
         (outside / "secret.pdf").write_text("secret", encoding="utf-8")
-        (tmp_path / "link.pdf").symlink_to(outside / "secret.pdf")
+        try:
+            (tmp_path / "link.pdf").symlink_to(outside / "secret.pdf")
+        except OSError as exc:
+            # 未启用 Windows 开发者模式且当前进程无管理员权限时，系统会拒绝创建
+            # 测试前置符号链接；这不是 PathPolicy 业务失败，必须明确记录环境跳过。
+            windows_privilege_error = os.name == "nt" and getattr(exc, "winerror", None) == 1314
+            permission_error = exc.errno in {errno.EPERM, errno.EACCES}
+            if windows_privilege_error or permission_error:
+                pytest.skip("当前 Windows 环境无创建符号链接权限，跳过真实 symlink 前置条件。")
+            raise
 
         with pytest.raises(PathPolicyError):
             resolve_managed_relative_path(root_path=tmp_path, relative_path="link.pdf")

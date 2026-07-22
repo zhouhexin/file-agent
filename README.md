@@ -37,6 +37,15 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m uvicorn app
 cd apps/web && npm install && npm run dev
 ```
 
+Windows PowerShell 在仓库根目录使用当前 Python 环境运行后端测试：
+
+```powershell
+python -m pytest
+```
+
+测试套件会隔离 `.env` 中的真实受管目录和外部服务，并为 Windows 自动选择短 pytest 临时根；不需要为了
+跑单元测试关闭 Neo4j 容器或修改正式受管目录配置。
+
 当前后端会自动读取项目根目录 `.env`。本机 `.env` 已配置为 PostgreSQL：`212.64.14.158:5432/fileAgent`，真实密码不提交到 Git。
 后端服务数据库必须使用 PostgreSQL；如果未配置 `DATABASE_URL`，或配置为 SQLite，服务会直接启动失败。
 从项目根目录启动后端时必须设置 `PYTHONPATH=apps/api`，否则 Python 无法找到 `apps/api/app` 包。

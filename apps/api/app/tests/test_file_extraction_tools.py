@@ -620,9 +620,12 @@ def test_extract_document_text_returns_structured_xls_conversion_failure(monkeyp
     assert result["error"]["code"] == "XLS_CONVERTER_NOT_AVAILABLE"
 
 
-def test_extract_image_uses_injected_ocr_service(tmp_path):
+def test_extract_image_uses_injected_ocr_service(monkeypatch, tmp_path):
     """图片解析应通过 OCR 服务写入统一页面文本。"""
 
+    # 测试套件默认关闭真实 OCR；本用例只显式启用注入的 deterministic fake。
+    monkeypatch.setenv("OCR_ENABLED", "true")
+    config.get_settings.cache_clear()
     image_path = tmp_path / "scan.png"
     image_path.write_bytes(b"fake-image")
     ocr_service = FakeOcrService(text="电子发票承诺书 OCR 文本")
@@ -644,6 +647,9 @@ def test_extract_image_uses_injected_ocr_service(tmp_path):
 def test_empty_pdf_triggers_ocr_fallback(monkeypatch, tmp_path):
     """PDF 原生文本为空时应渲染页面并触发 OCR 兜底。"""
 
+    # 只允许注入的 fake OCR 执行，不能在 Windows 测试机下载或初始化 Paddle 模型。
+    monkeypatch.setenv("OCR_ENABLED", "true")
+    config.get_settings.cache_clear()
     pdf_path = tmp_path / "scan.pdf"
     pdf_path.write_bytes(b"fake-pdf")
     rendered_page = tmp_path / "page-1.png"

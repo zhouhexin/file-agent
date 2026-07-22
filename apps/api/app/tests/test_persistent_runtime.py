@@ -1914,15 +1914,21 @@ def test_deterministic_message_extracts_and_classifies_multiple_documents():
 
 
 def test_alembic_files_exist_for_runtime_tables():
-    """迁移配置必须存在，避免 ORM 表只停留在测试内存里。"""
+    """迁移配置必须存在，且验证结果不能依赖 pytest 的启动目录。"""
 
-    assert Path("alembic.ini").exists()
-    assert Path("alembic/env.py").exists()
-    versions = list(Path("alembic/versions").glob("*_create_runtime_tables.py"))
+    # Windows 手工烟测常从仓库根目录启动 pytest；测试资源必须基于当前文件定位，
+    # 不能把进程 cwd 误当成 apps/api，否则真实存在的迁移会被错误报告为缺失。
+    api_root = Path(__file__).resolve().parents[2]
+    alembic_dir = api_root / "alembic"
+    versions_dir = alembic_dir / "versions"
+
+    assert (api_root / "alembic.ini").exists()
+    assert (alembic_dir / "env.py").exists()
+    versions = list(versions_dir.glob("*_create_runtime_tables.py"))
     assert len(versions) == 1
     classification_versions = list(
-        Path("alembic/versions").glob("*_create_classification_suggestion_tables.py")
+        versions_dir.glob("*_create_classification_suggestion_tables.py")
     )
     assert len(classification_versions) == 1
-    changeset_versions = list(Path("alembic/versions").glob("*_create_changeset_tables.py"))
+    changeset_versions = list(versions_dir.glob("*_create_changeset_tables.py"))
     assert len(changeset_versions) == 1

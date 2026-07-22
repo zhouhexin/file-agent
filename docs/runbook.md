@@ -35,6 +35,15 @@ cp .env.example .env
 /opt/homebrew/anaconda3/envs/py311/bin/python -m pytest
 ```
 
+Windows PowerShell 使用当前已配置的 Python 环境：
+
+```powershell
+python -m pytest
+```
+
+测试必须从仓库根目录和 `apps/api` 两种位置得到相同结果。Windows 下 pytest 会自动使用短临时根目录；
+测试进程同时隔离项目 `.env` 中的真实受管目录和外部服务配置，避免普通单元测试扫描用户文件或连接外部服务。
+
 当前期望结果：
 
 ```text
@@ -42,7 +51,8 @@ cp .env.example .env
 ```
 
 当前跳过项是需要真实外部执行器或独立环境的既有集成测试。Paddle、PyMuPDF 等依赖可能输出弃用或
-环境兼容警告；只要没有失败项，不影响当前自动化验收结论。
+环境兼容警告；只要没有失败项，不影响当前自动化验收结论。Windows 无符号链接权限时允许额外跳过
+`test_path_policy_rejects_symlink_escape`，但必须显示明确的权限原因。
 
 ## 3. 数据库
 
