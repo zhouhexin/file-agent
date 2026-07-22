@@ -184,7 +184,10 @@ def test_managed_file_preview_returns_safe_text_blob(monkeypatch, tmp_path):
     managed_root = tmp_path / "student-affairs"
     file_dir = managed_root / "2026"
     file_dir.mkdir(parents=True)
-    (file_dir / "notice.txt").write_text("第一行通知\n第二行要求", encoding="utf-8")
+    expected_content = "第一行通知\n第二行要求".encode("utf-8")
+    # write_text 会在 Windows 把 ``\n`` 转成 ``\r\n``，导致测试创建的文件字节因平台而异。
+    # 预览接口应原样返回受管文件，所以测试必须先写入跨平台一致的确定字节。
+    (file_dir / "notice.txt").write_bytes(expected_content)
     monkeypatch.setenv("MANAGED_ROOT_STUDENT_AFFAIRS", str(managed_root))
     client, _ = client_with_database()
     _, token = _register_and_login(client, "managed-preview-reader")
@@ -196,7 +199,8 @@ def test_managed_file_preview_returns_safe_text_blob(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
-    assert response.text == "第一行通知\n第二行要求"
+    assert response.content == expected_content
+    assert response.text == expected_content.decode("utf-8")
     clear_overrides()
 
 
