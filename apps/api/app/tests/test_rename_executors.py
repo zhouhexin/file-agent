@@ -128,10 +128,12 @@ def test_f2_report_parser_accepts_array_and_wrapper(tmp_path):
 
 
 def test_f2_preview_writes_escaped_csv_and_does_not_modify_file(tmp_path):
-    """F2 dry-run 应正确处理中文、逗号和引号，并保持文件不变。"""
+    """F2 dry-run 应正确处理中文和 CSV 逗号，并保持文件不变。"""
 
-    source = tmp_path / '旧,名称"测试.txt'
-    target = tmp_path / '2026_新,名称"测试.txt'
+    # Windows 文件名禁止双引号；逗号已经足以验证 csv.writer 的字段转义，测试前置文件必须
+    # 在所有支持平台都能真实创建。
+    source = tmp_path / "旧,名称测试.txt"
+    target = tmp_path / "2026_新,名称测试.txt"
     source.write_text("data", encoding="utf-8")
     observed_rows: list[list[str]] = []
 
@@ -163,6 +165,22 @@ def test_f2_preview_writes_escaped_csv_and_does_not_modify_file(tmp_path):
     assert observed_rows == [[str(source), target.name]]
     assert source.exists()
     assert not target.exists()
+
+
+@pytest.mark.parametrize("target_name", ['bad\"name.txt', "bad?.txt", "CON.txt"])
+def test_rename_batch_rejects_windows_invalid_targets_on_every_platform(tmp_path, target_name):
+    """所有平台都必须在执行前拒绝 Windows 无法创建的目标文件名。"""
+
+    source = tmp_path / "source.txt"
+    source.write_text("data", encoding="utf-8")
+
+    result = NativeRenameExecutor().preview_batch(
+        _request(tmp_path, ("managed-1", source.name, target_name))
+    )
+
+    assert result.status == "FAILED"
+    assert result.items[0].error_code == "INVALID_TARGET_FILENAME"
+    assert source.exists()
 
 
 def test_f2_execute_runs_dry_run_before_exec_and_postchecks_hash(tmp_path):

@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import threading
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Coroutine, TypeVar
 
 
@@ -79,12 +80,17 @@ class MCPFilesystemBridge:
     def resolve_relative_path(self, value: str | None) -> str:
         """把用户可见的受管相对路径解析为 MCP 允许根内的绝对路径。"""
 
-        raw_value = (value or "").replace("\\", "/").strip()
-        if raw_value in {"", "."}:
+        original_value = (value or "").strip()
+        normalized_value = original_value.replace("\\", "/")
+        if normalized_value in {"", "."}:
             return str(self.root)
 
-        relative = PurePosixPath(raw_value.strip("/"))
-        if PurePosixPath(raw_value).is_absolute() or relative.is_absolute():
+        # Windows 盘符路径在 Linux/macOS 上会被 PurePosixPath 误判成相对路径；路径校验必须同时
+        # 使用 POSIX 和 Windows 语义，避免 ``C:\\...`` 被拼接到受管根下后绕过绝对路径拒绝规则。
+        windows_path = PureWindowsPath(original_value)
+        posix_path = PurePosixPath(normalized_value)
+        relative = PurePosixPath(normalized_value.strip("/"))
+        if posix_path.is_absolute() or windows_path.is_absolute() or bool(windows_path.drive):
             raise MCPFilesystemError("Invalid managed relative path")
         if any(part in {"", ".", ".."} for part in relative.parts):
             raise MCPFilesystemError("Invalid managed relative path")
@@ -167,13 +173,29 @@ class MCPFilesystemBridge:
         if isinstance(value, (list, tuple)):
             return [self._sanitize(item) for item in value]
         if isinstance(value, str):
-            redacted = value.replace(str(self.root), "workdata:")
+            redacted = _redact_managed_root(value=value, root=self.root)
             if len(redacted) > self.max_output_chars:
                 return redacted[: self.max_output_chars] + "\n...[truncated]"
             return redacted
         if value is None or isinstance(value, (bool, int, float)):
             return value
         return str(value)
+
+
+def _redact_managed_root(*, value: str, root: Path) -> str:
+    """脱敏根路径并把用户可见逻辑路径统一为 POSIX 分隔符。
+
+    MCP 在 Windows 上返回反斜杠路径，在 Linux 容器中返回正斜杠路径；普通用户只能看到稳定的
+    ``workdata:/...`` 逻辑路径，不能看到任一平台的宿主机绝对路径。
+    """
+
+    normalized_value = value.replace("\\", "/")
+    normalized_root = root.as_posix().rstrip("/")
+    flags = re.IGNORECASE if os.name == "nt" else 0
+    pattern = re.compile(re.escape(normalized_root), flags=flags)
+    if pattern.search(normalized_value) is None:
+        return value
+    return pattern.sub("workdata:", normalized_value)
 
 
 _runner: BackgroundAsyncRunner | None = None
@@ -191,4 +213,3 @@ def get_mcp_filesystem() -> tuple[BackgroundAsyncRunner, MCPFilesystemBridge]:
         if _bridge is None:
             _bridge = MCPFilesystemBridge()
     return _runner, _bridge
-

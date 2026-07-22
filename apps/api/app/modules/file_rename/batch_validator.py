@@ -4,10 +4,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 from app.modules.file_rename.executor_protocol import RenameExecutorError
 from app.modules.file_rename.schemas import RenameBatchRequest
 from app.modules.managed_files.path_policy import PathPolicyError, resolve_managed_relative_path
+
+
+_WINDOWS_FORBIDDEN_FILENAME_CHARACTERS = re.compile(r"[<>:\"/\\|?*\x00-\x1f]")
+_WINDOWS_RESERVED_BASENAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 
 @dataclass(frozen=True)
@@ -34,7 +46,7 @@ def validate_rename_mapping(
         raise RenameExecutorError("MOVE_NOT_ALLOWED", "只允许在同一目录内修改文件名。")
     if before.suffix.lower() != after.suffix.lower():
         raise RenameExecutorError("EXTENSION_CHANGE_NOT_ALLOWED", "重命名不能改变文件扩展名。")
-    if not after.name or after.name in {".", ".."} or Path(after.name).name != after.name:
+    if not _is_portable_target_filename(after.name):
         raise RenameExecutorError("INVALID_TARGET_FILENAME", "目标文件名不合法。")
     try:
         source_path = resolve_managed_relative_path(
@@ -78,3 +90,18 @@ def _is_hidden_path(relative_path: str) -> bool:
     """判断任意相对路径段是否为隐藏项。"""
 
     return any(part.startswith(".") for part in Path(relative_path).parts)
+
+
+def _is_portable_target_filename(filename: str) -> bool:
+    """校验目标名称在 Windows 与 POSIX 上都可安全创建。
+
+    OperationPlan 可能在不同操作系统执行，因而不能在 Linux 上接受双引号、问号、保留设备名等
+    Windows 无法落盘的名称，否则确认后的真实执行会变成平台相关失败。
+    """
+
+    if not filename or filename in {".", ".."} or Path(filename).name != filename:
+        return False
+    if filename.rstrip(" .") != filename or _WINDOWS_FORBIDDEN_FILENAME_CHARACTERS.search(filename):
+        return False
+    basename = filename.split(".", 1)[0].upper()
+    return basename not in _WINDOWS_RESERVED_BASENAMES

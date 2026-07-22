@@ -24,6 +24,14 @@ def test_mcp_filesystem_bridge_resolves_only_managed_relative_paths(monkeypatch,
     with pytest.raises(MCPFilesystemError):
         bridge.resolve_relative_path(str(tmp_path / "outside"))
 
+    # Windows 绝对路径和 UNC 路径在非 Windows 测试机上也必须按 Windows 语义拒绝，
+    # 不能等部署到 Windows 后才发现盘符路径被误当作受管相对路径。
+    with pytest.raises(MCPFilesystemError):
+        bridge.resolve_relative_path(r"C:\Windows\secret.txt")
+
+    with pytest.raises(MCPFilesystemError):
+        bridge.resolve_relative_path(r"\\server\share\secret.txt")
+
 
 def test_mcp_filesystem_bridge_sanitizes_paths_and_truncates_output(monkeypatch, tmp_path):
     """Bridge 输出不能暴露容器绝对路径，超长文本需要截断。"""
@@ -43,4 +51,3 @@ def test_mcp_filesystem_bridge_sanitizes_paths_and_truncates_output(monkeypatch,
 
     assert sanitized["path"] == "workdata:/党办/通知.pdf"
     assert sanitized["content"].endswith("...[truncated]")
-
