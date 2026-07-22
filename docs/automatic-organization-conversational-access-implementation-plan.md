@@ -18,7 +18,8 @@
 | `.xls` 完整解析 | 已完成（待真实引擎烟测） | LibreOffice 隔离转换、输出校验、多 Sheet、原件不变和失败测试通过；本机尚未安装 LibreOffice |
 | 首次自动命名和冲突待决策 | 已完成 | 低置信度保留原名；冲突不自动加后缀、不覆盖并持久化用户选项 |
 | 逐文件自动整理回执 | 已完成 | 回执含最终名、分类、年份、关键词、实体、风险、原件不变和待决策项 |
-| DocumentVersion 原文索引 | 已完成（待部署烟测） | 当前 426 个后端测试通过、前端构建通过；CPU-only Jieba + PostgreSQL FTS/pg_trgm，向量默认关闭 |
+| 后台双摘要低耗 Provider | 已完成 | 默认 Jieba + LexRank、160 个候选上限；全局 LLM 开启不会隐式外发正文 |
+| DocumentVersion 原文索引 | 已完成（待部署烟测） | 当前 431 个后端测试通过、前端构建通过；CPU-only Jieba + PostgreSQL FTS/pg_trgm，向量默认关闭 |
 | 阶段四低耗两阶段检索 | 方案已制定、待确认实施 | 详见 `docs/stage-4-low-resource-two-stage-retrieval-plan.md` |
 | 阶段五 Evidence Answer | 未开始 | 按阶段五验收 |
 
@@ -54,6 +55,10 @@
 → 检索索引
 → 原子提交 ACTIVE 工作副本
 ```
+
+其中普通文档摘要和分类主题摘要默认由本地 CPU-only `Jieba + LexRank` 抽取式 Provider 生成；全局
+LLM 开启不能隐式改变该行为。只有用户明确提出总结/讲解时才使用独立的聊天摘要 LLM Provider，或由
+部署人员在获得正文处理授权后显式把某个后台摘要 Provider 改为 `llm`。
 
 首次命名属于创建工作副本的内部整理步骤，不修改已经存在的活动文件，因此不要求逐文件
 OperationPlan。所有步骤仍须经过受控服务、schema 校验和审计。受管原始文件不得改名、移动、覆盖或

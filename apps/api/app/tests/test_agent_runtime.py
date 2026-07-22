@@ -19,11 +19,30 @@ from app.modules.llm.schemas import UserIntentPlan
 from app.modules.agent.graph import _build_document_results_response, response
 from app.modules.agent.repository import _safe_graph_state_snapshot
 from app.modules.agent.planner import DeterministicPlanner, build_plan_from_user_intent
-from app.modules.agent.service import AgentRuntimeService, _graph_mode_for_user
+from app.modules.agent.service import (
+    AgentRuntimeService,
+    _build_document_summary_service,
+    _graph_mode_for_user,
+)
 from app.modules.agent.state import ToolInvocationRecord
 from app.modules.agent.tool_registry import ToolRegistry, UnknownToolError
 from app.modules.agent.tool_schemas import ToolInputValidationError
 from app.modules.llm.client import LLMResponseError
+
+
+def test_chat_summary_provider_can_disable_llm_even_when_global_llm_is_enabled():
+    """聊天摘要独立开关关闭后，明确总结请求也不能隐式构造模型客户端。"""
+
+    service = _build_document_summary_service(
+        settings=SimpleNamespace(
+            llm_enabled=True,
+            chat_document_summary_provider="disabled",
+        ),
+        db=None,
+    )
+
+    assert service.enabled is False
+    assert service.client is None
 
 
 def test_tool_registry_contains_mvp_catalog_and_endpoint_requires_authentication():

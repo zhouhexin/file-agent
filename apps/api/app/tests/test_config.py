@@ -99,6 +99,44 @@ def test_settings_loads_classification_llm_options(monkeypatch, tmp_path):
     assert settings.llm_classification_allow_free_paths is True
 
 
+def test_settings_defaults_background_summaries_to_local_extractive_provider(monkeypatch, tmp_path):
+    """后台上传和分类摘要默认不得因全局 LLM 开启而自动发送文件正文。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.setenv("LLM_ENABLED", "true")
+    for name in (
+        "DOCUMENT_SUMMARY_PROVIDER",
+        "CLASSIFICATION_SUMMARY_PROVIDER",
+        "CHAT_DOCUMENT_SUMMARY_PROVIDER",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.document_summary_provider == "extractive"
+    assert settings.classification_summary_provider == "extractive"
+    assert settings.chat_document_summary_provider == "llm"
+
+
+def test_settings_accepts_explicit_llm_summary_providers(monkeypatch, tmp_path):
+    """只有显式 Provider 配置才能恢复后台模型摘要，旧名称保持兼容。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.setenv("DOCUMENT_SUMMARY_PROVIDER", "llm")
+    monkeypatch.setenv("CLASSIFICATION_SUMMARY_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("CHAT_DOCUMENT_SUMMARY_PROVIDER", "disabled")
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.document_summary_provider == "llm"
+    assert settings.classification_summary_provider == "llm"
+    assert settings.chat_document_summary_provider == "disabled"
+
+
 def test_settings_defaults_paddleocr_model_source_to_baidu_bos(monkeypatch, tmp_path):
     """PaddleOCR 模型下载源默认必须使用百度 BOS，适配国内服务器部署。"""
 

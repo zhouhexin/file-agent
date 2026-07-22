@@ -304,9 +304,13 @@ def _graph_mode_for_user(*, settings, user_id: str) -> str:
 
 
 def _build_document_summary_service(*, settings, db: Session | None) -> LLMDocumentSummaryService:
-    """按配置构造文档总结服务；未启用 LLM 时返回关闭态服务。"""
+    """为用户明确提出的总结请求构造 LLM 服务。
 
-    if not settings.llm_enabled:
+    上传和分类阶段的持久化摘要由独立的本地抽取式 Provider 负责；这里不能因为后台
+    摘要启用就自动外发正文，只有聊天摘要 Provider 和全局 LLM 同时启用才允许调用模型。
+    """
+
+    if not settings.llm_enabled or settings.chat_document_summary_provider != "llm":
         return LLMDocumentSummaryService(db=db, enabled=False)
     client = OpenAICompatibleLLMClient(
         api_key=settings.llm_api_key,

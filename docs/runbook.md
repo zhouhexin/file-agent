@@ -187,6 +187,9 @@ LLM_CHAT_MODEL=<chat-model-name>
 LLM_TIMEOUT_SECONDS=30
 LLM_CLASSIFICATION_MODE=rule_only
 LLM_CLASSIFICATION_ALLOW_FREE_PATHS=false
+DOCUMENT_SUMMARY_PROVIDER=extractive
+CLASSIFICATION_SUMMARY_PROVIDER=extractive
+CHAT_DOCUMENT_SUMMARY_PROVIDER=llm
 OCR_ENABLED=true
 OCR_PADDLE_MODEL_SOURCE=BOS
 OCR_LLM_ENABLED=false
@@ -197,6 +200,13 @@ DOCLING_OCR_ENABLED=false
 ```
 
 当前客户端调用 OpenAI-compatible `/chat/completions` 接口，并要求模型返回符合 `UserIntentPlan` 的 JSON 对象。上传阶段的 deterministic ingest 不依赖 LLM；对话阶段启用 LLM 后，会先理解用户需求，再通过白名单 Tool 读取 `document_insights` 或执行后续受控工具。
+
+上传导入和分类阶段的持久化双摘要默认使用 `extractive` Provider：本地 Jieba 分词后以有候选上限的
+LexRank 选择可定位原文句子，不下载模型、不要求 GPU，也不会因为 `LLM_ENABLED=true` 自动外发正文。
+用户明确提出“总结、讲解”等任务时，`CHAT_DOCUMENT_SUMMARY_PROVIDER=llm` 才允许文档阅读服务调用
+LLM；设置为 `disabled` 可关闭该调用。只有部署已经获得文件正文模型处理授权时，才可以把
+`DOCUMENT_SUMMARY_PROVIDER` 或 `CLASSIFICATION_SUMMARY_PROVIDER` 显式改为 `llm`。旧配置值
+`openai_compatible` 会兼容映射为 `llm`，但新配置统一使用 `llm`。
 
 OCR 第一阶段使用本地 PaddleOCR 作为默认 Provider。图片文件会直接进入 OCR；PDF 原生文本为空时会先渲染页面，再进入 OCR，并把识别文本写入 `document_pages.text_content`。`OCR_PADDLE_MODEL_SOURCE` 默认是 `BOS`，服务会在加载 PaddleOCR 前设置 `PADDLE_PDX_MODEL_SOURCE=BOS`，让 PaddleOCR 使用百度 BOS 模型下载源。如需启用 LLM OCR 兜底，必须显式设置 `OCR_LLM_ENABLED=true` 且 `LLM_ENABLED=true`；系统会在本地 OCR 质量低于 `OCR_LLM_FALLBACK_QUALITY_THRESHOLD` 时按页调用多模态模型，不默认外发整份文件。
 

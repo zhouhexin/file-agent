@@ -61,6 +61,9 @@ DEFAULT_DOCUMENT_CHUNK_MAX_CHARS = 1200
 DEFAULT_DOCUMENT_CHUNK_OVERLAP_CHARS = 120
 DEFAULT_DOCUMENT_INDEX_MAX_CHARS = 50_000_000
 DEFAULT_DOCUMENT_INDEX_MAX_CHUNKS = 50_000
+DEFAULT_DOCUMENT_SUMMARY_PROVIDER = "extractive"
+DEFAULT_CLASSIFICATION_SUMMARY_PROVIDER = "extractive"
+DEFAULT_CHAT_DOCUMENT_SUMMARY_PROVIDER = "llm"
 DEFAULT_UPLOAD_ALLOWED_EXTENSIONS = (
     ".pdf",
     ".doc",
@@ -98,11 +101,14 @@ class Settings(BaseModel):
     llm_classification_mode: str = "rule_only"
     llm_classification_allow_free_paths: bool = False
     document_summary_enabled: bool = True
+    document_summary_provider: str = DEFAULT_DOCUMENT_SUMMARY_PROVIDER
     document_summary_prompt_version: str = "document-summary-v1"
     document_summary_schema_version: str = "document-summary-schema-v1"
     llm_classification_summary_enabled: bool = True
+    classification_summary_provider: str = DEFAULT_CLASSIFICATION_SUMMARY_PROVIDER
     llm_classification_summary_prompt_version: str = "classification-topic-summary-v1"
     classification_summary_schema_version: str = "classification-topic-summary-schema-v1"
+    chat_document_summary_provider: str = DEFAULT_CHAT_DOCUMENT_SUMMARY_PROVIDER
     initial_working_copy_organization_enabled: bool = True
     initial_organization_confidence: float = DEFAULT_INITIAL_ORGANIZATION_CONFIDENCE
     upload_max_file_size_mb: int = DEFAULT_UPLOAD_MAX_FILE_SIZE_MB
@@ -242,6 +248,26 @@ def require_postgresql_database_url() -> str:
     return database_url
 
 
+def _normalize_background_summary_provider(value: str) -> str:
+    """规范化后台双摘要 Provider，未知值安全回退本地抽取式实现。
+
+    ``openai_compatible`` 是旧配置文档使用过的名称，继续映射为 ``llm``，避免升级后
+    意外关闭已经获得部署授权的模型；其他未知值不能触发文件正文外发。
+    """
+
+    normalized = str(value or "").strip().lower()
+    if normalized in {"llm", "openai_compatible"}:
+        return "llm"
+    return DEFAULT_DOCUMENT_SUMMARY_PROVIDER
+
+
+def _normalize_chat_summary_provider(value: str) -> str:
+    """规范化用户显式总结 Provider；当前仅支持 LLM 或关闭两种受控模式。"""
+
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"llm", "disabled"} else DEFAULT_CHAT_DOCUMENT_SUMMARY_PROVIDER
+
+
 @lru_cache
 def get_settings() -> Settings:
     """读取环境变量并返回缓存后的配置对象。"""
@@ -269,6 +295,9 @@ def get_settings() -> Settings:
         llm_classification_mode=os.getenv("LLM_CLASSIFICATION_MODE", "rule_only").lower(),
         llm_classification_allow_free_paths=os.getenv("LLM_CLASSIFICATION_ALLOW_FREE_PATHS", "false").lower() == "true",
         document_summary_enabled=os.getenv("DOCUMENT_SUMMARY_ENABLED", "true").lower() == "true",
+        document_summary_provider=_normalize_background_summary_provider(
+            os.getenv("DOCUMENT_SUMMARY_PROVIDER", DEFAULT_DOCUMENT_SUMMARY_PROVIDER)
+        ),
         document_summary_prompt_version=os.getenv(
             "DOCUMENT_SUMMARY_PROMPT_VERSION", "document-summary-v1"
         ).strip() or "document-summary-v1",
@@ -278,12 +307,18 @@ def get_settings() -> Settings:
         llm_classification_summary_enabled=os.getenv(
             "LLM_CLASSIFICATION_SUMMARY_ENABLED", "true"
         ).lower() == "true",
+        classification_summary_provider=_normalize_background_summary_provider(
+            os.getenv("CLASSIFICATION_SUMMARY_PROVIDER", DEFAULT_CLASSIFICATION_SUMMARY_PROVIDER)
+        ),
         llm_classification_summary_prompt_version=os.getenv(
             "LLM_CLASSIFICATION_SUMMARY_PROMPT_VERSION", "classification-topic-summary-v1"
         ).strip() or "classification-topic-summary-v1",
         classification_summary_schema_version=os.getenv(
             "CLASSIFICATION_SUMMARY_SCHEMA_VERSION", "classification-topic-summary-schema-v1"
         ).strip() or "classification-topic-summary-schema-v1",
+        chat_document_summary_provider=_normalize_chat_summary_provider(
+            os.getenv("CHAT_DOCUMENT_SUMMARY_PROVIDER", DEFAULT_CHAT_DOCUMENT_SUMMARY_PROVIDER)
+        ),
         initial_working_copy_organization_enabled=os.getenv(
             "INITIAL_WORKING_COPY_ORGANIZATION_ENABLED", "true"
         ).lower() == "true",

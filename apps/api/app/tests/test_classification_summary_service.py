@@ -14,7 +14,10 @@ from app.db.models import (
     DocumentSummary,
     DocumentVersion,
 )
-from app.modules.classification.summary_service import DocumentSummaryService
+from app.modules.classification.summary_service import (
+    DocumentSummaryService,
+    _build_sentence_candidates,
+)
 
 
 class FakeDualSummaryClient:
@@ -158,6 +161,8 @@ def test_dual_summary_is_persisted_reused_and_excludes_incidental_topics_from_re
             llm_base_url="http://fake",
             llm_chat_model=client.model,
             document_summary_enabled=True,
+            document_summary_provider="llm",
+            classification_summary_provider="llm",
         )
         service = DocumentSummaryService(db=db, settings=settings, client=client)
 
@@ -185,3 +190,106 @@ def test_dual_summary_is_persisted_reused_and_excludes_incidental_topics_from_re
         assert db.query(DocumentClassificationSummary).count() == 1
     finally:
         db.close()
+
+
+def test_default_extractive_provider_uses_jieba_lexrank_without_calling_llm():
+    """上传阶段默认必须用本地抽取式摘要，即使全局 LLM 已启用也不能自动外发正文。"""
+
+    db = _db_session()
+    client = FakeDualSummaryClient()
+    try:
+        document = Document(
+            id="extractive-document",
+            user_id="extractive-user",
+            workspace_id="extractive-workspace",
+            original_filename="工作安排.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=200,
+            sha256="b" * 64,
+        )
+        version = DocumentVersion(
+            id="extractive-version",
+            document_id=document.id,
+            version_number=1,
+            storage_tier="WORKING_COPY",
+            storage_path="test/工作安排.docx",
+            filename=document.original_filename,
+            content_type=document.content_type,
+            size_bytes=document.size_bytes,
+            sha256=document.sha256,
+            source_type="IMPORT",
+        )
+        run = DocumentExtractionRun(
+            id="extractive-run",
+            document_id=document.id,
+            status="COMPLETED",
+            extractor="fake",
+        )
+        db.add_all([document, version, run])
+        db.add(
+            DocumentPage(
+                document_id=document.id,
+                extraction_run_id=run.id,
+                page_number=1,
+                text_content=(
+                    "工作安排\n请各单位按要求报送材料。\n联系人信息见附件。\n"
+                    "国家励志奖学金评审面向家庭经济困难学生。\n"
+                    "国家励志奖学金申请材料包括成绩证明和困难证明。\n"
+                    "国家励志奖学金材料须在规定日期前提交。"
+                ),
+                metadata_json={},
+            )
+        )
+        db.flush()
+        settings = Settings(
+            database_url="sqlite+pysqlite://",
+            llm_enabled=True,
+            llm_api_key="fake",
+            llm_base_url="http://fake",
+            llm_chat_model=client.model,
+        )
+
+        result = DocumentSummaryService(
+            db=db,
+            settings=settings,
+            client=client,
+        ).generate_or_reuse(
+            document_id=document.id,
+            document_version_id=version.id,
+            extraction_run_id=run.id,
+            filename=document.original_filename,
+        )
+
+        assert result is not None
+        assert client.calls == 0
+        assert result.document_summary.model_provider == "deterministic"
+        assert result.document_summary.model_name == "jieba-lexrank-v1"
+        assert result.classification_summary.model_provider == "deterministic"
+        assert "国家励志奖学金" in result.document_summary.summary_text
+        evidence_refs = result.classification_summary.summary_json["evidence_refs"]
+        assert evidence_refs
+        assert all(item["quote"] in document.pages[0].text_content for item in evidence_refs)
+    finally:
+        db.close()
+
+
+def test_extractive_summary_caps_candidates_and_samples_later_sections():
+    """超长文档候选句必须固定封顶，同时不能只保留文档开头。"""
+
+    page = DocumentPage(
+        document_id="candidate-document",
+        extraction_run_id="candidate-run",
+        page_number=1,
+        text_content="\n".join(f"第{index}节奖学金材料说明。" for index in range(400)),
+        metadata_json={},
+    )
+
+    candidates, truncated = _build_sentence_candidates(
+        full_text=page.text_content,
+        pages=[page],
+    )
+
+    assert truncated is True
+    assert len(candidates) == 160
+    assert candidates[0].order == 0
+    assert max(candidate.order for candidate in candidates) > 300

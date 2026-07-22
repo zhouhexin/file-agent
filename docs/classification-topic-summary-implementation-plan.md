@@ -1,7 +1,7 @@
 # 分类主题摘要优先的文件分类实施方案
 
-状态：Proposed  
-日期：2026-07-21  
+状态：执行中（CPU-only 抽取式默认 Provider 已完成）
+日期：2026-07-21
 适用范围：File Agent 工作副本文档解析后的持久化摘要、多标签分类、文档级检索和证据问答链路
 
 ## 1. 方案目标
@@ -41,6 +41,8 @@ document_pages 完整正文
 - `LLMClassificationJudge`已经限制模型只能从候选分类中选择，并校验引用必须来自原文。
 - LangGraph、AgentRuntimeContext、Tool白名单、ChangeSet和分类建议持久化边界已经存在。
 - 本地Sentence Transformers向量模型可以用于分类主题摘要与taxonomy描述的语义相似度计算。
+- 后台普通摘要和分类主题摘要已经默认使用带固定候选上限的 `Jieba + LexRank`，并与用户主动聊天总结
+  的 LLM Provider 分离。
 
 但不能直接采用以下简单链路：
 
@@ -319,6 +321,11 @@ Provider按以下顺序演进：
 2. 本地Hugging Face生成式模型Adapter。
 3. 无生成模型时，第一阶段使用带原文引用的本地确定性抽取式双摘要；该结果只作为低置信度召回和分类候选输入。抽取失败时摘要进入`UNAVAILABLE`，分类链路回退现有全文规则分类，证据问答继续使用原文检索。
 
+当前阶段已经选择第 3 条作为默认生产低耗路径：使用 Jieba 分词和候选句数量受限的 LexRank 进行
+CPU-only 原文关键句抽取。`LLM_ENABLED=true` 不得改变后台摘要 Provider；普通文档摘要和分类主题
+摘要必须分别通过显式配置才能切换到 `llm`。聊天中的用户主动总结请求使用独立 Provider，不与后台
+导入摘要开关耦合。
+
 Sentence Transformers是Embedding模型，不能生成普通文档摘要或分类主题摘要。它只参与普通文档摘要的文档级召回，以及分类主题摘要和taxonomy描述之间的语义召回。
 
 ## 7. 分类候选召回与判定
@@ -515,7 +522,7 @@ DOCUMENT_PROCESSING_FAILED
 
 ```text
 DOCUMENT_SUMMARY_ENABLED=true
-DOCUMENT_SUMMARY_PROVIDER=openai_compatible
+DOCUMENT_SUMMARY_PROVIDER=extractive
 DOCUMENT_SUMMARY_PROMPT_VERSION=document-summary-v1
 DOCUMENT_SUMMARY_SCHEMA_VERSION=document-summary-schema-v1
 DOCUMENT_SUMMARY_TRIGGER_MODE=hybrid
@@ -528,11 +535,12 @@ DOCUMENT_ANALYSIS_BACKFILL_PRIORITY=150
 DOCUMENT_ANALYSIS_FIRST_HIT_PRIORITY=10
 SUMMARY_QA_MODE=summary_first
 LLM_CLASSIFICATION_SUMMARY_ENABLED=true
-LLM_CLASSIFICATION_SUMMARY_PROVIDER=openai_compatible
+CLASSIFICATION_SUMMARY_PROVIDER=extractive
 LLM_CLASSIFICATION_SUMMARY_PROMPT_VERSION=classification-topic-summary-v1
 LLM_CLASSIFICATION_SUMMARY_SMALL_DOCUMENT_LIMIT=12000
 LLM_CLASSIFICATION_SUMMARY_CHUNK_SIZE=8000
 LLM_CLASSIFICATION_SUMMARY_MAX_CHUNKS=50
+CHAT_DOCUMENT_SUMMARY_PROVIDER=llm
 ```
 
 `DOCUMENT_SUMMARY_TRIGGER_MODE=hybrid`表示工作副本导入后创建低优先级分析任务，首次内容相关命中时提升同一任务优先级。`SUMMARY_QA_MODE`生产环境只允许`summary_first`或`full_text_only`，不得提供`summary_only`。
