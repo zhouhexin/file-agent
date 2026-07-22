@@ -22,6 +22,7 @@ File Agent 不是传统网盘，也不是只会问答的知识库系统。用户
 - `docs/neo4j-graph-classification-v1-implementation-plan.md`：轻量第一版本实施和验收方案。
 - `docs/neo4j-graph-classification-v2-implementation-plan.md`：真实图谱验证、相似文件语义召回和 Shadow 评测方案。
 - `docs/runbook.md`：本地启动、验证和当前可用接口。
+- `docs/file-agent-manual-smoke-test.md`：整项目真实文件系统手工烟测步骤、通过标准和记录模板。
 
 ## 本地运行
 
