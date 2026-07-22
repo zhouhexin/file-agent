@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.db.models import User
-from app.modules.auth.dependencies import get_current_user
+from app.modules.auth.dependencies import require_ops_or_admin
 from app.modules.changesets.repository import ChangeSetRepository
 from app.modules.changesets.schemas import ChangeItemResponse, ChangeSetResponse
 
@@ -18,12 +18,12 @@ router = APIRouter(prefix="/api/changesets", tags=["changesets"])
 def get_changeset(
     changeset_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(require_ops_or_admin),
 ) -> ChangeSetResponse:
-    """查询当前用户自己的 ChangeSet 明细。"""
+    """允许 ops/admin 查询内部 ChangeSet 审计明细。"""
 
     repository = ChangeSetRepository(db)
-    changeset = repository.get_owned_changeset(changeset_id=changeset_id, user_id=current_user.id)
+    changeset = repository.get_by_id(changeset_id)
     if changeset is None:
         raise HTTPException(status_code=404, detail="ChangeSet not found")
     items = repository.list_items(changeset_id=changeset.id)

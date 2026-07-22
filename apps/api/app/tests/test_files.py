@@ -120,6 +120,51 @@ def test_same_content_uploads_remain_distinct_until_dialog_decision(monkeypatch,
         clear_overrides()
 
 
+def test_upload_rejects_unsupported_extension_before_creating_document(monkeypatch, tmp_path):
+    """上传格式白名单必须在落盘前生效，不能接收可执行脚本。"""
+
+    _configure_storage(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    response = client.post(
+        "/api/files/upload",
+        headers=_auth_header(client, "unsupported-upload-owner"),
+        files={"file": ("run.sh", b"echo unsafe", "application/x-sh")},
+    )
+
+    assert response.status_code == 415
+    db = SessionLocal()
+    try:
+        assert db.query(Document).count() == 0
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_upload_resource_limit_cleans_incoming_file(monkeypatch, tmp_path):
+    """部署级资源上限超出时必须清理分块暂存，且不能留下业务记录。"""
+
+    _configure_storage(monkeypatch, tmp_path)
+    monkeypatch.setenv("UPLOAD_MAX_FILE_SIZE_MB", "1")
+    monkeypatch.setenv("UPLOAD_CHUNK_SIZE_BYTES", str(64 * 1024))
+    config.get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    response = client.post(
+        "/api/files/upload",
+        headers=_auth_header(client, "large-upload-owner"),
+        files={"file": ("large.pdf", b"x" * (1024 * 1024 + 1), "application/pdf")},
+    )
+
+    assert response.status_code == 413
+    incoming_dir = tmp_path / "uploads" / ".incoming"
+    assert list(incoming_dir.glob("*.part")) == []
+    db = SessionLocal()
+    try:
+        assert db.query(Document).count() == 0
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def test_get_file_content_enforces_owner(monkeypatch, tmp_path):
     """暂存附件读取必须校验所属用户，不能因为内容相同跨用户共享路径。"""
 

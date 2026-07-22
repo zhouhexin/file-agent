@@ -15,47 +15,21 @@ export type TokenResponse = {
   user: User;
 };
 
-export type AgentRun = {
-  agent_run_id: string;
-  conversation_id: string;
-  user_id: string;
-  message_id: string;
-  intent: string | null;
-  status: string;
-  selected_skills: string[];
+// 普通聊天页面只消费稳定任务投影，不依赖 Skill、ToolInvocation 或 Graph 内部结构。
+export type TaskResult = {
+  task_id: string;
+  task_status: 'processing' | 'waiting_confirmation' | 'completed' | 'needs_attention' | 'failed';
+  response_type: 'text' | 'file_results' | 'managed_file_list' | 'rename_plan' | 'operation_plan' | 'async_job';
   final_response: string | null;
-  tool_invocations: ToolInvocation[];
+  processed_count: number;
   document_results: DocumentResult[];
-  async_job_ids: string[];
-  changeset_id: string | null;
+  managed_file_result: { root_key: string; files: ManagedFileResult[] } | null;
+  rename_plan_result: import('./features/chat/RenameSuggestionReceipt').RenamePlanResult | null;
+  pending_job_ids: string[];
   operation_plan_id: string | null;
-};
-
-export type ChangeItem = {
-  id: string;
-  target_type: string;
-  target_id: string | null;
-  target_document_id: string | null;
-  change_type: string;
-  before_value_json: Record<string, unknown>;
-  after_value_json: Record<string, unknown>;
-  source: string;
-  confidence: number;
-  evidence_json: Record<string, unknown>;
-  execution_status: string;
-  created_at: string;
-};
-
-export type ChangeSetResponse = {
-  id: string;
-  conversation_id: string;
-  agent_run_id: string;
-  user_id: string;
-  status: string;
-  summary: string;
-  created_at: string;
-  updated_at: string;
-  items: ChangeItem[];
+  pending_decisions: Array<Record<string, unknown>>;
+  references: Array<Record<string, unknown>>;
+  suggested_next_actions: string[];
 };
 
 export type OperationPlanItem = {
@@ -108,16 +82,6 @@ export type RenameBatchItem = {
 export type RenameBatchItemsResponse = {
   items: RenameBatchItem[];
   next_cursor: number | null;
-};
-
-export type ToolInvocation = {
-  id: string;
-  tool_name: string;
-  status: string;
-  input_json: Record<string, unknown>;
-  output_json: Record<string, unknown>;
-  changeset_id: string | null;
-  operation_plan_id: string | null;
 };
 
 // 受管文件结果只包含逻辑 root 与相对路径，前端不能接触服务器绝对路径。
@@ -198,7 +162,7 @@ export type ConversationHistoryMessage = {
   content: string;
   attachments: UploadedFile[];
   metadata: Record<string, unknown>[];
-  agent_run: AgentRun | null;
+  task_result: TaskResult | null;
 };
 
 export type ConversationDetailResponse = {
@@ -223,7 +187,7 @@ export type SendMessageResponse = {
     content: string;
     attachments: { document_id: string }[];
   };
-  agent_run: AgentRun;
+  task_result: TaskResult;
 };
 
 export type FilesystemJobResponse = {
@@ -275,13 +239,23 @@ export type ClassificationFeedbackResponse = {
 
 export type DocumentResult = {
   document_id: string;
+  document_version_id?: string;
+  working_copy_id?: string;
   filename: string;
+  organization_status?: 'READY' | 'NEEDS_REVIEW' | string;
   extraction_status: 'COMPLETED' | 'FAILED' | string;
   extractor?: string;
   page_count: number;
   char_count: number;
   text_reused: boolean;
   classification_reused: boolean;
+  year?: string | null;
+  document_type?: string | null;
+  keywords?: string[];
+  entities?: string[];
+  managed_original_unchanged?: boolean;
+  risk_warnings?: Array<{ code?: string; message?: string }>;
+  pending_decision?: Record<string, unknown> | null;
   categories: DocumentCategory[];
   warnings: Array<Record<string, unknown> | string>;
   errors: Array<{

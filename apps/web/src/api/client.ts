@@ -1,7 +1,6 @@
 // 前端 API 客户端只封装受控 HTTP 接口，不绕过后端 Tool、权限和路径策略。
 import type {
   AgentCapabilityCatalog,
-  ChangeSetResponse,
   ClassificationFeedbackResponse,
   ConversationDetailResponse,
   DuplicateDecisionResponse,
@@ -233,14 +232,6 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     throw new ApiError(response.status, String(message));
   }
   return data as T;
-}
-
-export async function getChangeSet(
-  token: string,
-  changesetId: string,
-): Promise<ChangeSetResponse> {
-  // 结果回执用 ChangeSet 判断是否存在真实文件改名、移动、删除等写操作。
-  return request(`/changesets/${changesetId}`, { token });
 }
 
 export async function getOperationPlan(

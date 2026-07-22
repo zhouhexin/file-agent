@@ -99,6 +99,11 @@ class ChangeSetRepository:
             .one_or_none()
         )
 
+    def get_by_id(self, changeset_id: str) -> ChangeSet | None:
+        """按主键读取内部审计 ChangeSet，仅供已完成角色校验的 ops/admin 路由调用。"""
+
+        return self.db.get(ChangeSet, changeset_id)
+
     def list_items(self, changeset_id: str) -> list[ChangeItem]:
         """按创建顺序列出 ChangeItem 明细。"""
 

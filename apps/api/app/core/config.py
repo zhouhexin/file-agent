@@ -55,6 +55,25 @@ DEFAULT_WORKING_COPY_IMPORT_BATCH_SIZE = 100
 DEFAULT_WORKING_COPY_OPERATION_BATCH_SIZE = 20
 DEFAULT_TRASH_RETENTION_DAYS = 30
 DEFAULT_INITIAL_ORGANIZATION_CONFIDENCE = 0.60
+DEFAULT_UPLOAD_MAX_FILE_SIZE_MB = 1024
+DEFAULT_UPLOAD_CHUNK_SIZE_BYTES = 1024 * 1024
+DEFAULT_UPLOAD_ALLOWED_EXTENSIONS = (
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".xlsm",
+    ".txt",
+    ".md",
+    ".csv",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".bmp",
+    ".tiff",
+)
 
 
 class Settings(BaseModel):
@@ -82,6 +101,9 @@ class Settings(BaseModel):
     classification_summary_schema_version: str = "classification-topic-summary-schema-v1"
     initial_working_copy_organization_enabled: bool = True
     initial_organization_confidence: float = DEFAULT_INITIAL_ORGANIZATION_CONFIDENCE
+    upload_max_file_size_mb: int = DEFAULT_UPLOAD_MAX_FILE_SIZE_MB
+    upload_chunk_size_bytes: int = DEFAULT_UPLOAD_CHUNK_SIZE_BYTES
+    upload_allowed_extensions: tuple[str, ...] = DEFAULT_UPLOAD_ALLOWED_EXTENSIONS
     log_dir: str = DEFAULT_LOG_DIR
     log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
     log_level: str = "INFO"
@@ -264,6 +286,29 @@ def get_settings() -> Settings:
                     )
                 ),
             ),
+        ),
+        upload_max_file_size_mb=max(
+            1,
+            int(os.getenv("UPLOAD_MAX_FILE_SIZE_MB", str(DEFAULT_UPLOAD_MAX_FILE_SIZE_MB))),
+        ),
+        upload_chunk_size_bytes=max(
+            64 * 1024,
+            min(
+                8 * 1024 * 1024,
+                int(os.getenv("UPLOAD_CHUNK_SIZE_BYTES", str(DEFAULT_UPLOAD_CHUNK_SIZE_BYTES))),
+            ),
+        ),
+        upload_allowed_extensions=tuple(
+            sorted(
+                {
+                    f".{item.strip().lower().lstrip('.')}"
+                    for item in os.getenv(
+                        "UPLOAD_ALLOWED_EXTENSIONS",
+                        ",".join(DEFAULT_UPLOAD_ALLOWED_EXTENSIONS),
+                    ).split(",")
+                    if item.strip()
+                }
+            )
         ),
         log_dir=os.getenv("LOG_DIR", DEFAULT_LOG_DIR),
         log_retention_days=int(os.getenv("LOG_RETENTION_DAYS", str(DEFAULT_LOG_RETENTION_DAYS))),

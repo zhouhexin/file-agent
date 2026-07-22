@@ -9,7 +9,7 @@ from typing import Any, List
 
 from pydantic import BaseModel, Field
 
-from app.modules.agent.state import AgentRunResult
+from app.modules.agent.user_receipt import UserTaskReceipt
 
 
 class MessageAttachment(BaseModel):
@@ -56,7 +56,7 @@ class ConversationAttachmentSummary(BaseModel):
 
 
 class ConversationHistoryMessage(BaseModel):
-    """会话详情中的历史消息，包含可选 AgentRun。"""
+    """会话详情中的历史消息，只携带普通用户任务投影。"""
 
     id: str
     conversation_id: str
@@ -65,7 +65,7 @@ class ConversationHistoryMessage(BaseModel):
     content: str
     attachments: List[ConversationAttachmentSummary]
     metadata: List[dict[str, Any]] = Field(default_factory=list)
-    agent_run: AgentRunResult | None = None
+    task_result: UserTaskReceipt | None = None
 
 
 class ConversationPagination(BaseModel):
@@ -88,7 +88,7 @@ class ConversationDetailResponse(BaseModel):
 
 
 class SendMessageResponse(BaseModel):
-    """发送消息后的响应，包括 message 和本次 AgentRun 结果。"""
+    """发送消息后的普通用户响应，不暴露 AgentRun 或 Tool 内部载荷。"""
 
     message: ConversationMessage
-    agent_run: AgentRunResult
+    task_result: UserTaskReceipt

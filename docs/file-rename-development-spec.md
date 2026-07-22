@@ -342,7 +342,7 @@ Docling 或解析器提供的一级标题
 
 - 移除已提取的年份和文号重复片段。
 - 移除“扫描件”“最终版”“副本”等可配置噪声词，但保留业务含义。
-- 不删除“通知”“办法”“报告”等文种信息。
+- 当前阶段不把文种作为独立命名字段拼入建议文件名；“通知”“办法”“报告”等词如果本来就是原始标题的一部分，应保留标题原意且不得重复追加。
 - 不允许 LLM 改写标题，只能从原文中抽取或选择候选。
 
 ## 7. RenamePolicy
@@ -368,7 +368,7 @@ Docling 或解析器提供的一级标题
     }
   ],
   "missing_field_strategy": "NEEDS_REVIEW",
-  "conflict_strategy": "VERSION_SUFFIX",
+  "conflict_strategy": "ASK_USER",
   "duplicate_title_strategy": "FULL_DATE_THEN_VERSION",
   "include_hidden": false,
   "rename_directories": false,
@@ -613,7 +613,7 @@ F2_EXPECTED_VERSION=<固定测试版本>
 
 - 批量建议逐文件隔离。
 - 受管文件快照和 document_pages 复用。
-- 旧版 `.xls` 采用 `xlrd>=2.0.1 -> LibreOffice 可选转换 -> 结构化文件名回退`；当前部署不强制安装 LibreOffice，后续出现 xlrd 兼容性缺口时再启用。
+- 旧版 `.xls` 必须采用 `LibreOffice Headless 隔离转换为临时 .xlsx -> openpyxl`，转换隔离、超时、输出校验和原件保护边界与 `.doc -> .docx` 一致；不得继续使用 `xlrd` 直读。LibreOffice 缺失或转换失败时返回结构化失败，结构化文件名回退只能生成待确认命名建议，不能冒充正文解析成功。
 - READY 项创建真实 OperationPlan。
 - 计划 before/after、SHA-256 和证据完整。
 - 隐藏文件和目录被拒绝。
@@ -624,7 +624,7 @@ F2_EXPECTED_VERSION=<固定测试版本>
 - 第二次迭代验证 Native 和 F2 preview 输出同一结构。
 - 第二次迭代验证 Native 和 F2 execute 输出同一结构。
 - 目标冲突不覆盖文件。
-- 自动建议冲突由后端在 OperationPlan 创建前分配中文版本后缀；F2 不得自行修改目标名。
+- 自动建议冲突不得直接分配版本后缀，必须先通过对话询问用户是否同时保留；只有用户确认同时保留后，后端才在 OperationPlan 创建前分配中文版本后缀。F2 不得自行修改目标名。
 - 源文件缺失、变化和路径越界被拒绝。
 - 部分失败返回 PARTIAL。
 - 数据库失败触发文件名补偿。

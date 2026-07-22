@@ -7,10 +7,12 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.db.models import User
 from app.modules.agent.capabilities.service import load_agent_capabilities
 from app.modules.agent.repository import AgentRunRepository
 from app.modules.agent.state import AgentRunResult, ToolInvocationRecord
 from app.modules.agent.tool_registry import ToolRegistry
+from app.modules.auth.dependencies import require_ops_or_admin
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 agent_runs_router = APIRouter(prefix="/api/agent-runs", tags=["agent-runs"])
@@ -23,8 +25,10 @@ class ToolInvocationsResponse(BaseModel):
 
 
 @router.get("/tools")
-def list_agent_tools() -> dict:
-    """返回白名单 Registry 暴露的 MVP Tool 目录。"""
+def list_agent_tools(
+    _current_user: User = Depends(require_ops_or_admin),
+) -> dict:
+    """向 ops/admin 返回白名单 Registry 暴露的内部 Tool 目录。"""
 
     return {"tools": ToolRegistry().list_tools()}
 
@@ -37,8 +41,12 @@ def get_agent_capabilities() -> dict:
 
 
 @agent_runs_router.get("/{agent_run_id}", response_model=AgentRunResult)
-def get_agent_run(agent_run_id: str, db: Session = Depends(get_db)) -> AgentRunResult:
-    """按 id 查询持久化 AgentRun。"""
+def get_agent_run(
+    agent_run_id: str,
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(require_ops_or_admin),
+) -> AgentRunResult:
+    """允许 ops/admin 按 id 查询持久化 AgentRun 审计详情。"""
 
     repository = AgentRunRepository(db)
     run = repository.get_run(agent_run_id)
@@ -51,8 +59,9 @@ def get_agent_run(agent_run_id: str, db: Session = Depends(get_db)) -> AgentRunR
 def list_tool_invocations(
     agent_run_id: str,
     db: Session = Depends(get_db),
+    _current_user: User = Depends(require_ops_or_admin),
 ) -> ToolInvocationsResponse:
-    """查询某次 AgentRun 的持久化 Tool 调用记录。"""
+    """允许 ops/admin 查询某次 AgentRun 的持久化 Tool 调用记录。"""
 
     repository = AgentRunRepository(db)
     run = repository.get_run(agent_run_id)

@@ -22,7 +22,7 @@ from app.modules.file_rename.filename_builder import FilenameBuilder
 from app.modules.file_rename.metadata_extractor import FilenameMetadataExtractor
 from app.modules.file_rename.native_executor import NativeRenameExecutor
 from app.modules.file_rename.policy_loader import load_rename_policy
-from app.modules.file_rename.schemas import RenameFieldStatus
+from app.modules.file_rename.schemas import FilenameMetadataResult, RenameFieldResult, RenameFieldStatus
 from app.modules.llm.schemas import UserIntentPlan
 from app.tests.helpers import clear_overrides, client_with_database
 
@@ -140,6 +140,37 @@ def test_filename_metadata_extractor_preserves_leading_business_numbers():
         )
         assert template_key == "ordinary_material"
         assert proposed_filename == f"{expected_year}_{title}.doc"
+
+
+def test_filename_template_does_not_append_document_type_field():
+    """文种只能作为分类元数据；标题未含文种时，文件名不得额外追加“通知”等词。"""
+
+    policy = load_rename_policy()
+    assert all("document_type" not in template.template for template in policy.templates)
+    metadata = FilenameMetadataResult(
+        year=RenameFieldResult(
+            value="2026",
+            status=RenameFieldStatus.RESOLVED,
+            source="body",
+            confidence=0.95,
+        ),
+        document_number=RenameFieldResult(status=RenameFieldStatus.MISSING),
+        title=RenameFieldResult(
+            value="奖学金评审安排",
+            status=RenameFieldStatus.RESOLVED,
+            source="body",
+            confidence=0.95,
+        ),
+    )
+
+    proposed_filename, _ = FilenameBuilder().build(
+        original_filename="材料.pdf",
+        metadata=metadata,
+        policy=policy,
+    )
+
+    assert proposed_filename == "2026_奖学金评审安排.pdf"
+    assert "通知" not in proposed_filename
 
 
 def test_filename_metadata_extractor_still_removes_explicit_title_sequences():

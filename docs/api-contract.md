@@ -326,21 +326,19 @@ Response:
           "deduplicated": false
         }
       ],
-      "agent_run": {
-        "agent_run_id": "agent-run-uuid",
-        "conversation_id": "conversation-uuid",
-        "user_id": "user-uuid",
-        "message_id": "message-uuid",
-        "intent": "CLASSIFY_FILES",
-        "status": "COMPLETED",
-        "selected_skills": ["document-text-extract", "document-classification"],
-        "tool_plan": {},
-        "tool_results": [],
-        "tool_invocations": [],
-        "changeset_id": null,
+      "task_result": {
+        "task_id": "opaque-task-uuid",
+        "task_status": "completed",
+        "response_type": "file_results",
         "operation_plan_id": null,
         "final_response": "已处理 1 个文件：...",
-        "errors": []
+        "document_results": [],
+        "managed_file_result": null,
+        "rename_plan_result": null,
+        "pending_job_ids": [],
+        "pending_decisions": [],
+        "references": [],
+        "suggested_next_actions": ["继续查找相关文件", "询问文件中的具体内容"]
       }
     }
   ]
@@ -399,8 +397,9 @@ if LLM_ENABLED=true: call LLM to create structured UserIntentPlan
 if uploaded file insights already exist: reuse document_insights through read-document-insights
 if original text extraction is required: run extract-document-text and persist document_results in agent_runs.graph_state_json
 if classification suggestions are produced: persist structured suggestions in document_classification_runs and document_category_suggestions
-persist tool_invocations
-return message_id and agent_run_id
+persist tool_invocations for ops/admin audit
+project the internal run into UserTaskReceipt
+return message and task_result without Skill, Tool, Planner, AgentRun or host path payloads
 ```
 
 `tool_invocations.status` follows the structured Tool business result: `ok=false` or `status=FAILED` is persisted as `FAILED`.
@@ -421,20 +420,20 @@ Response:
       }
     ]
   },
-  "agent_run": {
-    "agent_run_id": "agent-run-uuid",
-    "conversation_id": "conversation-uuid",
-    "message_id": "message-uuid",
-    "intent": "CLASSIFY_FILES",
-    "status": "COMPLETED",
-    "selected_skills": ["chat-intake", "file-ingest", "document-classification", "change-report"],
-    "tool_plan": {},
-    "tool_results": [],
-    "tool_invocations": [],
-    "changeset_id": null,
+  "task_result": {
+    "task_id": "opaque-task-uuid",
+    "task_status": "completed",
+    "response_type": "file_results",
+    "final_response": "已处理 1 个文件，原始文件保持不变。",
+    "processed_count": 1,
+    "document_results": [],
+    "managed_file_result": null,
+    "rename_plan_result": null,
+    "pending_job_ids": [],
     "operation_plan_id": null,
-    "final_response": "AgentRun completed with 4 tool invocation(s).",
-    "errors": []
+    "pending_decisions": [],
+    "references": [],
+    "suggested_next_actions": ["继续查找相关文件", "询问文件中的具体内容"]
   }
 }
 ```
@@ -443,16 +442,10 @@ When LLM is enabled and the user asks for uploaded-file summary or basic file in
 
 ```json
 {
-  "agent_run": {
-    "intent": "SUMMARIZE_DOCUMENTS",
-    "status": "COMPLETED",
-    "selected_skills": ["llm-understanding", "document-insight-read"],
-    "tool_invocations": [
-      {
-        "tool_name": "read-document-insights",
-        "status": "COMPLETED"
-      }
-    ],
+  "task_result": {
+    "task_id": "opaque-task-uuid",
+    "task_status": "completed",
+    "response_type": "text",
     "final_response": "已读取 1 个文件的基础洞察：student.txt。"
   }
 }
@@ -464,22 +457,24 @@ Current `extract-document-text` supports `txt/md/csv/xls/xlsx/doc/docx/pdf/image
 
 ```json
 {
-  "agent_run": {
-    "intent": "EXTRACT_DOCUMENT_TEXT",
-    "status": "COMPLETED",
-    "selected_skills": ["llm-understanding", "document-text-extract"],
-    "tool_invocations": [
+  "task_result": {
+    "task_id": "opaque-task-uuid",
+    "task_status": "needs_attention",
+    "response_type": "file_results",
+    "final_response": "已处理 2 个文件：1 个完成，1 个失败。",
+    "processed_count": 2,
+    "document_results": [
       {
-        "tool_name": "extract-document-text",
-        "status": "COMPLETED"
-      },
-      {
-        "tool_name": "extract-document-text",
-        "status": "FAILED"
+        "document_id": "document-uuid",
+        "filename": "student.txt",
+        "extraction_status": "COMPLETED",
+        "page_count": 1,
+        "char_count": 1200,
+        "categories": [],
+        "warnings": [],
+        "errors": []
       }
-    ],
-    "changeset_id": "changeset-uuid",
-    "final_response": "已处理 2 个文件：\n1. student.txt：解析成功，提取 1 页/Sheet，共 1200 个字符；分类建议：学校/人事师资/职称，置信度 0.72，依据：职称；学校/党委相关/干部工作，置信度 0.70，依据：干部工作。\n2. broken.pdf：解析失败，原因：不支持的文件类型。"
+    ]
   }
 }
 ```
@@ -566,6 +561,9 @@ Errors:
 ```
 
 ## 6. AgentRun APIs
+
+本节接口属于内部运行审计面，只允许 `ops` 和 `admin` 访问。普通用户消息接口只返回
+`task_result` 用户任务投影，不返回 Planner、Skill、ToolInvocation 或原始 Tool 输出。
 
 ### 6.1 Get AgentRun
 
@@ -1067,6 +1065,8 @@ This endpoint may call the same implementation as `evidence-answer` for backward
 GET /api/changesets/{changeset_id}
 ```
 
+该接口属于内部审计面，只允许 `ops`、`admin` 访问；普通用户通过消息中的 `task_result` 查看任务回执。
+
 Response:
 
 ```json
@@ -1466,15 +1466,16 @@ external model use for file content must be explicit
 | `GET /api/workspace/default` | yes | yes | yes |
 | `GET/POST/PUT /api/conversations` | yes | yes | yes |
 | `POST /api/conversations/{id}/messages` | yes | yes | yes |
-| `GET /api/agent/tools` | yes | yes | yes |
+| `GET /api/agent/tools` | no | yes | yes |
 | `POST /api/conversations/{id}/documents/upload` | yes | yes | yes |
-| `GET /api/agent-runs/{id}` | owner | yes | yes |
+| `GET /api/agent-runs/{id}` | no | yes | yes |
+| `GET /api/agent-runs/{id}/tool-invocations` | no | yes | yes |
 | `GET /api/documents` | yes | yes | yes |
 | `POST /api/search` | yes | yes | yes |
 | `POST /api/conversations/{id}/evidence-answer` | yes | yes | yes |
 | `POST /api/operations/plans` | yes | yes | yes |
 | `POST /api/operations/plans/{id}/confirm` | owner | yes | yes |
-| `GET /api/changesets/{id}` | owner | yes | yes |
+| `GET /api/changesets/{id}` | no | yes | yes |
 | `POST /api/feedback` | yes | yes | yes |
 | `POST /api/classification/suggestions/{id}/feedback` | owner run | owner run | owner run |
 | `GET /api/classification/feedback/summary` | own | own | own |

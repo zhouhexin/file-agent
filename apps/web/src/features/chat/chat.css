@@ -597,6 +597,44 @@
   white-space: nowrap;
 }
 
+.task-pending-decisions {
+  display: grid;
+  gap: 10px;
+  margin: 10px 0 14px;
+}
+
+.task-pending-decision {
+  border: 1px solid color-mix(in srgb, var(--warning, #a86414) 35%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--warning, #a86414) 8%, transparent);
+  padding: 12px 14px;
+}
+
+.task-pending-decision strong,
+.task-pending-decision p,
+.task-pending-decision span {
+  display: block;
+}
+
+.document-result-risk-warnings {
+  margin-top: 10px;
+  color: var(--warning, #8a5615);
+  font-size: 13px;
+}
+
+.document-result-risk-warnings p {
+  margin: 4px 0 0;
+}
+
+.task-pending-decision p {
+  margin: 6px 0;
+}
+
+.task-pending-decision span {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
 .agent-run-summary--failed em {
   background: #fff1f2;
   color: #be123c;

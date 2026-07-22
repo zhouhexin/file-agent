@@ -26,16 +26,14 @@ from app.modules.agent.tool_schemas import ToolInputValidationError
 from app.modules.llm.client import LLMResponseError
 
 
-def test_get_agent_tools_returns_mvp_catalog():
-    """Tool catalog 接口必须暴露 tool-dispatch 使用的白名单。"""
+def test_tool_registry_contains_mvp_catalog_and_endpoint_requires_authentication():
+    """内部白名单必须完整，同时匿名请求不能读取 Tool 目录。"""
 
     client = TestClient(app)
-
     response = client.get("/api/agent/tools")
 
-    assert response.status_code == 200
-    data = response.json()
-    tool_names = {tool["name"] for tool in data["tools"]}
+    assert response.status_code == 401
+    tool_names = {tool["name"] for tool in ToolRegistry().list_tools()}
     assert "document-convert" in tool_names
     assert "operation-plan-create" in tool_names
     assert "confirmed-file-action" in tool_names
@@ -59,6 +57,23 @@ def test_mcp_filesystem_tool_returns_structured_error_when_disabled(monkeypatch)
     assert result.output_json["ok"] is False
     assert result.output_json["tool_name"] == "mcp-filesystem-list"
     assert result.output_json["error"]["code"] == "MCPFilesystemError"
+
+
+def test_confirmed_file_action_never_reports_fake_execution_without_runtime_context():
+    """缺少请求级数据库和用户上下文时，确认 Tool 必须失败而不是伪造物理执行。"""
+
+    result = ToolRegistry().invoke(
+        "confirmed-file-action",
+        {
+            "operation_plan_id": "plan-without-runtime",
+            "confirmation_text": "确认执行",
+        },
+    )
+
+    assert result.status == "FAILED"
+    assert result.output_json["ok"] is False
+    assert result.output_json["status"] == "FAILED"
+    assert result.output_json["error"]["code"] == "RUNTIME_CONTEXT_REQUIRED"
 
 
 def test_capability_catalog_exposes_router_metadata():

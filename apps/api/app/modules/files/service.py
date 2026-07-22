@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import tempfile
 from pathlib import Path
 
 from fastapi import HTTPException, UploadFile
@@ -39,30 +41,31 @@ class FileUploadService:
         上传请求不得同步执行归档、导入或分类，也不能因为哈希相同直接复用其他 Document。
         """
 
-        content = await file.read()
         filename = Path(file.filename or "uploaded-file").name
         content_type = file.content_type or "application/octet-stream"
-        sha256 = hashlib.sha256(content).hexdigest()
-        document = self.repository.create_document(
-            user_id=current_user.id,
-            workspace_id=current_user.default_workspace_id,
-            original_filename=filename,
-            content_type=content_type,
-            size_bytes=len(content),
-            sha256=sha256,
-        )
-        relative_path = self._write_local_file(
-            document=document,
-            filename=filename,
-            content=content,
-        )
-        self.repository.create_file_object(
-            document_id=document.id,
-            storage_path=relative_path,
-            size_bytes=len(content),
-            sha256=sha256,
-        )
+        self._validate_upload_metadata(filename=filename, content_type=content_type)
+        incoming_path, size_bytes, sha256 = await self._stream_upload_to_quarantine(file=file)
+        relative_path: str | None = None
         try:
+            document = self.repository.create_document(
+                user_id=current_user.id,
+                workspace_id=current_user.default_workspace_id,
+                original_filename=filename,
+                content_type=content_type,
+                size_bytes=size_bytes,
+                sha256=sha256,
+            )
+            relative_path = self._publish_quarantine_file(
+                document=document,
+                filename=filename,
+                incoming_path=incoming_path,
+            )
+            self.repository.create_file_object(
+                document_id=document.id,
+                storage_path=relative_path,
+                size_bytes=size_bytes,
+                sha256=sha256,
+            )
             version, archive, review, job = UploadLifecycleService(self.db).register_upload(
                 document=document,
                 storage_path=relative_path,
@@ -72,7 +75,9 @@ class FileUploadService:
             self.db.commit()
         except Exception:
             self.db.rollback()
-            (Path(get_settings().file_storage_root) / relative_path).unlink(missing_ok=True)
+            incoming_path.unlink(missing_ok=True)
+            if relative_path:
+                (Path(get_settings().file_storage_root) / relative_path).unlink(missing_ok=True)
             raise
         self.db.refresh(document)
         return self._to_upload_response(
@@ -176,15 +181,75 @@ class FileUploadService:
             filename=document.original_filename,
         )
 
-    def _write_local_file(self, *, document: Document, filename: str, content: bytes) -> str:
-        """把原始文件写入本地存储目录，并返回相对存储路径。"""
+    async def _stream_upload_to_quarantine(self, *, file: UploadFile) -> tuple[Path, int, str]:
+        """分块写入受控临时区并计算哈希，避免把整个文件一次性读入内存。"""
+
+        settings = get_settings()
+        storage_root = Path(settings.file_storage_root).resolve()
+        incoming_dir = storage_root / ".incoming"
+        incoming_dir.mkdir(parents=True, exist_ok=True)
+        max_bytes = settings.upload_max_file_size_mb * 1024 * 1024
+        digest = hashlib.sha256()
+        size_bytes = 0
+        descriptor, temp_name = tempfile.mkstemp(prefix="upload-", suffix=".part", dir=incoming_dir)
+        incoming_path = Path(temp_name)
+        try:
+            with os.fdopen(descriptor, "wb") as target:
+                while True:
+                    chunk = await file.read(settings.upload_chunk_size_bytes)
+                    if not chunk:
+                        break
+                    size_bytes += len(chunk)
+                    if size_bytes > max_bytes:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"文件超过当前部署允许的 {settings.upload_max_file_size_mb} MB 资源上限",
+                        )
+                    digest.update(chunk)
+                    target.write(chunk)
+                target.flush()
+                os.fsync(target.fileno())
+            if size_bytes == 0:
+                raise HTTPException(status_code=400, detail="不能上传空文件")
+            return incoming_path, size_bytes, digest.hexdigest()
+        except Exception:
+            incoming_path.unlink(missing_ok=True)
+            raise
+
+    def _publish_quarantine_file(
+        self,
+        *,
+        document: Document,
+        filename: str,
+        incoming_path: Path,
+    ) -> str:
+        """把已完整接收的临时文件原子提交到 Document 私有上传暂存目录。"""
 
         storage_root = Path(get_settings().file_storage_root)
         relative_path = Path(document.user_id) / document.id / filename
         target_path = storage_root / relative_path
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_bytes(content)
+        if target_path.exists():
+            raise FileExistsError("上传暂存目标已存在")
+        os.replace(incoming_path, target_path)
         return relative_path.as_posix()
+
+    @staticmethod
+    def _validate_upload_metadata(*, filename: str, content_type: str) -> None:
+        """执行基础扩展名和显式危险 MIME 检查，但不得宣称已经完成病毒扫描。"""
+
+        settings = get_settings()
+        suffix = Path(filename).suffix.lower()
+        if suffix not in set(settings.upload_allowed_extensions):
+            raise HTTPException(status_code=415, detail=f"暂不支持上传 {suffix or '无扩展名'} 文件")
+        dangerous_mime_types = {
+            "application/x-msdownload",
+            "application/x-dosexec",
+            "application/x-executable",
+            "application/x-sh",
+        }
+        if content_type.lower() in dangerous_mime_types:
+            raise HTTPException(status_code=415, detail="上传内容类型存在可执行风险，已拒绝接收")
 
     @staticmethod
     def _remove_empty_parent_dirs(start_dir: Path, *, stop_at: Path) -> None:

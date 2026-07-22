@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import subprocess
-import sys
-from types import SimpleNamespace
 from io import BytesIO
 from pathlib import Path
 
@@ -550,87 +548,26 @@ def test_extraction_repository_persists_structured_elements(tmp_path, monkeypatc
         clear_overrides()
 
 
-def test_extract_document_text_reads_xls_with_xlrd_first(monkeypatch, tmp_path):
-    """标准旧版 xls 应优先使用 xlrd 直接读取，不依赖 LibreOffice。"""
+def test_extract_document_text_always_converts_xls_before_reading(monkeypatch, tmp_path):
+    """旧版 XLS 必须先转换临时 XLSX，并完整读取所有工作表。"""
 
     xls_path = tmp_path / "奖学金汇总.xls"
     xls_path.write_bytes(b"legacy-xls")
-
-    class FakeCell:
-        def __init__(self, value, cell_type=1):
-            self.value = value
-            self.ctype = cell_type
-
-    class FakeSheet:
-        name = "汇总"
-        rows = [
-            [FakeCell("姓名"), FakeCell("等级"), FakeCell("人数")],
-            [FakeCell("赵六"), FakeCell("一等奖"), FakeCell(1.0, 2)],
-        ]
-        nrows = len(rows)
-        ncols = len(rows[0])
-
-        def cell(self, row_index, column_index):
-            return self.rows[row_index][column_index]
-
-    class FakeWorkbook:
-        datemode = 0
-
-        def sheets(self):
-            return [FakeSheet()]
-
-        def release_resources(self):
-            return None
-
-    fake_xlrd = SimpleNamespace(
-        XL_CELL_EMPTY=0,
-        XL_CELL_TEXT=1,
-        XL_CELL_NUMBER=2,
-        XL_CELL_DATE=3,
-        XL_CELL_BOOLEAN=4,
-        XL_CELL_ERROR=5,
-        open_workbook=lambda *_args, **_kwargs: FakeWorkbook(),
-    )
-    monkeypatch.setitem(sys.modules, "xlrd", fake_xlrd)
-    monkeypatch.setattr(
-        "app.modules.files.extractors.convert_xls_to_xlsx",
-        lambda **_: (_ for _ in ()).throw(AssertionError("xlrd 成功时不应调用 LibreOffice")),
-    )
-
-    result = extract_document_text(
-        file_path=xls_path,
-        filename="奖学金汇总.xls",
-        content_type="application/vnd.ms-excel",
-    )
-
-    assert result["ok"] is True
-    assert result["extractor"] == "excel-xls-xlrd"
-    assert result["pages"][0]["sheet_name"] == "汇总"
-    assert "赵六\t一等奖\t1" in result["pages"][0]["text"]
-    assert result["pages"][0]["metadata"]["reader"] == "xlrd"
-
-
-def test_extract_document_text_converts_xls_when_xlrd_fails(monkeypatch, tmp_path):
-    """xlrd 无法读取时才使用 LibreOffice 派生 xlsx 兜底。"""
-
-    xls_path = tmp_path / "奖学金汇总.xls"
-    xls_path.write_bytes(b"legacy-xls")
-    monkeypatch.setitem(
-        sys.modules,
-        "xlrd",
-        SimpleNamespace(open_workbook=lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("invalid BIFF"))),
-    )
+    original_bytes = xls_path.read_bytes()
 
     def fake_converter(*, source_path, output_dir):
-        """模拟 LibreOffice 生成 xlsx 派生件，避免测试依赖本机办公套件。"""
+        """模拟 LibreOffice 在隔离目录生成包含多工作表的临时文件。"""
 
         assert source_path == xls_path
-        converted_path = output_dir / "奖学金汇总.xlsx"
+        converted_path = output_dir / "source.xlsx"
         workbook = __import__("openpyxl").Workbook()
         worksheet = workbook.active
         worksheet.title = "汇总"
         worksheet.append(["姓名", "等级"])
         worksheet.append(["赵六", "一等奖"])
+        detail_sheet = workbook.create_sheet("明细")
+        detail_sheet.append(["学号", "姓名"])
+        detail_sheet.append(["2026001", "赵六"])
         workbook.save(converted_path)
         return converted_path
 
@@ -645,9 +582,36 @@ def test_extract_document_text_converts_xls_when_xlrd_fails(monkeypatch, tmp_pat
     assert result["ok"] is True
     assert result["status"] == "COMPLETED"
     assert result["extractor"] == "excel-xls-converted"
-    assert result["pages"][0]["sheet_name"] == "汇总"
+    assert [page["sheet_name"] for page in result["pages"]] == ["汇总", "明细"]
     assert "赵六\t一等奖" in result["pages"][0]["text"]
     assert result["pages"][0]["metadata"]["converted_from"] == ".xls"
+    assert xls_path.read_bytes() == original_bytes
+
+
+def test_extract_document_text_returns_structured_xls_conversion_failure(monkeypatch, tmp_path):
+    """LibreOffice 转换失败必须保留稳定错误码，不能回退为文件名正文。"""
+
+    xls_path = tmp_path / "损坏表格.xls"
+    xls_path.write_bytes(b"broken-xls")
+
+    def fail_conversion(**_kwargs):
+        """模拟转换器不可用。"""
+
+        from app.modules.spreadsheet_analysis.conversion import SpreadsheetConversionError
+
+        raise SpreadsheetConversionError("XLS_CONVERTER_NOT_AVAILABLE", "未找到 LibreOffice。")
+
+    monkeypatch.setattr("app.modules.files.extractors.convert_xls_to_xlsx", fail_conversion)
+
+    result = extract_document_text(
+        file_path=xls_path,
+        filename=xls_path.name,
+        content_type="application/vnd.ms-excel",
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "FAILED"
+    assert result["error"]["code"] == "XLS_CONVERTER_NOT_AVAILABLE"
 
 
 def test_extract_image_uses_injected_ocr_service(tmp_path):

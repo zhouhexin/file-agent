@@ -64,7 +64,7 @@ function historyMessagesToTurns(messages: ConversationHistoryMessage[]): ChatTur
     id: historyMessage.id,
     userText: historyMessage.content,
     attachments: historyMessage.attachments,
-    response: historyMessage.agent_run
+    response: historyMessage.task_result
       ? {
           message: {
             id: historyMessage.id,
@@ -74,7 +74,7 @@ function historyMessagesToTurns(messages: ConversationHistoryMessage[]): ChatTur
             content: historyMessage.content,
             attachments: historyMessage.attachments.map((file) => ({ document_id: file.document_id })),
           },
-          agent_run: historyMessage.agent_run,
+          task_result: historyMessage.task_result!,
         }
       : undefined,
     status: 'completed',
@@ -195,22 +195,22 @@ export function ChatPage({
   useEffect(() => {
     // 页面刷新后也要继续跟踪尚未完成的后台分类任务。
     chatTurns.forEach((turn) => {
-      const agentRun = turn.response?.agent_run;
+      const agentRun = turn.response?.task_result;
       if (
         !agentRun
-        || agentRun.status !== 'WAITING_FOR_ASYNC_JOB'
-        || agentRun.async_job_ids.length === 0
-        || pollingAgentRunsRef.current.has(agentRun.agent_run_id)
+        || agentRun.task_status !== 'processing'
+        || agentRun.pending_job_ids.length === 0
+        || pollingAgentRunsRef.current.has(agentRun.task_id)
       ) {
         return;
       }
-      pollingAgentRunsRef.current.add(agentRun.agent_run_id);
+      pollingAgentRunsRef.current.add(agentRun.task_id);
       void pollAsyncAgentRun({
         turnId: turn.id,
-        messageId: turn.response?.message.id ?? agentRun.message_id,
-        jobIds: agentRun.async_job_ids,
+        messageId: turn.response?.message.id ?? turn.id,
+        jobIds: agentRun.pending_job_ids,
       }).finally(() => {
-        pollingAgentRunsRef.current.delete(agentRun.agent_run_id);
+        pollingAgentRunsRef.current.delete(agentRun.task_id);
       });
     });
   }, [chatTurns]);
@@ -328,8 +328,8 @@ export function ChatPage({
         if (completed) {
           const conversation = await getConversationDetail(token, conversationId, { limit: 50 });
           const historyMessage = conversation.messages.find((item) => item.id === messageId);
-          if (historyMessage?.agent_run) {
-            const updatedAgentRun = historyMessage.agent_run;
+          if (historyMessage?.task_result) {
+            const updatedTaskResult = historyMessage.task_result;
             setChatTurns((current) => current.map((turn) => (
               turn.id === turnId
                 ? {
@@ -345,7 +345,7 @@ export function ChatPage({
                           document_id: file.document_id,
                         })),
                       },
-                      agent_run: updatedAgentRun,
+                      task_result: updatedTaskResult,
                     },
                     status: 'completed',
                   }

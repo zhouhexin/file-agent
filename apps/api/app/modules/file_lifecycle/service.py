@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass
 from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from app.db.models import (
     Document,
     DocumentVersion,
     FileObject,
+    FileRenameReviewItem,
     FilesystemJob,
     ManagedFile,
     ManagedRoot,
@@ -53,9 +55,19 @@ from app.modules.file_lifecycle.schemas import (
     TrashEntryResponse,
 )
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
+from app.modules.file_lifecycle.risk import inspect_basic_file_risks
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.path_policy import resolve_managed_relative_path
 from app.modules.classification.service import persist_document_results_classifications
+
+
+@dataclass(slots=True)
+class InitialWorkingPathResolution:
+    """首次导入的安全目标；冲突时只返回待确认位置，不自动生成版本后缀。"""
+
+    relative_path: str
+    filename: str
+    conflict: dict[str, Any] | None = None
 
 
 class UploadLifecycleService:
@@ -615,6 +627,13 @@ class FileLifecycleJobProcessor:
             raise RuntimeError("上传归档未启用")
         archive.status = "ARCHIVING"
         archive.attempt_count += 1
+        upload_path = self.storage.upload_path(version.storage_path)
+        risk_assessment = inspect_basic_file_risks(
+            file_path=upload_path,
+            filename=version.filename,
+            content_type=version.content_type,
+        )
+        archive.risk_assessment_json = risk_assessment.to_dict()
         created_at = version.created_at.astimezone(timezone.utc)
         relative_path = "/".join(
             ["uploads", f"{created_at.year:04d}", f"{created_at.month:02d}", version.id, self.storage.sanitize_filename(version.filename)]
@@ -638,18 +657,76 @@ class FileLifecycleJobProcessor:
         archive.archive_relative_path = relative_path
         archive.status = "ARCHIVED"
         archive.archived_at = utcnow()
+        if risk_assessment.status == "NEEDS_REVIEW":
+            archive.status = "NEEDS_REVIEW"
+            document.ingest_status = "NEEDS_REVIEW"
+            risk_pending_decision = {
+                "type": "encrypted_file_review",
+                "reason": "ENCRYPTED_FILE",
+                "document_id": document.id,
+                "filename": version.filename,
+                "message": "文件已加密，系统不会尝试破解。请上传可读取版本后继续整理。",
+                "allowed_decisions": ["UPLOAD_READABLE_COPY"],
+            }
+            risk_file_receipt = {
+                "document_id": document.id,
+                "document_version_id": version.id,
+                "filename": version.filename,
+                "organization_status": "NEEDS_REVIEW",
+                "extraction_status": "SKIPPED",
+                "page_count": 0,
+                "char_count": 0,
+                "categories": [],
+                "warnings": list(risk_assessment.warnings),
+                "errors": [],
+                "managed_original_unchanged": True,
+                "pending_decision": risk_pending_decision,
+            }
+            audit = create_lifecycle_audit(
+                db=self.db,
+                user_id=document.user_id,
+                workspace_id=str(document.workspace_id),
+                conversation_id=review.conversation_id,
+                tool_name="basic-file-risk-check",
+                message_content=f"文件“{version.filename}”已保护原件，但文件已加密，需要你提供可读取版本后再继续整理。",
+                change_type="FILE_RISK_REVIEW_REQUIRED",
+                target_type="managed_file",
+                target_id=managed_file.id,
+                target_document_id=document.id,
+                after_value={
+                    **risk_file_receipt,
+                    "managed_file_id": managed_file.id,
+                    "risk_assessment": risk_assessment.to_dict(),
+                },
+                graph_document_results=[risk_file_receipt],
+            )
+            archive.changeset_id = audit[0].id
+            FilesystemJobQueue(self.db).mark_completed(
+                job=job,
+                result={
+                    "managed_file_id": managed_file.id,
+                    "status": "NEEDS_REVIEW",
+                    "risk_assessment": risk_assessment.to_dict(),
+                },
+            )
+            return
         audit = create_lifecycle_audit(
             db=self.db,
             user_id=document.user_id,
             workspace_id=str(document.workspace_id),
             conversation_id=review.conversation_id,
             tool_name="upload-archive",
-            message_content=f"文件“{version.filename}”已安全归档，正在创建工作副本。",
+            message_content=f"文件“{version.filename}”的原件已归档，正在创建工作副本。",
             change_type="ORIGINAL_FILE_ARCHIVED",
             target_type="managed_file",
             target_id=managed_file.id,
             target_document_id=document.id,
-            after_value={"managed_file_id": managed_file.id, "source_type": "UPLOAD_ARCHIVE", "sha256": version.sha256},
+            after_value={
+                "managed_file_id": managed_file.id,
+                "source_type": "UPLOAD_ARCHIVE",
+                "sha256": version.sha256,
+                "risk_assessment": risk_assessment.to_dict(),
+            },
         )
         archive.changeset_id = audit[0].id
         import_job = FilesystemJobQueue(self.db).create_job(
@@ -762,11 +839,16 @@ class FileLifecycleJobProcessor:
                 user_id=user_id,
                 settings=self.settings,
             ).decide(document=document, version=version, managed_file=managed_file)
-            relative_path = self._working_relative_path(
+            path_resolution = self._working_path_resolution(
                 working_root=working_root,
                 managed_file=managed_file,
                 preferred_relative_path=decision.relative_path,
             )
+            relative_path = path_resolution.relative_path
+            decision.filename = path_resolution.filename
+            decision.relative_path = relative_path
+            if path_resolution.conflict is not None:
+                decision.rename_status = "NEEDS_REVIEW"
             final_storage_relative_path = f"{working_root.relative_storage_path}/{relative_path}"
             final_target, final_target_created = self.storage.publish_working_copy(
                 staged_relative_path=staged_relative_path,
@@ -807,13 +889,43 @@ class FileLifecycleJobProcessor:
                 if decision.primary_category is not None
                 else "待整理"
             )
+            pending_decision = self._initial_organization_pending_decision(
+                decision=decision,
+                working_copy=working_copy,
+                path_resolution=path_resolution,
+            )
+            extraction_pages = list((decision.extraction_result or {}).get("pages") or [])
+            file_receipt = {
+                **decision.document_result(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                ),
+                "document_version_id": version.id,
+                "working_copy_id": working_copy.id,
+                "filename": decision.filename,
+                "page_count": len(extraction_pages),
+                "char_count": sum(int(item.get("char_count") or 0) for item in extraction_pages),
+                "organization_status": "NEEDS_REVIEW" if pending_decision else "READY",
+                "year": decision.rename_metadata.get("year"),
+                "document_type": decision.summary_metadata.get("document_type"),
+                "keywords": list(decision.summary_metadata.get("keywords") or []),
+                "entities": list(decision.summary_metadata.get("entities") or []),
+                "managed_original_unchanged": True,
+                "risk_warnings": self._risk_warnings_for_managed_file(managed_file),
+                "pending_decision": pending_decision,
+            }
+            message_content = self._initial_organization_message(
+                filename=decision.filename,
+                category_name=category_name,
+                pending_decision=pending_decision,
+            )
             changeset, _ = create_lifecycle_audit(
                 db=self.db,
                 user_id=user_id,
                 workspace_id=workspace_id,
                 conversation_id=self._conversation_for_upload(managed_file),
                 tool_name="working-copy-initial-organize",
-                message_content=f"已整理文件：{decision.filename}\n分类：{category_name}",
+                message_content=message_content,
                 change_type="WORKING_COPY_IMPORTED",
                 target_type="working_copy",
                 target_id=working_copy.id,
@@ -827,9 +939,34 @@ class FileLifecycleJobProcessor:
                     "classification_summary_id": decision.classification_summary_id,
                     "primary_category": category_name,
                     "rename_status": decision.rename_status,
+                    "organization_status": file_receipt["organization_status"],
+                    "categories": decision.categories,
+                    "year": decision.rename_metadata.get("year"),
+                    "document_type": decision.summary_metadata.get("document_type"),
+                    "keywords": list(decision.summary_metadata.get("keywords") or []),
+                    "entities": list(decision.summary_metadata.get("entities") or []),
+                    "pending_decision": pending_decision,
                     "managed_original_unchanged": True,
                 },
+                graph_document_results=[file_receipt],
             )
+            if pending_decision:
+                self.db.add(
+                    FileRenameReviewItem(
+                        conversation_id=changeset.conversation_id,
+                        agent_run_id=changeset.agent_run_id,
+                        user_id=user_id,
+                        managed_file_id=managed_file.id,
+                        document_id=document.id,
+                        root_key=managed_root.root_key,
+                        original_relative_path=managed_file.relative_path,
+                        original_filename=managed_file.filename,
+                        source_sha256=source_sha256,
+                        status="NEEDS_REVIEW",
+                        review_context_json=pending_decision,
+                        decision_json={},
+                    )
+                )
             persist_document_results_classifications(
                 db=self.db,
                 agent_run_id=changeset.agent_run_id,
@@ -1076,14 +1213,14 @@ class FileLifecycleJobProcessor:
         if archive:
             archive.changeset_id = changeset.id
 
-    def _working_relative_path(
+    def _working_path_resolution(
         self,
         *,
         working_root: WorkingCopyRoot,
         managed_file: ManagedFile,
         preferred_relative_path: str | None = None,
-    ) -> str:
-        """选择不覆盖活动工作副本的最终相对路径，冲突时使用稳定备用路径。"""
+    ) -> InitialWorkingPathResolution:
+        """解析首次目标；不同内容冲突必须进入对话待确认，不能自动追加版本。"""
 
         candidate = preferred_relative_path or managed_file.relative_path
         path_hash = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
@@ -1101,14 +1238,84 @@ class FileLifecycleJobProcessor:
         )
         if conflict is None:
             if not storage_candidate.exists():
-                return candidate
+                return InitialWorkingPathResolution(
+                    relative_path=candidate,
+                    filename=Path(candidate).name,
+                )
             if (
                 managed_file.content_sha256
                 and self.storage.sha256_file(storage_candidate) == managed_file.content_sha256
             ):
                 # 上一次尝试可能已提交文件但数据库事务未完成，继续采用同一路径幂等收敛。
-                return candidate
-        return f"待整理/{managed_file.id}/{Path(candidate).name}"
+                return InitialWorkingPathResolution(
+                    relative_path=candidate,
+                    filename=Path(candidate).name,
+                )
+        pending_filename = self.storage.sanitize_filename(managed_file.filename)
+        pending_path = f"待确认/{managed_file.id}/{pending_filename}"
+        return InitialWorkingPathResolution(
+            relative_path=pending_path,
+            filename=pending_filename,
+            conflict={
+                "type": "filename_conflict",
+                "reason": "FILENAME_CONFLICT",
+                "target_filename": Path(candidate).name,
+                "existing_working_copy_ids": [conflict.id] if conflict is not None else [],
+                "existing_filenames": [conflict.filename] if conflict is not None else [Path(candidate).name],
+                "message": "整理后的目标文件名已存在，请确认是否同时保留两个文件。",
+                "allowed_decisions": [
+                    "KEEP_BOTH",
+                    "KEEP_EXISTING",
+                    "REPLACE_EXISTING_WORKING_COPY",
+                    "DELETE_EXISTING_WORKING_COPY",
+                ],
+            },
+        )
+
+    @staticmethod
+    def _initial_organization_pending_decision(
+        *,
+        decision: InitialOrganizationDecision,
+        working_copy: WorkingCopy,
+        path_resolution: InitialWorkingPathResolution,
+    ) -> dict[str, Any] | None:
+        """把低置信度或同名冲突转换为普通用户可以理解的待决策项。"""
+
+        if path_resolution.conflict is not None:
+            return {
+                **path_resolution.conflict,
+                "working_copy_id": working_copy.id,
+                "filename": working_copy.filename,
+            }
+        if decision.rename_status not in {"READY", "NO_CHANGE"}:
+            return {
+                "type": "rename_review",
+                "reason": "LOW_CONFIDENCE_RENAME",
+                "working_copy_id": working_copy.id,
+                "filename": working_copy.filename,
+                "proposed_filename": decision.rename_metadata.get("proposed_filename"),
+                "message": "命名依据不足，已保留上传时的文件名，请通过对话确认或更正。",
+                "allowed_decisions": ["CONFIRM_CURRENT_NAME", "PROVIDE_NEW_NAME"],
+            }
+        return None
+
+    @staticmethod
+    def _initial_organization_message(
+        *,
+        filename: str,
+        category_name: str,
+        pending_decision: dict[str, Any] | None,
+    ) -> str:
+        """生成不包含 Skill、Tool 或服务器路径的首次整理消息。"""
+
+        if pending_decision and pending_decision.get("type") == "filename_conflict":
+            return (
+                f"文件已读取并分类，当前保留为“{filename}”。整理后的目标名称已存在，"
+                "请确认是否需要同时保留两个文件；如同时保留，确认后再分配版本后缀。"
+            )
+        if pending_decision:
+            return f"文件已读取并分类，当前保留为“{filename}”。命名依据不足，请确认或告诉我新的文件名。"
+        return f"已整理文件：{filename}\n分类：{category_name}"
 
     def _conversation_for_upload(self, managed_file: ManagedFile) -> str | None:
         """从上传归档关系恢复原会话，部署文件没有会话时返回 None。"""
@@ -1117,6 +1324,17 @@ class FileLifecycleJobProcessor:
             return None
         review = self.repository.get_review_by_version(managed_file.source_upload_version_id)
         return review.conversation_id if review else None
+
+    def _risk_warnings_for_managed_file(self, managed_file: ManagedFile) -> list[dict[str, str]]:
+        """读取上传归档的基础风险警告，绝不把它解释成病毒扫描结果。"""
+
+        if not managed_file.source_upload_version_id:
+            return []
+        archive = self.repository.get_archive_by_version(managed_file.source_upload_version_id)
+        if archive is None:
+            return []
+        assessment = dict(archive.risk_assessment_json or {})
+        return [dict(item) for item in assessment.get("warnings", []) if isinstance(item, dict)]
 
 
 class WorkingCopyQueryService:
@@ -1290,6 +1508,7 @@ def create_lifecycle_audit(
     before_value: dict[str, Any] | None = None,
     execution_status: str = "COMPLETED",
     attachment_metadata: dict[str, Any] | None = None,
+    graph_document_results: list[dict[str, Any]] | None = None,
 ) -> tuple[ChangeSet, Message]:
     """创建系统生命周期调用的 AgentRun、ToolInvocation、ChangeSet 和逐文件 ChangeItem。"""
 
@@ -1323,7 +1542,11 @@ def create_lifecycle_audit(
         status=execution_status,
         selected_skills_json=["change-report"],
         plan_json={"system_lifecycle": True, "tool_name": tool_name},
-        graph_state_json={"status": "COMPLETED", "final_response": message_content},
+        graph_state_json={
+            "status": "COMPLETED",
+            "final_response": message_content,
+            "document_results": graph_document_results or [],
+        },
         final_response=message_content,
     )
     db.add(run)

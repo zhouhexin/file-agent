@@ -26,7 +26,7 @@ export function ChatTurnView({ token, turn, onOpenAttachment, onOpenManagedFile 
             {uploadVersionId ? (
               <DuplicateUploadReviewLoader token={token} uploadVersionId={uploadVersionId} />
             ) : turn.response ? (
-              <AgentRunReceipt agentRun={turn.response.agent_run} token={token} />
+              <AgentRunReceipt taskResult={turn.response.task_result} token={token} />
             ) : (
               <p className="agent-chat-response">{turn.userText}</p>
             )}
@@ -65,7 +65,7 @@ export function ChatTurnView({ token, turn, onOpenAttachment, onOpenManagedFile 
           {turn.status === 'failed' ? <AgentRunReceipt state="failed" /> : null}
           {turn.response ? (
             <AgentRunReceipt
-              agentRun={turn.response.agent_run}
+              taskResult={turn.response.task_result}
               attachments={turn.attachments}
               token={token}
               onOpenAttachment={onOpenAttachment}

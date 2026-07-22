@@ -31,3 +31,15 @@ def get_current_user(
     if user is None:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+
+def require_ops_or_admin(current_user: User = Depends(get_current_user)) -> User:
+    """限制内部运行审计接口只允许 ops 和 admin 角色访问。
+
+    普通用户只能消费经过脱敏的任务回执，不能通过独立审计接口绕过投影边界读取
+    Planner、Skill、ToolInvocation 或原始 Tool 输出。
+    """
+
+    if current_user.role not in {"ops", "admin"}:
+        raise HTTPException(status_code=403, detail="Insufficient role")
+    return current_user

@@ -1044,6 +1044,7 @@ class UploadArchiveRecord(Base):
     changeset_id: Mapped[Optional[str]] = mapped_column(
         String(36), ForeignKey("change_sets.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    risk_assessment_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
     archived_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

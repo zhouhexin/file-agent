@@ -741,74 +741,17 @@ class RenameSuggestionService:
             reserved_targets.add(target_key)
             reserved_logical_targets.add(logical_target_key)
             return suggestion.model_copy(update={"status": "READY", "errors": []})
-        if self.policy.conflict_strategy != "VERSION_SUFFIX":
-            return suggestion.model_copy(
-                update={
-                    "status": "CONFLICT",
-                    "errors": [{"code": "TARGET_ALREADY_EXISTS", "message": "目标文件名已存在。"}],
-                }
-            )
-
-        original_target = Path(proposed_relative_path)
-        for version in range(2, 1001):
-            versioned_filename = _append_version_suffix(
-                original_target.name,
-                version=version,
-                max_bytes=self.policy.max_filename_bytes,
-            )
-            versioned_relative_path = (original_target.parent / versioned_filename).as_posix()
-            versioned_key = (root.id, versioned_relative_path)
-            versioned_logical_key = (root.id, _logical_target_path(versioned_relative_path))
-            if versioned_key in reserved_targets:
-                continue
-            if versioned_logical_key in reserved_logical_targets:
-                continue
-            if self._target_conflict(
-                managed_file=managed_file,
-                root=root,
-                proposed_relative_path=versioned_relative_path,
-            ):
-                continue
-            reserved_targets.add(versioned_key)
-            reserved_logical_targets.add(versioned_logical_key)
-            return suggestion.model_copy(
-                update={
-                    "proposed_relative_path": versioned_relative_path,
-                    "proposed_filename": versioned_filename,
-                    "status": "READY",
-                    "warnings": [
-                        *suggestion.warnings,
-                        f"基础目标名称已存在，已按版本规则生成第{_chinese_number(version)}版。",
-                    ],
-                    "errors": [],
-                }
-            )
         return suggestion.model_copy(
             update={
                 "status": "CONFLICT",
-                "errors": [{"code": "VERSION_SUFFIX_EXHAUSTED", "message": "目标文件版本号已达到上限。"}],
+                "errors": [
+                    {
+                        "code": "TARGET_ALREADY_EXISTS",
+                        "message": "目标文件名已存在，请通过对话确认是否同时保留；确认同时保留后才会分配版本后缀。",
+                    }
+                ],
             }
         )
-
-
-def _append_version_suffix(filename: str, *, version: int, max_bytes: int) -> str:
-    """在扩展名前追加中文版本号，并在需要时安全截断原名称。"""
-
-    extension = Path(filename).suffix
-    stem = filename[: -len(extension)] if extension else filename
-    version_suffix = f"_第{_chinese_number(version)}版"
-    reserved_bytes = len(f"{version_suffix}{extension}".encode("utf-8"))
-    available_bytes = max_bytes - reserved_bytes
-    if available_bytes <= 0:
-        raise ValueError("文件名长度限制不足以保存版本后缀。")
-    encoded_stem = stem.encode("utf-8")[:available_bytes]
-    while encoded_stem:
-        try:
-            safe_stem = encoded_stem.decode("utf-8").rstrip(" ._-")
-            return f"{safe_stem}{version_suffix}{extension}"
-        except UnicodeDecodeError:
-            encoded_stem = encoded_stem[:-1]
-    raise ValueError("原文件名无法在长度限制内追加版本后缀。")
 
 
 def _resolved_full_date(field: RenameFieldResult) -> bool:
@@ -846,27 +789,6 @@ def _logical_target_path(relative_path: str) -> str:
 
     target = Path(relative_path)
     return (target.parent / target.stem).as_posix().casefold()
-
-
-def _chinese_number(value: int) -> str:
-    """把 1 到 999 的版本号转换为简体中文数字。"""
-
-    if value <= 0 or value >= 1000:
-        return str(value)
-    digits = "零一二三四五六七八九"
-    if value < 10:
-        return digits[value]
-    if value < 20:
-        return f"十{digits[value % 10] if value % 10 else ''}"
-    if value < 100:
-        tens, ones = divmod(value, 10)
-        return f"{digits[tens]}十{digits[ones] if ones else ''}"
-    hundreds, remainder = divmod(value, 100)
-    if remainder == 0:
-        return f"{digits[hundreds]}百"
-    if remainder < 10:
-        return f"{digits[hundreds]}百零{digits[remainder]}"
-    return f"{digits[hundreds]}百{_chinese_number(remainder)}"
 
 
 def _operation_plan_item(suggestion: RenameSuggestion) -> dict[str, Any]:

@@ -107,9 +107,9 @@ def test_worker_completes_async_managed_file_classification(monkeypatch, tmp_pat
     )
 
     assert response.status_code == 200
-    initial_run = response.json()["agent_run"]
-    assert initial_run["status"] == "WAITING_FOR_ASYNC_JOB"
-    job_id = initial_run["tool_results"][0]["job_id"]
+    initial_run = response.json()["task_result"]
+    assert initial_run["task_status"] == "processing"
+    job_id = initial_run["pending_job_ids"][0]
 
     processed_job_id = process_next_filesystem_job(
         session_factory=SessionLocal,
@@ -120,7 +120,7 @@ def test_worker_completes_async_managed_file_classification(monkeypatch, tmp_pat
     db = SessionLocal()
     try:
         job = db.get(FilesystemJob, job_id)
-        run = db.get(AgentRun, initial_run["agent_run_id"])
+        run = db.get(AgentRun, initial_run["task_id"])
         assert job is not None
         assert job.status == "COMPLETED"
         assert job.progress_current == 2

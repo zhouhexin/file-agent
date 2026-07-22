@@ -1,12 +1,12 @@
 // AgentRun 回执组件展示结构化执行结果，文件打开仍交由上层受控回调处理。
 import { useEffect, useState } from 'react';
-import { CheckCircle2, FileText, Folder } from 'lucide-react';
+import { AlertCircle, CheckCircle2, FileText, Folder } from 'lucide-react';
 
 import { getOperationPlan } from '../../api/client';
-import type { AgentRun, ManagedFileResult, OperationPlanResponse, ToolInvocation } from '../../types';
+import type { ManagedFileResult, OperationPlanResponse, TaskResult } from '../../types';
 import { DocumentResultCard } from './DocumentResultCard';
 import { OperationPlanCard } from './OperationPlanCard';
-import { RenameSuggestionReceipt, type RenamePlanResult } from './RenameSuggestionReceipt';
+import { RenameSuggestionReceipt } from './RenameSuggestionReceipt';
 import type { ChatAttachment } from './presentation';
 import { findAttachmentByDocumentId, formatFileSize } from './presentation';
 
@@ -15,7 +15,7 @@ const CHANGESET_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0
 type AgentRunReceiptProps = {
   token?: string;
   state?: 'running' | 'failed';
-  agentRun?: AgentRun;
+  taskResult?: TaskResult;
   attachments?: ChatAttachment[];
   onOpenAttachment?: (file: ChatAttachment) => void;
   onOpenManagedFile?: (file: ManagedFileResult) => void;
@@ -24,17 +24,17 @@ type AgentRunReceiptProps = {
 export function AgentRunReceipt({
   token,
   state,
-  agentRun,
+  taskResult,
   attachments = [],
   onOpenAttachment,
   onOpenManagedFile,
 }: AgentRunReceiptProps) {
   const [operationPlan, setOperationPlan] = useState<OperationPlanResponse | null>(null);
-  const results = agentRun?.document_results ?? [];
+  const results = taskResult?.document_results ?? [];
 
   useEffect(() => {
     let cancelled = false;
-    const planId = agentRun?.operation_plan_id ?? '';
+    const planId = taskResult?.operation_plan_id ?? '';
     if (!token || !isPersistedOperationPlanId(planId)) {
       setOperationPlan(null);
       return;
@@ -49,7 +49,7 @@ export function AgentRunReceipt({
     return () => {
       cancelled = true;
     };
-  }, [agentRun?.operation_plan_id, token]);
+  }, [taskResult?.operation_plan_id, token]);
 
   if (state === 'running') {
     // 普通用户只看最终结果；内部 Agent、Skill 和 Tool 状态不在聊天界面展开。
@@ -67,17 +67,15 @@ export function AgentRunReceipt({
     );
   }
 
-  if (!agentRun) {
+  if (!taskResult) {
     return null;
   }
 
-  const managedFileResult = getManagedFileResult(agentRun.tool_invocations);
-  const renamePlanResult = getRenamePlanResult(agentRun.tool_invocations);
+  const managedFileResult = taskResult.managed_file_result;
+  const renamePlanResult = taskResult.rename_plan_result;
+  const pendingDecisions = taskResult.pending_decisions ?? [];
 
-  if (agentRun.intent === 'RESOLVE_RENAME_REVIEW') {
-    return agentRun.final_response ? <p className="agent-chat-response">{agentRun.final_response}</p> : null;
-  }
-  if (agentRun.intent === 'SUGGEST_RENAME') {
+  if (taskResult.response_type === 'rename_plan') {
     return (
       <>
         {operationPlan && token ? (
@@ -91,8 +89,8 @@ export function AgentRunReceipt({
         ) : null}
         {renamePlanResult ? (
           <RenameSuggestionReceipt token={token} result={renamePlanResult} onOpenManagedFile={onOpenManagedFile} />
-        ) : agentRun.final_response ? (
-          <p className="agent-chat-response">{agentRun.final_response}</p>
+        ) : taskResult.final_response ? (
+          <p className="agent-chat-response">{taskResult.final_response}</p>
         ) : null}
       </>
     );
@@ -109,9 +107,9 @@ export function AgentRunReceipt({
     );
   }
 
-  if (agentRun.intent === 'SUMMARIZE_DOCUMENTS' || agentRun.intent === 'ANSWER_DOCUMENTS') {
-    return agentRun.final_response ? (
-      <p className="agent-chat-response">{agentRun.final_response}</p>
+  if (taskResult.response_type === 'text') {
+    return taskResult.final_response ? (
+      <p className="agent-chat-response">{taskResult.final_response}</p>
     ) : null;
   }
 
@@ -120,14 +118,14 @@ export function AgentRunReceipt({
       return (
         <ManagedFileTreeReceipt
           files={managedFileResult.files}
-          rootKey={managedFileResult.rootKey}
+          rootKey={managedFileResult.root_key}
           onOpenManagedFile={onOpenManagedFile}
         />
       );
     }
     // 纯聊天、分类汇总、历史分类读取等任务没有逐文件处理结果时，只展示 Agent 文本回复。
-    return agentRun.final_response ? (
-      <p className="agent-chat-response">{agentRun.final_response}</p>
+    return taskResult.final_response ? (
+      <p className="agent-chat-response">{taskResult.final_response}</p>
     ) : null;
   }
 
@@ -136,11 +134,14 @@ export function AgentRunReceipt({
       <div className="agent-run-summary">
         <div>
           <strong>
-            <CheckCircle2 size={18} />
-            已处理 {results.length} 个文件
+            {pendingDecisions.length > 0 ? <AlertCircle size={18} /> : <CheckCircle2 size={18} />}
+            已处理 {taskResult.processed_count || results.length} 个文件
           </strong>
+          {pendingDecisions.length > 0 ? <span>{pendingDecisions.length} 个文件需要确认</span> : null}
         </div>
       </div>
+
+      {pendingDecisions.length > 0 ? <PendingDecisionList decisions={pendingDecisions} /> : null}
 
       {results.length > 0 ? (
         <div className="document-result-list">
@@ -155,11 +156,46 @@ export function AgentRunReceipt({
             />
           ))}
         </div>
-      ) : agentRun.final_response ? (
-        <p className="agent-final-response">{agentRun.final_response}</p>
+      ) : taskResult.final_response ? (
+        <p className="agent-final-response">{taskResult.final_response}</p>
       ) : null}
     </section>
   );
+}
+
+function PendingDecisionList({ decisions }: { decisions: Array<Record<string, unknown>> }) {
+  // 待确认卡只给出用户决策语义，不展示内部计划、Tool 或物理路径。
+  return (
+    <div className="task-pending-decisions">
+      {decisions.map((decision, index) => {
+        const message = String(decision.message || '这个文件需要你确认后才能继续整理。');
+        const choices = Array.isArray(decision.allowed_decisions)
+          ? decision.allowed_decisions.map((item) => decisionLabel(String(item)))
+          : [];
+        return (
+          <article className="task-pending-decision" key={`${String(decision.working_copy_id || '')}-${index}`}>
+            <strong>需要确认</strong>
+            <p>{message}</p>
+            {choices.length > 0 ? <span>可选处理方式：{choices.join('、')}</span> : null}
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function decisionLabel(value: string): string {
+  // 后端使用稳定枚举审计，普通用户只看到自然语言选项。
+  const labels: Record<string, string> = {
+    KEEP_BOTH: '同时保留',
+    KEEP_EXISTING: '保留已有文件',
+    REPLACE_EXISTING_WORKING_COPY: '用新文件替换已有工作副本',
+    DELETE_EXISTING_WORKING_COPY: '删除已有工作副本',
+    CONFIRM_CURRENT_NAME: '保留当前文件名',
+    PROVIDE_NEW_NAME: '告诉我新的文件名',
+    UPLOAD_READABLE_COPY: '上传可读取版本',
+  };
+  return labels[value] || value;
 }
 
 type ManagedFileTreeNode = {
@@ -262,47 +298,7 @@ function buildManagedFileTree(files: ManagedFileResult[]): ManagedFileTreeNode {
   return root;
 }
 
-function getManagedFileResult(toolInvocations: ToolInvocation[]): { rootKey: string; files: ManagedFileResult[] } | null {
-  // managed-file-list 的结构化输出用于前端交互树；纯文本 final_response 保留给历史兼容。
-  const invocation = toolInvocations.find((item) => item.tool_name === 'managed-file-list');
-  const output = invocation?.output_json;
-  if (!output || output.ok !== true || !Array.isArray(output.files)) {
-    return null;
-  }
-  const files = output.files.filter(isManagedFileResult);
-  const query = isRecord(output.query) ? output.query : {};
-  const rootKey = String(query.root_key || files[0]?.root_key || '受管目录');
-  return { rootKey, files };
-}
-
-function isManagedFileResult(value: unknown): value is ManagedFileResult {
-  // 运行时保护 API 数据，避免坏结构导致聊天页崩溃。
-  if (!isRecord(value)) {
-    return false;
-  }
-  return typeof value.root_key === 'string'
-    && typeof value.relative_path === 'string'
-    && typeof value.filename === 'string'
-    && typeof value.extension === 'string'
-    && typeof value.size_bytes === 'number'
-    && typeof value.status === 'string';
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  // API 输出进入组件前先做最小结构判断，避免任意 JSON 破坏回执渲染。
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
-}
-
 function isPersistedOperationPlanId(planId: string): boolean {
   // 仅真实 UUID 才访问详情接口，避免 operation-plan-pending 等占位值触发 404。
   return CHANGESET_ID_PATTERN.test(planId);
-}
-
-function getRenamePlanResult(invocations: ToolInvocation[]): RenamePlanResult | null {
-  // 重命名 UI 只消费对应 Tool 的结构化结果，避免误展示分类卡片。
-  const invocation = invocations.find((item) => item.tool_name === 'generate-rename-suggestions');
-  if (!invocation || invocation.output_json.kind !== 'rename_plan') {
-    return null;
-  }
-  return invocation.output_json as RenamePlanResult;
 }

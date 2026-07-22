@@ -94,6 +94,15 @@ export function DocumentResultCard({
               </div>
             </div>
           ) : null}
+          {result.risk_warnings && result.risk_warnings.length > 0 ? (
+            <div className="document-result-risk-warnings">
+              {result.risk_warnings.map((warning, warningIndex) => (
+                <p key={`${warning.code || 'risk'}-${warningIndex}`}>
+                  {warning.message || '文件存在需要注意的格式风险。'}
+                </p>
+              ))}
+            </div>
+          ) : null}
         </>
       )}
     </article>

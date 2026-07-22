@@ -5,17 +5,32 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from sqlalchemy.orm import Session
 
 from app.modules.agent.service import AgentRuntimeService
+from app.modules.agent.state import AgentRunResult
 from app.modules.conversations.context import ConversationAttachmentContextService
 from app.modules.conversations.repository import ConversationRepository
 from app.modules.conversations.schemas import (
     ConversationDetailResponse,
+    ConversationMessage,
     SendMessageRequest,
-    SendMessageResponse,
 )
 from app.modules.files.repository import FileRepository
+
+
+@dataclass(frozen=True)
+class ConversationExecutionResult:
+    """消息服务内部执行结果，供路由投影和服务层测试使用。
+
+    `agent_run` 只在后端进程内流转，HTTP 路由必须显式转换成不含内部载荷的
+    `SendMessageResponse`。
+    """
+
+    message: ConversationMessage
+    agent_run: AgentRunResult
 
 
 class ConversationMessageService:
@@ -33,10 +48,10 @@ class ConversationMessageService:
         conversation_id: str,
         request: SendMessageRequest,
         user_id: str = "user-memory",
-    ) -> SendMessageResponse:
+    ) -> ConversationExecutionResult:
         """创建持久化用户消息，并把消息交给 Agent Runtime 执行。
 
-        当前没有接认证和数据库，所以 `user_id` 使用占位值；后续接 JWT 后必须来自认证上下文。
+        HTTP 调用必须传入认证用户 ID；默认值只保留给不经过 HTTP 的最小服务测试。
         """
 
         attachment_context = ConversationAttachmentContextService(self.repository).resolve(
@@ -76,7 +91,10 @@ class ConversationMessageService:
         )
         self.db.commit()
         self.db.refresh(message)
-        return SendMessageResponse(message=self.repository.to_schema(message), agent_run=agent_run)
+        return ConversationExecutionResult(
+            message=self.repository.to_schema(message),
+            agent_run=agent_run,
+        )
 
     def get_conversation_detail(
         self,

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.db.models import User
+from app.modules.agent.user_receipt import build_user_task_receipt
 from app.modules.auth.dependencies import get_current_user
 from app.modules.conversations.schemas import ConversationDetailResponse, SendMessageRequest, SendMessageResponse
 from app.modules.conversations.service import ConversationMessageService
@@ -42,13 +43,15 @@ def send_message_to_agent(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> SendMessageResponse:
-    """接收用户消息并启动一次内存态 AgentRun。
+    """接收登录用户消息，执行 AgentRun 后只返回普通用户任务投影。"""
 
-    这里暂不接大模型和认证；数据库只用于持久化 message、AgentRun 和 ToolInvocation。
-    """
-
-    return ConversationMessageService(db=db).send_user_message(
+    execution = ConversationMessageService(db=db).send_user_message(
         conversation_id=conversation_id,
         request=request,
         user_id=current_user.id,
+    )
+    # 普通消息路由必须在后端完成显式投影，不能把内部 AgentRun 交给前端自行隐藏。
+    return SendMessageResponse(
+        message=execution.message,
+        task_result=build_user_task_receipt(execution.agent_run),
     )

@@ -68,7 +68,7 @@ def test_post_message_uses_authenticated_user_id():
 
     assert response.status_code == 200
     assert response.json()["message"]["user_id"] == user_id
-    assert response.json()["agent_run"]["user_id"] == user_id
+    assert "agent_run" not in response.json()
 
     db = SessionLocal()
     try:

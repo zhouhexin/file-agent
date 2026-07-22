@@ -43,7 +43,7 @@
 `classify-managed-files`, `job-status-read`, `feedback-record`
 
 ## Open Source Backing
-业务编排与分类边界为项目自研。正文解析间接使用 Docling、python-docx、PyMuPDF、openpyxl、xlrd 和 OCR adapter；图谱候选增强间接使用 Neo4j 与 `neo4j-graphrag-python`。开源组件只作为受控 Tool/Service adapter，不得直接操作受管源文件。
+业务编排与分类边界为项目自研。正文解析间接使用 Docling、python-docx、PyMuPDF、openpyxl、LibreOffice 和 OCR adapter；其中 `.xls` 先隔离转换为临时 `.xlsx`，不使用 xlrd。图谱候选增强间接使用 Neo4j 与 `neo4j-graphrag-python`。开源组件只作为受控 Tool/Service adapter，不得直接操作受管源文件。
 
 ## Steps
 1. Planner 判断 `CLASSIFY_MANAGED_FILES`，在普通上传附件分类分支之前解析受管目录范围。

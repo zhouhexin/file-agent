@@ -10,7 +10,7 @@ from io import BytesIO
 from fastapi.testclient import TestClient
 import openpyxl
 
-from app.db.models import Conversation, Message
+from app.db.models import AgentRun, Conversation, Message, ToolInvocation
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -57,10 +57,29 @@ def _xlsx_with_formula_error() -> bytes:
     return buffer.getvalue()
 
 
-def test_post_message_starts_agent_run():
-    """发送用户消息后，接口必须返回 message 和持久化 AgentRun 结果。"""
+def _latest_agent_audit(session_factory) -> tuple[AgentRun, list[str]]:
+    """从测试数据库读取最近一次内部运行，普通消息响应本身不得暴露这些字段。"""
 
-    client, _ = client_with_database()
+    with session_factory() as db:
+        run = db.query(AgentRun).order_by(AgentRun.created_at.desc()).first()
+        assert run is not None
+        tool_names = [
+            item.tool_name
+            for item in (
+                db.query(ToolInvocation)
+                .filter(ToolInvocation.agent_run_id == run.id)
+                .order_by(ToolInvocation.created_at.asc())
+                .all()
+            )
+        ]
+        db.expunge(run)
+        return run, tool_names
+
+
+def test_post_message_starts_agent_run():
+    """发送消息后必须持久化 AgentRun，但普通响应只能返回安全任务投影。"""
+
+    client, session_factory = client_with_database()
     headers = _auth_header(client)
     document_id = _upload_document(client, headers)
 
@@ -77,22 +96,32 @@ def test_post_message_starts_agent_run():
     data = response.json()
     assert data["message"]["conversation_id"] == "conv-1"
     assert data["message"]["role"] == "user"
-    assert data["agent_run"]["status"] == "COMPLETED"
-    assert data["agent_run"]["intent"] == "CLASSIFY_FILES"
-    assert data["agent_run"]["selected_skills"] == [
+    assert "agent_run" not in data
+    run, tool_names = _latest_agent_audit(session_factory)
+    assert run.status == "COMPLETED"
+    assert run.intent == "CLASSIFY_FILES"
+    assert run.selected_skills_json == [
         "chat-intake",
         "document-text-extract",
         "document-classification",
         "change-report",
     ]
-    assert [item["tool_name"] for item in data["agent_run"]["tool_invocations"]] == [
-        "extract-document-text",
-    ]
+    assert tool_names == ["extract-document-text"]
+    # 普通用户投影不能要求前端理解 Skill 或 Tool，也不能携带解析器和内部路径字段。
+    task_result = data["task_result"]
+    assert task_result["task_id"] == run.id
+    assert task_result["task_status"] == "completed"
+    assert task_result["response_type"] == "file_results"
+    assert "selected_skills" not in task_result
+    assert "tool_invocations" not in task_result
+    assert "tool_results" not in task_result
+    assert "extractor" not in task_result["document_results"][0]
+    assert "relative_path" not in task_result["document_results"][0]
     clear_overrides()
 
 
-def test_get_conversation_returns_messages_with_agent_runs_and_attachments():
-    """读取会话详情时必须返回刷新页面所需的消息、附件和 AgentRun 结果。"""
+def test_get_conversation_returns_messages_with_task_results_and_attachments():
+    """读取会话详情时必须返回附件和安全任务投影，不返回内部 AgentRun。"""
 
     client, _ = client_with_database()
     headers = _auth_header(client, "history-user")
@@ -118,13 +147,14 @@ def test_get_conversation_returns_messages_with_agent_runs_and_attachments():
     assert history_message["content"] == "帮我读取并分类这批文件"
     assert history_message["attachments"][0]["document_id"] == document_id
     assert history_message["attachments"][0]["filename"] == "message.txt"
-    assert history_message["agent_run"]["status"] == "COMPLETED"
-    assert history_message["agent_run"]["final_response"]
-    assert len(history_message["agent_run"]["document_results"]) == 1
-    assert history_message["agent_run"]["document_results"][0]["document_id"] == document_id
-    assert history_message["agent_run"]["document_results"][0]["filename"] == "message.txt"
-    assert history_message["agent_run"]["document_results"][0]["extraction_status"] == "COMPLETED"
-    assert history_message["agent_run"]["tool_invocations"][0]["tool_name"] == "extract-document-text"
+    assert "agent_run" not in history_message
+    assert history_message["task_result"]["task_status"] == "completed"
+    assert history_message["task_result"]["final_response"]
+    assert len(history_message["task_result"]["document_results"]) == 1
+    assert history_message["task_result"]["document_results"][0]["document_id"] == document_id
+    assert history_message["task_result"]["document_results"][0]["filename"] == "message.txt"
+    assert history_message["task_result"]["document_results"][0]["extraction_status"] == "COMPLETED"
+    assert "tool_invocations" not in history_message["task_result"]
     clear_overrides()
 
 
@@ -236,8 +266,8 @@ def test_message_can_reference_previous_uploaded_attachment():
     assert second_response.status_code == 200
     data = second_response.json()
     assert data["message"]["attachments"] == [{"document_id": document_id}]
-    assert data["agent_run"]["status"] == "COMPLETED"
-    assert data["agent_run"]["document_results"][0]["document_id"] == document_id
+    assert data["task_result"]["task_status"] == "completed"
+    assert data["task_result"]["document_results"][0]["document_id"] == document_id
     clear_overrides()
 
 
@@ -274,15 +304,15 @@ def test_message_can_reference_second_previous_attachment_by_ordinal():
     assert second_response.status_code == 200
     data = second_response.json()
     assert data["message"]["attachments"] == [{"document_id": second_document_id}]
-    assert data["agent_run"]["status"] == "COMPLETED"
-    assert data["agent_run"]["document_results"][0]["document_id"] == second_document_id
+    assert data["task_result"]["task_status"] == "completed"
+    assert data["task_result"]["document_results"][0]["document_id"] == second_document_id
     clear_overrides()
 
 
 def test_message_can_reference_previous_attachment_by_filename_fragment():
     """用户按文件名片段提问时，应自动引用当前会话中的对应历史附件。"""
 
-    client, _ = client_with_database()
+    client, session_factory = client_with_database()
     headers = _auth_header(client, "filename-reference-user")
     document_id = _upload_document(
         client,
@@ -313,16 +343,17 @@ def test_message_can_reference_previous_attachment_by_filename_fragment():
     assert second_response.status_code == 200
     data = second_response.json()
     assert data["message"]["attachments"] == [{"document_id": document_id}]
-    assert data["agent_run"]["intent"] == "ANALYZE_SPREADSHEET"
-    assert [item["tool_name"] for item in data["agent_run"]["tool_invocations"]] == ["analyze-spreadsheet"]
-    assert "AgentRun completed" not in (data["agent_run"]["final_response"] or "")
+    run, tool_names = _latest_agent_audit(session_factory)
+    assert run.intent == "ANALYZE_SPREADSHEET"
+    assert tool_names == ["analyze-spreadsheet"]
+    assert "AgentRun completed" not in (data["task_result"]["final_response"] or "")
     clear_overrides()
 
 
 def test_message_can_reference_previous_attachment_by_fuzzy_filename_tokens():
     """用户只说文件名中的核心词时，应通过年份和关键词匹配到历史附件。"""
 
-    client, _ = client_with_database()
+    client, session_factory = client_with_database()
     headers = _auth_header(client, "fuzzy-filename-reference-user")
     old_document_id = _upload_document(
         client,
@@ -359,16 +390,17 @@ def test_message_can_reference_previous_attachment_by_fuzzy_filename_tokens():
     assert second_response.status_code == 200
     data = second_response.json()
     assert data["message"]["attachments"] == [{"document_id": target_document_id}]
-    assert data["agent_run"]["intent"] == "ANALYZE_SPREADSHEET"
-    assert [item["tool_name"] for item in data["agent_run"]["tool_invocations"]] == ["analyze-spreadsheet"]
-    assert "AgentRun completed" not in (data["agent_run"]["final_response"] or "")
+    run, tool_names = _latest_agent_audit(session_factory)
+    assert run.intent == "ANALYZE_SPREADSHEET"
+    assert tool_names == ["analyze-spreadsheet"]
+    assert "AgentRun completed" not in (data["task_result"]["final_response"] or "")
     clear_overrides()
 
 
 def test_message_can_validate_uploaded_spreadsheet_formula_errors():
     """聊天入口中的表格校验请求必须路由到 validate-spreadsheet。"""
 
-    client, _ = client_with_database()
+    client, session_factory = client_with_database()
     headers = _auth_header(client, "spreadsheet-validation-user")
     document_id = _upload_document(
         client,
@@ -388,9 +420,10 @@ def test_message_can_validate_uploaded_spreadsheet_formula_errors():
 
     assert response.status_code == 200
     data = response.json()
-    assert data["agent_run"]["intent"] == "VALIDATE_SPREADSHEET"
-    assert [item["tool_name"] for item in data["agent_run"]["tool_invocations"]] == ["validate-spreadsheet"]
-    assert "#REF!" in (data["agent_run"]["final_response"] or "")
+    run, tool_names = _latest_agent_audit(session_factory)
+    assert run.intent == "VALIDATE_SPREADSHEET"
+    assert tool_names == ["validate-spreadsheet"]
+    assert "#REF!" in (data["task_result"]["final_response"] or "")
     clear_overrides()
 
 
@@ -425,7 +458,7 @@ def test_message_can_summarize_previous_classification_results():
     )
 
     assert second_response.status_code == 200
-    final_response = second_response.json()["agent_run"]["final_response"]
+    final_response = second_response.json()["task_result"]["final_response"]
     assert "已汇总" in final_response
     assert "分类建议" in final_response
     assert "基础洞察" not in final_response
@@ -486,7 +519,7 @@ def test_just_uploaded_classification_uses_latest_attachment_batch_only():
     assert summary_response.status_code == 200
     data = summary_response.json()
     assert data["message"]["attachments"] == [{"document_id": latest_id}]
-    final_response = data["agent_run"]["final_response"]
+    final_response = data["task_result"]["final_response"]
     assert "最新批次-财务.txt" in final_response
     assert "旧批次-职称.txt" not in final_response
     assert "旧批次-科研.txt" not in final_response

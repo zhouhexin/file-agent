@@ -1,5 +1,5 @@
 // 聊天页展示工具只负责前端呈现规则，不承担文件权限或后端路径校验。
-import type { ChangeItem, UploadedFile } from '../../types';
+import type { UploadedFile } from '../../types';
 
 export type ChatAttachment = UploadedFile & {
   // 图片预览使用浏览器本地 object URL，发送后仍仅以 document_id 作为后端引用。
@@ -24,13 +24,6 @@ export type AttachmentListProps = {
   onOpen?: (file: ChatAttachment) => void;
   onRemove?: (documentId: string) => void;
 };
-
-const FILE_MUTATION_CHANGE_TYPES = new Set([
-  'FILE_RENAMED',
-  'FILE_MOVED',
-  'FILE_DELETED',
-  'FILE_OVERWRITTEN',
-]);
 
 export function formatFileSize(sizeBytes: number): string {
   // 文件大小只用于界面展示，后端仍保存精确字节数。
@@ -83,11 +76,6 @@ export function canPreviewFileInfo(filenameValue: string, contentType: string): 
 export function formatConfidence(confidence: number): string {
   // 分类置信度统一转成整数百分比，避免卡片里出现过多小数。
   return `${Math.round(confidence * 100)}%`;
-}
-
-export function hasFileMutation(items: ChangeItem[] | null): boolean {
-  // 只有真实文件改名、移动、删除、覆盖才算修改原始文件；解析和分类建议不算。
-  return Boolean(items?.some((item) => FILE_MUTATION_CHANGE_TYPES.has(item.change_type)));
 }
 
 export function findAttachmentByDocumentId(

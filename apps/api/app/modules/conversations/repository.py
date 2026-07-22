@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import AgentRun, Conversation, Document, Message
 from app.modules.agent.repository import AgentRunRepository
+from app.modules.agent.user_receipt import build_user_task_receipt
 from app.modules.conversations.schemas import (
     ConversationAttachmentSummary,
     ConversationDetailResponse,
@@ -285,6 +286,11 @@ class ConversationRepository:
         document_map = self._load_document_map(messages=messages, user_id=user_id)
         agent_run_map = self._load_agent_run_map(messages=messages)
         agent_repository = AgentRunRepository(self.db)
+        # 同一 AgentRun 只组装一次完整审计结果，再生成普通用户投影；完整结果不进入会话响应。
+        agent_results = {
+            message_id: agent_repository.to_result(run)
+            for message_id, run in agent_run_map.items()
+        }
         return ConversationDetailResponse(
             id=conversation.id,
             user_id=conversation.user_id,
@@ -307,9 +313,9 @@ class ConversationRepository:
                         for item in message.attachments_json
                         if isinstance(item, dict) and not item.get("document_id")
                     ],
-                    agent_run=(
-                        agent_repository.to_result(agent_run_map[message.id])
-                        if message.id in agent_run_map
+                    task_result=(
+                        build_user_task_receipt(agent_results[message.id])
+                        if message.id in agent_results
                         else None
                     ),
                 )

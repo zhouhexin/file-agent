@@ -9,14 +9,18 @@ from app.db.models import (
     DocumentClassificationSummary,
     DocumentSummary,
     DocumentVersion,
+    FileRenameReviewItem,
     ManagedFile,
     TrashEntry,
     UploadArchiveRecord,
     UploadDuplicateReview,
+    User,
     WorkingCopy,
     WorkingCopyPathRecord,
 )
+from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
+from app.modules.file_lifecycle.risk import inspect_basic_file_risks
 from app.modules.managed_files.worker import process_next_filesystem_job
 from app.tests.helpers import clear_overrides, client_with_database
 
@@ -177,6 +181,227 @@ def test_duplicate_upload_waits_for_dialog_and_can_use_existing(monkeypatch, tmp
         clear_overrides()
 
 
+def test_low_confidence_initial_name_keeps_upload_name_and_returns_pending_receipt(monkeypatch, tmp_path):
+    """低置信度首次命名必须保留上传名，并在普通回执中请求自然语言确认。"""
+
+    _configure(monkeypatch, tmp_path)
+    original_suggest = UploadedRenameSuggestionService.suggest_for_initial_import
+
+    def force_needs_review(self, *, document):
+        """复用真实解析结果，仅把命名质量门禁固定为待确认。"""
+
+        suggestion, extraction = original_suggest(self, document=document)
+        return {
+            **suggestion,
+            "status": "NEEDS_REVIEW",
+            "proposed_filename": None,
+            "warnings": ["测试固定为低置信度"],
+        }, extraction
+
+    monkeypatch.setattr(
+        UploadedRenameSuggestionService,
+        "suggest_for_initial_import",
+        force_needs_review,
+    )
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "low-confidence-owner")
+    upload = client.post(
+        "/api/files/upload",
+        headers=headers,
+        data={"conversation_id": "low-confidence-conv"},
+        files={"file": ("原上传名称.txt", b"2026 annual scholarship material", "text/plain")},
+    ).json()
+
+    _drain(SessionLocal)
+    working_copy = client.get("/api/working-copies", headers=headers).json()[0]
+    history = client.get("/api/conversations/low-confidence-conv", headers=headers).json()
+    task_result = history["messages"][-1]["task_result"]
+
+    assert working_copy["filename"] == "原上传名称.txt"
+    assert task_result["task_status"] == "needs_attention"
+    assert task_result["processed_count"] == 1
+    assert task_result["document_results"][0]["working_copy_id"] == working_copy["id"]
+    assert task_result["document_results"][0]["filename"] == "原上传名称.txt"
+    assert task_result["pending_decisions"][0]["reason"] == "LOW_CONFIDENCE_RENAME"
+    db = SessionLocal()
+    try:
+        review = db.query(FileRenameReviewItem).filter_by(document_id=working_copy["document_id"]).one()
+        assert review.status == "NEEDS_REVIEW"
+        assert review.review_context_json["reason"] == "LOW_CONFIDENCE_RENAME"
+        assert db.get(Document, upload["document_id"]).original_filename == "原上传名称.txt"
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_initial_filename_conflict_waits_for_dialog_without_version_suffix(monkeypatch, tmp_path):
+    """不同内容得到同一目标名时必须保留新文件上传名，不能自动追加版本后缀。"""
+
+    _configure(monkeypatch, tmp_path)
+    original_suggest = UploadedRenameSuggestionService.suggest_for_initial_import
+
+    def force_same_name(self, *, document):
+        """固定两个文件的高置信度目标名，同时保留真实解析链路。"""
+
+        suggestion, extraction = original_suggest(self, document=document)
+        return {
+            **suggestion,
+            "status": "READY",
+            "proposed_filename": "2026_统一材料.txt",
+            "warnings": [],
+            "errors": [],
+        }, extraction
+
+    def force_same_category(self, **_kwargs):
+        """让两个文件落入同一受控 taxonomy 路径以触发真实路径冲突。"""
+
+        return {
+            "status": "COMPLETED",
+            "categories": [
+                {
+                    "name": "奖助学金",
+                    "category_id": "student-affairs.scholarship",
+                    "category_path": ["学生工作", "奖助学金"],
+                    "confidence": 0.95,
+                    "status": "SUGGESTED",
+                    "source": "rule",
+                    "evidence_items": [{"type": "text_quote", "quote": "材料"}],
+                }
+            ],
+            "summary_status": "FULL_TEXT_FALLBACK",
+        }
+
+    monkeypatch.setattr(
+        UploadedRenameSuggestionService,
+        "suggest_for_initial_import",
+        force_same_name,
+    )
+    monkeypatch.setattr(
+        "app.modules.file_lifecycle.organizer.DocumentClassificationService.classify",
+        force_same_category,
+    )
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "filename-conflict-owner")
+    client.post(
+        "/api/files/upload",
+        headers=headers,
+        data={"conversation_id": "filename-conflict-conv"},
+        files={"file": ("第一份.txt", b"first unique material", "text/plain")},
+    )
+    _drain(SessionLocal)
+    client.post(
+        "/api/files/upload",
+        headers=headers,
+        data={"conversation_id": "filename-conflict-conv"},
+        files={"file": ("第二份.txt", b"second completely different content", "text/plain")},
+    )
+    _drain(SessionLocal)
+
+    copies = client.get("/api/working-copies", headers=headers).json()
+    assert sorted(item["filename"] for item in copies) == ["2026_统一材料.txt", "第二份.txt"]
+    assert not any("第二版" in item["filename"] for item in copies)
+    history = client.get("/api/conversations/filename-conflict-conv", headers=headers).json()
+    conflict_receipts = [
+        message["task_result"]
+        for message in history["messages"]
+        if message.get("task_result")
+        and message["task_result"].get("pending_decisions")
+        and message["task_result"]["pending_decisions"][0].get("reason") == "FILENAME_CONFLICT"
+    ]
+    assert len(conflict_receipts) == 1
+    pending = conflict_receipts[0]["pending_decisions"][0]
+    assert pending["target_filename"] == "2026_统一材料.txt"
+    assert pending["allowed_decisions"] == [
+        "KEEP_BOTH",
+        "KEEP_EXISTING",
+        "REPLACE_EXISTING_WORKING_COPY",
+        "DELETE_EXISTING_WORKING_COPY",
+    ]
+    db = SessionLocal()
+    try:
+        review = next(
+            item
+            for item in db.query(FileRenameReviewItem).all()
+            if item.review_context_json.get("reason") == "FILENAME_CONFLICT"
+        )
+        assert review.status == "NEEDS_REVIEW"
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_macro_risk_is_reported_without_claiming_virus_scan(tmp_path):
+    """宏格式只做风险提示且绝不执行，病毒扫描状态必须明确为未实现。"""
+
+    macro_file = tmp_path / "含宏表.xlsm"
+    macro_file.write_bytes(b"macro-container-placeholder")
+
+    assessment = inspect_basic_file_risks(
+        file_path=macro_file,
+        filename=macro_file.name,
+        content_type="application/vnd.ms-excel.sheet.macroenabled.12",
+    )
+
+    assert assessment.status == "WARNING"
+    assert assessment.macro_risk is True
+    assert assessment.virus_scan_status == "NOT_IMPLEMENTED"
+    assert any(item["code"] == "OFFICE_MACRO_RISK" for item in assessment.warnings)
+
+
+def test_encrypted_pdf_archives_original_but_stops_before_working_copy(monkeypatch, tmp_path):
+    """加密文件必须保护不可变原件并进入待复核，系统不得尝试破解或创建工作副本。"""
+
+    import fitz
+
+    _configure(monkeypatch, tmp_path)
+    encrypted_path = tmp_path / "encrypted.pdf"
+    document = fitz.open()
+    document.new_page().insert_text((72, 72), "encrypted material")
+    document.save(
+        encrypted_path,
+        encryption=fitz.PDF_ENCRYPT_AES_256,
+        owner_pw="owner-secret",
+        user_pw="user-secret",
+    )
+    document.close()
+    encrypted_bytes = encrypted_path.read_bytes()
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "encrypted-file-owner")
+    upload = client.post(
+        "/api/files/upload",
+        headers=headers,
+        data={"conversation_id": "encrypted-file-conv"},
+        files={"file": ("加密材料.pdf", encrypted_bytes, "application/pdf")},
+    ).json()
+
+    processed = _drain(SessionLocal)
+
+    assert len(processed) == 2
+    status = client.get(
+        f"/api/uploads/{upload['upload_document_version_id']}/archive-status",
+        headers=headers,
+    ).json()
+    assert status["status"] == "NEEDS_REVIEW"
+    assert status["working_copy_id"] is None
+    history = client.get("/api/conversations/encrypted-file-conv", headers=headers).json()
+    task_result = history["messages"][-1]["task_result"]
+    assert task_result["task_status"] == "needs_attention"
+    assert task_result["pending_decisions"][0]["reason"] == "ENCRYPTED_FILE"
+    db = SessionLocal()
+    try:
+        archive = db.query(UploadArchiveRecord).filter_by(
+            upload_document_version_id=upload["upload_document_version_id"]
+        ).one()
+        original = db.get(ManagedFile, archive.managed_file_id)
+        assert archive.risk_assessment_json["encrypted"] is True
+        assert archive.risk_assessment_json["virus_scan_status"] == "NOT_IMPLEMENTED"
+        assert (tmp_path / "originals" / original.relative_path).read_bytes() == encrypted_bytes
+        assert db.query(WorkingCopy).count() == 0
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def test_cross_user_duplicate_candidate_is_sanitized(monkeypatch, tmp_path):
     """跨用户重复候选只能提示存在相同内容，不能暴露文件名、路径或业务 ID。"""
 
@@ -301,3 +526,50 @@ def test_rename_move_trash_and_restore_only_change_working_copy(monkeypatch, tmp
     finally:
         db.close()
         clear_overrides()
+
+
+def test_confirmed_file_action_tool_executes_persisted_working_copy_plan(monkeypatch, tmp_path):
+    """Agent Tool 必须执行真实工作副本计划，并返回可追踪 ChangeSet。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "tool-operation-owner")
+    _upload(client, headers, "待整理通知.txt", b"controlled rename body")
+    _drain(SessionLocal)
+    working_copy = client.get("/api/working-copies", headers=headers).json()[0]
+    plan = client.post(
+        "/api/operations/plans",
+        headers=headers,
+        json={
+            "conversation_id": "tool-confirmed-operation",
+            "operation_type": "RENAME_WORKING_COPIES",
+            "reason": "验证 Tool 真实执行入口",
+            "items": [
+                {
+                    "working_copy_id": working_copy["id"],
+                    "after": {"filename": "已整理通知.txt"},
+                }
+            ],
+        },
+    ).json()
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.username == "tool-operation-owner").one()
+        invocation = ToolRegistry(db=db, user_id=user.id).invoke(
+            "confirmed-file-action",
+            {
+                "operation_plan_id": plan["id"],
+                "confirmation_text": "确认重命名工作副本",
+            },
+        )
+
+        assert invocation.status == "COMPLETED"
+        assert invocation.output_json["status"] == "EXECUTED"
+        assert invocation.changeset_id
+    finally:
+        db.close()
+
+    renamed = client.get(f"/api/working-copies/{working_copy['id']}", headers=headers).json()
+    assert renamed["filename"] == "已整理通知.txt"
+    clear_overrides()

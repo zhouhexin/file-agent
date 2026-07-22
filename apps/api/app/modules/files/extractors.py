@@ -180,11 +180,7 @@ def _extract_excel_text(file_path: Path) -> Dict[str, Any]:
 
 
 def _extract_legacy_xls_text(file_path: Path) -> Dict[str, Any]:
-    """优先使用 xlrd 读取旧版 xls，失败后再尝试 LibreOffice 转换。"""
-
-    direct_result = _extract_xls_text_with_xlrd(file_path)
-    if direct_result.get("ok"):
-        return direct_result
+    """把旧版 XLS 隔离转换为临时 XLSX 后再读取，禁止直接解析原件。"""
 
     with tempfile.TemporaryDirectory() as temp_dir:
         try:
@@ -193,16 +189,10 @@ def _extract_legacy_xls_text(file_path: Path) -> Dict[str, Any]:
                 output_dir=Path(temp_dir),
             )
         except SpreadsheetConversionError as exc:
-            direct_error = direct_result.get("error") or {}
             return _failed(
                 "excel-xls",
-                "XLS_READ_FAILED",
-                "；".join(
-                    [
-                        str(direct_error.get("message") or "xlrd 无法读取旧版 xls 文件"),
-                        exc.message,
-                    ]
-                ),
+                exc.code,
+                exc.message,
             )
 
         result = _extract_excel_text(converted_path)
@@ -217,66 +207,6 @@ def _extract_legacy_xls_text(file_path: Path) -> Dict[str, Any]:
         metadata["converted_from"] = ".xls"
         metadata["converter"] = "libreoffice"
     return result
-
-
-def _extract_xls_text_with_xlrd(file_path: Path) -> Dict[str, Any]:
-    """使用 xlrd 直接读取 BIFF xls，不执行宏或外部链接。"""
-
-    try:
-        import xlrd
-    except ImportError:
-        return _failed("excel-xls-xlrd", "XLS_READER_NOT_AVAILABLE", "缺少 xlrd，无法直接读取旧版 xls 文件。")
-
-    try:
-        workbook = xlrd.open_workbook(str(file_path), on_demand=True)
-        pages: List[Dict[str, Any]] = []
-        for sheet_index, sheet in enumerate(workbook.sheets(), start=1):
-            lines: List[str] = []
-            for row_index in range(sheet.nrows):
-                values = [
-                    _format_xlrd_cell(
-                        cell=sheet.cell(row_index, column_index),
-                        workbook=workbook,
-                        xlrd_module=xlrd,
-                    )
-                    for column_index in range(sheet.ncols)
-                ]
-                if any(value for value in values):
-                    lines.append("\t".join(values))
-            pages.append(
-                {
-                    "page_number": sheet_index,
-                    "sheet_name": sheet.name,
-                    "text": "\n".join(lines),
-                    "metadata": {
-                        "sheet_index": sheet_index,
-                        "reader": "xlrd",
-                        "source_format": ".xls",
-                    },
-                }
-            )
-        workbook.release_resources()
-    except Exception as exc:
-        return _failed("excel-xls-xlrd", "XLS_DIRECT_READ_FAILED", f"xlrd 读取 xls 失败：{exc}")
-    return _completed("excel-xls-xlrd", pages)
-
-
-def _format_xlrd_cell(*, cell: Any, workbook: Any, xlrd_module: Any) -> str:
-    """把 xlrd 单元格转换为稳定文本，避免整数显示为浮点数。"""
-
-    value = cell.value
-    if cell.ctype == xlrd_module.XL_CELL_EMPTY:
-        return ""
-    if cell.ctype == xlrd_module.XL_CELL_DATE:
-        converted = xlrd_module.xldate_as_datetime(value, workbook.datemode)
-        return converted.date().isoformat() if converted.time().isoformat() == "00:00:00" else converted.isoformat(sep=" ")
-    if cell.ctype == xlrd_module.XL_CELL_NUMBER and isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    if cell.ctype == xlrd_module.XL_CELL_BOOLEAN:
-        return "TRUE" if bool(value) else "FALSE"
-    if cell.ctype == xlrd_module.XL_CELL_ERROR:
-        return f"#ERROR({value})"
-    return str(value)
 
 
 def _extract_docx_text(file_path: Path) -> Dict[str, Any]:

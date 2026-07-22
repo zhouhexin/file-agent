@@ -160,17 +160,18 @@ def test_post_message_persists_message_agent_run_and_tool_invocations():
 
     assert response.status_code == 200
     data = response.json()
-    agent_run_id = data["agent_run"]["agent_run_id"]
+    agent_run_id = data["task_result"]["task_id"]
     assert data["message"]["conversation_id"] == "conv-1"
-    assert data["agent_run"]["status"] == "COMPLETED"
-    assert [item["tool_name"] for item in data["agent_run"]["tool_invocations"]] == ["extract-document-text"]
-    assert data["agent_run"]["document_results"][0]["categories"][0]["suggestion_id"]
+    assert "agent_run" not in data
+    assert data["task_result"]["task_status"] == "completed"
+    assert data["task_result"]["document_results"][0]["categories"][0]["suggestion_id"]
 
     db = next(app.dependency_overrides[get_db]())
     try:
         assert db.query(Message).count() == 1
         assert db.query(AgentRun).count() == 1
         assert db.query(ToolInvocation).count() == 1
+        assert db.query(ToolInvocation).one().tool_name == "extract-document-text"
         stored_run = db.get(AgentRun, agent_run_id)
         assert stored_run is not None
         assert stored_run.plan_json["intent"] == "CLASSIFY_FILES"
@@ -183,7 +184,7 @@ def test_post_message_persists_message_agent_run_and_tool_invocations():
 
 
 def test_agent_run_query_endpoints_return_persisted_records():
-    """AgentRun 查询接口必须返回同一次持久化运行和对应 Tool 调用。"""
+    """普通用户不能读取内部运行详情，ops 可以读取持久化运行和 Tool 调用。"""
 
     client = _client_with_database()
     headers = _auth_header(client, username="persist-query-user")
@@ -197,15 +198,42 @@ def test_agent_run_query_endpoints_return_persisted_records():
             "attachments": [{"document_id": document_id}],
         },
     )
-    agent_run_id = create_response.json()["agent_run"]["agent_run_id"]
+    agent_run_id = create_response.json()["task_result"]["task_id"]
 
-    run_response = client.get(f"/api/agent-runs/{agent_run_id}")
-    invocations_response = client.get(f"/api/agent-runs/{agent_run_id}/tool-invocations")
+    user_run_response = client.get(f"/api/agent-runs/{agent_run_id}", headers=headers)
+    user_invocations_response = client.get(
+        f"/api/agent-runs/{agent_run_id}/tool-invocations",
+        headers=headers,
+    )
+    user_tools_response = client.get("/api/agent/tools", headers=headers)
+
+    assert user_run_response.status_code == 403
+    assert user_invocations_response.status_code == 403
+    assert user_tools_response.status_code == 403
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(User.username == "persist-query-user").one()
+        user.role = "ops"
+        db.commit()
+    finally:
+        db.close()
+
+    run_response = client.get(f"/api/agent-runs/{agent_run_id}", headers=headers)
+    invocations_response = client.get(
+        f"/api/agent-runs/{agent_run_id}/tool-invocations",
+        headers=headers,
+    )
+    tools_response = client.get("/api/agent/tools", headers=headers)
 
     assert run_response.status_code == 200
     assert run_response.json()["agent_run_id"] == agent_run_id
     assert run_response.json()["status"] == "COMPLETED"
     assert invocations_response.status_code == 200
+    assert tools_response.status_code == 200
+    assert "extract-document-text" in {
+        item["name"] for item in tools_response.json()["tools"]
+    }
     assert [
         item["tool_name"]
         for item in invocations_response.json()["tool_invocations"]
@@ -400,7 +428,7 @@ def test_classification_uses_full_document_pages_not_short_preview():
     )
 
     assert response.status_code == 200
-    assert "学校/人事师资/职称" in (response.json()["agent_run"]["final_response"] or "")
+    assert "学校/人事师资/职称" in (response.json()["task_result"]["final_response"] or "")
     db = next(app.dependency_overrides[get_db]())
     try:
         suggestion_names = [item.category_name for item in db.query(DocumentCategorySuggestion).all()]
@@ -652,7 +680,7 @@ def test_graph_uses_classification_service_not_context_loader_texts(monkeypatch)
     )
 
     assert response.status_code == 200
-    assert "学校/人事师资/职称" in (response.json()["agent_run"]["final_response"] or "")
+    assert "学校/人事师资/职称" in (response.json()["task_result"]["final_response"] or "")
     app.dependency_overrides.clear()
 
 
@@ -989,24 +1017,30 @@ def test_managed_file_snapshot_reuse_persists_changeset_items(monkeypatch, tmp_p
 
     assert first_response.status_code == 200
     assert second_response.status_code == 200
-    first_run = first_response.json()["agent_run"]
-    second_run = second_response.json()["agent_run"]
-    assert first_run["document_results"][0]["snapshot_status"] == "CREATED"
-    assert second_run["document_results"][0]["snapshot_status"] == "REUSED"
-    assert first_run["document_results"][0]["document_id"] == second_run["document_results"][0]["document_id"]
+    first_task = first_response.json()["task_result"]
+    second_task = second_response.json()["task_result"]
 
     db = next(app.dependency_overrides[get_db]())
     try:
         assert db.query(DocumentExtractionRun).count() == 1
         assert db.query(DocumentPage).count() == 1
         assert db.query(ManagedFileSnapshot).count() == 1
+        first_run = db.get(AgentRun, first_task["task_id"])
+        second_run = db.get(AgentRun, second_task["task_id"])
+        assert first_run is not None
+        assert second_run is not None
+        first_results = first_run.graph_state_json["document_results"]
+        second_results = second_run.graph_state_json["document_results"]
+        assert first_results[0]["snapshot_status"] == "CREATED"
+        assert second_results[0]["snapshot_status"] == "REUSED"
+        assert first_results[0]["document_id"] == second_results[0]["document_id"]
         first_types = {
             item.change_type
-            for item in db.query(ChangeItem).filter(ChangeItem.changeset_id == first_run["changeset_id"]).all()
+            for item in db.query(ChangeItem).filter(ChangeItem.changeset_id == first_run.changeset_id).all()
         }
         second_types = {
             item.change_type
-            for item in db.query(ChangeItem).filter(ChangeItem.changeset_id == second_run["changeset_id"]).all()
+            for item in db.query(ChangeItem).filter(ChangeItem.changeset_id == second_run.changeset_id).all()
         }
         assert {
             "MANAGED_FILE_SNAPSHOT_CREATED",
@@ -1046,13 +1080,14 @@ def test_managed_file_partial_batch_persists_partial_changeset(monkeypatch, tmp_
     )
 
     assert response.status_code == 200
-    agent_run = response.json()["agent_run"]
-    assert agent_run["tool_invocations"][0]["status"] == "PARTIAL"
-    assert [item["extraction_status"] for item in agent_run["document_results"]] == ["FAILED", "COMPLETED"]
+    task_result = response.json()["task_result"]
+    assert [item["extraction_status"] for item in task_result["document_results"]] == ["FAILED", "COMPLETED"]
 
     db = next(app.dependency_overrides[get_db]())
     try:
-        changeset = db.get(ChangeSet, agent_run["changeset_id"])
+        invocation = db.query(ToolInvocation).filter_by(agent_run_id=task_result["task_id"]).one()
+        assert invocation.status == "PARTIAL"
+        changeset = db.get(ChangeSet, invocation.changeset_id)
         assert changeset is not None
         assert changeset.status == "PARTIAL"
         change_types = [
@@ -1132,27 +1167,37 @@ def test_managed_directory_classification_uses_global_catalog_and_persists_sugge
 
     assert response.status_code == 200
     assert second_response.status_code == 200
-    agent_run = response.json()["agent_run"]
-    second_run = second_response.json()["agent_run"]
-    assert agent_run["intent"] == "CLASSIFY_MANAGED_FILES"
-    assert [item["tool_name"] for item in agent_run["tool_invocations"]] == [
-        "classify-managed-files"
-    ]
-    assert len(agent_run["document_results"]) == 1
-    result = agent_run["document_results"][0]
+    first_task = response.json()["task_result"]
+    second_task = second_response.json()["task_result"]
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        first_run = db.get(AgentRun, first_task["task_id"])
+        second_run = db.get(AgentRun, second_task["task_id"])
+        assert first_run is not None
+        assert second_run is not None
+        assert first_run.intent == "CLASSIFY_MANAGED_FILES"
+        invocation = db.query(ToolInvocation).filter_by(agent_run_id=first_run.id).one()
+        assert invocation.tool_name == "classify-managed-files"
+        assert len(first_run.graph_state_json["document_results"]) == 1
+        result = first_run.graph_state_json["document_results"][0]
+        second_result = second_run.graph_state_json["document_results"][0]
+    finally:
+        db.close()
+
     assert result["relative_path"] == "待分类/申报材料.txt"
     assert result["categories"][0]["category_path"] == ["学校", "人事师资", "职称"]
     assert result["categories"][0]["category_id"] == "school.hr.title-review"
     assert result["categories"][0]["status"] == "SUGGESTED"
     assert result["classification_reused"] is False
-    assert second_run["document_results"][0]["classification_reused"] is True
+    assert second_result["classification_reused"] is True
 
     db = next(app.dependency_overrides[get_db]())
     try:
         assert db.query(DocumentClassificationRun).count() == 2
         suggestions = db.query(DocumentCategorySuggestion).all()
         expected_suggestions = len(result["categories"]) + len(
-            second_run["document_results"][0]["categories"]
+            second_result["categories"]
         )
         assert len(suggestions) == expected_suggestions
         assert suggestions[0].category_path_json == ["学校", "人事师资", "职称"]
@@ -1166,7 +1211,7 @@ def test_managed_directory_classification_uses_global_catalog_and_persists_sugge
             db.query(ChangeItem)
             .filter(ChangeItem.change_type == "CATEGORY_SUGGESTION_REUSED")
             .count()
-            == len(second_run["document_results"][0]["categories"])
+            == len(second_result["categories"])
         )
     finally:
         db.close()
@@ -1231,10 +1276,10 @@ def test_large_managed_directory_classification_job_updates_original_agent_run(
     )
 
     assert response.status_code == 200
-    initial_run = response.json()["agent_run"]
-    assert initial_run["status"] == "WAITING_FOR_ASYNC_JOB"
-    assert len(initial_run["async_job_ids"]) == 1
-    job_id = initial_run["async_job_ids"][0]
+    initial_run = response.json()["task_result"]
+    assert initial_run["task_status"] == "processing"
+    assert len(initial_run["pending_job_ids"]) == 1
+    job_id = initial_run["pending_job_ids"][0]
     job_response = client.get(f"/api/filesystem-jobs/{job_id}", headers=headers)
     assert job_response.status_code == 200
     assert job_response.json()["status"] == "PENDING"
@@ -1251,7 +1296,7 @@ def test_large_managed_directory_classification_job_updates_original_agent_run(
 
         db.refresh(job)
         db.expire_all()
-        stored_run = db.get(AgentRun, initial_run["agent_run_id"])
+        stored_run = db.get(AgentRun, initial_run["task_id"])
         assert job.status == "COMPLETED"
         assert stored_run is not None
         assert stored_run.status == "COMPLETED"
@@ -1278,7 +1323,7 @@ def test_large_managed_directory_classification_job_updates_original_agent_run(
 
 
 def test_get_changeset_returns_items_for_owner():
-    """当前用户可以查询自己 AgentRun 生成的 ChangeSet 明细。"""
+    """普通用户不能读取 ChangeSet；提升为 ops 后可以查询内部审计明细。"""
 
     client = _client_with_database()
     headers = _auth_header(client, username="changeset-owner-user")
@@ -1299,7 +1344,26 @@ def test_get_changeset_returns_items_for_owner():
     )
 
     assert response.status_code == 200
-    changeset_id = response.json()["agent_run"]["changeset_id"]
+    task_id = response.json()["task_result"]["task_id"]
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        run = db.get(AgentRun, task_id)
+        assert run is not None
+        changeset_id = run.changeset_id
+    finally:
+        db.close()
+
+    denied_response = client.get(f"/api/changesets/{changeset_id}", headers=headers)
+    assert denied_response.status_code == 403
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(User.username == "changeset-owner-user").one()
+        user.role = "ops"
+        db.commit()
+    finally:
+        db.close()
+
     detail_response = client.get(f"/api/changesets/{changeset_id}", headers=headers)
 
     assert detail_response.status_code == 200
@@ -1316,7 +1380,7 @@ def test_get_changeset_returns_items_for_owner():
 
 
 def test_get_changeset_rejects_other_user():
-    """用户不能越权读取其他用户的 ChangeSet。"""
+    """其他普通用户也不能通过已知 ID 越权读取 ChangeSet。"""
 
     client = _client_with_database()
     owner_headers = _auth_header(client, username="changeset-private-owner")
@@ -1335,11 +1399,18 @@ def test_get_changeset_rejects_other_user():
             "attachments": [{"document_id": document_id}],
         },
     )
-    changeset_id = response.json()["agent_run"]["changeset_id"]
+    task_id = response.json()["task_result"]["task_id"]
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        run = db.get(AgentRun, task_id)
+        assert run is not None
+        changeset_id = run.changeset_id
+    finally:
+        db.close()
 
     detail_response = client.get(f"/api/changesets/{changeset_id}", headers=other_headers)
 
-    assert detail_response.status_code == 404
+    assert detail_response.status_code == 403
 
 
 def test_changeset_records_success_and_failed_documents_in_one_run():
@@ -1375,9 +1446,10 @@ def test_changeset_records_success_and_failed_documents_in_one_run():
     bad_document_id = _upload_document(
         client,
         headers,
-        filename="partial-bad.bin",
-        content=b"\x00\x01",
-        content_type="application/octet-stream",
+        # 上传边界应拒绝未知二进制扩展名，因此使用允许上传但内容损坏的 PDF 保护解析失败隔离行为。
+        filename="partial-bad.pdf",
+        content=b"not-a-valid-pdf",
+        content_type="application/pdf",
     )
 
     db = next(app.dependency_overrides[get_db]())
@@ -1412,7 +1484,7 @@ def test_changeset_records_success_and_failed_documents_in_one_run():
         )
         assert failed_item.target_document_id == bad_document_id
         assert failed_item.execution_status == "FAILED"
-        assert "暂不支持解析该文件类型" in failed_item.after_value_json["errors"][0]["message"]
+        assert failed_item.after_value_json["errors"][0]["message"]
         assert db.query(ChangeItem).filter(ChangeItem.change_type == "TEXT_EXTRACTED").count() == 1
         assert db.query(ChangeItem).filter(ChangeItem.change_type == "CATEGORY_SUGGESTED").count() >= 1
     finally:

@@ -14,7 +14,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
-from app.db.models import Document, DocumentVersion, ManagedFile
+from app.db.models import Document, DocumentClassificationSummary, DocumentVersion, ManagedFile
 from app.modules.classification.classifier_service import DocumentClassificationService
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 
@@ -32,6 +32,8 @@ class InitialOrganizationDecision:
     classification_summary_id: str | None
     summary_status: str
     rename_status: str
+    rename_metadata: dict[str, Any]
+    summary_metadata: dict[str, Any]
 
     def document_result(
         self,
@@ -53,6 +55,10 @@ class InitialOrganizationDecision:
             "document_summary_id": self.document_summary_id,
             "classification_summary_id": self.classification_summary_id,
             "summary_status": self.summary_status,
+            "year": self.rename_metadata.get("year"),
+            "document_type": self.summary_metadata.get("document_type"),
+            "keywords": list(self.summary_metadata.get("keywords") or []),
+            "entities": list(self.summary_metadata.get("entities") or []),
             "source": "initial-working-copy-organization",
             "warnings": list(extraction.get("warnings") or []),
             "errors": [extraction.get("error")] if extraction.get("error") else [],
@@ -90,6 +96,8 @@ class InitialWorkingCopyOrganizer:
                 classification_summary_id=None,
                 summary_status="DISABLED",
                 rename_status="DISABLED",
+                rename_metadata={},
+                summary_metadata={},
             )
 
         # 延迟导入避免重命名 OperationPlan 服务反向引用生命周期审计造成模块循环。
@@ -136,6 +144,11 @@ class InitialWorkingCopyOrganizer:
             classification_summary_id=classification_result.get("classification_summary_id"),
             summary_status=str(classification_result.get("summary_status") or "FULL_TEXT_FALLBACK"),
             rename_status=str(rename_suggestion.get("status") or "FAILED"),
+            rename_metadata=_rename_metadata(rename_suggestion),
+            summary_metadata=_summary_metadata(
+                db=self.db,
+                classification_summary_id=classification_result.get("classification_summary_id"),
+            ),
         )
 
 
@@ -196,3 +209,47 @@ def _safe_directory_component(value: str) -> str:
 
     cleaned = re.sub(r"[\x00-\x1f<>:\"/\\|?*]", "_", value).strip(" .")
     return cleaned[:120]
+
+
+def _rename_metadata(suggestion: dict[str, Any]) -> dict[str, Any]:
+    """提取用户回执需要的命名依据，文种不参与文件名模板。"""
+
+    def field_value(key: str) -> str | None:
+        value = suggestion.get(key)
+        if not isinstance(value, dict):
+            return None
+        resolved = str(value.get("value") or "").strip()
+        return resolved or None
+
+    return {
+        "year": field_value("year"),
+        "document_number": field_value("document_number"),
+        "title": field_value("title"),
+        "proposed_filename": suggestion.get("proposed_filename"),
+        "warnings": list(suggestion.get("warnings") or []),
+        "errors": list(suggestion.get("errors") or []),
+    }
+
+
+def _summary_metadata(
+    *,
+    db: Session,
+    classification_summary_id: str | None,
+) -> dict[str, Any]:
+    """从持久化分类摘要提取少量元数据，正文和完整摘要不得进入运行回执。"""
+
+    if not classification_summary_id:
+        return {}
+    summary = db.get(DocumentClassificationSummary, classification_summary_id)
+    if summary is None:
+        return {}
+    payload = dict(summary.summary_json or {})
+    entities = [
+        *[str(item) for item in payload.get("subjects", []) if item],
+        *[str(item) for item in payload.get("organizations", []) if item],
+    ]
+    return {
+        "document_type": str(payload.get("document_type") or "") or None,
+        "keywords": [str(item) for item in payload.get("keywords", []) if item][:8],
+        "entities": list(dict.fromkeys(entities))[:20],
+    }

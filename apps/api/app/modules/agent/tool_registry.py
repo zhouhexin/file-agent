@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Type
 
+from fastapi import HTTPException
 from pydantic import BaseModel, ValidationError
 
 from app.core.config import get_settings
@@ -68,6 +69,8 @@ from app.modules.managed_files.service import (
     sync_configured_managed_roots,
 )
 from app.modules.managed_files.snapshot_service import ManagedFileSnapshotService
+from app.modules.operations.schemas import OperationConfirmRequest
+from app.modules.operations.service import OperationPlanService
 from app.modules.retrieval.summary_search import WorkingCopySummarySearchService
 from app.modules.skills.managed_file_query_feedback import (
     SKILL_ID as MANAGED_FILE_QUERY_SKILL_ID,
@@ -461,16 +464,67 @@ def _operation_plan_handler(tool_input: BaseModel) -> Dict[str, Any]:
     }
 
 
-def _confirmed_action_handler(tool_input: BaseModel) -> Dict[str, Any]:
-    """返回已确认 OperationPlan 的执行占位结果。"""
+def _confirmed_action_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """创建确认后真实执行工作副本 OperationPlan 的请求级 handler。
 
-    return {
-        "ok": True,
-        "operation_plan_id": getattr(tool_input, "operation_plan_id"),
-        "status": "EXECUTED",
-        # "changeset_id": "changeset-confirmed-action",
-        "changeset_id": None,
-    }
+    Tool 只能接收计划 ID 和确认文本；目标工作副本、相对路径和 before/after 快照必须从
+    后端持久化 OperationPlan 重新读取。缺少数据库或用户上下文时返回失败，绝不能用
+    `EXECUTED` 占位掩盖未发生的物理动作。
+    """
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """校验当前用户所有权和确认状态后调用统一工作副本执行服务。"""
+
+        operation_plan_id = str(getattr(tool_input, "operation_plan_id"))
+        if db is None or user_id is None:
+            return {
+                "ok": False,
+                "operation_plan_id": operation_plan_id,
+                "status": "FAILED",
+                "error": {
+                    "code": "RUNTIME_CONTEXT_REQUIRED",
+                    "message": "确认文件操作缺少请求级数据库或用户上下文。",
+                },
+            }
+        current_user = db.get(User, user_id)
+        if current_user is None:
+            return {
+                "ok": False,
+                "operation_plan_id": operation_plan_id,
+                "status": "FAILED",
+                "error": {
+                    "code": "USER_NOT_FOUND",
+                    "message": "当前用户不存在，不能执行文件操作。",
+                },
+            }
+        try:
+            response = OperationPlanService(db).confirm_plan(
+                plan_id=operation_plan_id,
+                request=OperationConfirmRequest(
+                    confirmation=str(getattr(tool_input, "confirmation_text")),
+                ),
+                current_user=current_user,
+            )
+        except HTTPException as exc:
+            # HTTP 入口和 Agent Tool 共用业务服务，但 Tool 必须把可预期业务拒绝归一为结构化结果。
+            return {
+                "ok": False,
+                "operation_plan_id": operation_plan_id,
+                "status": "FAILED",
+                "error": {
+                    "code": f"OPERATION_PLAN_{exc.status_code}",
+                    "message": str(exc.detail),
+                },
+            }
+        return {
+            "ok": response.status in {"EXECUTED", "PARTIAL"},
+            "operation_plan_id": response.id,
+            "status": response.status,
+            "changeset_id": response.changeset_id,
+            "result": response.result,
+        }
+
+    return handler
 
 
 def _feedback_handler(user_id: str | None = None) -> ToolHandler:
@@ -1588,7 +1642,7 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("evidence-answer", "Answer from retrieved evidence.", EvidenceAnswerInput, True, False, ["qa_answers", "answer_references"], _evidence_answer_handler),
         _tool("change-report", "Build per-file receipt from changes.", ChangeReportInput, True, False, ["change_sets"], _change_report_handler),
         _tool("operation-plan-create", "Create high-risk operation plan.", OperationPlanCreateInput, True, False, ["operation_plans"], _operation_plan_handler),
-        _tool("confirmed-file-action", "Execute confirmed operation plan.", ConfirmedFileActionInput, True, True, ["change_items"], _confirmed_action_handler),
+        _tool("confirmed-file-action", "Execute confirmed operation plan.", ConfirmedFileActionInput, True, True, ["change_items"], _confirmed_action_handler(db, user_id)),
         _tool("feedback-record", "Record user feedback.", FeedbackRecordInput, True, False, ["feedback", "skill_feedback_samples"], _feedback_handler(user_id)),
         _tool("job-status-read", "Read processing job status.", JobStatusReadInput, False, False, [], _job_status_handler),
         _tool("document-lineage-read", "Read document lineage.", DocumentLineageReadInput, False, False, [], _lineage_handler),
