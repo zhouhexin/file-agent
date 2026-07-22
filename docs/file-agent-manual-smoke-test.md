@@ -4,6 +4,11 @@
 文件生命周期、权限、审计和真实工作副本副作用进行手工验证。自动化测试通过不能替代本文的真实文件
 系统烟测。
 
+阶段二及之前阶段的普通用户验收以
+`docs/frontend-conversation-smoke-test.md` 为唯一页面烟测入口。本文中保留的 curl、直接 API、SQL 和
+文件系统命令只用于阶段三内部索引、运维审计或故障诊断，不能替代 `/chat` 页面操作，也不能作为普通用户
+产品闭环的通过证据。
+
 ## 1. 测试范围和通过原则
 
 本轮必须验证：
@@ -20,7 +25,7 @@
 以下能力当前不作为通过条件：
 
 - 阶段四、阶段五的两阶段 RAG、正式 Evidence Answer 和持久化引用。
-- 阶段六的文件名冲突自然语言决策执行；当前只验收冲突提示和待决策持久化。
+- 分类接受、拒绝和纠正的普通用户页面；同名冲突自然语言决策已经纳入本阶段验收。
 - 尚未提供的 `/admin/documents`、`/admin/feedback`、`/admin/settings/llm` 前端页面。
 - 病毒扫描引擎。系统当前只能说明已完成基础格式、MIME、宏和加密风险检查。
 
@@ -67,9 +72,9 @@ git diff --check
 当前阶段期望：
 
 ```text
-后端（macOS/Linux）：422 passed, 19 skipped
-后端（Windows 有 symlink 权限）：422 passed, 19 skipped
-后端（Windows 无 symlink 权限）：421 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
+后端（macOS/Linux）：426 passed, 19 skipped
+后端（Windows 有 symlink 权限）：426 passed, 19 skipped
+后端（Windows 无 symlink 权限）：425 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
 前端：TypeScript 检查和 Vite build 成功
 Alembic：单一 head 20260723_0001
 Python：No broken requirements found
@@ -117,53 +122,16 @@ python -m pytest -v `
 
 ## 4. 隔离环境准备
 
-### 4.1 本地数据库
+### 4.1 当前开发测试数据库
 
-启动项目自带的 PostgreSQL + pgvector：
+烟测直接使用项目当前已经配置并正在使用的开发测试数据库，不创建新数据库、不切换 SQLite、不清表、
+不执行 Alembic upgrade/downgrade，也不通过 SQL 修改测试结果。用户通过注册、上传、发消息和确认计划
+产生的正常业务数据允许写入当前开发测试数据库。
 
-```bash
-docker compose up -d postgres
-docker compose ps postgres
-```
+为避免历史数据干扰，每次前端烟测使用唯一批次号，并把批次号写入虚构测试文件正文。测试结束后不直接
+删除数据库记录；需要清理时必须以后续受控产品能力执行。
 
-烟测配置建议使用：
-
-```dotenv
-DATABASE_URL=postgresql+psycopg2://file_agent:file_agent_dev@127.0.0.1:5432/file_agent
-AUTO_CREATE_TABLES=false
-
-FILE_STORAGE_ROOT=/tmp/file-agent-smoke/uploads
-MANAGED_ROOT_ARCHIVE_WRITE_PATH=/tmp/file-agent-smoke/managed-original
-MANAGED_ROOT_ARCHIVE_ENABLED=true
-WORKING_COPY_STORAGE_ROOT=/tmp/file-agent-smoke/working-copies
-TRASH_STORAGE_ROOT=/tmp/file-agent-smoke/trash
-
-UPLOAD_ARCHIVE_ENABLED=true
-UPLOAD_DUPLICATE_CHECK_ENABLED=true
-FILESYSTEM_ASYNC_JOBS_ENABLED=true
-INITIAL_WORKING_COPY_ORGANIZATION_ENABLED=true
-
-LLM_ENABLED=false
-GRAPH_CLASSIFICATION_ENABLED=false
-GRAPH_EMBEDDING_ENABLED=false
-TRASH_AUTO_PURGE_ENABLED=false
-```
-
-准备目录：
-
-```bash
-mkdir -p /tmp/file-agent-smoke/uploads
-mkdir -p /tmp/file-agent-smoke/managed-original
-mkdir -p /tmp/file-agent-smoke/working-copies
-mkdir -p /tmp/file-agent-smoke/trash
-```
-
-执行迁移：
-
-```bash
-/opt/homebrew/anaconda3/envs/py311/bin/python \
-  -m alembic -c apps/api/alembic.ini upgrade head
-```
+如果当前数据库 schema 与运行代码不兼容，应停止烟测并报告环境问题，而不是在烟测过程中修改数据库。
 
 ### 4.2 LibreOffice
 
@@ -232,18 +200,11 @@ cd /Users/zhouhexin/PycharmProjects/file-agent/apps/web
 npm run dev
 ```
 
-### 5.5 健康检查
+### 5.5 页面健康检查
 
-```bash
-curl -i http://127.0.0.1:8000/api/health
-```
-
-通过标准：
-
-- HTTP 200。
-- 响应包含 `status=ok`。
-- `X-Request-ID` 响应头存在。
-- Neo4j 关闭时显示 `disabled`，不能导致基础健康检查失败。
+浏览器访问 `http://127.0.0.1:5173/login`，完成登录并进入 `/chat`。页面能够加载、发送消息和选择附件
+才属于普通用户健康检查通过。`GET /api/health` 只保留给运维诊断，不再作为阶段二及之前阶段的用户烟测
+步骤。
 
 ## 6. 测试数据矩阵
 
@@ -271,6 +232,10 @@ shasum -a 256 /path/to/file-agent-smoke-input/* \
 
 ## 7. 具体烟测用例
 
+本节原有用例包含页面验收和技术核验。阶段二及之前阶段执行时，应改用
+`docs/frontend-conversation-smoke-test.md` 中的 `UI-SMOKE-*`；不得用本节的 curl 或 SQL 步骤替代页面
+失败项。本节直接 API 步骤仅供阶段三内部事实检查和故障定位。
+
 ### SMOKE-001 注册、登录和普通用户界面
 
 步骤：
@@ -287,11 +252,14 @@ shasum -a 256 /path/to/file-agent-smoke-input/* \
 - 普通用户可以进入 `/chat`。
 - 页面不展示 Skill、Tool、LangGraph、AgentRun、ToolInvocation、服务器绝对路径或模型 Prompt。
 
-### SMOKE-002 只上传文件的自动整理
+### SMOKE-002 上传文件并输入任务文字后的自动整理
+
+当前阶段有附件时仍要求用户输入任务文字，不允许空文字直接提交。该限制用于避免系统猜测用户希望
+分类、总结还是仅保存文件。
 
 步骤：
 
-1. 上传 F01、F02、F04、F06。
+1. 上传 F01、F02、F04、F06，并输入“读取并整理这些文件”。
 2. 不要求用户选择 Skill、Tool、目录或解析器。
 3. 等待 worker 完成查重、归档和导入。
 4. 刷新聊天页，检查逐文件回执。
@@ -371,7 +339,10 @@ curl -sS http://127.0.0.1:8000/api/working-copies/<working_copy_id>/versions \
 - 冲突发生后不自动生成 `_第二版`，不覆盖已有工作副本。
 - 用户看到“同时保留、保留已有、替换现有工作副本、删除现有工作副本”等处理方式。
 - F13 失败不影响同批有效 TXT 完成整理。
-- 当前阶段只验收冲突选项展示和持久化，不验收自然语言执行这些选项。
+- 分别在独立冲突批次中回复“同时保留”“保留已有文件”“用新文件替换已有文件”和“删除已有文件”。
+- 每种选择都必须先展示 OperationPlan；确认前文件不变，确认后才执行真实工作副本动作。
+- “同时保留”确认后才分配 `_第二版` 等稳定后缀；替换或删除已有文件时，旧工作副本进入可恢复回收站。
+- 受管原件在所有冲突选择前后都保持不变。
 
 ### SMOKE-006 重复上传决策
 
@@ -486,65 +457,23 @@ curl -sS http://127.0.0.1:8000/api/working-copies/<working_copy_id>/path-records
 
 ### SMOKE-011 回收站和恢复
 
-取得一个活动 `working_copy_id`，创建回收站计划：
+本用例必须从 `/chat` 页面完成，不使用工作副本 ID、回收站 ID、curl、Swagger 或 SQL：
 
-```bash
-export FILE_AGENT_SMOKE_WORKING_COPY_ID=<working_copy_id>
-
-export FILE_AGENT_SMOKE_TRASH_PLAN_ID="$(
-  jq -n --arg working_copy_id "${FILE_AGENT_SMOKE_WORKING_COPY_ID}" '{
-    conversation_id: "smoke-trash-conversation",
-    operation_type: "TRASH_WORKING_COPIES",
-    reason: "手工烟测移入回收站",
-    risk_level: "medium",
-    items: [{working_copy_id: $working_copy_id}]
-  }' | curl -sS -X POST http://127.0.0.1:8000/api/operations/plans \
-    -H "Authorization: Bearer ${FILE_AGENT_SMOKE_TOKEN}" \
-    -H 'Content-Type: application/json' \
-    --data-binary @- | jq -r '.id'
-)"
-```
-
-确认计划：
-
-```bash
-curl -sS -X POST \
-  "http://127.0.0.1:8000/api/operations/plans/${FILE_AGENT_SMOKE_TRASH_PLAN_ID}/confirm" \
-  -H "Authorization: Bearer ${FILE_AGENT_SMOKE_TOKEN}" \
-  -H 'Content-Type: application/json' \
-  -d '{"confirmation":"确认将此测试工作副本移入回收站"}' | jq
-
-curl -sS http://127.0.0.1:8000/api/trash-entries \
-  -H "Authorization: Bearer ${FILE_AGENT_SMOKE_TOKEN}" | jq
-```
-
-取得 `trash_entry_id` 后创建并确认恢复计划：
-
-```bash
-export FILE_AGENT_SMOKE_TRASH_ENTRY_ID=<trash_entry_id>
-
-export FILE_AGENT_SMOKE_RESTORE_PLAN_ID="$(
-  curl -sS -X POST \
-    "http://127.0.0.1:8000/api/trash-entries/${FILE_AGENT_SMOKE_TRASH_ENTRY_ID}/restore-plan" \
-    -H "Authorization: Bearer ${FILE_AGENT_SMOKE_TOKEN}" \
-    -H 'Content-Type: application/json' \
-    -d '{"conversation_id":"smoke-restore-conversation"}' | jq -r '.id'
-)"
-
-curl -sS -X POST \
-  "http://127.0.0.1:8000/api/operations/plans/${FILE_AGENT_SMOKE_RESTORE_PLAN_ID}/confirm" \
-  -H "Authorization: Bearer ${FILE_AGENT_SMOKE_TOKEN}" \
-  -H 'Content-Type: application/json' \
-  -d '{"confirmation":"确认恢复此测试工作副本"}' | jq
-```
+1. 在已上传测试文件的会话中输入：`把刚才上传的文件移入回收站。`
+2. 页面应展示“移入回收站计划”，先刷新页面确认计划仍在等待确认且文件未变化。
+3. 点击“确认移入回收站”。
+4. 输入：`恢复刚才删除的文件。`
+5. 页面应展示“恢复文件计划”，确认前文件仍未恢复。
+6. 点击“确认恢复”，再输入：`读取刚才恢复的文件。`
 
 通过标准：
 
 - 创建计划和确认之间不发生物理变化。
-- 确认移入回收站后，工作副本状态为 `TRASHED`，回收站条目可查询。
-- 确认恢复后，工作副本重新 `ACTIVE`。
+- 确认移入回收站后，页面提示文件已进入可恢复回收站。
+- 确认恢复后，工作副本重新可通过对话读取。
 - 原路径冲突时恢复到稳定备用路径，不覆盖其他工作副本。
-- `TRASH_AUTO_PURGE_ENABLED=false`，没有永久删除。
+- 页面不提供永久删除入口；`TRASH_AUTO_PURGE_ENABLED=false`。
+- 普通用户看不到物理路径、数据库 ID、Skill、Tool 或内部执行载荷。
 
 ### SMOKE-012 分类反馈
 

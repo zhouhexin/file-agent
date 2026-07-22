@@ -482,7 +482,10 @@ def _looks_like_context_reference_message(content: str) -> bool:
     """兼容历史数据：旧消息没有 source 时，用文本判断是否是上下文引用消息。"""
 
     reference_keywords = ["上面", "上文", "前面", "刚才", "刚刚", "刚上传", "之前", "已上传", "上传的"]
-    file_task_keywords = ["文件", "附件", "文章", "读取", "总结", "讲解", "内容", "分析", "分类", "归类", "重新"]
+    file_task_keywords = [
+        "文件", "附件", "文章", "读取", "总结", "讲解", "内容", "分析", "分类", "归类", "重新",
+        "删除", "删掉", "回收站", "恢复",
+    ]
     return any(keyword in content for keyword in reference_keywords) and any(
         keyword in content for keyword in file_task_keywords
     )

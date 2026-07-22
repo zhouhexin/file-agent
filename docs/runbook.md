@@ -746,11 +746,11 @@ NEO4J_SYNC_ENABLED=false
 
 - 当前已接入 OpenAI-compatible LLM 意图理解；默认 `LLM_ENABLED=false` 时仍使用 `DeterministicPlanner`。
 - 当前已持久化 user、default workspace、message、AgentRun、ToolInvocation、Document、document_insights、document_extraction_runs、document_pages、document_classification_runs、document_category_suggestions、document_category_feedback、change_sets、change_items、operation_plans 和 operation_confirmations。
-- OperationPlan 已支持工作副本重命名、移动、移入回收站和恢复；重命名、移动不新增工作副本版本，所有路径变更写入 `working_copy_path_records`。受管原始目录保持不变；自动永久删除和覆盖仍未开放。
+- OperationPlan 已支持工作副本重命名、移动、移入回收站和恢复；普通用户可以在 `/chat` 通过自然语言生成同名冲突、移入回收站和恢复计划，并在页面确认后执行。重命名、移动不新增工作副本版本，所有路径变更写入 `working_copy_path_records`。受管原始目录保持不变；自动永久删除仍未开放。
 - 没有白名单执行器的 OperationPlan 不能确认，计划保持 `WAITING_CONFIRMATION`，不会伪造 `EXECUTED`。
 - 当前已支持读取当前用户自己的原始文件元信息和解析文本内容；其他多数 Tool handler 仍是结构化占位实现。
 - 当前已有最小 JWT 鉴权，但没有 refresh token、复杂 RBAC、ACL 或 admin 权限体系。
-- 当前前端已有注册、登录、Chat、异步上传状态和逐文件重复确认卡；工作副本与回收站已有后端 API，独立文件管理界面仍待补充。
+- 当前前端已有注册、登录、Chat、异步上传状态、逐文件重复确认卡和通用 OperationPlan 确认卡；同名文件处理、移入回收站及恢复均可从对话完成，独立文件管理界面仍待补充。
 
 ## 10. 维护规则
 

@@ -174,6 +174,25 @@ class DeterministicPlanner:
         """根据用户消息和附件上下文生成声明式计划。"""
         lowered = message.lower()
 
+        conflict_action = _filename_conflict_action(message)
+        if conflict_action:
+            return _working_copy_action_plan(
+                user_goal=message,
+                action=conflict_action,
+                document_ids=[],
+            )
+        if _has_restore_working_copy_intent(message):
+            return _working_copy_action_plan(
+                user_goal=message,
+                action="RESTORE",
+                document_ids=_document_ids(attachments),
+            )
+        if _has_trash_working_copy_intent(message):
+            return _working_copy_action_plan(
+                user_goal=message,
+                action="TRASH",
+                document_ids=_document_ids(attachments),
+            )
         if _has_rename_review_resolution_intent(message):
             return _rename_review_resolution_plan(user_goal=message)
 
@@ -507,6 +526,31 @@ def build_plan_from_user_intent(
     )
     resolved_scope = _resolved_scope_from_attachments(attachments)
 
+    conflict_action = _filename_conflict_action(message)
+    if conflict_action:
+        return _working_copy_action_plan(
+            user_goal=intent_plan.user_goal or message,
+            action=conflict_action,
+            document_ids=[],
+            response_style=intent_plan.response_style,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
+    if _has_restore_working_copy_intent(message):
+        return _working_copy_action_plan(
+            user_goal=intent_plan.user_goal or message,
+            action="RESTORE",
+            document_ids=attachment_document_ids,
+            response_style=intent_plan.response_style,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
+    if _has_trash_working_copy_intent(message):
+        return _working_copy_action_plan(
+            user_goal=intent_plan.user_goal or message,
+            action="TRASH",
+            document_ids=attachment_document_ids,
+            response_style=intent_plan.response_style,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
     if _has_rename_review_resolution_intent(message) or intent_plan.intent == "RESOLVE_RENAME_REVIEW":
         return _rename_review_resolution_plan(
             user_goal=intent_plan.user_goal or message,
@@ -1331,6 +1375,48 @@ def _rename_review_resolution_plan(
     )
 
 
+def _working_copy_action_plan(
+    *,
+    user_goal: str,
+    action: str,
+    document_ids: list[str],
+    response_style: str = "concise",
+    llm_intent_plan: Dict[str, Any] | None = None,
+) -> PlannerOutput:
+    """生成删除、恢复或同名冲突的声明式计划，真实对象由后端服务解析。"""
+
+    return PlannerOutput(
+        intent="PREPARE_WORKING_COPY_ACTION",
+        user_goal=user_goal,
+        slots={
+            "document_ids": document_ids,
+            "requested_outputs": ["operation_plan"],
+            "response_style": response_style,
+            "llm_intent_plan": llm_intent_plan or {},
+            "route_source": "controlled_working_copy_action",
+        },
+        selected_skills=["operation-plan", "confirmed-file-action"],
+        steps=[
+            {
+                "step_id": "step-prepare-working-copy-action",
+                "skill": "operation-plan",
+                "tool_name": "working-copy-action-plan-create",
+                "input": {
+                    "action": action,
+                    "message": user_goal,
+                    "document_ids": document_ids,
+                },
+                "requires_confirmation": False,
+                "risk_level": "high" if action in {"TRASH", "CONFLICT_REPLACE_EXISTING", "CONFLICT_DELETE_EXISTING"} else "medium",
+                "expected_outputs": ["operation_plan"],
+                "writes": ["operation_plans", "working_copy_path_records"],
+            }
+        ],
+        evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+        confirmation_policy={"operation_plan_required": True},
+    )
+
+
 def _has_rename_review_resolution_intent(message: str) -> bool:
     """识别明确的文件名更正或放弃表达，不由 LLM 猜测执行确认。"""
 
@@ -1338,6 +1424,33 @@ def _has_rename_review_resolution_intent(message: str) -> bool:
     if normalized in {"不需要", "不需要改名", "无需改名", "不用改名"}:
         return True
     return bool(re.search(r"文件\s*.+?\s*更正为\s*.+", message, flags=re.DOTALL))
+
+
+def _filename_conflict_action(message: str) -> str | None:
+    """识别同名冲突卡允许的明确选择，不把模糊聊天当作执行授权。"""
+
+    compact = re.sub(r"\s+", "", message)
+    if any(value in compact for value in ["同时保留", "两个都保留", "都保留"]):
+        return "CONFLICT_KEEP_BOTH"
+    if any(value in compact for value in ["保留已有", "保留原来的", "不要新文件"]):
+        return "CONFLICT_KEEP_EXISTING"
+    if any(value in compact for value in ["用新文件替换", "替换已有", "覆盖已有", "覆盖原文件"]):
+        return "CONFLICT_REPLACE_EXISTING"
+    if any(value in compact for value in ["删除已有", "删除原文件", "删掉已有", "删掉原文件"]):
+        return "CONFLICT_DELETE_EXISTING"
+    return None
+
+
+def _has_restore_working_copy_intent(message: str) -> bool:
+    """识别恢复工作副本请求；恢复对象仍必须来自后端附件上下文。"""
+
+    return "恢复" in message and any(value in message for value in ["文件", "附件", "回收站", "刚才", "刚刚"])
+
+
+def _has_trash_working_copy_intent(message: str) -> bool:
+    """识别移入回收站请求；项目不提供自然语言永久删除通道。"""
+
+    return any(value in message for value in ["移入回收站", "放入回收站", "移到回收站", "删除这个文件", "删除刚才", "删掉这个文件"])
 
 
 def _mcp_filesystem_list_plan(

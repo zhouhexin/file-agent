@@ -95,7 +95,7 @@ function isInferredContextFileRequest(text: string): boolean {
     '上传的',
     '所有上传',
   ];
-  const fileTaskWords = ['文件', '附件', '文章', '读取', '总结', '讲解', '内容', '分析', '分类', '归类', '重新'];
+  const fileTaskWords = ['文件', '附件', '文章', '读取', '总结', '讲解', '内容', '分析', '分类', '归类', '重新', '删除', '删掉', '回收站', '恢复'];
   return historyReferenceWords.some((word) => text.includes(word))
     && fileTaskWords.some((word) => text.includes(word));
 }

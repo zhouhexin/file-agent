@@ -1,5 +1,5 @@
 // OperationPlan 卡片只负责展示和确认受控计划，不在浏览器直接修改文件。
-import { CheckCircle2, FilePenLine } from 'lucide-react';
+import { CheckCircle2, Files, FilePenLine, RotateCcw, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 
 import { confirmOperationPlan, getRenameBatchItems } from '../../api/client';
@@ -20,6 +20,7 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
   const [error, setError] = useState('');
   const waiting = plan.status === 'WAITING_CONFIRMATION' || plan.status === 'PLANNED';
   const uploadedTemporaryRename = plan.operation_type === 'RENAME_UPLOADED_FILES';
+  const presentation = operationPresentation(plan.operation_type);
   const pathPrefix = readOptionalString(plan.scope, 'path_prefix');
   const renameBatchId = readOptionalString(plan.scope, 'rename_batch_id');
   const totalItemCount = plan.total_item_count || plan.items.length;
@@ -48,8 +49,8 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
       <header className="operation-plan-header">
         <div>
           <strong>
-            <FilePenLine size={18} />
-            {uploadedTemporaryRename ? '上传附件临时重命名计划' : '文件重命名计划'}
+            {presentation.icon}
+            {uploadedTemporaryRename ? '上传附件临时重命名计划' : presentation.title}
           </strong>
           <span>{selectable ? `已选择 ${selectedCount} / ${totalItemCount} 个文件` : `${totalItemCount} 个文件`}</span>
         </div>
@@ -61,6 +62,8 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
       {uploadedTemporaryRename ? (
         <p>本次只修改附件在临时存储中的文件名，不执行分类或写入受管目录。</p>
       ) : null}
+
+      {!uploadedTemporaryRename && plan.reason ? <p>{plan.reason}。受管原件不会改变。</p> : null}
 
       {!uploadedTemporaryRename && pathPrefix ? (
         <p className="operation-plan-scope">处理范围：{pathPrefix}</p>
@@ -90,7 +93,7 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
             )}
             <div>
               <del>{readString(item.before, 'filename')}</del>
-              <strong>{readString(item.after, 'filename')}</strong>
+              <strong>{formatOperationTarget(item)}</strong>
               <small>状态：{formatItemStatus(item.execution_status)}</small>
             </div>
           </div>
@@ -126,7 +129,7 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
       ) : null}
 
       {plan.status === 'EXECUTED' ? (
-        <div className="operation-plan-complete"><CheckCircle2 size={16} />重命名已执行</div>
+        <div className="operation-plan-complete"><CheckCircle2 size={16} />{presentation.completedLabel}</div>
       ) : null}
       {error ? <p className="operation-plan-error">{error}</p> : null}
       {waiting ? (
@@ -136,11 +139,52 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
           onClick={handleConfirm}
           type="button"
         >
-          {confirming ? '执行中...' : `确认重命名 ${selectedCount} 个文件`}
+          {confirming ? '执行中...' : `${presentation.confirmLabel} ${selectedCount} 个文件`}
         </button>
       ) : null}
     </section>
   );
+}
+
+function operationPresentation(operationType: string) {
+  // 同一确认卡覆盖多种工作副本动作，但文案不能把删除或恢复误称为重命名。
+  if (operationType === 'TRASH_WORKING_COPIES') {
+    return {
+      title: '移入回收站计划',
+      confirmLabel: '确认移入回收站',
+      completedLabel: '文件已移入回收站，可继续通过对话恢复',
+      icon: <Trash2 size={18} />,
+    };
+  }
+  if (operationType === 'RESTORE_WORKING_COPIES') {
+    return {
+      title: '恢复文件计划',
+      confirmLabel: '确认恢复',
+      completedLabel: '文件已恢复',
+      icon: <RotateCcw size={18} />,
+    };
+  }
+  if (operationType === 'RESOLVE_FILENAME_CONFLICT') {
+    return {
+      title: '同名文件处理计划',
+      confirmLabel: '确认处理',
+      completedLabel: '同名文件处理已完成',
+      icon: <Files size={18} />,
+    };
+  }
+  return {
+    title: '文件重命名计划',
+    confirmLabel: '确认重命名',
+    completedLabel: '重命名已执行',
+    icon: <FilePenLine size={18} />,
+  };
+}
+
+function formatOperationTarget(item: OperationPlanItem): string {
+  // 目标文案只描述用户可理解的结果，不展示物理回收站或工作副本存储路径。
+  if (item.operation === 'TRASH_WORKING_COPIES') return '移入回收站（可恢复）';
+  if (item.operation === 'RESTORE_WORKING_COPIES') return `恢复为 ${readString(item.after, 'filename')}`;
+  return readString(item.after, 'filename');
 }
 
 function batchItemToPlanItem(item: RenameBatchItem): OperationPlanItem {

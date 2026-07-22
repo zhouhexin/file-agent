@@ -23,6 +23,7 @@ from app.db.models import (
     Document,
     DocumentVersion,
     FileObject,
+    FileRenameReviewItem,
     OperationConfirmation,
     OperationPlan,
     TrashEntry,
@@ -45,6 +46,7 @@ WORKING_COPY_OPERATION_TYPES = {
     "MOVE_WORKING_COPIES",
     "TRASH_WORKING_COPIES",
     "RESTORE_WORKING_COPIES",
+    "RESOLVE_FILENAME_CONFLICT",
 }
 
 
@@ -66,6 +68,8 @@ class WorkingCopyOperationService:
             raise HTTPException(status_code=400, detail="Unsupported working copy operation")
         if request.operation_type == "RESTORE_WORKING_COPIES":
             raise HTTPException(status_code=400, detail="Restore plans must be created from a trash entry")
+        if request.operation_type == "RESOLVE_FILENAME_CONFLICT":
+            raise HTTPException(status_code=400, detail="Conflict plans must be created from a pending review")
         if not current_user.default_workspace_id:
             raise HTTPException(status_code=400, detail="Default workspace is required")
         normalized_items: list[dict[str, Any]] = []
@@ -153,6 +157,132 @@ class WorkingCopyOperationService:
         self.db.flush()
         return plan
 
+    def create_conflict_resolution_plan(
+        self,
+        *,
+        review: FileRenameReviewItem,
+        pending_copy: WorkingCopy,
+        existing_copy: WorkingCopy,
+        decision: str,
+        target_relative_path: str,
+        conversation_id: str,
+        agent_run_id: str,
+        current_user: User,
+    ) -> OperationPlan:
+        """从持久化冲突记录创建计划，禁止 Planner 自报工作副本和目标路径。"""
+
+        if not current_user.default_workspace_id or review.user_id != current_user.id:
+            raise HTTPException(status_code=404, detail="Filename conflict review not found")
+        if review.status != "NEEDS_REVIEW" or review.conversation_id != conversation_id:
+            raise HTTPException(status_code=409, detail="Filename conflict review is not pending")
+        if pending_copy.workspace_id != current_user.default_workspace_id or existing_copy.workspace_id != current_user.default_workspace_id:
+            raise HTTPException(status_code=404, detail="Working copy not found")
+        if pending_copy.status != "ACTIVE" or existing_copy.status != "ACTIVE":
+            raise HTTPException(status_code=409, detail="Filename conflict working copy is not active")
+
+        items: list[dict[str, Any]] = []
+        if decision in {"REPLACE_EXISTING_WORKING_COPY", "DELETE_EXISTING_WORKING_COPY"}:
+            items.append(self._snapshot_conflict_item(working_copy=existing_copy, operation="TRASH_WORKING_COPIES"))
+        if decision == "KEEP_EXISTING":
+            items.append(self._snapshot_conflict_item(working_copy=pending_copy, operation="TRASH_WORKING_COPIES"))
+        else:
+            items.append(
+                self._snapshot_conflict_item(
+                    working_copy=pending_copy,
+                    operation="RENAME_WORKING_COPIES",
+                    target_relative_path=target_relative_path,
+                )
+            )
+        plan = self.plan_repository.create_plan(
+            workspace_id=current_user.default_workspace_id,
+            conversation_id=conversation_id,
+            agent_run_id=agent_run_id,
+            user_id=current_user.id,
+            operation_type="RESOLVE_FILENAME_CONFLICT",
+            risk_level="high" if decision in {"REPLACE_EXISTING_WORKING_COPY", "DELETE_EXISTING_WORKING_COPY"} else "medium",
+            reason={
+                "KEEP_BOTH": "同名文件同时保留，并为新工作副本分配版本后缀",
+                "KEEP_EXISTING": "保留已有文件，把新工作副本移入可恢复回收站",
+                "REPLACE_EXISTING_WORKING_COPY": "用新工作副本替换已有工作副本，旧副本进入可恢复回收站",
+                "DELETE_EXISTING_WORKING_COPY": "删除已有工作副本并保留新文件，删除项进入可恢复回收站",
+            }[decision],
+            plan_json={
+                "target": "WORKING_COPY",
+                "conflict_review_id": review.id,
+                "conflict_decision": decision,
+                "items": items,
+            },
+        )
+        for item in items:
+            if item["operation"] != "RENAME_WORKING_COPIES":
+                continue
+            working_copy = self.db.get(WorkingCopy, item["working_copy_id"])
+            sequence = int(
+                self.db.query(func.max(WorkingCopyPathRecord.sequence_number))
+                .filter(WorkingCopyPathRecord.working_copy_id == working_copy.id)
+                .scalar()
+                or 0
+            ) + 1
+            record = WorkingCopyPathRecord(
+                working_copy_id=working_copy.id,
+                sequence_number=sequence,
+                operation_type="RENAME",
+                before_relative_path=item["before"]["relative_path"],
+                after_relative_path=item["after"]["relative_path"],
+                before_filename=item["before"]["filename"],
+                after_filename=item["after"]["filename"],
+                document_version_id=item["before"]["document_version_id"],
+                content_sha256=item["before"]["sha256"],
+                operation_plan_id=plan.id,
+                agent_run_id=agent_run_id,
+                status="PLANNED",
+            )
+            self.db.add(record)
+            self.db.flush()
+            item["working_copy_path_record_id"] = record.id
+        plan.plan_json = {**plan.plan_json, "items": items}
+        flag_modified(plan, "plan_json")
+        review.status = "PLANNED"
+        review.decision_json = {"action": decision, "operation_plan_id": plan.id}
+        review.updated_at = utcnow()
+        self.db.flush()
+        return plan
+
+    def _snapshot_conflict_item(
+        self,
+        *,
+        working_copy: WorkingCopy,
+        operation: str,
+        target_relative_path: str | None = None,
+    ) -> dict[str, Any]:
+        """为冲突计划生成数据库快照，执行时必须再次校验路径、版本和哈希。"""
+
+        version = self.db.get(DocumentVersion, working_copy.current_version_id) if working_copy.current_version_id else None
+        if version is None:
+            raise HTTPException(status_code=409, detail="Working copy version is missing")
+        return {
+            "document_id": working_copy.document_id,
+            "working_copy_id": working_copy.id,
+            "managed_file_id": working_copy.managed_file_id,
+            "operation": operation,
+            "before": {
+                "relative_path": working_copy.relative_path,
+                "filename": working_copy.filename,
+                "sha256": working_copy.content_sha256,
+                "document_version_id": version.id,
+            },
+            "after": {
+                "relative_path": target_relative_path,
+                "filename": PurePosixPath(target_relative_path).name if target_relative_path else None,
+            },
+            "protection": {
+                "managed_original_unchanged": True,
+                "creates_new_version": False,
+                "recoverable": operation == "TRASH_WORKING_COPIES",
+            },
+            "execution_status": "PLANNED",
+        }
+
     def create_restore_plan(
         self,
         *,
@@ -203,6 +333,7 @@ class WorkingCopyOperationService:
                         "operation": "RESTORE_WORKING_COPIES",
                         "before": {
                             "relative_path": entry.trash_relative_path,
+                            "filename": working_copy.filename,
                             "sha256": working_copy.content_sha256,
                             "document_version_id": version.id,
                             "trash_entry_id": entry.id,
@@ -260,6 +391,16 @@ class WorkingCopyOperationService:
         plan.updated_at = plan.executed_at
         plan.plan_json = {**plan.plan_json, "items": plan.plan_json.get("items", []), "results": results}
         flag_modified(plan, "plan_json")
+        review_id = plan.plan_json.get("conflict_review_id")
+        review = self.db.get(FileRenameReviewItem, review_id) if review_id else None
+        if review is not None:
+            review.status = "EXECUTED" if failed_count == 0 else "NEEDS_REVIEW"
+            review.decision_json = {
+                **dict(review.decision_json or {}),
+                "execution_status": plan.status,
+                "results": results,
+            }
+            review.updated_at = utcnow()
         changeset_id = self._persist_audit(plan=plan, results=results, current_user=current_user)
         return {
             "status": plan.status,
@@ -285,13 +426,14 @@ class WorkingCopyOperationService:
             .with_for_update()
             .one_or_none()
         )
-        expected_status = "TRASHED" if plan.operation_type == "RESTORE_WORKING_COPIES" else "ACTIVE"
+        operation_type = str(item.get("operation") or plan.operation_type)
+        expected_status = "TRASHED" if operation_type == "RESTORE_WORKING_COPIES" else "ACTIVE"
         if working_copy is None or working_copy.status != expected_status:
             raise RuntimeError("工作副本不存在或不处于活动状态")
         before = dict(item.get("before") or {})
         after = dict(item.get("after") or {})
         if (
-            (plan.operation_type != "RESTORE_WORKING_COPIES" and working_copy.relative_path != before.get("relative_path"))
+            (operation_type != "RESTORE_WORKING_COPIES" and working_copy.relative_path != before.get("relative_path"))
             or working_copy.content_sha256 != before.get("sha256")
             or working_copy.current_version_id != before.get("document_version_id")
         ):
@@ -304,14 +446,14 @@ class WorkingCopyOperationService:
         before_storage_path = version.storage_path
         source = (
             self.storage.trash_path(before_storage_path)
-            if plan.operation_type == "RESTORE_WORKING_COPIES"
+            if operation_type == "RESTORE_WORKING_COPIES"
             else self.storage.working_copy_path(before_storage_path)
         )
         if self.storage.sha256_file(source) != working_copy.content_sha256:
             self._mark_path_record_stale(item=item)
             raise RuntimeError("工作副本内容已经变化，请重新生成计划")
-        if plan.operation_type == "TRASH_WORKING_COPIES":
-            return self._trash(
+        if operation_type == "TRASH_WORKING_COPIES":
+            result = self._trash(
                 plan=plan,
                 working_copy=working_copy,
                 version=version,
@@ -319,8 +461,9 @@ class WorkingCopyOperationService:
                 source=source,
                 current_user=current_user,
             )
-        if plan.operation_type == "RESTORE_WORKING_COPIES":
-            return self._restore(
+            return {**result, "operation_type": operation_type}
+        if operation_type == "RESTORE_WORKING_COPIES":
+            result = self._restore(
                 plan=plan,
                 working_copy=working_copy,
                 version=version,
@@ -328,6 +471,7 @@ class WorkingCopyOperationService:
                 source=source,
                 item=item,
             )
+            return {**result, "operation_type": operation_type}
         after_relative_path = str(after.get("relative_path") or "")
         after_storage_path = f"{root.relative_storage_path}/{after_relative_path}"
         target = self.storage.working_copy_path(after_storage_path)
@@ -369,6 +513,7 @@ class WorkingCopyOperationService:
             "path_record_updated_at": operation_time.isoformat(),
             "status": "COMPLETED",
             "managed_original_unchanged": True,
+            "operation_type": operation_type,
         }
 
     def _trash(
@@ -430,12 +575,13 @@ class WorkingCopyOperationService:
         """为计划创建一份 ChangeSet，并为每个工作副本写独立 ChangeItem。"""
 
         first = results[0] if results else {}
-        change_type = {
+        change_types = {
             "RENAME_WORKING_COPIES": "FILENAME_CHANGED",
             "MOVE_WORKING_COPIES": "FILE_MOVED",
             "TRASH_WORKING_COPIES": "FILE_TRASHED",
             "RESTORE_WORKING_COPIES": "FILE_RESTORED",
-        }[plan.operation_type]
+        }
+        first_change_type = change_types.get(str(first.get("operation_type") or plan.operation_type), "FILE_OPERATION_COMPLETED")
         changeset, _message = create_lifecycle_audit(
             db=self.db,
             user_id=current_user.id,
@@ -443,7 +589,7 @@ class WorkingCopyOperationService:
             conversation_id=plan.conversation_id,
             tool_name="confirmed-file-action",
             message_content=f"工作副本操作完成：{plan.operation_type}",
-            change_type=change_type if first.get("status") == "COMPLETED" else "FILE_OPERATION_FAILED",
+            change_type=first_change_type if first.get("status") == "COMPLETED" else "FILE_OPERATION_FAILED",
             target_type="working_copy",
             target_id=first.get("working_copy_id"),
             target_document_id=(
@@ -457,6 +603,7 @@ class WorkingCopyOperationService:
         )
         plan.agent_run_id = changeset.agent_run_id
         for result in results[1:]:
+            result_change_type = change_types.get(str(result.get("operation_type") or plan.operation_type), "FILE_OPERATION_COMPLETED")
             self.db.add(
                 ChangeItem(
                     changeset_id=changeset.id,
@@ -467,7 +614,7 @@ class WorkingCopyOperationService:
                         if result.get("working_copy_id") and self.db.get(WorkingCopy, result.get("working_copy_id"))
                         else None
                     ),
-                    change_type=change_type if result.get("status") == "COMPLETED" else "FILE_OPERATION_FAILED",
+                    change_type=result_change_type if result.get("status") == "COMPLETED" else "FILE_OPERATION_FAILED",
                     before_value_json={"relative_path": result.get("before_relative_path")},
                     after_value_json=result,
                     source="confirmed-file-action",

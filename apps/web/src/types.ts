@@ -34,6 +34,8 @@ export type TaskResult = {
 
 export type OperationPlanItem = {
   document_id: string;
+  working_copy_id?: string | null;
+  operation?: string | null;
   before: Record<string, unknown>;
   after: Record<string, unknown>;
   rename_metadata: Record<string, unknown>;

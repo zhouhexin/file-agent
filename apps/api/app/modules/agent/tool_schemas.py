@@ -320,6 +320,33 @@ class ResolveRenameReviewsInput(StrictToolInput):
     agent_run_id: str = Field(min_length=1)
 
 
+class WorkingCopyActionPlanInput(StrictToolInput):
+    """把对话文件动作转换为待确认工作副本计划的受控输入。"""
+
+    action: Literal[
+        "TRASH",
+        "RESTORE",
+        "CONFLICT_KEEP_BOTH",
+        "CONFLICT_KEEP_EXISTING",
+        "CONFLICT_REPLACE_EXISTING",
+        "CONFLICT_DELETE_EXISTING",
+    ]
+    message: str = Field(min_length=1, max_length=4000)
+    document_ids: List[str] = Field(default_factory=list, max_length=50)
+    conversation_id: str = Field(min_length=1)
+    agent_run_id: str = Field(min_length=1)
+
+    @field_validator("document_ids")
+    @classmethod
+    def validate_document_ids(cls, value: List[str]) -> List[str]:
+        """拒绝空 ID 并保持后端附件顺序，不能扩大用户选择范围。"""
+
+        normalized = [str(item).strip() for item in value]
+        if any(not item for item in normalized):
+            raise ValueError("document_ids must not contain empty values")
+        return list(dict.fromkeys(normalized))
+
+
 class ManagedRootScanInput(StrictToolInput):
     """创建受管目录扫描任务的输入。"""
 

@@ -55,6 +55,7 @@ from app.modules.agent.tool_schemas import (
     SpreadsheetAnalysisInput,
     SpreadsheetDocumentInput,
     ToolInputValidationError,
+    WorkingCopyActionPlanInput,
 )
 from app.modules.classification.taxonomy_service import read_default_taxonomy_catalog
 from app.modules.chunks.service import DocumentIndexService
@@ -62,6 +63,7 @@ from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text, extraction_config_hash
 from app.modules.files.readable_source import ReadableDocumentSourceResolver, apply_readable_source_metadata
 from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
+from app.modules.file_lifecycle.conversation_operations import ConversationalWorkingCopyPlanService
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
 from app.modules.managed_files.service import (
@@ -847,6 +849,27 @@ def _resolve_rename_reviews_handler(db: Any, user_id: str | None) -> ToolHandler
                 "message": "旧待复核项已失效，请重新选择文件生成工作副本重命名计划。",
             },
         }
+
+    return handler
+
+
+def _working_copy_action_plan_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """创建自然语言文件动作的请求级 Tool handler，只生成计划不执行。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """把受信任会话标识和后端附件范围交给计划服务。"""
+
+        if db is None:
+            return {"ok": False, "status": "FAILED", "error": {"code": "DB_REQUIRED", "message": "创建文件操作计划需要数据库会话。"}}
+        if user_id is None:
+            return {"ok": False, "status": "FAILED", "error": {"code": "AUTH_REQUIRED", "message": "创建文件操作计划需要当前用户。"}}
+        return ConversationalWorkingCopyPlanService(db, user_id).prepare(
+            action=str(getattr(tool_input, "action")),
+            message=str(getattr(tool_input, "message")),
+            document_ids=list(getattr(tool_input, "document_ids", []) or []),
+            conversation_id=str(getattr(tool_input, "conversation_id")),
+            agent_run_id=str(getattr(tool_input, "agent_run_id")),
+        )
 
     return handler
 
@@ -1708,6 +1731,7 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("classify-managed-files", "Snapshot, extract and classify files selected from a server managed directory.", ManagedFileClassificationInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages", "document_classification_runs", "document_category_suggestions", "change_sets", "change_items"], _managed_file_classification_handler(db, user_id)),
         _tool("generate-rename-suggestions", "Resolve uploaded attachments or managed-original scope to working copies, then persist controlled rename suggestions without changing original files.", GenerateRenameSuggestionsInput, True, False, ["document_pages", "operation_plans"], _generate_rename_suggestions_handler(db, user_id)),
         _tool("resolve-rename-reviews", "Resolve pending rename reviews from explicit user corrections and immediately execute a confirmed OperationPlan.", ResolveRenameReviewsInput, True, False, ["operation_plans", "operation_confirmations", "change_sets", "change_items"], _resolve_rename_reviews_handler(db, user_id)),
+        _tool("working-copy-action-plan-create", "Create a controlled working-copy OperationPlan from conversation context without executing it.", WorkingCopyActionPlanInput, True, False, ["operation_plans", "working_copy_path_records"], _working_copy_action_plan_handler(db, user_id)),
         _tool("managed-root-scan", "Create an async scan job for a managed logical root.", ManagedRootScanInput, True, False, ["filesystem_jobs", "filesystem_job_events"], _managed_root_scan_handler(db, user_id)),
         _tool("mcp-filesystem-list", "List files and directories in the server managed filesystem root without database scan.", MCPFilesystemListInput, False, False, [], _mcp_filesystem_list_handler()),
         _tool("mcp-filesystem-search", "Search files and directories in the server managed filesystem root without database scan.", MCPFilesystemSearchInput, False, False, [], _mcp_filesystem_search_handler()),

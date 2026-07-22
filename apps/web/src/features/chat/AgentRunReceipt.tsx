@@ -177,6 +177,9 @@ function PendingDecisionList({ decisions }: { decisions: Array<Record<string, un
             <strong>需要确认</strong>
             <p>{message}</p>
             {choices.length > 0 ? <span>可选处理方式：{choices.join('、')}</span> : null}
+            {decision.reason === 'FILENAME_CONFLICT' ? (
+              <small>请直接回复“同时保留”“保留已有文件”“用新文件替换已有文件”或“删除已有文件”。</small>
+            ) : null}
           </article>
         );
       })}

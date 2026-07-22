@@ -330,17 +330,120 @@ def test_initial_filename_conflict_waits_for_dialog_without_version_suffix(monke
         "REPLACE_EXISTING_WORKING_COPY",
         "DELETE_EXISTING_WORKING_COPY",
     ]
+
+    # 用户通过普通消息选择同时保留时只能生成计划；确认前仍不得分配版本后缀。
+    decision_response = client.post(
+        "/api/conversations/filename-conflict-conv/messages",
+        headers=headers,
+        json={"content": "这两个文件同时保留", "attachments": []},
+    )
+    assert decision_response.status_code == 200
+    decision_receipt = decision_response.json()["task_result"]
+    assert decision_receipt["response_type"] == "operation_plan"
+    assert decision_receipt["operation_plan_id"]
+    before_confirmation = client.get("/api/working-copies", headers=headers).json()
+    assert not any("第二版" in item["filename"] for item in before_confirmation)
+    confirmation = client.post(
+        f"/api/operations/plans/{decision_receipt['operation_plan_id']}/confirm",
+        headers=headers,
+        json={"confirmation": "确认同时保留"},
+    )
+    assert confirmation.status_code == 200
+    assert confirmation.json()["status"] == "EXECUTED"
+    after_confirmation = client.get("/api/working-copies", headers=headers).json()
+    assert sorted(item["filename"] for item in after_confirmation) == [
+        "2026_统一材料.txt",
+        "2026_统一材料_第二版.txt",
+    ]
+
+    # 替换选择必须先把已有工作副本移入可恢复回收站，再提升新副本；原件仍不被覆盖。
+    client.post(
+        "/api/files/upload",
+        headers=headers,
+        data={"conversation_id": "filename-conflict-conv"},
+        files={"file": ("第三份.txt", b"third replacement material", "text/plain")},
+    )
+    _drain(SessionLocal)
+    replace_response = client.post(
+        "/api/conversations/filename-conflict-conv/messages",
+        headers=headers,
+        json={"content": "用新文件替换已有文件", "attachments": []},
+    )
+    replace_plan_id = replace_response.json()["task_result"]["operation_plan_id"]
+    replace_confirmation = client.post(
+        f"/api/operations/plans/{replace_plan_id}/confirm",
+        headers=headers,
+        json={"confirmation": "确认替换"},
+    )
+    assert replace_confirmation.json()["status"] == "EXECUTED"
+    final_copies = client.get("/api/working-copies", headers=headers).json()
+    assert sorted(item["filename"] for item in final_copies if item["status"] == "ACTIVE") == [
+        "2026_统一材料.txt",
+        "2026_统一材料_第二版.txt",
+    ]
+    assert sum(item["status"] == "TRASHED" for item in final_copies) == 1
+    assert len(client.get("/api/trash-entries", headers=headers).json()) == 1
     db = SessionLocal()
     try:
-        review = next(
+        reviews = [
             item
             for item in db.query(FileRenameReviewItem).all()
             if item.review_context_json.get("reason") == "FILENAME_CONFLICT"
-        )
-        assert review.status == "NEEDS_REVIEW"
+        ]
+        assert len(reviews) == 2
+        assert all(review.status == "EXECUTED" for review in reviews)
     finally:
         db.close()
         clear_overrides()
+
+
+def test_chat_creates_and_confirms_trash_then_restore_plans(monkeypatch, tmp_path):
+    """普通用户必须从对话生成回收站和恢复计划，确认前不得发生物理副作用。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "chat-trash-owner")
+    upload = _upload(client, headers, "待删除通知.txt", b"chat trash and restore")
+    _drain(SessionLocal)
+    working_copy = client.get("/api/working-copies", headers=headers).json()[0]
+
+    trash_message = client.post(
+        "/api/conversations/chat-trash-conv/messages",
+        headers=headers,
+        json={
+            "content": "把这个文件移入回收站",
+            "attachments": [{"document_id": upload["document_id"]}],
+        },
+    )
+    assert trash_message.status_code == 200
+    trash_receipt = trash_message.json()["task_result"]
+    assert trash_receipt["response_type"] == "operation_plan"
+    assert client.get(f"/api/working-copies/{working_copy['id']}", headers=headers).json()["status"] == "ACTIVE"
+    trash_confirmation = client.post(
+        f"/api/operations/plans/{trash_receipt['operation_plan_id']}/confirm",
+        headers=headers,
+        json={"confirmation": "确认移入回收站"},
+    )
+    assert trash_confirmation.json()["status"] == "EXECUTED"
+    assert client.get(f"/api/working-copies/{working_copy['id']}", headers=headers).json()["status"] == "TRASHED"
+
+    restore_message = client.post(
+        "/api/conversations/chat-trash-conv/messages",
+        headers=headers,
+        json={"content": "恢复刚才删除的文件", "attachments": []},
+    )
+    assert restore_message.status_code == 200
+    restore_receipt = restore_message.json()["task_result"]
+    assert restore_receipt["response_type"] == "operation_plan"
+    assert client.get(f"/api/working-copies/{working_copy['id']}", headers=headers).json()["status"] == "TRASHED"
+    restore_confirmation = client.post(
+        f"/api/operations/plans/{restore_receipt['operation_plan_id']}/confirm",
+        headers=headers,
+        json={"confirmation": "确认恢复"},
+    )
+    assert restore_confirmation.json()["status"] == "EXECUTED"
+    assert client.get(f"/api/working-copies/{working_copy['id']}", headers=headers).json()["status"] == "ACTIVE"
+    clear_overrides()
 
 
 def test_macro_risk_is_reported_without_claiming_virus_scan(tmp_path):

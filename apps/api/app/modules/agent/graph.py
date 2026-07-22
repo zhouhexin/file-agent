@@ -271,6 +271,7 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
             if step["tool_name"] in {
                 "generate-rename-suggestions",
                 "resolve-rename-reviews",
+                "working-copy-action-plan-create",
                 "classify-managed-files",
             }:
                 # 运行标识来自受信任 State，不能由 LLM 直接提供。
@@ -278,6 +279,9 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
                 tool_input["agent_run_id"] = state["agent_run_id"]
             if step["tool_name"] == "resolve-rename-reviews":
                 # 用户确认文本必须来自原始消息，不能采用 LLM 改写后的内容。
+                tool_input["message"] = state["message"]
+            if step["tool_name"] == "working-copy-action-plan-create":
+                # 文件动作文本和会话标识只能来自受信任 State，不能采用 LLM 改写或自报 ID。
                 tool_input["message"] = state["message"]
             # 调用工具注册表执行工具
             invocation = registry.invoke(step["tool_name"], tool_input)
