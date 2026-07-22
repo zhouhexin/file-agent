@@ -9,6 +9,7 @@ import hashlib
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
 from app.core.config import Settings, get_settings
@@ -72,6 +73,31 @@ class FileLifecycleStorageService:
         target = self.working_copy_path(relative_path)
         return self._atomic_copy(source=source, target=target, expected_sha256=expected_sha256)
 
+    def internal_staging_relative_path(
+        self,
+        *,
+        working_root_relative_path: str,
+        job_id: str,
+        managed_file_id: str,
+        filename: str,
+    ) -> str:
+        """生成长度受控且不可由用户操纵的内部暂存相对路径。
+
+        Windows 的传统文件 API 通常受 260 字符路径限制。内部路径只需要保证任务级唯一，
+        不需要重复保存完整业务 UUID 和原文件名；正式发布路径仍保留用户可见名称。
+        """
+
+        sanitized = self.sanitize_filename(filename)
+        suffix = Path(sanitized).suffix.lower()
+        # 当前支持的文件扩展名均为短 ASCII 后缀；异常长或特殊后缀不能放大内部路径。
+        if not re.fullmatch(r"\.[a-z0-9]{1,15}", suffix):
+            suffix = ""
+        staging_key = hashlib.sha256(f"{job_id}\0{managed_file_id}".encode("utf-8")).hexdigest()[:32]
+        root = working_root_relative_path.strip("/\\")
+        if not root:
+            raise ValueError("工作副本根相对路径不能为空")
+        return f"{root}/.internal/{staging_key}{suffix}"
+
     def publish_working_copy(
         self,
         *,
@@ -117,7 +143,11 @@ class FileLifecycleStorageService:
         return digest.hexdigest()
 
     def _atomic_copy(self, *, source: Path, target: Path, expected_sha256: str) -> Path:
-        """使用同目录临时文件和原子提交复制内容。"""
+        """使用同目录短临时文件和原子提交复制内容。
+
+        临时文件名不能包含目标文件名，否则长中文文件名叠加 UUID 目录后会在 Windows
+        上越过 MAX_PATH，并以具有误导性的 FileNotFoundError 失败。
+        """
 
         if not source.is_file():
             raise FileNotFoundError("源文件不存在")
@@ -126,9 +156,18 @@ class FileLifecycleStorageService:
             if self.sha256_file(target) == expected_sha256:
                 return target
             raise FileExistsError("目标文件已存在且内容不同，禁止覆盖")
-        temporary = target.with_name(f".{target.name}.{os.getpid()}.part")
+        descriptor = -1
+        temporary: Path | None = None
         try:
-            with source.open("rb") as source_handle, temporary.open("xb") as target_handle:
+            # mkstemp 直接以排他方式创建短随机名，既避免并发冲突，也不重复长目标文件名。
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".fa-",
+                suffix=".part",
+                dir=target.parent,
+            )
+            temporary = Path(temporary_name)
+            with source.open("rb") as source_handle, os.fdopen(descriptor, "wb") as target_handle:
+                descriptor = -1
                 shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
                 target_handle.flush()
                 os.fsync(target_handle.fileno())
@@ -136,7 +175,10 @@ class FileLifecycleStorageService:
                 raise ValueError("复制后的文件哈希校验失败")
             os.replace(temporary, target)
         finally:
-            temporary.unlink(missing_ok=True)
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         return target
 
     @staticmethod

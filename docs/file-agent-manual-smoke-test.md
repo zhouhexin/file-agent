@@ -67,13 +67,28 @@ git diff --check
 当前阶段期望：
 
 ```text
-后端：420 passed, 19 skipped
+后端：422 passed, 19 skipped
 前端：TypeScript 检查和 Vite build 成功
 Alembic：单一 head 20260723_0001
 Python：No broken requirements found
 ```
 
 后续新增测试后，测试数量可以增加，但不能出现失败项或新增未说明的跳过项。
+
+### 3.1 Windows 生命周期路径回归检查
+
+Windows 烟测必须先在已经配置好的 Python 环境中执行以下定向测试：
+
+```powershell
+cd apps\api
+python -m pytest -v `
+  app/tests/test_file_lifecycle_storage.py `
+  app/tests/test_file_lifecycle.py::test_upload_is_archived_then_imported_by_separate_jobs
+```
+
+通过标准：3 项测试全部通过。该检查会重建曾经达到 267 字符的 pytest 工作副本路径，验证内部暂存路径
+不再重复完整任务 UUID、文件 UUID 和原文件名，并验证原子复制的 `.part` 文件使用短排他名称。失败时不得
+通过缩短测试临时目录来掩盖问题。
 
 ## 4. 隔离环境准备
 

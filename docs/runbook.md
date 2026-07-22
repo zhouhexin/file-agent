@@ -38,7 +38,7 @@ cp .env.example .env
 当前期望结果：
 
 ```text
-420 passed, 19 skipped
+422 passed, 19 skipped
 ```
 
 当前跳过项是需要真实外部执行器或独立环境的既有集成测试。Paddle、PyMuPDF 等依赖可能输出弃用或

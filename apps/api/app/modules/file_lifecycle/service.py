@@ -778,9 +778,13 @@ class FileLifecycleJobProcessor:
         )
         source_stat_before = source.stat()
         source_sha256 = managed_file.content_sha256 or self.storage.sha256_file(source)
-        staged_filename = self.storage.sanitize_filename(managed_file.filename)
-        staged_relative_path = "/".join(
-            [working_root.relative_storage_path, ".internal", job.id, managed_file.id, staged_filename]
+        # 内部暂存路径只承载任务唯一性；完整 UUID 和用户文件名会放大 Windows 路径长度，
+        # 因而必须由 StorageService 生成固定上界的私有名称。
+        staged_relative_path = self.storage.internal_staging_relative_path(
+            working_root_relative_path=working_root.relative_storage_path,
+            job_id=job.id,
+            managed_file_id=managed_file.id,
+            filename=managed_file.filename,
         )
         final_storage_relative_path = ""
         final_target: Path | None = None
