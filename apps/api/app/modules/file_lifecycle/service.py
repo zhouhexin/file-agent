@@ -60,6 +60,7 @@ from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.path_policy import resolve_managed_relative_path
 from app.modules.classification.service import persist_document_results_classifications
 from app.modules.chunks.service import DocumentIndexService
+from app.modules.retrieval.search_profile import DocumentSearchProfileService
 
 
 @dataclass(slots=True)
@@ -905,6 +906,8 @@ class FileLifecycleJobProcessor:
             working_copy.current_version_id = version.id
             working_root.status = "READY"
             working_root.last_imported_at = utcnow()
+            # 工作副本成为 ACTIVE 的同一事务内必须创建检索投影；查询请求不能承担回填职责。
+            DocumentSearchProfileService(db=self.db).upsert_current_profile(working_copy.id)
 
             category_name = (
                 "/".join(str(item) for item in decision.primary_category.get("category_path", []))

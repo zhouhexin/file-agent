@@ -10,13 +10,14 @@ from typing import Any
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from app.db.models import Document, DocumentChunk, DocumentIndexRun
+from app.db.models import Document, DocumentChunk, DocumentIndexRun, WorkingCopy
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
 
 
 MAX_QUERY_CHARS = 2000
 MAX_QUERY_TOKENS = 64
 MAX_CANDIDATE_VERSION_IDS = 500
+MAX_FALLBACK_VERSION_AGGREGATIONS = 10
 
 
 class DocumentChunkLexicalSearchService:
@@ -100,6 +101,155 @@ class DocumentChunkLexicalSearchService:
                 ranked.append((matched / len(unique_tokens), chunk))
         ranked.sort(key=lambda item: (-item[0], item[1].chunk_index, item[1].id))
         return [_safe_result(chunk, score=score) for score, chunk in ranked[:limit]]
+
+    def fallback_recall(
+        self,
+        *,
+        query: str,
+        workspace_id: str,
+        max_versions: int = MAX_FALLBACK_VERSION_AGGREGATIONS,
+        limit_chunks: int = 30,
+    ) -> list[dict[str, Any]]:
+        """全局 Chunk GIN 候选补召回。
+
+        阶段四第一阶段文档召回候选不足时调用。
+        联结当前用户 ACTIVE 工作副本的当前版本，按版本聚合，最多补充 max_versions 个版本。
+        只返回 document_version_id、最佳 Chunk ID、位置和分数，不返回正文。
+        """
+        if not query:
+            return []
+
+        tokens = self.tokenizer.tokenize(str(query)[:MAX_QUERY_CHARS])[:MAX_QUERY_TOKENS]
+        if not tokens:
+            return []
+
+        max_versions = max(1, min(int(max_versions), 50))
+        limit_chunks = max(1, min(int(limit_chunks), 100))
+
+        if self.db.bind is not None and self.db.bind.dialect.name == "postgresql":
+            return self._fallback_postgresql(
+                tokens=tokens, workspace_id=workspace_id,
+                max_versions=max_versions, limit_chunks=limit_chunks,
+            )
+        return self._fallback_deterministic(
+            tokens=tokens, workspace_id=workspace_id,
+            max_versions=max_versions, limit_chunks=limit_chunks,
+        )
+
+    def _fallback_postgresql(
+        self, *, tokens: list[str], workspace_id: str,
+        max_versions: int, limit_chunks: int,
+    ) -> list[dict[str, Any]]:
+        """PostgreSQL 全局 Chunk GIN 补召回。"""
+
+        query_text = " OR ".join(dict.fromkeys(tokens))
+        ts_query = func.websearch_to_tsquery("simple", query_text)
+        rank = func.ts_rank_cd(DocumentChunk.search_vector, ts_query)
+
+        # 子查询：当前工作区下 ACTIVE 工作副本的最新版本
+        active_subq = (
+            self.db.query(
+                WorkingCopy.document_id.label("document_id"),
+                WorkingCopy.current_version_id.label("version_id"),
+            )
+            .filter(
+                WorkingCopy.workspace_id == workspace_id,
+                WorkingCopy.status == "ACTIVE",
+                WorkingCopy.current_version_id.isnot(None),
+            )
+            .subquery()
+        )
+
+        # 取 top chunk
+        ranked_chunks = (
+            self.db.query(
+                DocumentChunk,
+                rank.label("fts_rank"),
+            )
+            .join(Document, Document.id == DocumentChunk.document_id)
+            .join(DocumentIndexRun, DocumentIndexRun.id == DocumentChunk.index_run_id)
+            .join(
+                active_subq,
+                (active_subq.c.version_id == DocumentChunk.document_version_id)
+                & (active_subq.c.document_id == DocumentChunk.document_id),
+            )
+            .filter(
+                Document.user_id == self.user_id,
+                DocumentIndexRun.status == "COMPLETED",
+                DocumentChunk.search_vector.op("@@")(ts_query),
+            )
+            .order_by(rank.desc(), DocumentChunk.chunk_index.asc())
+            .limit(limit_chunks)
+            .all()
+        )
+
+        # 按版本聚合
+        version_map: dict[str, dict[str, Any]] = {}
+        for chunk, fts_rank in ranked_chunks:
+            version_id = chunk.document_version_id
+            if version_id in version_map:
+                continue
+            if len(version_map) >= max_versions:
+                break
+            version_map[version_id] = _safe_result(
+                chunk, score=float(fts_rank or 0.0),
+            )
+
+        return list(version_map.values())
+
+    def _fallback_deterministic(
+        self, *, tokens: list[str], workspace_id: str,
+        max_versions: int, limit_chunks: int,
+    ) -> list[dict[str, Any]]:
+        """SQLite 全局 deterministic Chunk 补召回。"""
+
+        unique_tokens = list(dict.fromkeys(tokens))
+
+        # 子查询：active working copies
+        active_version_ids = [
+            row.version_id for row in self.db.query(
+                WorkingCopy.current_version_id.label("version_id"),
+            )
+            .filter(
+                WorkingCopy.workspace_id == workspace_id,
+                WorkingCopy.status == "ACTIVE",
+                WorkingCopy.current_version_id.isnot(None),
+            )
+            .all()
+        ]
+
+        if not active_version_ids:
+            return []
+
+        chunks = (
+            self._base_query()
+            .filter(DocumentChunk.document_version_id.in_(active_version_ids))
+            .all()
+        )
+
+        ranked: list[tuple[float, DocumentChunk]] = []
+        for chunk in chunks:
+            indexed = set(str(chunk.search_text or "").split())
+            matched = sum(
+                1 for token in unique_tokens
+                if token in indexed or token in (chunk.text_content or "").lower()
+            )
+            if matched:
+                ranked.append((matched / len(unique_tokens), chunk))
+
+        ranked.sort(key=lambda item: (-item[0], item[1].chunk_index, item[1].id))
+
+        # 按版本聚合
+        version_map: dict[str, dict[str, Any]] = {}
+        for score, chunk in ranked[:limit_chunks]:
+            version_id = chunk.document_version_id
+            if version_id in version_map:
+                continue
+            if len(version_map) >= max_versions:
+                break
+            version_map[version_id] = _safe_result(chunk, score=score)
+
+        return list(version_map.values())
 
 
 def _safe_result(chunk: DocumentChunk, *, score: float) -> dict[str, Any]:

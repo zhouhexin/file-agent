@@ -116,6 +116,18 @@ class Settings(BaseModel):
     upload_allowed_extensions: tuple[str, ...] = DEFAULT_UPLOAD_ALLOWED_EXTENSIONS
     retrieval_mode: str = "lexical"
     chinese_tokenizer: str = "jieba"
+    # 阶段四的 CPU 两阶段检索是默认主路径；关闭仅用于紧急回退旧兼容实现。
+    two_stage_retrieval_enabled: bool = True
+    retrieval_document_candidate_limit: int = 30
+    retrieval_document_detail_limit: int = 12
+    retrieval_chunk_limit_per_document: int = 3
+    retrieval_chunk_global_limit: int = 24
+    retrieval_query_max_chars: int = 500
+    retrieval_preview_max_chars: int = 240
+    retrieval_statement_timeout_ms: int = 2000
+    retrieval_filename_trgm_min_chars: int = 4
+    retrieval_filename_trgm_candidate_limit: int = 20
+    retrieval_filename_trgm_similarity_threshold: float = 0.25
     document_chunk_max_chars: int = DEFAULT_DOCUMENT_CHUNK_MAX_CHARS
     document_chunk_overlap_chars: int = DEFAULT_DOCUMENT_CHUNK_OVERLAP_CHARS
     document_index_max_chars: int = DEFAULT_DOCUMENT_INDEX_MAX_CHARS
@@ -366,6 +378,37 @@ def get_settings() -> Settings:
             os.getenv("CHINESE_TOKENIZER", "jieba"),
             allowed={"jieba"},
             default="jieba",
+        ),
+        two_stage_retrieval_enabled=os.getenv("TWO_STAGE_RETRIEVAL_ENABLED", "true").lower() == "true",
+        retrieval_document_candidate_limit=max(
+            1, min(50, int(os.getenv("RETRIEVAL_DOCUMENT_CANDIDATE_LIMIT", "30")))
+        ),
+        retrieval_document_detail_limit=max(
+            1, min(20, int(os.getenv("RETRIEVAL_DOCUMENT_DETAIL_LIMIT", "12")))
+        ),
+        retrieval_chunk_limit_per_document=max(
+            1, min(3, int(os.getenv("RETRIEVAL_CHUNK_LIMIT_PER_DOCUMENT", "3")))
+        ),
+        retrieval_chunk_global_limit=max(
+            1, min(24, int(os.getenv("RETRIEVAL_CHUNK_GLOBAL_LIMIT", "24")))
+        ),
+        retrieval_query_max_chars=max(
+            10, min(500, int(os.getenv("RETRIEVAL_QUERY_MAX_CHARS", "500")))
+        ),
+        retrieval_preview_max_chars=max(
+            10, min(1000, int(os.getenv("RETRIEVAL_PREVIEW_MAX_CHARS", "240")))
+        ),
+        retrieval_statement_timeout_ms=max(
+            100, min(30000, int(os.getenv("RETRIEVAL_STATEMENT_TIMEOUT_MS", "2000")))
+        ),
+        retrieval_filename_trgm_min_chars=max(
+            4, min(20, int(os.getenv("RETRIEVAL_FILENAME_TRGM_MIN_CHARS", "4")))
+        ),
+        retrieval_filename_trgm_candidate_limit=max(
+            1, min(20, int(os.getenv("RETRIEVAL_FILENAME_TRGM_CANDIDATE_LIMIT", "20")))
+        ),
+        retrieval_filename_trgm_similarity_threshold=max(
+            0.15, min(1.0, float(os.getenv("RETRIEVAL_FILENAME_TRGM_SIMILARITY_THRESHOLD", "0.25")))
         ),
         document_chunk_max_chars=max(
             200,

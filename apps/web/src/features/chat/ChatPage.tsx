@@ -584,6 +584,20 @@ export function ChatPage({
     }
   }
 
+  async function openSearchDocument(documentId: string, filename: string) {
+    // 全局检索结果不携带路径或存储位置，只允许用后端再次鉴权的稳定 document_id 打开。
+    await openAttachment({
+      document_id: documentId,
+      filename,
+      size_bytes: 0,
+      content_type: 'application/octet-stream',
+      sha256: '',
+      status: 'READY',
+      ingest_status: 'INGESTED',
+      deduplicated: false,
+    });
+  }
+
   async function openManagedFile(file: ManagedFileResult) {
     // 受管文件复用 Blob 预览流程；后端只接受 root_key + relative_path，不暴露真实路径。
     setError('');
@@ -674,6 +688,7 @@ export function ChatPage({
                   token={token}
                   turn={turn}
                   onOpenAttachment={openAttachment}
+                  onOpenDocument={openSearchDocument}
                   onOpenManagedFile={openManagedFile}
                 />
               ))}

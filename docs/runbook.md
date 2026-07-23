@@ -47,7 +47,7 @@ python -m pytest
 当前期望结果：
 
 ```text
-422 passed, 19 skipped
+504 passed, 19 skipped
 ```
 
 当前跳过项是需要真实外部执行器或独立环境的既有集成测试。Paddle、PyMuPDF 等依赖可能输出弃用或
@@ -144,6 +144,12 @@ DOCUMENT_INDEX_MAX_CHARS=50000000
 DOCUMENT_INDEX_MAX_CHUNKS=50000
 EMBEDDING_ENABLED=false
 EMBEDDING_PROVIDER=disabled
+TWO_STAGE_RETRIEVAL_ENABLED=true
+RETRIEVAL_DOCUMENT_CANDIDATE_LIMIT=30
+RETRIEVAL_DOCUMENT_DETAIL_LIMIT=12
+RETRIEVAL_CHUNK_LIMIT_PER_DOCUMENT=3
+RETRIEVAL_CHUNK_GLOBAL_LIMIT=24
+RETRIEVAL_STATEMENT_TIMEOUT_MS=2000
 ```
 
 `DOCUMENT_INDEX_MAX_CHARS` 和 `DOCUMENT_INDEX_MAX_CHUNKS` 是可调整的 worker 资源预算，不是上传业务
@@ -151,6 +157,28 @@ EMBEDDING_PROVIDER=disabled
 Jieba 在应用层生成中文词项，PostgreSQL 使用 `simple` FTS/GIN 和 `pg_trgm`；不要在 File Agent API
 进程安装或加载 embedding 模型。后续如接独立 GPU 推理服务，先实现受控 provider 和异步回填任务，
 再把 `RETRIEVAL_MODE` 调整为 `hybrid`。关闭或回填失败时必须继续使用词法索引。
+
+阶段四的 `document_search_profiles` 是可重建的工作副本级瘦检索投影。执行 migration 后，上传导入、
+重命名/移动、恢复、摘要完成和分类建议写入会在同一事务更新投影；旧数据可由
+`DocumentSearchProfileService.backfill_profiles()` 或 `reconcile_profiles()` 幂等补齐。生产迁移完成后，
+用以下两类对话烟测确认：上传后搜索文件名或分类主题；再搜索仅出现于原文中的短语，确认系统能返回
+可打开的文件卡和页码/Sheet 位置。检索结果不可出现其他用户、回收站或旧版本文件。
+
+阶段四新增迁移为 `20260724_0001_create_document_search_profiles` 和
+`20260724_0002_finalize_document_search_profiles`。部署前先确认只有一个 head：
+
+```bash
+python -m alembic -c apps/api/alembic.ini heads
+```
+
+在隔离的 PostgreSQL 开发库上，可验证升级、降级和再次升级；禁止在含有需要保留业务数据的库上直接
+执行 downgrade：
+
+```bash
+python -m alembic -c apps/api/alembic.ini upgrade head
+python -m alembic -c apps/api/alembic.ini downgrade 20260723_0001
+python -m alembic -c apps/api/alembic.ini upgrade head
+```
 
 上传接口使用临时文件和分块流式写入，不会把整份文件一次性读入内存。以下参数只用于部署资源保护，
 可以根据磁盘、并发和 worker 容量调整，不应被解释为学校业务文件的固定大小限制：

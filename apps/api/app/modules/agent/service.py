@@ -77,6 +77,9 @@ class AgentRuntimeService:
 
         planner_mode = "deterministic" if planner is not None or not self.llm_intent_service.enabled else "llm"
         runtime_context = self._build_runtime_context(db=db, user_id=user_id, planner=planner)
+        # Registry 是每次运行新建的运行依赖；在图执行前注入真实会话 ID，供 L1 文件范围读取。
+        if hasattr(runtime_context.registry, "set_conversation_id"):
+            runtime_context.registry.set_conversation_id(conversation_id)
         initial_state = self._build_initial_state(
             agent_run_id=agent_run_id,
             conversation_id=conversation_id,

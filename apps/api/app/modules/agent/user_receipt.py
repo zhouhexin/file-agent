@@ -31,12 +31,14 @@ class UserTaskReceipt(BaseModel):
         "rename_plan",
         "operation_plan",
         "async_job",
+        "file_search_results",
     ] = "text"
     final_response: str | None = None
     processed_count: int = 0
     document_results: list[dict[str, Any]] = Field(default_factory=list)
     managed_file_result: dict[str, Any] | None = None
     rename_plan_result: dict[str, Any] | None = None
+    file_search_result: dict[str, Any] | None = None
     pending_job_ids: list[str] = Field(default_factory=list)
     operation_plan_id: str | None = None
     pending_decisions: list[dict[str, Any]] = Field(default_factory=list)
@@ -53,6 +55,7 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
 
     managed_file_result = _managed_file_result(result)
     rename_plan_result = _rename_plan_result(result)
+    file_search_result = _file_search_result(result)
     initial_organization_results = _initial_organization_results(result)
     document_results = _merge_document_results(
         initial_organization_results,
@@ -62,6 +65,7 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         result=result,
         managed_file_result=managed_file_result,
         rename_plan_result=rename_plan_result,
+        file_search_result=file_search_result,
     )
     pending_decisions: list[dict[str, Any]] = []
     if result.operation_plan_id:
@@ -90,6 +94,7 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         document_results=document_results,
         managed_file_result=managed_file_result,
         rename_plan_result=rename_plan_result,
+        file_search_result=file_search_result,
         pending_job_ids=list(result.async_job_ids),
         operation_plan_id=result.operation_plan_id,
         pending_decisions=pending_decisions,
@@ -296,6 +301,7 @@ def _response_type(
     result: AgentRunResult,
     managed_file_result: dict[str, Any] | None,
     rename_plan_result: dict[str, Any] | None,
+    file_search_result: dict[str, Any] | None,
 ) -> str:
     """把内部意图收敛为少量稳定的用户展示类型。"""
 
@@ -303,6 +309,8 @@ def _response_type(
         return "operation_plan"
     if rename_plan_result:
         return "rename_plan"
+    if file_search_result:
+        return "file_search_results"
     if managed_file_result:
         return "managed_file_list"
     if result.async_job_ids or result.status == "WAITING_FOR_ASYNC_JOB":
@@ -312,6 +320,54 @@ def _response_type(
     return "text"
 
 
+def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
+    """投影两阶段文件搜索结果。
+
+    只有当 hybrid-search tool 输出包含 total_returned 字段（表示走两阶段链路）时
+    才激活此投影；旧链路保持 final_response 文本格式不变。
+    """
+
+    for invocation in result.tool_invocations:
+        output = invocation.output_json
+        if invocation.tool_name != "hybrid-search":
+            continue
+        if not isinstance(output, dict):
+            continue
+        # 新链路会包含 total_returned 字段
+        if "total_returned" not in output:
+            continue
+        files = []
+        for item in output.get("results", []):
+            if not isinstance(item, dict):
+                continue
+            files.append(
+                {
+                    key: item.get(key)
+                    for key in (
+                        "working_copy_id",
+                        "document_id",
+                        "document_version_id",
+                        "filename",
+                        "category_path",
+                        "year",
+                        "overview",
+                        "match_reasons",
+                        "match_location",
+                        "evidence_preview",
+                    )
+                    if key in item
+                }
+            )
+        return {
+            "query": str(output.get("query") or ""),
+            "total_returned": int(output.get("total_returned") or 0),
+            "partial": bool(output.get("partial", False)),
+            "user_message": str(output.get("user_message") or ""),
+            "files": files,
+        }
+    return None
+
+
 def _suggested_next_actions(*, result: AgentRunResult, response_type: str) -> list[str]:
     """提供用户可以直接继续输入的自然语言动作。"""
 
@@ -319,6 +375,8 @@ def _suggested_next_actions(*, result: AgentRunResult, response_type: str) -> li
         return ["查看计划并确认是否执行"]
     if response_type == "file_results":
         return ["继续查找相关文件", "询问文件中的具体内容"]
+    if response_type == "file_search_results":
+        return ["继续查找相关文件", "查看文件的详细内容"]
     if response_type == "managed_file_list":
         return ["继续按主题、年份或文件类型筛选"]
     return []

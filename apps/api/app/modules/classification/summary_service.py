@@ -318,6 +318,14 @@ class DocumentSummaryService:
             created_models.append(classification_summary)
         self.db.add_all(created_models)
         self.db.flush()
+        # 摘要属于第一阶段召回信号；异步摘要完成后同步刷新当前工作副本投影，
+        # 不能等到下一次搜索才发现摘要变化。
+        from app.modules.retrieval.search_profile import DocumentSearchProfileService
+
+        DocumentSearchProfileService(db=self.db).refresh_profiles_for_document_version(
+            document_id=document_id,
+            document_version_id=document_version_id,
+        )
         log_event(
             "document.summary.completed",
             document_id=document_id,

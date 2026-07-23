@@ -10,10 +10,11 @@ type ChatTurnViewProps = {
   token: string;
   turn: ChatTurn;
   onOpenAttachment: (file: ChatAttachment) => void;
+  onOpenDocument: (documentId: string, filename: string) => void;
   onOpenManagedFile: (file: ManagedFileResult) => void;
 };
 
-export function ChatTurnView({ token, turn, onOpenAttachment, onOpenManagedFile }: ChatTurnViewProps) {
+export function ChatTurnView({ token, turn, onOpenAttachment, onOpenDocument, onOpenManagedFile }: ChatTurnViewProps) {
   // 文件任务按"附件上下文 -> 用户指令 -> 助手结果"展示，减少阅读跳跃。
   if (turn.role === 'assistant') {
     const duplicateMetadata = turn.metadata?.find((item) => item.type === 'duplicate_upload_review');
@@ -26,7 +27,11 @@ export function ChatTurnView({ token, turn, onOpenAttachment, onOpenManagedFile 
             {uploadVersionId ? (
               <DuplicateUploadReviewLoader token={token} uploadVersionId={uploadVersionId} />
             ) : turn.response ? (
-              <AgentRunReceipt taskResult={turn.response.task_result} token={token} />
+              <AgentRunReceipt
+                taskResult={turn.response.task_result}
+                token={token}
+                onOpenDocument={onOpenDocument}
+              />
             ) : (
               <p className="agent-chat-response">{turn.userText}</p>
             )}
@@ -69,6 +74,7 @@ export function ChatTurnView({ token, turn, onOpenAttachment, onOpenManagedFile 
               attachments={turn.attachments}
               token={token}
               onOpenAttachment={onOpenAttachment}
+              onOpenDocument={onOpenDocument}
               onOpenManagedFile={onOpenManagedFile}
             />
           ) : null}

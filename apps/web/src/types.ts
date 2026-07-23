@@ -19,17 +19,54 @@ export type TokenResponse = {
 export type TaskResult = {
   task_id: string;
   task_status: 'processing' | 'waiting_confirmation' | 'completed' | 'needs_attention' | 'failed';
-  response_type: 'text' | 'file_results' | 'managed_file_list' | 'rename_plan' | 'operation_plan' | 'async_job';
+  response_type:
+    | 'text'
+    | 'file_results'
+    | 'managed_file_list'
+    | 'rename_plan'
+    | 'operation_plan'
+    | 'async_job'
+    | 'file_search_results';
   final_response: string | null;
   processed_count: number;
   document_results: DocumentResult[];
   managed_file_result: { root_key: string; files: ManagedFileResult[] } | null;
   rename_plan_result: import('./features/chat/RenameSuggestionReceipt').RenamePlanResult | null;
+  file_search_result: FileSearchResult | null;
   pending_job_ids: string[];
   operation_plan_id: string | null;
   pending_decisions: Array<Record<string, unknown>>;
   references: Array<Record<string, unknown>>;
   suggested_next_actions: string[];
+};
+
+// 两阶段文件搜索结果的普通用户投影。
+// 不包含 Skill、Tool、内部路径、SQL 分数或 search_text。
+export type FileSearchMatchLocation = {
+  page_number?: number | null;
+  sheet_name?: string | null;
+  cell_range?: string | null;
+};
+
+export type FileSearchResultFile = {
+  working_copy_id: string | null;
+  document_id: string;
+  document_version_id: string;
+  filename: string;
+  category_path: string[];
+  year?: number | null;
+  overview?: string;
+  match_reasons: string[];
+  match_location: FileSearchMatchLocation | null;
+  evidence_preview: string;
+};
+
+export type FileSearchResult = {
+  query: string;
+  total_returned: number;
+  partial: boolean;
+  user_message: string;
+  files: FileSearchResultFile[];
 };
 
 export type OperationPlanItem = {

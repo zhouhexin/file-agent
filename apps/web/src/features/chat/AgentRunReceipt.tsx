@@ -7,6 +7,7 @@ import type { ManagedFileResult, OperationPlanResponse, TaskResult } from '../..
 import { DocumentResultCard } from './DocumentResultCard';
 import { OperationPlanCard } from './OperationPlanCard';
 import { RenameSuggestionReceipt } from './RenameSuggestionReceipt';
+import { SearchResultsReceipt } from './SearchResultsReceipt';
 import type { ChatAttachment } from './presentation';
 import { findAttachmentByDocumentId, formatFileSize } from './presentation';
 
@@ -18,6 +19,7 @@ type AgentRunReceiptProps = {
   taskResult?: TaskResult;
   attachments?: ChatAttachment[];
   onOpenAttachment?: (file: ChatAttachment) => void;
+  onOpenDocument?: (documentId: string, filename: string) => void;
   onOpenManagedFile?: (file: ManagedFileResult) => void;
 };
 
@@ -27,6 +29,7 @@ export function AgentRunReceipt({
   taskResult,
   attachments = [],
   onOpenAttachment,
+  onOpenDocument,
   onOpenManagedFile,
 }: AgentRunReceiptProps) {
   const [operationPlan, setOperationPlan] = useState<OperationPlanResponse | null>(null);
@@ -93,6 +96,20 @@ export function AgentRunReceipt({
           <p className="agent-chat-response">{taskResult.final_response}</p>
         ) : null}
       </>
+    );
+  }
+
+  if (
+    taskResult.response_type === 'file_search_results' &&
+    taskResult.file_search_result
+  ) {
+    return (
+      <SearchResultsReceipt
+        result={taskResult.file_search_result}
+        attachments={attachments}
+        onOpenAttachment={onOpenAttachment}
+        onOpenDocument={onOpenDocument}
+      />
     );
   }
   if (operationPlan && token) {

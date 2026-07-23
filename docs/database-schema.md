@@ -567,6 +567,44 @@ create index ix_document_versions_filename_trgm on document_versions using gin(f
 `search_vector`。`embedding` 仅为可空扩展槽，不创建 IVFFlat/HNSW 索引；默认
 `embedding_status=DISABLED`，本阶段不要求 GPU。
 
+### 4.12.1 document_search_profiles（阶段四可重建检索投影）
+
+阶段四使用工作副本级瘦投影做第一阶段候选召回。它只保存稳定 ID、规范化文件名和分词后的
+检索词项，不复制完整分类 JSON、摘要 JSON 或正文；展示字段必须在候选收敛后从事实表批量 JOIN。
+
+```sql
+create table document_search_profiles (
+  id uuid primary key,
+  user_id uuid not null,
+  workspace_id uuid not null,
+  working_copy_id uuid not null unique,
+  document_id uuid not null,
+  document_version_id uuid not null,
+  status varchar(40) not null default 'ACTIVE',
+  normalized_filename text null,
+  filename_search_text text null,
+  category_search_text text null,
+  metadata_search_text text null,
+  summary_search_text text null,
+  combined_search_text text null,
+  search_vector tsvector null,
+  source_fingerprint varchar(64) null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index ix_dsp_user_ws_status on document_search_profiles(user_id, workspace_id, status);
+create index ix_dsp_normalized_filename on document_search_profiles(normalized_filename);
+create index ix_dsp_search_vector_gin on document_search_profiles using gin(search_vector);
+create index ix_dsp_normalized_filename_trgm on document_search_profiles using gin(normalized_filename gin_trgm_ops);
+```
+
+PostgreSQL migration 会用 trigger 在插入或更新分词字段时同步写入加权 `search_vector`：文件名 A、
+分类 B、元数据 C、摘要 D。`normalized_filename` 的 `pg_trgm` 只用于长文件名的受限补召回；中文主题
+检索主路径仍是应用层 Jieba 词项 + `simple` GIN。投影在工作副本创建、重命名/移动、恢复、摘要完成和
+分类建议写入时同事务刷新；回收站操作标记为 `INACTIVE`。投影可以 backfill/reconcile 重建，不能反向
+修改文件或分类事实。
+
 ### 4.13 evidence_spans
 
 ```sql

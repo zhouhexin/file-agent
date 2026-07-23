@@ -133,7 +133,19 @@ class ToolRegistry:
 
         self.db = db
         self.user_id = user_id
-        self._tools = _build_mvp_tools(db=db, user_id=user_id)
+        self._conversation_id: str | None = None
+        self._tools = _build_mvp_tools(
+            db=db,
+            user_id=user_id,
+            conversation_id_getter=lambda: self._conversation_id,
+        )
+
+    def set_conversation_id(self, conversation_id: str) -> None:
+        """为本次 AgentRun 注入会话 ID，供 L1 范围服务读取真实会话附件。
+
+        会话 ID 只保存在运行时 Registry，不能由 Planner 伪造，也不能写入持久化 Graph State。
+        """
+        self._conversation_id = conversation_id
 
     def list_tools(self) -> List[Dict[str, Any]]:
         """返回全部白名单 Tool，供管理和调试查看。"""
@@ -293,11 +305,16 @@ def _embedding_generate_handler(tool_input: BaseModel) -> Dict[str, Any]:
     }
 
 
-def _search_handler(db: Any, user_id: str | None) -> ToolHandler:
+def _search_handler(
+    db: Any,
+    user_id: str | None,
+    conversation_id_getter: Callable[[], str | None] | None = None,
+) -> ToolHandler:
     """创建摘要优先的工作副本文档级检索 handler。
 
-    当前实现完成文档级候选召回；原文 Chunk 级混合检索接入后仍必须保留这层路由，
-    且 evidence-answer 不得把摘要当成最终事实证据。
+    当 TWO_STAGE_RETRIEVAL_ENABLED=true 时改用两阶段检索服务（基于 document_search_profiles
+    GIN 索引 + Chunk fallback + 候选内精查 + 确定性融合）。
+    默认启用；关闭开关仅用于紧急回退旧摘要优先检索，且不影响 Tool 契约和审计。
     """
 
     def handler(tool_input: BaseModel) -> Dict[str, Any]:
@@ -311,10 +328,71 @@ def _search_handler(db: Any, user_id: str | None) -> ToolHandler:
                 "results": [],
                 "error": {"code": "RUNTIME_CONTEXT_REQUIRED", "message": "检索上下文不可用"},
             }
-        return WorkingCopySummarySearchService(db=db, user_id=user_id).search(
-            query=getattr(tool_input, "query"),
-            document_ids=list(getattr(tool_input, "document_ids", [])),
+
+        settings = get_settings()
+        if not settings.two_stage_retrieval_enabled:
+            # 默认路径：保持原有摘要优先检索，行为不变
+            return WorkingCopySummarySearchService(db=db, user_id=user_id).search(
+                query=getattr(tool_input, "query"),
+                document_ids=list(getattr(tool_input, "document_ids", [])),
+            )
+
+        # 启用新链路：两阶段检索
+        # 解析用户的 default workspace
+        user = db.get(User, user_id)
+        workspace_id = user.default_workspace_id if user and user.default_workspace_id else None
+        if not workspace_id:
+            # 没有 workspace 时降级到旧链路，避免新功能破坏现有调用
+            return WorkingCopySummarySearchService(db=db, user_id=user_id).search(
+                query=getattr(tool_input, "query"),
+                document_ids=list(getattr(tool_input, "document_ids", [])),
+            )
+
+        from app.modules.retrieval.two_stage_search import TwoStageFileSearchService
+        from app.modules.retrieval.query_parser import FileSearchQueryParser
+        from app.modules.retrieval.scope_resolver import (
+            ConversationFileSearchContextService,
+            FileSearchScopeResolver,
         )
+
+        # 构造查询解析器和范围解析器
+        tokenizer = None
+        try:
+            from app.modules.chunks.tokenizer import (
+                ChineseLexicalTokenizer,
+                load_default_business_terms,
+            )
+            tokenizer = ChineseLexicalTokenizer(load_default_business_terms())
+        except Exception:
+            tokenizer = None
+
+        parser = FileSearchQueryParser(tokenizer=tokenizer)
+        parsed = parser.parse(getattr(tool_input, "query") or "")
+
+        conversation_id = conversation_id_getter() if conversation_id_getter else None
+        resolver = FileSearchScopeResolver(
+            session_file_service=ConversationFileSearchContextService(
+                db=db,
+                user_id=user_id,
+            ),
+        )
+        scope = resolver.resolve(
+            query=getattr(tool_input, "query") or "",
+            explicit_attachment_ids=list(getattr(tool_input, "document_ids", []) or []),
+            conversation_id=conversation_id,
+        )
+
+        service = TwoStageFileSearchService(
+            db=db, user_id=user_id, workspace_id=workspace_id,
+            config=settings, tokenizer=tokenizer,
+        )
+        result = service.search(
+            query=getattr(tool_input, "query") or "",
+            parsed_query=parsed,
+            scope=scope,
+        )
+        result["kind"] = "workspace_file_search"
+        return result
 
     return handler
 
@@ -1696,7 +1774,12 @@ def _spreadsheet_workbench_handler(db: Any, user_id: str | None, *, action: str)
     return handler
 
 
-def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str, ToolDefinition]:
+def _build_mvp_tools(
+    *,
+    db: Any = None,
+    user_id: str | None = None,
+    conversation_id_getter: Callable[[], str | None] | None = None,
+) -> Dict[str, ToolDefinition]:
     """创建 AGENTS.md 要求的完整 MVP Tool 目录。"""
 
     tools = [
@@ -1716,7 +1799,7 @@ def _build_mvp_tools(*, db: Any = None, user_id: str | None = None) -> Dict[str,
         _tool("intent-summary", "Record LLM-understood user intent without side effects.", IntentSummaryInput, False, False, [], _intent_summary_handler),
         _tool("read-agent-capabilities", "Read fixed File Agent capability catalog.", AgentCapabilitiesReadInput, False, False, [], _agent_capabilities_handler),
         _tool("read-classification-taxonomy", "Read fixed classification taxonomy catalog.", ClassificationTaxonomyReadInput, False, False, [], _classification_taxonomy_handler),
-        _tool("hybrid-search", "Run summary-first workspace retrieval.", SearchToolInput, False, False, [], _search_handler(db, user_id)),
+        _tool("hybrid-search", "Run summary-first workspace retrieval.", SearchToolInput, False, False, [], _search_handler(db, user_id, conversation_id_getter)),
         _tool("evidence-answer", "Answer from retrieved evidence.", EvidenceAnswerInput, True, False, ["qa_answers", "answer_references"], _evidence_answer_handler),
         _tool("change-report", "Build per-file receipt from changes.", ChangeReportInput, True, False, ["change_sets"], _change_report_handler),
         _tool("operation-plan-create", "Create high-risk operation plan.", OperationPlanCreateInput, True, False, ["operation_plans"], _operation_plan_handler),

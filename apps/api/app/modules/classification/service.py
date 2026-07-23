@@ -22,6 +22,7 @@ def persist_document_results_classifications(
 
     repository = ClassificationRepository(db)
     suggestion_ids: dict[tuple[str, int], str] = {}
+    changed_versions: set[tuple[str, str]] = set()
     repository.delete_by_agent_run(agent_run_id)
     for result in document_results:
         document_id = str(result.get("document_id") or "")
@@ -68,6 +69,17 @@ def persist_document_results_classifications(
             )
             category["suggestion_id"] = suggestion.id
             suggestion_ids[(document_id, rank)] = suggestion.id
+            changed_versions.add((document_id, document_version_id))
+    # 分类建议是文档级召回信号。所有建议写入后一次性刷新，避免每个标签各自触发一次投影写入。
+    if changed_versions:
+        from app.modules.retrieval.search_profile import DocumentSearchProfileService
+
+        profile_service = DocumentSearchProfileService(db=db)
+        for document_id, document_version_id in changed_versions:
+            profile_service.refresh_profiles_for_document_version(
+                document_id=document_id,
+                document_version_id=document_version_id,
+            )
     return suggestion_ids
 
 

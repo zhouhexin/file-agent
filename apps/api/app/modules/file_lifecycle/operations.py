@@ -39,6 +39,7 @@ from app.modules.file_lifecycle.service import create_lifecycle_audit
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.operations.repository import OperationPlanRepository
 from app.modules.operations.schemas import OperationPlanCreateRequest
+from app.modules.retrieval.search_profile import DocumentSearchProfileService
 
 
 WORKING_COPY_OPERATION_TYPES = {
@@ -502,6 +503,8 @@ class WorkingCopyOperationService:
         if file_object is not None:
             file_object.storage_backend = "working_copy_local"
             file_object.storage_path = after_storage_path
+        # 已确认的改名/移动必须在同一事务刷新投影，避免新旧文件名同时或都不能被检索。
+        DocumentSearchProfileService(db=self.db).upsert_current_profile(working_copy.id)
         record.status = "COMPLETED"
         record.updated_at = operation_time
         return {
@@ -559,6 +562,8 @@ class WorkingCopyOperationService:
         if file_object is not None:
             file_object.storage_backend = "trash_local"
             file_object.storage_path = trash_relative_path
+        # 回收站文件必须立即退出可搜索范围；不等待后台 reconciliation。
+        DocumentSearchProfileService(db=self.db).deactivate_profile(working_copy.id)
         return {
             "working_copy_id": working_copy.id,
             "before_relative_path": working_copy.relative_path,
@@ -684,6 +689,8 @@ class WorkingCopyOperationService:
         if file_object is not None:
             file_object.storage_backend = "working_copy_local"
             file_object.storage_path = after_storage_path
+        # 恢复为 ACTIVE 时重新生成当前版本投影，防止沿用回收前的陈旧名称或摘要。
+        DocumentSearchProfileService(db=self.db).upsert_current_profile(working_copy.id)
         return {
             "working_copy_id": working_copy.id,
             "before_relative_path": before.get("relative_path"),

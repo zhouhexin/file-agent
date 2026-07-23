@@ -1,6 +1,6 @@
 # File Agent 整项目手工烟测手册
 
-本文用于在阶段三开发完成后以及后续版本发布前，对 File Agent 当前已经实现的普通用户入口、上传自动整理、
+本文用于在阶段四开发完成后以及后续版本发布前，对 File Agent 当前已经实现的普通用户入口、上传自动整理、
 文件生命周期、权限、审计和真实工作副本副作用进行手工验证。自动化测试通过不能替代本文的真实文件
 系统烟测。
 
@@ -24,7 +24,7 @@
 
 以下能力当前不作为通过条件：
 
-- 阶段四、阶段五的两阶段 RAG、正式 Evidence Answer 和持久化引用。
+- 阶段五的正式 Evidence Answer、`qa_answers` 和持久化引用。
 - 分类接受、拒绝和纠正的普通用户页面；同名冲突自然语言决策已经纳入本阶段验收。
 - 尚未提供的 `/admin/documents`、`/admin/feedback`、`/admin/settings/llm` 前端页面。
 - 病毒扫描引擎。系统当前只能说明已完成基础格式、MIME、宏和加密风险检查。
@@ -72,11 +72,11 @@ git diff --check
 当前阶段期望：
 
 ```text
-后端（macOS/Linux）：426 passed, 19 skipped
-后端（Windows 有 symlink 权限）：426 passed, 19 skipped
-后端（Windows 无 symlink 权限）：425 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
+后端（macOS/Linux）：504 passed, 19 skipped
+后端（Windows 有 symlink 权限）：504 passed, 19 skipped
+后端（Windows 无 symlink 权限）：503 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
 前端：TypeScript 检查和 Vite build 成功
-Alembic：单一 head 20260723_0001
+Alembic：单一 head 20260724_0002
 Python：No broken requirements found
 ```
 
@@ -409,12 +409,15 @@ curl -sS http://127.0.0.1:8000/api/documents/<document_id>/chunks \
 - 页码、Sheet 或单元格范围由文件名/文本猜测，或为空时伪造坐标。
 - 重复运行生成重复 Chunk，或者移动/改名导致历史引用失效。
 
-### SMOKE-009 对话访问和表格计算
+### SMOKE-009 对话文件搜索、原文定位和表格计算
 
 在 `/chat` 依次输入：
 
 ```text
 找我刚才上传的奖学金材料。
+找我去年的奖学金材料。
+哪个文件提到了公示期限？
+找包含资助金额的表格。
 打开2026年的学生工作文件。
 总结刚才上传的PDF。
 把统计表的每个工作表分别概括一下。
@@ -424,11 +427,17 @@ curl -sS http://127.0.0.1:8000/api/documents/<document_id>/chunks \
 
 通过标准：
 
-- 搜索只返回当前用户工作区的工作副本。
-- 最终文件名、分类和摘要能够参与当前轻量召回。
+- 搜索只返回当前用户工作区的活动工作副本；另一个测试用户的同主题文件永远不出现。
+- 最终文件名、分类、元数据和摘要先参与低耗文档级召回；摘要遗漏但原文含“公示期限”的文件仍须
+  经 Chunk 补召回命中，并显示真实页码。
+- XLSX 命中“资助金额”时显示真实 Sheet 与单元格范围；不能通过文件名猜测位置。
+- “刚才这些文件”只检索该轮后端确认的附件；“找我去年的奖学金材料”可以在当前用户工作区全局检索。
+- 结果卡默认显示前 10 个，点击“查看更多”每次追加最多 10 个；点击“查看文件”能通过鉴权下载或预览，
+  不依赖相对路径。
+- 页面和普通消息/API 响应不显示 Skill、Tool、Chunk、内部路径、搜索词项、SQL 分数或完整正文。
 - Excel 数字汇总由确定性表格服务完成，不能让 LLM 心算。
 - 重命名请求只生成 OperationPlan，确认前文件不变。
-- 当前阶段只要求 Chunk/Evidence 持久化边界，不要求返回阶段五的正式引用或 Evidence Answer。
+- 阶段四只展示搜索定位和受限短预览，不要求返回阶段五的正式 Evidence Answer。
 
 ### SMOKE-010 工作副本重命名确认
 

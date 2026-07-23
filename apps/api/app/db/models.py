@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, func, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import UserDefinedType
@@ -1015,6 +1015,40 @@ class WorkingCopyPathRecord(Base):
     executed_by: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class DocumentSearchProfile(Base):
+    """工作副本级瘦检索投影，只保存检索必需词项和稳定 ID。
+
+    不保存完整 category_path_json、summary_preview 或 entities_json；
+    候选收敛后的显示数据以一次批量 JOIN 从事实表读取。
+    这是可重建的检索派生数据，不替代 WorkingCopy、DocumentSummary、分类建议或 Evidence 表。
+    投影损坏时可以重建，不能反向修改文件客观事实。
+    """
+
+    __tablename__ = "document_search_profiles"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    workspace_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    working_copy_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False)
+    document_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    document_version_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="ACTIVE", index=True)
+    normalized_filename: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    filename_search_text: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    category_search_text: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    metadata_search_text: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    summary_search_text: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    combined_search_text: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    search_vector: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    source_fingerprint: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class TrashEntry(Base):

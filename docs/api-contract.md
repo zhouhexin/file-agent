@@ -946,7 +946,7 @@ Response:
 
 ## 8. Search API
 
-### 8.1 Hybrid Search
+### 8.1 CPU-only Two-stage File Search
 
 ```text
 POST /api/search
@@ -966,33 +966,41 @@ Request:
 Behavior:
 
 ```text
-search current attachments first
-prioritize current conversation documents
-generate query embedding
-run vector search
-run full-text search
-merge and rerank
-filter by current user's workspace
+parse query with Jieba and deterministic rules
+resolve L0 current attachments / L1 conversation files / L4 active workspace files on the server
+recall a bounded set of current working copies from document_search_profiles
+use PostgreSQL simple GIN as primary lexical recall; use normalized filename pg_trgm only as bounded fallback
+when document recall is insufficient, make one bounded document_chunks lexical fallback recall
+search chunks only inside the bounded candidate versions, then validate Evidence and permissions
+merge deterministically and return user-safe file cards
 ```
 
 Response:
 
 ```json
 {
-  "results": [
+  "query": "贫困生补助怎么申请？",
+  "total_returned": 1,
+  "partial": false,
+  "user_message": "",
+  "files": [
     {
-      "chunk_id": "chunk-uuid",
       "document_id": "document-uuid",
-      "document_title": "资助政策.pdf",
-      "page_no": 2,
-      "sheet_name": null,
-      "cell_range": null,
-      "quote": "申请国家助学金需要提交申请表和相关证明材料。",
-      "score": 0.82
+      "document_version_id": "version-uuid",
+      "filename": "2025年资助政策.pdf",
+      "category_path": ["学生工作", "资助"],
+      "overview": "资助申请的材料与时间说明。",
+      "match_reasons": ["文件名命中：2025年资助政策.pdf", "原文 Chunk 命中查询词"],
+      "match_location": {"page_number": 2, "sheet_name": null, "cell_range": null},
+      "evidence_preview": "申请国家助学金需要提交申请表和相关证明材料。"
     }
   ]
 }
 ```
+
+此接口和聊天入口均不调用 embedding、GPU、LLM、Graph 或文件系统扫描；不会返回 Chunk 正文、
+`search_text`、内部路径、SQL 分数或 Tool/Skill 载荷。`attachment_document_ids` 仅作为后端再次
+鉴权的稳定 ID 输入，`top_k` 范围为 1–20。
 
 ## 9. Evidence Answer Skill API
 
