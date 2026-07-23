@@ -61,6 +61,28 @@ def _print_worker_status(
     print(" ".join(fields), flush=True)
 
 
+def _job_completion_summary(job: FilesystemJob) -> str | None:
+    """提取可安全显示的任务完成摘要，帮助区分扫描和导入断点。
+
+    这里只输出数量、任务 ID 和幂等标记，不输出原始文件名、相对路径或正文，
+    因为 worker 控制台可能被运维日志采集。
+    """
+
+    result = dict(job.result_json or {})
+    if job.job_type == "SCAN_MANAGED_ROOT":
+        return (
+            f"files_discovered={result.get('files_discovered', 0)} "
+            f"files_updated={result.get('files_updated', 0)} "
+            f"import_jobs={len(result.get('import_job_ids') or [])}"
+        )
+    if job.job_type == "RECONCILE_MANAGED_ROOT":
+        scan_job_id = result.get("scan_job_id")
+        return f"scan_job_id={scan_job_id}" if scan_job_id else None
+    if job.job_type == "IMPORT_WORKING_COPIES":
+        return f"working_copy_created={not bool(result.get('idempotent'))}"
+    return None
+
+
 def process_next_filesystem_job(
     *,
     session_factory: Callable[[], Session] = SessionLocal,
@@ -95,6 +117,7 @@ def process_next_filesystem_job(
                     "任务完成",
                     job=job,
                     duration_ms=int((time.perf_counter() - started_at) * 1000),
+                    message=_job_completion_summary(job),
                 )
                 log_event(
                     "filesystem.worker.completed",
@@ -491,6 +514,8 @@ def _public_job_error_message(*, job: FilesystemJob, error: Exception) -> str:
 
     if job.job_type == "CLASSIFY_MANAGED_FILES":
         return "受管文件后台分类失败，请稍后重试或联系管理员。"
+    if job.job_type in {"RECONCILE_MANAGED_ROOT", "SCAN_MANAGED_ROOT"}:
+        return "受管原始目录不可访问，请检查 MANAGED_ROOT 配置、目录是否存在及服务账户读取权限。"
     if FileLifecycleJobProcessor.supports(job.job_type):
         return "文件后台处理失败，系统将按策略重试；达到上限后请联系管理员。"
     return str(error)[:2000] or "文件系统任务执行失败。"

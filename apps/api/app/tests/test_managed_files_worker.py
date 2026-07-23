@@ -63,7 +63,30 @@ def test_worker_processes_scan_job_and_persists_files(tmp_path: Path, capsys):
         assert "任务开始" in console_output
         assert "任务完成" in console_output
         assert "job_type=SCAN_MANAGED_ROOT" in console_output
+        assert "files_discovered=1" in console_output
+        assert "import_jobs=" in console_output
         assert str(managed_dir) not in console_output
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_scanner_reports_unavailable_managed_root_instead_of_silent_empty_scan(tmp_path: Path):
+    """错误的受管目录配置必须显式失败，不能伪装为发现 0 个文件。"""
+
+    _client, session_factory = client_with_database()
+    db = session_factory()
+    try:
+        root = ManagedRoot(
+            root_key="missing_root",
+            display_name="不存在的目录",
+            container_path=str(tmp_path / "missing-root"),
+        )
+        db.add(root)
+        db.flush()
+
+        with pytest.raises(FileNotFoundError, match="受管原始目录不存在"):
+            ManagedFileScanner(db).scan_root(root)
     finally:
         db.close()
         clear_overrides()
