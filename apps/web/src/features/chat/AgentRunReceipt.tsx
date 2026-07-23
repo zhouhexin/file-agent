@@ -55,8 +55,14 @@ export function AgentRunReceipt({
   }, [taskResult?.operation_plan_id, token]);
 
   if (state === 'running') {
-    // 普通用户只看最终结果；内部 Agent、Skill 和 Tool 状态不在聊天界面展开。
-    return null;
+    // 不暴露内部 Agent、Skill 和 Tool 状态，但不能把正在处理的轮次渲染成空白。
+    return (
+      <section className="agent-run-receipt" aria-live="polite">
+        <div className="agent-run-summary">
+          <strong>正在处理你的请求…</strong>
+        </div>
+      </section>
+    );
   }
 
   if (state === 'failed') {
@@ -72,6 +78,36 @@ export function AgentRunReceipt({
 
   if (!taskResult) {
     return null;
+  }
+
+  // 历史恢复和实时接口都可能直接携带失败状态。不能只依赖 ChatTurn 的本地状态，
+  // 否则后端已失败的任务会被渲染成没有任何内容的空白区域。
+  if (taskResult.task_status === 'failed') {
+    return (
+      <section className="agent-run-receipt">
+        <div className="agent-run-summary agent-run-summary--failed">
+          <strong>本次请求未能完成</strong>
+          <span>{taskResult.final_response || '请稍后重试；如问题持续出现，请查看服务端日志。'}</span>
+        </div>
+      </section>
+    );
+  }
+
+  if (
+    taskResult.task_status === 'processing'
+    && !taskResult.final_response
+    && taskResult.document_results.length === 0
+    && !taskResult.managed_file_result
+    && !taskResult.file_search_result
+  ) {
+    // 异步任务刚入队时尚无最终回执；明确反馈等待状态，不能留下一块无内容的消息区域。
+    return (
+      <section className="agent-run-receipt" aria-live="polite">
+        <div className="agent-run-summary">
+          <strong>文件正在后台处理，完成后会自动更新这里。</strong>
+        </div>
+      </section>
+    );
   }
 
   const managedFileResult = taskResult.managed_file_result;
@@ -160,6 +196,11 @@ export function AgentRunReceipt({
 
       {pendingDecisions.length > 0 ? <PendingDecisionList decisions={pendingDecisions} /> : null}
 
+      {/* 逐文件卡说明处理明细，final_response 仍是用户可读的总体回执，不能因存在卡片而被隐藏。 */}
+      {taskResult.final_response ? (
+        <p className="agent-final-response">{taskResult.final_response}</p>
+      ) : null}
+
       {results.length > 0 ? (
         <div className="document-result-list">
           {results.map((result, index) => (
@@ -173,8 +214,6 @@ export function AgentRunReceipt({
             />
           ))}
         </div>
-      ) : taskResult.final_response ? (
-        <p className="agent-final-response">{taskResult.final_response}</p>
       ) : null}
     </section>
   );
