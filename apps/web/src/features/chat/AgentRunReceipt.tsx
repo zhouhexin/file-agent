@@ -252,6 +252,8 @@ function decisionLabel(value: string): string {
     DELETE_EXISTING_WORKING_COPY: '删除已有工作副本',
     CONFIRM_CURRENT_NAME: '保留当前文件名',
     PROVIDE_NEW_NAME: '告诉我新的文件名',
+    REQUEST_RENAME_PLAN: '查看重命名计划',
+    KEEP_CURRENT_NAME: '保留当前文件名',
     UPLOAD_READABLE_COPY: '上传可读取版本',
   };
   return labels[value] || value;

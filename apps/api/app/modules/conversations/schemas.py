@@ -87,6 +87,17 @@ class ConversationDetailResponse(BaseModel):
     pagination: ConversationPagination
 
 
+class ClearConversationResponse(BaseModel):
+    """清空会话可见消息后的结果。
+
+    清空只影响聊天记录展示；文件、工作副本与 Agent 审计记录仍被保留，
+    以避免“删除对话”意外删除用户已经整理的文件。
+    """
+
+    conversation_id: str
+    cleared_message_count: int
+
+
 class SendMessageResponse(BaseModel):
     """发送消息后的普通用户响应，不暴露 AgentRun 或 Tool 内部载荷。"""
 

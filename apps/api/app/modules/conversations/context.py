@@ -66,6 +66,26 @@ class ConversationAttachmentContextService:
                     source="inferred_context",
                     scope="filename_reference",
                 )
+        if _is_single_file_rename_confirmation(content):
+            # “改名”可以确认上一轮单文件建议，但多个最近附件时绝不能猜测要改哪一份。
+            # 用户必须写出文件名或重新附加文件，避免把一句短确认扩展成批量物理操作。
+            latest_attachments = self.repository.get_latest_attachment_batch_references(
+                conversation_id=conversation_id,
+                user_id=user_id,
+            )
+            if not latest_attachments:
+                # 上传接口在消息创建前就可能先登记生命周期；此时从同会话上传审计恢复
+                # 最近一份文件，仍保持“一次短确认只能指向一份文件”的安全边界。
+                latest_attachments = self.repository.get_latest_upload_lifecycle_attachment_references(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                )
+            if len(latest_attachments) == 1:
+                return ResolvedAttachmentContext(
+                    attachments=latest_attachments,
+                    source="inferred_context",
+                    scope="single_latest_rename_confirmation",
+                )
         if not _should_infer_recent_attachments(content):
             return ResolvedAttachmentContext(attachments=[], source="uploaded", scope="none")
 
@@ -134,6 +154,9 @@ def _has_file_task_intent(content: str) -> bool:
         "分类",
         "归类",
         "重新",
+        "重命名",
+        "改名",
+        "命名",
         "删除",
         "删掉",
         "回收站",
@@ -153,6 +176,13 @@ def _has_file_task_intent(content: str) -> bool:
     return any(keyword in content for keyword in file_task_keywords) or any(
         keyword in lowered for keyword in ["csv", "excel", "xlsx", "sheet"]
     )
+
+
+def _is_single_file_rename_confirmation(content: str) -> bool:
+    """识别不带文件名的单文件改名确认，且只允许绑定最近一批唯一附件。"""
+
+    normalized = re.sub(r"\s+", "", content).strip("。！!")
+    return normalized in {"改名", "重命名", "确认改名", "按建议改名", "需要改名"}
 
 
 def _select_referenced_attachments(

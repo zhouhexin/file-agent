@@ -16,6 +16,7 @@ from app.db.models import (
 from app.modules.managed_files.worker import process_next_filesystem_job
 from app.modules.managed_files.scanner import ManagedFileScanner
 from app.modules.managed_files.service import sync_configured_managed_roots
+from app.modules.file_lifecycle.service import FileLifecycleJobProcessor
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -58,6 +59,46 @@ def test_worker_processes_scan_job_and_persists_files(tmp_path: Path):
         managed_file = db.query(ManagedFile).filter(ManagedFile.root_id == root.id).one_or_none()
         assert managed_file is not None
         assert managed_file.relative_path == "notice.pdf"
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_reconciliation_requeues_completed_scan_for_reused_parent_job(tmp_path: Path):
+    """同一受管根在下一次启动对账时必须重新扫描，不能复用已完成子扫描后静默跳过。"""
+
+    _client, session_factory = client_with_database()
+    db = session_factory()
+    try:
+        root_dir = tmp_path / "startup-root"
+        root_dir.mkdir()
+        root = ManagedRoot(root_key="startup_root", display_name="启动同步目录", container_path=str(root_dir))
+        db.add(root)
+        db.flush()
+        parent = FilesystemJob(
+            job_type="RECONCILE_MANAGED_ROOT",
+            root_id=root.id,
+            status="RUNNING",
+            payload_json={},
+            result_json={},
+        )
+        db.add(parent)
+        db.flush()
+
+        processor = FileLifecycleJobProcessor(db)
+        assert processor.process(parent) is True
+        first_scan_id = parent.result_json["scan_job_id"]
+        first_scan = db.get(FilesystemJob, first_scan_id)
+        assert first_scan is not None
+        first_scan.status = "COMPLETED"
+        parent.status = "RUNNING"
+        db.flush()
+
+        # scheduler 重用父任务后，同一 child deduplication key 也必须被重置为待执行。
+        assert processor.process(parent) is True
+        second_scan = db.get(FilesystemJob, first_scan_id)
+        assert second_scan is not None
+        assert second_scan.status == "PENDING"
     finally:
         db.close()
         clear_overrides()

@@ -90,7 +90,6 @@ def upgrade() -> None:
             "document_search_profiles",
             ["search_vector"],
             postgresql_using="gin",
-            postgresql_ops={"search_vector": "gin"},
         )
 
         # combined_search_text pg_trgm GIN 索引，用于受限的长短语和轻微错字补召回

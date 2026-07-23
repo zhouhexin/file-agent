@@ -134,6 +134,7 @@ def _safe_document_result(value: dict[str, Any]) -> dict[str, Any]:
         "classification_reused",
         "categories",
         "year",
+        "rename_suggestion",
         "document_type",
         "keywords",
         "entities",

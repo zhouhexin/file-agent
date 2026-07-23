@@ -24,6 +24,22 @@ def test_deterministic_planner_routes_natural_language_file_search():
     }
 
 
+def test_deterministic_planner_routes_list_and_article_search_phrases():
+    """“列出…文档”和“文章有哪些”都属于文件检索，不能回复普通闲聊占位语。"""
+
+    for message in ["列出与科研有关的文档", "关于科研的文章有哪些"]:
+        plan = DeterministicPlanner().plan(
+            conversation_id="conversation-search-list",
+            user_id="user-search-list",
+            message_id="message-search-list",
+            message=message,
+            attachments=[],
+        )
+
+        assert plan.intent == "SEARCH_FILES"
+        assert plan.steps[0].tool_name == "hybrid-search"
+
+
 def test_llm_search_intent_is_converted_to_controlled_search_plan():
     """LLM 只能选择检索能力，最终 Tool 输入仍由应用层 schema 控制。"""
 
@@ -42,4 +58,3 @@ def test_llm_search_intent_is_converted_to_controlled_search_plan():
     assert plan.intent == "SEARCH_FILES"
     assert plan.steps[0].tool_name == "hybrid-search"
     assert plan.steps[0].input["query"] == "干部考察结果报告"
-

@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.db.models import AgentRun, Conversation, Document, Message
+from app.db.models import AgentRun, Conversation, Document, DocumentVersion, Message, UploadDuplicateReview
 from app.modules.agent.repository import AgentRunRepository
 from app.modules.agent.user_receipt import build_user_task_receipt
 from app.modules.conversations.schemas import (
@@ -97,7 +97,7 @@ class ConversationRepository:
 
         messages = (
             self.db.query(Message)
-            .filter(Message.conversation_id == conversation_id)
+            .filter(Message.conversation_id == conversation_id, Message.role != "CLEARED")
             .order_by(Message.created_at.desc(), Message.id.desc())
             .limit(limit)
             .all()
@@ -238,6 +238,44 @@ class ConversationRepository:
             return []
         return self._filter_owned_attachment_references(document_ids=document_ids, user_id=user_id)
 
+    def get_latest_upload_lifecycle_attachment_references(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+    ) -> list[MessageAttachment]:
+        """从上传生命周期记录恢复最近一份会话文件。
+
+        上传接口与发送消息是两个独立请求：当用户先上传、等待异步回执后只回复“改名”时，
+        会话消息可能尚未保存附件。这里仅从同一用户、同一会话的最近上传审计关系恢复一份
+        稳定 document_id，不能扫描用户其他文件，也不能在存在多目标时扩展为批量操作。
+        """
+
+        conversation = self.db.get(Conversation, conversation_id)
+        if conversation is None:
+            return []
+        if conversation.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Conversation belongs to another user")
+        row = (
+            self.db.query(DocumentVersion.document_id)
+            .join(
+                UploadDuplicateReview,
+                UploadDuplicateReview.upload_document_version_id == DocumentVersion.id,
+            )
+            .filter(
+                UploadDuplicateReview.conversation_id == conversation_id,
+                UploadDuplicateReview.user_id == user_id,
+            )
+            .order_by(UploadDuplicateReview.created_at.desc(), DocumentVersion.created_at.desc())
+            .first()
+        )
+        if row is None:
+            return []
+        return self._filter_owned_attachment_references(
+            document_ids=[str(row.document_id)],
+            user_id=user_id,
+        )
+
     def _filter_owned_attachment_references(
         self,
         *,
@@ -328,6 +366,32 @@ class ConversationRepository:
             ),
         )
 
+    def clear_visible_history(self, *, conversation_id: str, user_id: str) -> int:
+        """逻辑清空当前用户会话中的可见消息，不删除文件或 Agent 审计。
+
+        AgentRun 的 `message_id` 是非空审计外键，直接物理删除消息会破坏
+        可追溯性。因此以 `CLEARED` 标记隐藏消息并清除其附件引用；读取、
+        附件上下文和分页查询都排除该标记，用户看到的效果等同于新对话。
+        """
+
+        self.get_conversation_for_user(conversation_id=conversation_id, user_id=user_id)
+        query = self.db.query(Message).filter(
+            Message.conversation_id == conversation_id,
+            Message.role != "CLEARED",
+        )
+        cleared_count = query.count()
+        if cleared_count:
+            query.update(
+                {
+                    Message.role: "CLEARED",
+                    Message.content: "",
+                    Message.attachments_json: [],
+                },
+                synchronize_session=False,
+            )
+            self.db.flush()
+        return cleared_count
+
     def _load_message_page(
         self,
         *,
@@ -340,11 +404,19 @@ class ConversationRepository:
         数据库查询用倒序拿最近记录，返回前再恢复时间正序，前端可直接追加渲染。
         """
 
-        query = self.db.query(Message).filter(Message.conversation_id == conversation_id)
+        # 已清空的消息仍保留为审计锚点，但不能再次出现在聊天历史中。
+        query = self.db.query(Message).filter(
+            Message.conversation_id == conversation_id,
+            Message.role != "CLEARED",
+        )
         if before_message_id:
             before_message = (
                 self.db.query(Message)
-                .filter(Message.conversation_id == conversation_id, Message.id == before_message_id)
+                .filter(
+                    Message.conversation_id == conversation_id,
+                    Message.id == before_message_id,
+                    Message.role != "CLEARED",
+                )
                 .one_or_none()
             )
             if before_message is None:

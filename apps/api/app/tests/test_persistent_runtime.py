@@ -1932,3 +1932,25 @@ def test_alembic_files_exist_for_runtime_tables():
     assert len(classification_versions) == 1
     changeset_versions = list(versions_dir.glob("*_create_changeset_tables.py"))
     assert len(changeset_versions) == 1
+
+
+def test_search_profile_migration_uses_plain_gin_for_tsvector():
+    """TSVECTOR 的 GIN 索引不能误填名为 gin 的操作符类。
+
+    PostgreSQL 的 ``gin`` 是索引访问方法而不是 operator class。迁移若把它
+    同时写入 ``postgresql_using`` 和 ``postgresql_ops``，会生成
+    ``USING gin (search_vector gin)`` 并在真实 PostgreSQL 升级时失败。
+    此处直接保护迁移源文件，避免 SQLite 单元测试掩盖该生产兼容性问题。
+    """
+
+    api_root = Path(__file__).resolve().parents[2]
+    migration = (
+        api_root
+        / "alembic"
+        / "versions"
+        / "20260724_0001_create_document_search_profiles.py"
+    )
+    source = migration.read_text(encoding="utf-8")
+
+    assert 'postgresql_using="gin"' in source
+    assert 'postgresql_ops={"search_vector": "gin"}' not in source

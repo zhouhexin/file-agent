@@ -594,6 +594,8 @@ def build_plan_from_user_intent(
         intent_plan.intent == "SUGGEST_RENAME"
         or requested_capabilities.intersection(MANAGED_FILE_RENAME_HINTS)
         or "generate-rename-suggestions" in intent_plan.tool_plan_hint
+        # 明确“改名”必须优先走确定性文件动作识别，不能依赖 LLM 恰好返回 SUGGEST_RENAME。
+        or (_has_rename_intent(message=message, lowered=lowered) and attachment_document_ids)
         or (managed_rename_filters and not document_ids)
     ):
         if attachment_document_ids:
@@ -711,11 +713,25 @@ def build_plan_from_user_intent(
             route_source="capability_router" if capability_route else "llm_planner",
         )
 
+    # 目录列表是受管目录 Tool 的明确请求；即便同时含有“列出”和“文件”，
+    # 也不能被通用主题检索规则提前截走。
+    has_explicit_managed_file_list_request = any(
+        [
+            bool(intent_plan.managed_root_key),
+            intent_plan.intent in {"LIST_MANAGED_FILES", "SEARCH_MANAGED_FILES"},
+            bool(requested_capabilities.intersection(MANAGED_FILE_LIST_HINTS)),
+            capability_route is not None and capability_route.tool_name == "managed-file-list",
+            bool(_managed_root_key_from_list_request(message)),
+        ]
+    )
     if (
         intent_plan.intent in {"SEARCH_FILES", "FIND_FILES"}
         or requested_capabilities.intersection(FILE_SEARCH_HINTS)
         or (capability_route is not None and capability_route.tool_name == "hybrid-search")
-        or _has_file_search_intent(message=message, lowered=lowered)
+        or (
+            not has_explicit_managed_file_list_request
+            and _has_file_search_intent(message=message, lowered=lowered)
+        )
     ):
         return _file_search_plan(
             user_goal=intent_plan.user_goal or message,
@@ -1866,9 +1882,11 @@ def _has_file_search_intent(*, message: str, lowered: str) -> bool:
 
     if any(keyword in message for keyword in ["受管目录", "服务器目录", "服务器工作目录"]):
         return False
-    object_keywords = ["文件", "文档", "材料", "证明", "通知", "表格", "报告"]
-    explicit_actions = ["找", "查找", "搜索", "检索", "寻找"]
-    existence_objects = ["文件", "文档", "材料", "证明", "通知", "报告"]
+    # “文章”也是学校业务中常见的文件称呼；“列出”属于检索展示动作，
+    # 不能因为没有“找”字而退回普通闲聊回复。
+    object_keywords = ["文件", "文档", "文章", "材料", "证明", "通知", "表格", "报告"]
+    explicit_actions = ["找", "查找", "搜索", "检索", "寻找", "列出", "展示", "显示"]
+    existence_objects = ["文件", "文档", "文章", "材料", "证明", "通知", "报告"]
     english_actions = ["find file", "search file", "search document", "find document"]
     return (
         any(keyword in message for keyword in explicit_actions)

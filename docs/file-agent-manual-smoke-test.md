@@ -14,7 +14,7 @@
 本轮必须验证：
 
 - 普通用户注册、登录、新手引导和 `/chat`。
-- 上传、异步查重、不可变原件归档、隐藏导入、摘要、分类和首次命名。
+- 上传、异步查重、不可变原件归档、隐藏导入、摘要、分类和首次命名建议。
 - 低置信度、重复文件、同名冲突、加密文件和宏风险提示。
 - TXT、MD、CSV、PDF、DOC、DOCX、XLS、XLSX 的代表性解析。
 - 普通用户任务回执不暴露 Skill、Tool、AgentRun、服务器路径或密钥。
@@ -72,9 +72,9 @@ git diff --check
 当前阶段期望：
 
 ```text
-后端（macOS/Linux）：504 passed, 19 skipped
-后端（Windows 有 symlink 权限）：504 passed, 19 skipped
-后端（Windows 无 symlink 权限）：503 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
+后端（macOS/Linux）：510 passed, 19 skipped
+后端（Windows 有 symlink 权限）：510 passed, 19 skipped
+后端（Windows 无 symlink 权限）：509 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
 前端：TypeScript 检查和 Vite build 成功
 Alembic：单一 head 20260724_0002
 Python：No broken requirements found
@@ -159,6 +159,27 @@ FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE,IMPORT,RECONCILE,FILE_OPERATION
   -m app.modules.managed_files.worker
 ```
 
+worker 会在没有任务时保持静默并轮询，这不是卡住或退出。API 启动时只向
+`RECONCILE` 队列提交同步任务；只有此终端持续运行且队列列表包含
+`RECONCILE,IMPORT`，已有受管原始目录中的文件才会扫描并导入工作副本。
+任务完成、失败或没有任务时请查看 `logs/file-agent-YYYY-MM-DD.log`，不要以
+“终端没有输出”判断同步未执行。
+
+### 5.1.1 已有受管原始目录的同步前提
+
+在启动 API 前，`.env` 必须定义一个普通受管目录，例如：
+
+```dotenv
+MANAGED_ROOT_SCHOOL_FILES=/absolute/path/to/school-files
+MANAGED_ROOT_RECONCILE_ON_STARTUP=true
+FILESYSTEM_ASYNC_JOBS_ENABLED=true
+```
+
+`MANAGED_ROOT_ARCHIVE_WRITE_PATH` 仅是上传文件的受保护归档写入位置，系统刻意
+不会把它当作可扫描的受管根；将原始文件手动放入该目录不会触发同步。普通受管根
+中的文件在 API 启动后依次进入 `RECONCILE -> SCAN -> IMPORT`，再由 worker 为已有
+用户工作区创建只可由 File Agent 操作的工作副本。
+
 ### 5.2 生命周期 scheduler
 
 终端二：
@@ -217,8 +238,8 @@ shasum -a 256 /path/to/file-agent-smoke-input/* \
 
 | 编号 | 文件 | 内容要求 | 主要验证点 |
 |---|---|---|---|
-| F01 | `通知.pdf` | 正文含明确年份、单位和完整标题 | 泛化文件名必须依据正文整理 |
-| F02 | `奖学金材料.docx` | 多段落并含明确业务主题 | Word 结构解析、分类和命名 |
+| F01 | `通知.pdf` | 正文含明确年份、单位和完整标题 | 泛化文件名必须依据正文分类并生成命名建议 |
+| F02 | `奖学金材料.docx` | 多段落并含明确业务主题 | Word 结构解析、分类和命名建议 |
 | F03 | `旧版通知.doc` | 与 F02 不同内容 | LibreOffice 持久 `.docx` 派生件 |
 | F04 | `统计表.xlsx` | 至少两个 Sheet，含日期、金额或人数列 | 全 Sheet 读取和确定性表格能力 |
 | F05 | `旧版统计表.xls` | 至少两个 Sheet | 隔离转换、全部 Sheet、原件不变 |
@@ -343,6 +364,23 @@ curl -sS http://127.0.0.1:8000/api/working-copies/<working_copy_id>/versions \
 - 每种选择都必须先展示 OperationPlan；确认前文件不变，确认后才执行真实工作副本动作。
 - “同时保留”确认后才分配 `_第二版` 等稳定后缀；替换或删除已有文件时，旧工作副本进入可恢复回收站。
 - 受管原件在所有冲突选择前后都保持不变。
+
+### SMOKE-005A 首次导入只给出命名建议
+
+步骤：
+
+1. 在 `/chat` 上传 F01 或 F06，并输入“读取并分类这个文件”，不要在消息中提出改名。
+2. 等待文件处理回执完成，记录上传名和“建议名称”。
+3. 在工作副本列表或文件系统中核对当前工作副本名称。
+4. 再在同一对话中明确回复“改名”，确认系统先展示 OperationPlan。
+5. 在计划确认前后分别核对工作副本名称。
+
+通过标准：
+
+- 首次导入后工作副本、DocumentVersion 和受管原件均保留上传时的文件名。
+- 回执可以显示“建议名称”，但必须明确说明当前尚未改名。
+- 用户未提出改名时，不创建自动重命名 OperationPlan，不产生 `FILENAME_CHANGED` ChangeItem。
+- 用户明确提出“改名”后才生成 OperationPlan；确认前文件不变，确认后才执行真实工作副本重命名。
 
 ### SMOKE-006 重复上传决策
 

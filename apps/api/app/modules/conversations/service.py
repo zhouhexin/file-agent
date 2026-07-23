@@ -14,6 +14,7 @@ from app.modules.agent.state import AgentRunResult
 from app.modules.conversations.context import ConversationAttachmentContextService
 from app.modules.conversations.repository import ConversationRepository
 from app.modules.conversations.schemas import (
+    ClearConversationResponse,
     ConversationDetailResponse,
     ConversationMessage,
     SendMessageRequest,
@@ -110,4 +111,17 @@ class ConversationMessageService:
             user_id=user_id,
             limit=limit,
             before_message_id=before_message_id,
+        )
+
+    def clear_conversation_history(self, *, conversation_id: str, user_id: str) -> ClearConversationResponse:
+        """清空当前用户的聊天显示历史，保留文件和运行审计。"""
+
+        cleared_count = self.repository.clear_visible_history(
+            conversation_id=conversation_id,
+            user_id=user_id,
+        )
+        self.db.commit()
+        return ClearConversationResponse(
+            conversation_id=conversation_id,
+            cleared_message_count=cleared_count,
         )

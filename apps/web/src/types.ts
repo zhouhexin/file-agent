@@ -293,6 +293,8 @@ export type DocumentResult = {
   text_reused: boolean;
   classification_reused: boolean;
   year?: string | null;
+  /** 仅供展示的命名建议；文件尚未改名，用户仍需明确发起重命名。 */
+  rename_suggestion?: { proposed_filename?: string } | null;
   document_type?: string | null;
   keywords?: string[];
   entities?: string[];

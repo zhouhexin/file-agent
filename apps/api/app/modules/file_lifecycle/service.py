@@ -581,6 +581,9 @@ class FileLifecycleJobProcessor:
             root_id=job.root_id,
             created_by=job.created_by,
             deduplication_key=f"managed-root-scan:{job.id}",
+            # 父对账任务会被 scheduler 复用并重置为 PENDING；子扫描任务也必须
+            # 同步重入队，否则第二次 API 启动只会复用已完成的 scan 而永不扫描新文件。
+            reuse_completed=True,
             payload={"reconcile_job_id": job.id},
         )
         FilesystemJobQueue(self.db).mark_completed(job=job, result={"scan_job_id": child.id})
@@ -1009,22 +1012,29 @@ class FileLifecycleJobProcessor:
                 )
             )
             if pending_decision:
-                self.db.add(
-                    FileRenameReviewItem(
-                        conversation_id=changeset.conversation_id,
-                        agent_run_id=changeset.agent_run_id,
-                        user_id=user_id,
-                        managed_file_id=managed_file.id,
-                        document_id=document.id,
-                        root_key=managed_root.root_key,
-                        original_relative_path=managed_file.relative_path,
-                        original_filename=managed_file.filename,
-                        source_sha256=source_sha256,
-                        status="NEEDS_REVIEW",
-                        review_context_json=pending_decision,
-                        decision_json={},
+                # 同名冲突和无建议的低置信度命名需要持久化为待处理事项；普通命名建议
+                # 只展示给用户，不能伪装成已进入执行确认的重命名任务。
+                requires_review_record = pending_decision.get("reason") in {
+                    "FILENAME_CONFLICT",
+                    "LOW_CONFIDENCE_RENAME",
+                }
+                if requires_review_record:
+                    self.db.add(
+                        FileRenameReviewItem(
+                            conversation_id=changeset.conversation_id,
+                            agent_run_id=changeset.agent_run_id,
+                            user_id=user_id,
+                            managed_file_id=managed_file.id,
+                            document_id=document.id,
+                            root_key=managed_root.root_key,
+                            original_relative_path=managed_file.relative_path,
+                            original_filename=managed_file.filename,
+                            source_sha256=source_sha256,
+                            status="NEEDS_REVIEW",
+                            review_context_json=pending_decision,
+                            decision_json={},
+                        )
                     )
-                )
             persist_document_results_classifications(
                 db=self.db,
                 agent_run_id=changeset.agent_run_id,
@@ -1337,13 +1347,32 @@ class FileLifecycleJobProcessor:
         working_copy: WorkingCopy,
         path_resolution: InitialWorkingPathResolution,
     ) -> dict[str, Any] | None:
-        """把低置信度或同名冲突转换为普通用户可以理解的待决策项。"""
+        """把命名建议、低置信度或同名冲突转换为普通用户可理解的待决策项。
+
+        命名建议不代表已经创建重命名计划。用户必须在后续对话中明确提出“改名”，
+        系统才重新生成建议并展示待确认的 OperationPlan。
+        """
 
         if path_resolution.conflict is not None:
             return {
                 **path_resolution.conflict,
                 "working_copy_id": working_copy.id,
                 "filename": working_copy.filename,
+            }
+        proposed_filename = str(decision.rename_metadata.get("proposed_filename") or "").strip()
+        if proposed_filename and proposed_filename != working_copy.filename:
+            return {
+                "type": "rename_suggestion",
+                "reason": "RENAME_SUGGESTION_AVAILABLE",
+                "working_copy_id": working_copy.id,
+                "filename": working_copy.filename,
+                "proposed_filename": proposed_filename,
+                "message": (
+                    f"系统建议将“{working_copy.filename}”改为“{proposed_filename}”，"
+                    "当前尚未改名。若需要，请回复“改名”或明确说明要改名的文件；"
+                    "系统会先展示待确认计划。"
+                ),
+                "allowed_decisions": ["REQUEST_RENAME_PLAN", "KEEP_CURRENT_NAME"],
             }
         if decision.rename_status not in {"READY", "NO_CHANGE"}:
             return {
@@ -1371,6 +1400,8 @@ class FileLifecycleJobProcessor:
                 f"文件已读取并分类，当前保留为“{filename}”。整理后的目标名称已存在，"
                 "请确认是否需要同时保留两个文件；如同时保留，确认后再分配版本后缀。"
             )
+        if pending_decision and pending_decision.get("type") == "rename_suggestion":
+            return str(pending_decision["message"])
         if pending_decision:
             return f"文件已读取并分类，当前保留为“{filename}”。命名依据不足，请确认或告诉我新的文件名。"
         return f"已整理文件：{filename}\n分类：{category_name}"

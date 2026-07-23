@@ -22,6 +22,7 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000
 type RequestOptions = {
   token?: string | null;
   body?: unknown;
+  method?: 'GET' | 'POST' | 'DELETE';
 };
 
 export class ApiError extends Error {
@@ -95,6 +96,17 @@ export async function getConversationDetail(
   }
   const query = params.toString();
   return request<ConversationDetailResponse>(`/conversations/${conversationId}${query ? `?${query}` : ''}`, { token });
+}
+
+export async function clearConversationHistory(
+  token: string,
+  conversationId: string,
+): Promise<{ conversation_id: string; cleared_message_count: number }> {
+  // 后端只清空消息展示，不允许聊天页绕过确认逻辑删除文件或工作副本。
+  return request<{ conversation_id: string; cleared_message_count: number }>(`/conversations/${conversationId}`, {
+    token,
+    method: 'DELETE',
+  });
 }
 
 export async function getFilesystemJob(
@@ -218,7 +230,7 @@ export async function deleteUploadedFile(token: string, documentId: string): Pro
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   // 统一封装 fetch，确保所有受保护请求都通过同一处追加 Bearer token。
   const response = await fetch(`${API_BASE_URL}${path}`, {
-    method: options.body ? 'POST' : 'GET',
+    method: options.method ?? (options.body ? 'POST' : 'GET'),
     headers: {
       'Content-Type': 'application/json',
       ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),

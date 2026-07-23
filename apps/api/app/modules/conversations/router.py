@@ -12,7 +12,12 @@ from app.core.database import get_db
 from app.db.models import User
 from app.modules.agent.user_receipt import build_user_task_receipt
 from app.modules.auth.dependencies import get_current_user
-from app.modules.conversations.schemas import ConversationDetailResponse, SendMessageRequest, SendMessageResponse
+from app.modules.conversations.schemas import (
+    ClearConversationResponse,
+    ConversationDetailResponse,
+    SendMessageRequest,
+    SendMessageResponse,
+)
 from app.modules.conversations.service import ConversationMessageService
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -33,6 +38,20 @@ def get_conversation_detail(
         user_id=current_user.id,
         limit=limit,
         before_message_id=before_message_id,
+    )
+
+
+@router.delete("/{conversation_id}", response_model=ClearConversationResponse)
+def clear_conversation_history(
+    conversation_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ClearConversationResponse:
+    """清空当前用户的对话显示历史，不删除已上传或已整理的文件。"""
+
+    return ConversationMessageService(db=db).clear_conversation_history(
+        conversation_id=conversation_id,
+        user_id=current_user.id,
     )
 
 

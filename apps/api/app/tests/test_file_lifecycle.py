@@ -247,14 +247,94 @@ def test_low_confidence_initial_name_keeps_upload_name_and_returns_pending_recei
         clear_overrides()
 
 
+def test_initial_ready_rename_is_only_suggestion_until_user_requests_rename(monkeypatch, tmp_path):
+    """首次导入即使命名建议可用，也必须保留上传名且不得自动改工作副本。"""
+
+    _configure(monkeypatch, tmp_path)
+    original_suggest = UploadedRenameSuggestionService.suggest_for_initial_import
+
+    def force_ready_suggestion(self, *, document):
+        """固定一个可执行候选，保护“建议不等于用户授权”的边界。"""
+
+        suggestion, extraction = original_suggest(self, document=document)
+        return {
+            **suggestion,
+            "status": "READY",
+            "proposed_filename": "2026_研究成果资助汇总表.txt",
+            "warnings": [],
+            "errors": [],
+        }, extraction
+
+    monkeypatch.setattr(
+        UploadedRenameSuggestionService,
+        "suggest_for_initial_import",
+        force_ready_suggestion,
+    )
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "rename-suggestion-owner")
+    upload = client.post(
+        "/api/files/upload",
+        headers=headers,
+        data={"conversation_id": "rename-suggestion-conv"},
+        files={
+            "file": (
+                "2024科研成果资助汇总表.txt",
+                b"research funding summary fixture",
+                "text/plain",
+            )
+        },
+    )
+    assert upload.status_code == 202
+
+    _drain(SessionLocal)
+    working_copy = client.get("/api/working-copies", headers=headers).json()[0]
+    history = client.get("/api/conversations/rename-suggestion-conv", headers=headers).json()
+    task_result = history["messages"][-1]["task_result"]
+
+    assert working_copy["filename"] == "2024科研成果资助汇总表.txt"
+    assert task_result["document_results"][0]["filename"] == "2024科研成果资助汇总表.txt"
+    assert task_result["document_results"][0]["rename_suggestion"] == {
+        "proposed_filename": "2026_研究成果资助汇总表.txt"
+    }
+    pending = task_result["pending_decisions"][0]
+    assert pending["reason"] == "RENAME_SUGGESTION_AVAILABLE"
+    assert pending["proposed_filename"] == "2026_研究成果资助汇总表.txt"
+    # 用户仅在后续明确提出改名时，才允许创建待确认计划；此刻仍不得改动工作副本。
+    rename_request = client.post(
+        "/api/conversations/rename-suggestion-conv/messages",
+        headers=headers,
+        json={"content": "改名", "attachments": []},
+    )
+    assert rename_request.status_code == 200
+    rename_receipt = rename_request.json()["task_result"]
+    assert rename_receipt["response_type"] == "operation_plan"
+    assert rename_receipt["operation_plan_id"]
+    assert client.get("/api/working-copies", headers=headers).json()[0]["filename"] == "2024科研成果资助汇总表.txt"
+    db = SessionLocal()
+    try:
+        working_document = db.get(Document, working_copy["document_id"])
+        original = db.query(ManagedFile).one()
+        path_record = db.query(WorkingCopyPathRecord).filter_by(
+            working_copy_id=working_copy["id"],
+            operation_type="INITIAL_IMPORT",
+        ).one()
+        assert working_document.original_filename == "2024科研成果资助汇总表.txt"
+        assert original.filename == "2024科研成果资助汇总表.txt"
+        assert path_record.after_filename == "2024科研成果资助汇总表.txt"
+        assert db.query(FileRenameReviewItem).filter_by(document_id=working_copy["document_id"]).count() == 0
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def test_initial_filename_conflict_waits_for_dialog_without_version_suffix(monkeypatch, tmp_path):
-    """不同内容得到同一目标名时必须保留新文件上传名，不能自动追加版本后缀。"""
+    """不同内容使用同一上传名时必须等待对话决策，不能自动追加版本后缀。"""
 
     _configure(monkeypatch, tmp_path)
     original_suggest = UploadedRenameSuggestionService.suggest_for_initial_import
 
     def force_same_name(self, *, document):
-        """固定两个文件的高置信度目标名，同时保留真实解析链路。"""
+        """保留建议生成，验证建议不会参与首次物理命名或制造冲突。"""
 
         suggestion, extraction = original_suggest(self, document=document)
         return {
@@ -299,19 +379,19 @@ def test_initial_filename_conflict_waits_for_dialog_without_version_suffix(monke
         "/api/files/upload",
         headers=headers,
         data={"conversation_id": "filename-conflict-conv"},
-        files={"file": ("第一份.txt", b"first unique material", "text/plain")},
+        files={"file": ("同名材料.txt", b"first unique material", "text/plain")},
     )
     _drain(SessionLocal)
     client.post(
         "/api/files/upload",
         headers=headers,
         data={"conversation_id": "filename-conflict-conv"},
-        files={"file": ("第二份.txt", b"second completely different content", "text/plain")},
+        files={"file": ("同名材料.txt", b"second completely different content", "text/plain")},
     )
     _drain(SessionLocal)
 
     copies = client.get("/api/working-copies", headers=headers).json()
-    assert sorted(item["filename"] for item in copies) == ["2026_统一材料.txt", "第二份.txt"]
+    assert sorted(item["filename"] for item in copies) == ["同名材料.txt", "同名材料.txt"]
     assert not any("第二版" in item["filename"] for item in copies)
     history = client.get("/api/conversations/filename-conflict-conv", headers=headers).json()
     conflict_receipts = [
@@ -323,7 +403,7 @@ def test_initial_filename_conflict_waits_for_dialog_without_version_suffix(monke
     ]
     assert len(conflict_receipts) == 1
     pending = conflict_receipts[0]["pending_decisions"][0]
-    assert pending["target_filename"] == "2026_统一材料.txt"
+    assert pending["target_filename"] == "同名材料.txt"
     assert pending["allowed_decisions"] == [
         "KEEP_BOTH",
         "KEEP_EXISTING",
@@ -352,8 +432,8 @@ def test_initial_filename_conflict_waits_for_dialog_without_version_suffix(monke
     assert confirmation.json()["status"] == "EXECUTED"
     after_confirmation = client.get("/api/working-copies", headers=headers).json()
     assert sorted(item["filename"] for item in after_confirmation) == [
-        "2026_统一材料.txt",
-        "2026_统一材料_第二版.txt",
+        "同名材料.txt",
+        "同名材料_第二版.txt",
     ]
 
     # 替换选择必须先把已有工作副本移入可恢复回收站，再提升新副本；原件仍不被覆盖。
@@ -361,7 +441,7 @@ def test_initial_filename_conflict_waits_for_dialog_without_version_suffix(monke
         "/api/files/upload",
         headers=headers,
         data={"conversation_id": "filename-conflict-conv"},
-        files={"file": ("第三份.txt", b"third replacement material", "text/plain")},
+        files={"file": ("同名材料.txt", b"third replacement material", "text/plain")},
     )
     _drain(SessionLocal)
     replace_response = client.post(
@@ -378,8 +458,8 @@ def test_initial_filename_conflict_waits_for_dialog_without_version_suffix(monke
     assert replace_confirmation.json()["status"] == "EXECUTED"
     final_copies = client.get("/api/working-copies", headers=headers).json()
     assert sorted(item["filename"] for item in final_copies if item["status"] == "ACTIVE") == [
-        "2026_统一材料.txt",
-        "2026_统一材料_第二版.txt",
+        "同名材料.txt",
+        "同名材料_第二版.txt",
     ]
     assert sum(item["status"] == "TRASHED" for item in final_copies) == 1
     assert len(client.get("/api/trash-entries", headers=headers).json()) == 1

@@ -1,9 +1,10 @@
 // 聊天工作台是文件智能体主入口，文件打开动作必须经过后端受控接口。
 import { ChangeEvent, FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { BookOpen, LogOut, MessageSquare, Paperclip, Send, User as UserIcon } from 'lucide-react';
+import { BookOpen, LogOut, MessageSquare, Paperclip, Send, Trash2, User as UserIcon } from 'lucide-react';
 
 import {
   ApiError,
+  clearConversationHistory,
   deleteUploadedFile,
   getDuplicateReview,
   getUploadArchiveStatus,
@@ -109,6 +110,24 @@ export function ChatPage({
   const hasTurns = chatTurns.length > 0;
   const primaryConversationId = getWebConversationId(user.id);
   const [conversationId, setConversationId] = useState(primaryConversationId);
+
+  const clearConversation = async () => {
+    // “删除对话”只能清空聊天记录，必须明确告知用户不会删除已上传、归档或整理的文件。
+    if (!window.confirm('确定清空当前对话吗？这不会删除任何已上传或已整理的文件。')) {
+      return;
+    }
+    try {
+      setError('');
+      await clearConversationHistory(token, conversationId);
+      setChatTurns([]);
+      setDraftAttachments([]);
+      setDuplicateReviews({});
+      setHasMoreHistory(false);
+      setMessage('');
+    } catch (err) {
+      setError(formatError(err));
+    }
+  };
 
   const scrollMessageListToBottom = useCallback(() => {
     requestAnimationFrame(() => {
@@ -650,6 +669,16 @@ export function ChatPage({
           >
             <BookOpen size={16} />
             <span>功能介绍</span>
+          </button>
+          <button
+            className="sidebar-menu-item"
+            type="button"
+            onClick={() => void clearConversation()}
+            disabled={historyLoading || submitting || chatTurns.length === 0}
+            title="仅清空聊天记录，不删除文件"
+          >
+            <Trash2 size={16} />
+            <span>清空对话</span>
           </button>
           {/*<button*/}
           {/*  className="sidebar-menu-item"*/}

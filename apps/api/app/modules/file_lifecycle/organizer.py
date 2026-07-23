@@ -56,6 +56,11 @@ class InitialOrganizationDecision:
             "classification_summary_id": self.classification_summary_id,
             "summary_status": self.summary_status,
             "year": self.rename_metadata.get("year"),
+            # 建议名称只用于回执展示；它不是已执行的重命名结果。
+            "rename_suggestion": _user_visible_rename_suggestion(
+                current_filename=self.filename,
+                proposed_filename=self.rename_metadata.get("proposed_filename"),
+            ),
             "document_type": self.summary_metadata.get("document_type"),
             "keywords": list(self.summary_metadata.get("keywords") or []),
             "entities": list(self.summary_metadata.get("entities") or []),
@@ -66,7 +71,12 @@ class InitialOrganizationDecision:
 
 
 class InitialWorkingCopyOrganizer:
-    """在工作副本正式落位前完成解析、双摘要、分类和首次命名。"""
+    """在工作副本正式落位前完成解析、双摘要、分类和命名建议。
+
+    首次导入只负责创建可追溯的工作副本，不能把系统建议当成用户授权而直接改名。
+    无论建议质量如何，工作副本初始文件名都保持上传原名；用户后续明确提出改名时，
+    才由受控重命名流程创建并确认 OperationPlan。
+    """
 
     def __init__(self, *, db: Session, user_id: str, settings: Settings | None = None) -> None:
         """保存 worker 级数据库会话和确定用户边界。"""
@@ -82,7 +92,11 @@ class InitialWorkingCopyOrganizer:
         version: DocumentVersion,
         managed_file: ManagedFile,
     ) -> InitialOrganizationDecision:
-        """生成最终工作副本路径；任何失败都降级到内部待整理目录。"""
+        """生成最终工作副本路径；任何失败都降级到内部待整理目录。
+
+        分类目录可作为首次导入的整理位置，但文件名始终保留上传名。命名建议只进入
+        普通用户回执和审计，不能在未收到用户“改名”请求前产生物理副作用。
+        """
 
         if not self.settings.initial_working_copy_organization_enabled:
             filename = FileLifecycleStorageService.sanitize_filename(managed_file.filename)
@@ -107,10 +121,9 @@ class InitialWorkingCopyOrganizer:
             db=self.db,
             user_id=self.user_id,
         ).suggest_for_initial_import(document=document)
-        filename = _resolved_filename(
-            original_filename=managed_file.filename,
-            suggestion=rename_suggestion,
-        )
+        # 高置信度建议也不能替代用户确认。这里必须固定为原上传名，防止正文中偶然
+        # 出现的年份或标题（例如表格历史条目）直接改变用户实际可见的工作副本名称。
+        filename = FileLifecycleStorageService.sanitize_filename(managed_file.filename)
         classification_result: dict[str, Any] = {}
         if extraction_result and extraction_result.get("status") == "COMPLETED":
             try:
@@ -150,17 +163,6 @@ class InitialWorkingCopyOrganizer:
                 classification_summary_id=classification_result.get("classification_summary_id"),
             ),
         )
-
-
-def _resolved_filename(*, original_filename: str, suggestion: dict[str, Any]) -> str:
-    """只接受通过质量门禁的 basename，并始终保留原扩展名。"""
-
-    proposed = str(suggestion.get("proposed_filename") or "")
-    if suggestion.get("status") not in {"READY", "NO_CHANGE"} or not proposed:
-        return FileLifecycleStorageService.sanitize_filename(original_filename)
-    if Path(proposed).name != proposed or Path(proposed).suffix.lower() != Path(original_filename).suffix.lower():
-        return FileLifecycleStorageService.sanitize_filename(original_filename)
-    return FileLifecycleStorageService.sanitize_filename(proposed)
 
 
 def _select_primary_category(
@@ -229,6 +231,22 @@ def _rename_metadata(suggestion: dict[str, Any]) -> dict[str, Any]:
         "warnings": list(suggestion.get("warnings") or []),
         "errors": list(suggestion.get("errors") or []),
     }
+
+
+def _user_visible_rename_suggestion(
+    *,
+    current_filename: str,
+    proposed_filename: Any,
+) -> dict[str, str] | None:
+    """将内部命名候选收敛为普通回执可展示的建议。
+
+    不返回解析器、风险评分或路径；更不能把建议包装成已发生的文件重命名。
+    """
+
+    proposed = str(proposed_filename or "").strip()
+    if not proposed or proposed == current_filename:
+        return None
+    return {"proposed_filename": proposed}
 
 
 def _summary_metadata(

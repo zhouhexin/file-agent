@@ -114,6 +114,12 @@ export function DocumentResultCard({
               ))}
             </div>
           ) : null}
+          {result.rename_suggestion?.proposed_filename ? (
+            <div className="document-result-rename-suggestion">
+              <p>建议名称：{result.rename_suggestion.proposed_filename}</p>
+              <small>当前文件名未改变。如需改名，请在对话中明确提出“改名”。</small>
+            </div>
+          ) : null}
         </>
       )}
     </article>
