@@ -20,8 +20,8 @@ from app.modules.file_lifecycle.service import FileLifecycleJobProcessor
 from app.tests.helpers import clear_overrides, client_with_database
 
 
-def test_worker_processes_scan_job_and_persists_files(tmp_path: Path):
-    """worker 应能领取扫描任务、执行扫描并把结果写入 managed_files。"""
+def test_worker_processes_scan_job_and_persists_files(tmp_path: Path, capsys):
+    """worker 应能领取扫描任务、执行扫描并输出不含路径的控制台状态。"""
 
     client, SessionLocal = client_with_database()
     db = SessionLocal()
@@ -59,6 +59,11 @@ def test_worker_processes_scan_job_and_persists_files(tmp_path: Path):
         managed_file = db.query(ManagedFile).filter(ManagedFile.root_id == root.id).one_or_none()
         assert managed_file is not None
         assert managed_file.relative_path == "notice.pdf"
+        console_output = capsys.readouterr().out
+        assert "任务开始" in console_output
+        assert "任务完成" in console_output
+        assert "job_type=SCAN_MANAGED_ROOT" in console_output
+        assert str(managed_dir) not in console_output
     finally:
         db.close()
         clear_overrides()

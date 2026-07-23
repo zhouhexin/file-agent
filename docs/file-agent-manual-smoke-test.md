@@ -159,11 +159,12 @@ FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE,IMPORT,RECONCILE,FILE_OPERATION
   -m app.modules.managed_files.worker
 ```
 
-worker 会在没有任务时保持静默并轮询，这不是卡住或退出。API 启动时只向
-`RECONCILE` 队列提交同步任务；只有此终端持续运行且队列列表包含
-`RECONCILE,IMPORT`，已有受管原始目录中的文件才会扫描并导入工作副本。
-任务完成、失败或没有任务时请查看 `logs/file-agent-YYYY-MM-DD.log`，不要以
-“终端没有输出”判断同步未执行。
+worker 启动时会输出“已启动，等待任务”，领取、完成或失败任务时会输出 job ID、
+任务类型、队列和耗时；不会输出文件正文、绝对路径或密钥。空闲轮询不会刷屏，
+这不是卡住或退出。API 启动时只向 `RECONCILE` 队列提交同步任务；只有此终端
+持续运行且队列列表包含 `RECONCILE,IMPORT`，已有受管原始目录中的文件才会扫描
+并导入工作副本。任务完成、失败或没有任务时可进一步查看
+`logs/file-agent-YYYY-MM-DD.log`，不要以空闲期间没有新行判断同步未执行。
 
 ### 5.1.1 已有受管原始目录的同步前提
 

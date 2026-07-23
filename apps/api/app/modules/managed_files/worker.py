@@ -31,6 +31,36 @@ from app.modules.managed_files.repository import FilesystemJobRepository, Manage
 from app.modules.managed_files.scanner import ManagedFileScanner
 
 
+def _print_worker_status(
+    event: str,
+    *,
+    job: FilesystemJob | None = None,
+    duration_ms: int | None = None,
+    message: str | None = None,
+) -> None:
+    """向 worker 控制台输出不含路径、正文和密钥的运行摘要。
+
+    JSONL 文件日志仍是审计与故障定位依据；控制台只帮助部署人员确认 worker
+    已启动、正在领取任务或已处理失败，不能输出文件内容和内部存储位置。
+    """
+
+    fields = ["[File Agent Worker]", event]
+    if job is not None:
+        fields.extend(
+            [
+                f"job_id={job.id}",
+                f"job_type={job.job_type}",
+                f"queue={job.queue_name}",
+                f"status={job.status}",
+            ]
+        )
+    if duration_ms is not None:
+        fields.append(f"duration_ms={duration_ms}")
+    if message:
+        fields.append(f"message={message}")
+    print(" ".join(fields), flush=True)
+
+
 def process_next_filesystem_job(
     *,
     session_factory: Callable[[], Session] = SessionLocal,
@@ -49,6 +79,8 @@ def process_next_filesystem_job(
 
         job_id = str(job.id)
         with log_context(request_id=new_request_id()):
+            started_at = time.perf_counter()
+            _print_worker_status("任务开始", job=job)
             log_event(
                 "filesystem.worker.started",
                 agent_run_id=job_id,
@@ -59,6 +91,11 @@ def process_next_filesystem_job(
             try:
                 _process_job(db=db, job=job)
                 db.commit()
+                _print_worker_status(
+                    "任务完成",
+                    job=job,
+                    duration_ms=int((time.perf_counter() - started_at) * 1000),
+                )
                 log_event(
                     "filesystem.worker.completed",
                     agent_run_id=job_id,
@@ -97,6 +134,12 @@ def process_next_filesystem_job(
                             error_message=public_error,
                         )
                         failed_db.commit()
+                        _print_worker_status(
+                            "任务失败",
+                            job=failed_job,
+                            duration_ms=int((time.perf_counter() - started_at) * 1000),
+                            message=public_error,
+                        )
                     log_event(
                         "filesystem.worker.failed",
                         level="ERROR",
@@ -124,11 +167,18 @@ def run_filesystem_worker(
     """持续轮询指定数据库任务队列，实现归档、导入与 API 资源隔离。"""
 
     while True:
-        processed = process_next_filesystem_job(
-            session_factory=session_factory,
-            worker_id=worker_id,
-            queue_names=queue_names,
-        )
+        try:
+            processed = process_next_filesystem_job(
+                session_factory=session_factory,
+                worker_id=worker_id,
+                queue_names=queue_names,
+            )
+        except Exception:
+            # 单个任务失败已在 process_next 中写回状态；worker 必须继续轮询后续任务，
+            # 不能因一个损坏文件或暂时性环境问题整体退出。
+            _print_worker_status("任务异常后继续轮询", message="请查看同一 job_id 的 JSONL 日志")
+            time.sleep(poll_seconds)
+            continue
         if processed is None:
             time.sleep(poll_seconds)
 
@@ -456,6 +506,13 @@ def main() -> None:
         for value in os.getenv("FILESYSTEM_WORKER_QUEUES", "").split(",")
         if value.strip()
     }
+    _print_worker_status(
+        "已启动，等待任务",
+        message=(
+            f"worker_id={worker_id} queues={','.join(sorted(configured_queues)) or 'ALL'} "
+            f"poll_seconds={poll_seconds:g}"
+        ),
+    )
     run_filesystem_worker(
         worker_id=worker_id,
         poll_seconds=poll_seconds,
