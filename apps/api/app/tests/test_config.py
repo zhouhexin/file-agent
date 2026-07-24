@@ -84,6 +84,21 @@ def test_dotenv_managed_root_overrides_stale_process_env(monkeypatch, tmp_path):
     assert config.os.environ["MANAGED_ROOT_FILE_AGENT_SPREADSHEET_PATCH_FILES"] == "/new/root"
 
 
+def test_settings_loads_incremental_managed_root_scan_limits(monkeypatch, tmp_path):
+    """受管目录扫描批次与时间预算必须可配置，避免大目录长期阻塞导入队列。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.setenv("MANAGED_ROOT_SCAN_BATCH_SIZE", "25")
+    monkeypatch.setenv("MANAGED_ROOT_SCAN_BATCH_MAX_SECONDS", "7")
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.managed_root_scan_batch_size == 25
+    assert settings.managed_root_scan_batch_max_seconds == 7
+
+
 def test_settings_loads_classification_llm_options(monkeypatch, tmp_path):
     """分类 LLM 判定开关必须通过配置显式启用。"""
 

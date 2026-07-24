@@ -577,7 +577,9 @@ class FileLifecycleJobProcessor:
             raise RuntimeError("RECONCILE_MANAGED_ROOT 缺少 root_id")
         child = FilesystemJobQueue(self.db).create_job(
             job_type="SCAN_MANAGED_ROOT",
-            queue_name="RECONCILE",
+            # 扫描与 IMPORT 使用独立队列；部署时由不同 worker 消费，避免大目录
+            # 扫描占住同一 worker 后让已发现文件迟迟无法进入工作副本。
+            queue_name="SCAN",
             root_id=job.root_id,
             created_by=job.created_by,
             deduplication_key=f"managed-root-scan:{job.id}",

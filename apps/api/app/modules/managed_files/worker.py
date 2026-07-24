@@ -223,7 +223,58 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
     root = ManagedFileRepository(db).get_root(job.root_id)
     if root is None or not root.enabled:
         raise ValueError("Managed root not found")
-    scan_run = ManagedFileScanner(db).scan_root(root, job_id=job.id)
+    batch_import_job_ids: list[str] = []
+    batch_number = 0
+
+    def publish_import_batch(files: list[ManagedFile], scan_run) -> None:
+        """为已提交扫描元数据立即创建导入任务，并释放事务给 import worker。"""
+
+        nonlocal batch_number
+        batch_number += 1
+        import_job_ids = _enqueue_import_jobs_for_files(db=db, root_id=root.id, files=files)
+        batch_import_job_ids.extend(import_job_ids)
+        job.progress_current = scan_run.files_discovered
+        # 总文件数在遍历完成前未知；只报告已经扫描的进度，不能伪造百分比。
+        job.progress_total = 0
+        job.result_json = {
+            "scan_run_id": scan_run.id,
+            "status": "RUNNING",
+            "batches_committed": batch_number,
+            "files_discovered": scan_run.files_discovered,
+            "files_updated": scan_run.files_updated,
+            "import_jobs_created": len(batch_import_job_ids),
+        }
+        FilesystemJobRepository(db).create_event(
+            job_id=job.id,
+            level="INFO",
+            message="扫描批次已提交导入任务",
+            details={
+                "batch_number": batch_number,
+                "batch_file_count": len(files),
+                "files_discovered": scan_run.files_discovered,
+                "import_job_count": len(import_job_ids),
+            },
+        )
+        # 关键边界：必须在整轮扫描结束前提交本批 ManagedFile 和 IMPORT 任务。
+        # 另一独立 worker 才能看到任务并复制工作副本；提交不涉及任何原件写入。
+        db.commit()
+        _print_worker_status(
+            "扫描批次已提交",
+            job=job,
+            message=(
+                f"batch={batch_number} files_discovered={scan_run.files_discovered} "
+                f"import_jobs={len(import_job_ids)}"
+            ),
+        )
+
+    settings = get_settings()
+    scan_run = ManagedFileScanner(db).scan_root(
+        root,
+        job_id=job.id,
+        batch_size=settings.managed_root_scan_batch_size,
+        batch_max_seconds=settings.managed_root_scan_batch_max_seconds,
+        on_batch=publish_import_batch,
+    )
     # watcher 只记录轻量事件；完成全量扫描后统一标记为已处理，事件本身仍永久保留用于审计。
     from app.db.models import ManagedFileEvent
 
@@ -234,7 +285,6 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
         {"status": "PROCESSED", "processed_at": utcnow()},
         synchronize_session=False,
     )
-    import_job_ids = _enqueue_import_jobs_for_root(db=db, root_id=root.id)
     FilesystemJobQueue(db).mark_completed(
         job=job,
         result={
@@ -243,22 +293,17 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
             "files_updated": scan_run.files_updated,
             "files_missing": scan_run.files_missing,
             "errors": scan_run.errors,
-            "import_job_ids": import_job_ids,
+            "import_job_ids": batch_import_job_ids,
+            "batches_committed": batch_number,
         },
     )
 
 
-def _enqueue_import_jobs_for_root(*, db: Session, root_id: str) -> list[str]:
-    """扫描完成后只创建导入任务，不在当前 worker 调用栈复制工作副本。"""
+def _enqueue_import_jobs_for_files(*, db: Session, root_id: str, files: list[ManagedFile]) -> list[str]:
+    """为当前扫描批次创建导入任务，不等待整轮扫描结束。"""
 
     queue = FilesystemJobQueue(db)
     lifecycle_repository = FileLifecycleRepository(db)
-    files = (
-        db.query(ManagedFile)
-        .filter(ManagedFile.root_id == root_id, ManagedFile.status == "ACTIVE")
-        .order_by(ManagedFile.created_at.asc())
-        .all()
-    )
     workspaces = db.query(Workspace).filter(Workspace.owner_id.isnot(None)).all()
     job_ids: list[str] = []
     for managed_file in files:
@@ -538,6 +583,13 @@ def main() -> None:
             f"poll_seconds={poll_seconds:g}"
         ),
     )
+    if {"SCAN", "IMPORT"}.issubset(configured_queues):
+        # 单进程虽然能正确处理任务，但长时间扫描期间不会返回主循环领取 IMPORT；
+        # 明确提示部署者启动第二个 worker，避免误以为已获得并行导入能力。
+        _print_worker_status(
+            "并行导入提示",
+            message="当前进程同时领取 SCAN 与 IMPORT；请另启一个 IMPORT worker 以实现扫描与导入并行",
+        )
     run_filesystem_worker(
         worker_id=worker_id,
         poll_seconds=poll_seconds,

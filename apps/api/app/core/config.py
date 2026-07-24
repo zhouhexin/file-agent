@@ -46,6 +46,8 @@ DEFAULT_LEGACY_OFFICE_CONVERSION_TIMEOUT_SECONDS = 90
 DEFAULT_LEGACY_OFFICE_MAX_FILE_SIZE_MB = 100
 DEFAULT_LEGACY_OFFICE_DERIVATIVE_DIR = "derivatives/office"
 DEFAULT_MANAGED_ROOT_RECONCILE_INTERVAL_SECONDS = 300
+DEFAULT_MANAGED_ROOT_SCAN_BATCH_SIZE = 100
+DEFAULT_MANAGED_ROOT_SCAN_BATCH_MAX_SECONDS = 5
 DEFAULT_UPLOAD_ARCHIVE_RETRY_INTERVAL_SECONDS = 300
 DEFAULT_UPLOAD_DUPLICATE_SIMILARITY_THRESHOLD = 0.90
 DEFAULT_UPLOAD_DUPLICATE_MAX_CANDIDATES = 5
@@ -200,6 +202,9 @@ class Settings(BaseModel):
     managed_root_watch_enabled: bool = True
     managed_root_reconcile_interval_seconds: int = DEFAULT_MANAGED_ROOT_RECONCILE_INTERVAL_SECONDS
     managed_root_reconcile_on_startup: bool = True
+    # 增量扫描每批完成后立即提交导入任务，避免大型目录全量扫描阻塞工作副本创建。
+    managed_root_scan_batch_size: int = DEFAULT_MANAGED_ROOT_SCAN_BATCH_SIZE
+    managed_root_scan_batch_max_seconds: int = DEFAULT_MANAGED_ROOT_SCAN_BATCH_MAX_SECONDS
     upload_archive_enabled: bool = True
     upload_archive_retry_interval_seconds: int = DEFAULT_UPLOAD_ARCHIVE_RETRY_INTERVAL_SECONDS
     upload_duplicate_check_enabled: bool = True
@@ -650,6 +655,25 @@ def get_settings() -> Settings:
             ),
         ),
         managed_root_reconcile_on_startup=os.getenv("MANAGED_ROOT_RECONCILE_ON_STARTUP", "true").lower() == "true",
+        managed_root_scan_batch_size=max(
+            1,
+            min(
+                1000,
+                int(os.getenv("MANAGED_ROOT_SCAN_BATCH_SIZE", str(DEFAULT_MANAGED_ROOT_SCAN_BATCH_SIZE))),
+            ),
+        ),
+        managed_root_scan_batch_max_seconds=max(
+            1,
+            min(
+                60,
+                int(
+                    os.getenv(
+                        "MANAGED_ROOT_SCAN_BATCH_MAX_SECONDS",
+                        str(DEFAULT_MANAGED_ROOT_SCAN_BATCH_MAX_SECONDS),
+                    )
+                ),
+            ),
+        ),
         upload_archive_enabled=os.getenv("UPLOAD_ARCHIVE_ENABLED", "true").lower() == "true",
         upload_archive_retry_interval_seconds=max(
             30,

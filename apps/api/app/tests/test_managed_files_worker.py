@@ -92,6 +92,74 @@ def test_scanner_reports_unavailable_managed_root_instead_of_silent_empty_scan(t
         clear_overrides()
 
 
+def test_scan_publishes_import_jobs_by_batch_before_full_root_completion(monkeypatch, tmp_path: Path, capsys):
+    """大目录扫描必须按批提交 IMPORT 任务，不能等整轮扫描完成后才统一入队。"""
+
+    managed_dir = tmp_path / "incremental-root"
+    managed_dir.mkdir()
+    for index in range(3):
+        (managed_dir / f"notice-{index}.txt").write_text(f"第 {index} 份测试通知", encoding="utf-8")
+    monkeypatch.setenv("MANAGED_ROOT_SCAN_BATCH_SIZE", "1")
+    monkeypatch.setenv("MANAGED_ROOT_SCAN_BATCH_MAX_SECONDS", "60")
+    get_settings.cache_clear()
+    client, session_factory = client_with_database()
+    try:
+        registered = client.post(
+            "/api/auth/register",
+            json={
+                "username": "incremental-scan-user",
+                "password": "password123",
+                "display_name": "incremental-scan-user",
+            },
+        )
+        assert registered.status_code == 200
+        with session_factory() as db:
+            root = ManagedRoot(
+                root_key="incremental_root",
+                display_name="增量扫描目录",
+                container_path=str(managed_dir),
+            )
+            db.add(root)
+            db.flush()
+            job = FilesystemJob(
+                job_type="SCAN_MANAGED_ROOT",
+                queue_name="SCAN",
+                root_id=root.id,
+                status="PENDING",
+                payload_json={"root_key": root.root_key},
+                result_json={},
+            )
+            db.add(job)
+            db.commit()
+            job_id = job.id
+
+        processed = process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="incremental-scan-worker",
+            queue_names={"SCAN"},
+        )
+        assert processed == job_id
+
+        with session_factory() as db:
+            completed_scan = db.get(FilesystemJob, job_id)
+            import_jobs = (
+                db.query(FilesystemJob)
+                .filter(FilesystemJob.job_type == "IMPORT_WORKING_COPIES")
+                .order_by(FilesystemJob.created_at.asc())
+                .all()
+            )
+            assert completed_scan is not None
+            assert completed_scan.result_json["batches_committed"] == 3
+            assert len(import_jobs) == 3
+            assert all(item.queue_name == "IMPORT" and item.status == "PENDING" for item in import_jobs)
+
+        console_output = capsys.readouterr().out
+        assert console_output.count("扫描批次已提交") == 3
+    finally:
+        get_settings.cache_clear()
+        clear_overrides()
+
+
 def test_reconciliation_requeues_completed_scan_for_reused_parent_job(tmp_path: Path):
     """同一受管根在下一次启动对账时必须重新扫描，不能复用已完成子扫描后静默跳过。"""
 
@@ -127,6 +195,7 @@ def test_reconciliation_requeues_completed_scan_for_reused_parent_job(tmp_path: 
         second_scan = db.get(FilesystemJob, first_scan_id)
         assert second_scan is not None
         assert second_scan.status == "PENDING"
+        assert second_scan.queue_name == "SCAN"
     finally:
         db.close()
         clear_overrides()

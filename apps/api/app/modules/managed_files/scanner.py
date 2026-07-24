@@ -8,7 +8,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
+import time
+from collections.abc import Callable
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.db.models import FilesystemScanRun, ManagedFile, ManagedRoot, WorkingCopy, utcnow
@@ -23,8 +26,21 @@ class ManagedFileScanner:
 
         self.db = db
 
-    def scan_root(self, root: ManagedRoot, job_id: str | None = None) -> FilesystemScanRun:
-        """扫描一个受管目录并返回扫描汇总。"""
+    def scan_root(
+        self,
+        root: ManagedRoot,
+        job_id: str | None = None,
+        *,
+        batch_size: int = 100,
+        batch_max_seconds: float = 5.0,
+        on_batch: Callable[[list[ManagedFile], FilesystemScanRun], None] | None = None,
+    ) -> FilesystemScanRun:
+        """增量扫描一个受管目录，并在每批完成后发布已发现文件。
+
+        扫描器只登记原始文件元数据，回调由 worker 创建 IMPORT 任务并提交事务。
+        因而导入 worker 不必等待整棵目录扫描结束；即使扫描进程中断，已经提交
+        的批次仍能按已有幂等键继续导入，原始文件不会被修改。
+        """
 
         scan_run = FilesystemScanRun(root_id=root.id, job_id=job_id, status="RUNNING")
         self.db.add(scan_run)
@@ -46,10 +62,18 @@ class ManagedFileScanner:
             for file in existing_by_path.values()
             if file.file_identity
         }
-        seen_paths: set[str] = set()
+        normalized_batch_size = max(1, batch_size)
+        normalized_batch_seconds = max(0.1, batch_max_seconds)
+        batch_files: list[ManagedFile] = []
+        batch_started_at = time.monotonic()
+        files_discovered = 0
         files_updated = 0
         errors = 0
-        for path in sorted(item for item in root_path.rglob("*") if item.is_file() or item.is_symlink()):
+        # `sorted(root.rglob(...))` 会先枚举完整目录树，百万文件时首批导入仍会被
+        # 卡住。这里保持惰性遍历，满足一批后即可提交给独立 import worker。
+        for path in root_path.rglob("*"):
+            if not (path.is_file() or path.is_symlink()):
+                continue
             relative_path = path.relative_to(root_path).as_posix()
             if _is_hidden_relative_path(relative_path):
                 # 受管目录只展示业务文件，macOS .DS_Store、点号目录等隐藏项不进入索引。
@@ -112,13 +136,48 @@ class ManagedFileScanner:
                 existing.last_seen_scan_run_id = scan_run.id
                 existing.updated_at = utcnow()
                 self._sync_working_copy_status(managed_file=existing, source_sha256=content_sha256)
-            seen_paths.add(relative_path)
+            batch_files.append(existing)
+            files_discovered += 1
             files_updated += 1
 
+            # 每批先 flush 以获得 ManagedFile 的稳定 ID，再把批次交给 worker。
+            # 回调会创建并提交 IMPORT 任务，使另一个 worker 可以立即开始复制。
+            if (
+                len(batch_files) >= normalized_batch_size
+                or time.monotonic() - batch_started_at >= normalized_batch_seconds
+            ):
+                self._publish_batch(
+                    scan_run=scan_run,
+                    files=batch_files,
+                    files_discovered=files_discovered,
+                    files_updated=files_updated,
+                    errors=errors,
+                    on_batch=on_batch,
+                )
+                batch_files = []
+                batch_started_at = time.monotonic()
+
+        if batch_files:
+            self._publish_batch(
+                scan_run=scan_run,
+                files=batch_files,
+                files_discovered=files_discovered,
+                files_updated=files_updated,
+                errors=errors,
+                on_batch=on_batch,
+            )
+
+        # 只有整轮遍历结束后才标记原件缺失。分批扫描过程中不能用“当前批次
+        # 未出现”推断文件已消失，否则会错误影响仍在等待扫描的目录项。
         missing_files = (
             self.db.query(ManagedFile)
             .filter(ManagedFile.root_id == root.id, ManagedFile.status == "ACTIVE")
-            .filter(~ManagedFile.relative_path.in_(seen_paths) if seen_paths else ManagedFile.relative_path != "")
+            .filter(
+                or_(
+                    ManagedFile.last_seen_scan_run_id.is_(None),
+                    ManagedFile.last_seen_scan_run_id != scan_run.id,
+                )
+            )
             .all()
         )
         for missing in missing_files:
@@ -130,7 +189,7 @@ class ManagedFileScanner:
             )
         missing_count = len(missing_files)
         scan_run.status = "COMPLETED"
-        scan_run.files_discovered = len(seen_paths)
+        scan_run.files_discovered = files_discovered
         scan_run.files_updated = files_updated
         scan_run.files_missing = int(missing_count or 0)
         scan_run.errors = errors
@@ -138,6 +197,25 @@ class ManagedFileScanner:
         root.last_reconciled_at = scan_run.finished_at
         self.db.flush()
         return scan_run
+
+    def _publish_batch(
+        self,
+        *,
+        scan_run: FilesystemScanRun,
+        files: list[ManagedFile],
+        files_discovered: int,
+        files_updated: int,
+        errors: int,
+        on_batch: Callable[[list[ManagedFile], FilesystemScanRun], None] | None,
+    ) -> None:
+        """持久化当前扫描进度，并让 worker 发布可立即导入的文件批次。"""
+
+        scan_run.files_discovered = files_discovered
+        scan_run.files_updated = files_updated
+        scan_run.errors = errors
+        self.db.flush()
+        if on_batch is not None:
+            on_batch(list(files), scan_run)
 
     def _sync_working_copy_status(self, *, managed_file: ManagedFile, source_sha256: str) -> None:
         """根据原始文件内容变化更新工作副本同步状态，但绝不覆盖工作副本。"""

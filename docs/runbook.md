@@ -697,8 +697,8 @@ PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=import-operation-1 \
   FILESYSTEM_WORKER_QUEUES=IMPORT,FILE_OPERATION \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 
-PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=reconcile-1 \
-  FILESYSTEM_WORKER_QUEUES=RECONCILE \
+PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=reconcile-scan-1 \
+  FILESYSTEM_WORKER_QUEUES=RECONCILE,SCAN \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 
 PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
@@ -708,7 +708,7 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
   -m app.modules.file_lifecycle.watcher
 ```
 
-API 启动钩子、scheduler 和 watcher 都只创建 `filesystem_jobs`。实际 SHA-256 查重、归档、扫描、导入和暂存清理由 worker 完成。任务通过租约和幂等键恢复，状态接口为：
+API 启动钩子、scheduler 和 watcher 都只创建 `filesystem_jobs`。实际 SHA-256 查重、归档、扫描、导入和暂存清理由 worker 完成。受管目录扫描按 `MANAGED_ROOT_SCAN_BATCH_SIZE` 或 `MANAGED_ROOT_SCAN_BATCH_MAX_SECONDS` 分批提交；每批立即创建 `IMPORT` 任务，故 `RECONCILE,SCAN` worker 与 `IMPORT` worker 必须同时运行。任务通过租约和幂等键恢复，状态接口为：
 
 ```text
 GET /api/jobs/{job_id}

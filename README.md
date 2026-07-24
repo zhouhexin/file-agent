@@ -70,12 +70,13 @@ Neo4j 图谱增强分类默认关闭。第二版本支持目录角色 Profile、
 除 API 外，三层文件生命周期至少需要独立启动 worker 和 scheduler；需要近实时同步时再启动 watcher：
 
 ```bash
-# 可在不同进程中分别设置 FILESYSTEM_WORKER_QUEUES，以隔离查重、归档、导入和对账资源。
+# 可在不同进程中分别设置 FILESYSTEM_WORKER_QUEUES。SCAN 每完成一批就提交
+# IMPORT 任务，因此扫描 worker 与导入 worker 同时运行时，工作副本无需等待全量扫描结束。
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=IMPORT,FILE_OPERATION \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
-PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=RECONCILE \
+PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=RECONCILE,SCAN \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.file_lifecycle.scheduler
 PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.file_lifecycle.watcher
