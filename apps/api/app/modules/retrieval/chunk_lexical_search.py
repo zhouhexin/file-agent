@@ -21,19 +21,25 @@ MAX_FALLBACK_VERSION_AGGREGATIONS = 10
 
 
 class DocumentChunkLexicalSearchService:
-    """在当前用户和明确候选版本边界内检索 Chunk，禁止隐式扩大到全库。"""
+    """在受控工作区和明确候选版本边界内检索 Chunk，禁止隐式扩大到全库。"""
 
     def __init__(
         self,
         *,
         db: Session,
         user_id: str,
+        workspace_id: str | None = None,
         tokenizer: ChineseLexicalTokenizer | None = None,
     ) -> None:
-        """保存用户所有权边界和 CPU 分词器。"""
+        """保存检索范围和 CPU 分词器。
+
+        workspace_id 存在时表示共享工作目录，Document.user_id 仅用于审计；
+        兼容旧的无工作区调用时仍使用 user_id 保护私有 Document。
+        """
 
         self.db = db
         self.user_id = user_id
+        self.workspace_id = workspace_id
         self.tokenizer = tokenizer or ChineseLexicalTokenizer(load_default_business_terms())
 
     def search(self, *, query: str, document_version_ids: list[str], limit: int = 20) -> list[dict[str, Any]]:
@@ -52,13 +58,26 @@ class DocumentChunkLexicalSearchService:
         return self._search_deterministic(tokens=tokens, version_ids=version_ids, limit=safe_limit)
 
     def _base_query(self):
-        """构造所有权和成功索引运行过滤，任何搜索分支都不能绕过。"""
+        """构造工作区或用户边界以及成功索引过滤，任何搜索分支都不能绕过。"""
 
-        return (
+        query = (
             self.db.query(DocumentChunk)
             .join(Document, Document.id == DocumentChunk.document_id)
             .join(DocumentIndexRun, DocumentIndexRun.id == DocumentChunk.index_run_id)
-            .filter(Document.user_id == self.user_id, DocumentIndexRun.status == "COMPLETED")
+            .filter(DocumentIndexRun.status == "COMPLETED")
+        )
+        if self.workspace_id is None:
+            return query.filter(Document.user_id == self.user_id)
+        return (
+            query.join(
+                WorkingCopy,
+                (WorkingCopy.document_id == DocumentChunk.document_id)
+                & (WorkingCopy.current_version_id == DocumentChunk.document_version_id),
+            )
+            .filter(
+                WorkingCopy.workspace_id == self.workspace_id,
+                WorkingCopy.status == "ACTIVE",
+            )
         )
 
     def _search_postgresql(self, *, tokens: list[str], version_ids: list[str], limit: int) -> list[dict[str, Any]]:
@@ -118,6 +137,9 @@ class DocumentChunkLexicalSearchService:
         """
         if not query:
             return []
+        if self.workspace_id is not None and workspace_id != self.workspace_id:
+            # 实例已经绑定共享范围时，不接受调用方临时扩大或切换工作区。
+            return []
 
         tokens = self.tokenizer.tokenize(str(query)[:MAX_QUERY_CHARS])[:MAX_QUERY_TOKENS]
         if not tokens:
@@ -161,7 +183,7 @@ class DocumentChunkLexicalSearchService:
         )
 
         # 取 top chunk
-        ranked_chunks = (
+        ranked_query = (
             self.db.query(
                 DocumentChunk,
                 rank.label("fts_rank"),
@@ -174,10 +196,14 @@ class DocumentChunkLexicalSearchService:
                 & (active_subq.c.document_id == DocumentChunk.document_id),
             )
             .filter(
-                Document.user_id == self.user_id,
                 DocumentIndexRun.status == "COMPLETED",
                 DocumentChunk.search_vector.op("@@")(ts_query),
             )
+        )
+        if self.workspace_id is None:
+            ranked_query = ranked_query.filter(Document.user_id == self.user_id)
+        ranked_chunks = (
+            ranked_query
             .order_by(rank.desc(), DocumentChunk.chunk_index.asc())
             .limit(limit_chunks)
             .all()

@@ -1,6 +1,7 @@
 """阶段四只读文件搜索 API 测试。
 
-保护普通用户入口只返回自己的活动工作副本安全投影，不要求 GPU、LLM 或真实 PostgreSQL。
+保护普通用户入口只返回共享工作区的活动工作副本安全投影，不要求 GPU、LLM 或真实 PostgreSQL。
+Document.user_id 记录导入审计来源，不能再次切分所有用户共享的文件检索范围。
 """
 
 from uuid import uuid4
@@ -98,8 +99,8 @@ def _add_profile(db, *, user: User, filename: str, summary_text: str) -> str:
     return document_id
 
 
-def test_search_api_returns_only_current_users_safe_file_projection():
-    """HTTP 搜索结果不得包含内部检索字段，也不得返回其他用户同主题文件。"""
+def test_search_api_returns_shared_workspace_safe_file_projection():
+    """已认证用户可以检索共享工作区文件，但结果不得包含内部检索字段。"""
 
     client, SessionLocal = client_with_database()
     owner_id, owner_token = _register_and_login(client, "stage4-search-owner")
@@ -111,7 +112,7 @@ def test_search_api_returns_only_current_users_safe_file_projection():
         owner_document_id = _add_profile(
             db, user=owner, filename="国家励志奖学金申请.txt", summary_text="奖学金申请材料",
         )
-        _add_profile(
+        other_document_id = _add_profile(
             db, user=other, filename="国家励志奖学金申请.txt", summary_text="奖学金申请材料",
         )
         db.commit()
@@ -126,9 +127,15 @@ def test_search_api_returns_only_current_users_safe_file_projection():
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["total_returned"] == 1
-    assert payload["files"][0]["document_id"] == owner_document_id
-    assert {"search_text", "score", "tool_name", "absolute_path"}.isdisjoint(payload["files"][0])
+    assert payload["total_returned"] == 2
+    assert {item["document_id"] for item in payload["files"]} == {
+        owner_document_id,
+        other_document_id,
+    }
+    assert all(
+        {"search_text", "score", "tool_name", "absolute_path"}.isdisjoint(item)
+        for item in payload["files"]
+    )
 
 
 def test_search_api_requires_authentication():

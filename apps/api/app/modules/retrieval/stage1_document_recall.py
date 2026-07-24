@@ -27,7 +27,8 @@ class Stage1DocumentRecallService:
     """第一阶段数据库索引召回。
 
     不直接访问文件系统，不修改任何数据。
-    所有权校验在查询时通过 user_id + workspace_id + status 过滤完成。
+    共享工作目录以 workspace_id + ACTIVE 状态作为可见范围；user_id 只保留为
+    导入审计信息，不能把同一共享目录再次切成按创建者隔离的检索集合。
     """
 
     def __init__(
@@ -94,7 +95,6 @@ class Stage1DocumentRecallService:
                 WorkingCopy.workspace_id == self.workspace_id,
                 WorkingCopy.status == "ACTIVE",
                 WorkingCopy.current_version_id.in_(list(score_by_version)),
-                Document.user_id == self.user_id,
             )
             .all()
         )
@@ -185,7 +185,6 @@ class Stage1DocumentRecallService:
         rows = (
             self.db.query(DocumentSearchProfile)
             .filter(
-                DocumentSearchProfile.user_id == self.user_id,
                 DocumentSearchProfile.workspace_id == self.workspace_id,
                 DocumentSearchProfile.status == "ACTIVE",
                 DocumentSearchProfile.normalized_filename == normalized,
@@ -237,7 +236,6 @@ class Stage1DocumentRecallService:
                 ).label("score"),
             )
             .filter(
-                DocumentSearchProfile.user_id == self.user_id,
                 DocumentSearchProfile.workspace_id == self.workspace_id,
                 DocumentSearchProfile.status == "ACTIVE",
                 DocumentSearchProfile.search_vector.op("@@")(ts_query),
@@ -292,7 +290,6 @@ class Stage1DocumentRecallService:
                 similarity.label("score"),
             )
             .filter(
-                DocumentSearchProfile.user_id == self.user_id,
                 DocumentSearchProfile.workspace_id == self.workspace_id,
                 DocumentSearchProfile.status == "ACTIVE",
                 DocumentSearchProfile.normalized_filename.op("%")(normalized),
@@ -319,7 +316,6 @@ class Stage1DocumentRecallService:
         rows = (
             self.db.query(DocumentSearchProfile)
             .filter(
-                DocumentSearchProfile.user_id == self.user_id,
                 DocumentSearchProfile.workspace_id == self.workspace_id,
                 DocumentSearchProfile.status == "ACTIVE",
                 *self._scope_predicates(scope),
@@ -430,7 +426,6 @@ class Stage1DocumentRecallService:
                 WorkingCopy.id.in_(wc_ids),
                 WorkingCopy.workspace_id == self.workspace_id,
                 WorkingCopy.status == "ACTIVE",
-                Document.user_id == self.user_id,
             )
             .all()
         )

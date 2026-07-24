@@ -265,7 +265,7 @@ def test_search_is_stable():
 
 
 def test_cross_user_isolation():
-    """其他用户的文件不出现。"""
+    """不同工作区之间仍必须隔离，不能因为共享目录改造扩大到其他工作区。"""
     db = _db_session()
     try:
         _setup_full_doc(
@@ -292,6 +292,48 @@ def test_cross_user_isolation():
         )
         for item in result["results"]:
             assert item["working_copy_id"] == "wc-ua"
+    finally:
+        db.close()
+
+
+def test_shared_workspace_search_returns_content_owned_by_another_audit_user():
+    """共享工作区按工作副本授权，Document 创建者只用于审计，不能阻断全员检索。"""
+
+    db = _db_session()
+    try:
+        _setup_full_doc(
+            db,
+            suffix="shared",
+            user_id="import-auditor",
+            workspace_id="shared-workspace",
+            filename="干部面谈名单.docx",
+            summary_text="干部面谈工作安排",
+            chunk_text="面谈人员包括金海燕老师，具体时间另行通知。",
+        )
+        # 第一阶段投影故意不包含人名，保护“必须从正文 Chunk 补召回”的业务行为。
+        profile = db.get(DocumentSearchProfile, "prof-shared")
+        profile.combined_search_text = "干部面谈名单 干部面谈工作安排"
+        profile.summary_search_text = "干部面谈工作安排"
+        db.commit()
+
+        service = TwoStageFileSearchService(
+            db=db,
+            user_id="current-chat-user",
+            workspace_id="shared-workspace",
+        )
+        result = service.search(
+            query="查找与金海燕老师有关的文件",
+            parsed_query=_FakeParsedQuery(
+                cleaned="金海燕老师",
+                terms=["金海燕老师", "金海燕", "老师"],
+            ),
+            scope=_FakeScope(),
+        )
+
+        assert result["ok"] is True
+        assert [item["filename"] for item in result["results"]] == ["干部面谈名单.docx"]
+        assert "金海燕" in result["results"][0]["evidence_preview"]
+        assert "原文命中查询" in result["results"][0]["match_reasons"]
     finally:
         db.close()
 

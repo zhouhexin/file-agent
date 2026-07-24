@@ -66,7 +66,10 @@ class TwoStageFileSearchService:
             config=self.config, tokenizer=tokenizer,
         )
         self.stage2 = DocumentChunkLexicalSearchService(
-            db=db, user_id=user_id, tokenizer=tokenizer,
+            db=db,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            tokenizer=tokenizer,
         )
         self.evidence = SearchEvidenceProjector(
             db=db, user_id=user_id, workspace_id=workspace_id,
@@ -221,7 +224,6 @@ class TwoStageFileSearchService:
                     WorkingCopy.status == "ACTIVE",
                     WorkingCopy.document_id.in_(document_ids),
                     WorkingCopy.current_version_id.isnot(None),
-                    Document.user_id == self.user_id,
                 )
                 .all()
             )

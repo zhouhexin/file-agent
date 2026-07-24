@@ -36,13 +36,13 @@ class SearchEvidenceProjector:
     ) -> dict[str, dict[str, Any]]:
         """读取 EvidenceSpan，返回 {chunk_id: {page_number, sheet_name, cell_range, preview}}。
 
-        跨用户隔离：只返回当前用户 Document 的 Evidence。
+        共享工作目录按 workspace_id 校验；未提供共享范围的兼容调用仍按 user_id 隔离。
         """
         if not chunk_ids:
             return {}
 
         # 一次批量查询，包含用户权限校验
-        rows = (
+        query = (
             self.db.query(EvidenceSpan)
             .join(Document, Document.id == EvidenceSpan.document_id)
             .join(DocumentChunk, DocumentChunk.id == EvidenceSpan.chunk_id)
@@ -54,16 +54,16 @@ class SearchEvidenceProjector:
             )
             .filter(
                 EvidenceSpan.chunk_id.in_(chunk_ids),
-                Document.user_id == self.user_id,
                 WorkingCopy.status == "ACTIVE",
                 DocumentIndexRun.status == "COMPLETED",
             )
-            .filter(
-                WorkingCopy.workspace_id == self.workspace_id
-                if self.workspace_id is not None
-                else True
-            )
-            .order_by(
+        )
+        if self.workspace_id is not None:
+            query = query.filter(WorkingCopy.workspace_id == self.workspace_id)
+        else:
+            query = query.filter(Document.user_id == self.user_id)
+        rows = (
+            query.order_by(
                 EvidenceSpan.chunk_id.asc(),
                 EvidenceSpan.span_index.asc(),
             )
