@@ -707,7 +707,14 @@ scripts\start-file-agent-workers.cmd
 不能在 Windows CMD 中执行 macOS 的 `/Users/.../scripts/start-file-agent-workers.cmd`。如果预检返回
 `MANAGED_ROOT_NOT_FOUND`，应修正 Windows 项目根 `.env` 对应目录；只有
 `MANAGED_ROOT_PERMISSION_DENIED` 才表示当前 Windows 账户确实无目录枚举权限。预检失败会在创建任何
-子进程前退出，不能通过管理员启动或跳过预检掩盖错误配置。
+子进程前退出，不能通过管理员启动或跳过预检掩盖错误配置。程序只从当前仓库根及其上级查找 `.env`，
+不会读取 Downloads 中的同名文件。
+
+当 PostgreSQL 开发数据库在 macOS 和 Windows 间复用、但
+`WORKING_COPY_STORAGE_ROOT=./storage/working-copies` 是各自本地目录时，数据库可能已有 WorkingCopy
+记录而当前机器缺少物理文件。扫描 worker 会识别该不一致并重新激活原 IMPORT 任务；生命周期 worker
+在原件哈希仍与已导入版本一致时重新物化同一相对路径。它不会创建第二条 WorkingCopy，不会覆盖内容
+不同的已有文件，也不会自动恢复用户已移入回收站的副本。
 
 ```bash
 PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=duplicate-archive-1 \

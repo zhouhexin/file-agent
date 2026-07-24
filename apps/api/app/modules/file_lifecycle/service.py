@@ -780,7 +780,66 @@ class FileLifecycleJobProcessor:
             managed_file_id=managed_file.id,
         )
         if existing is not None:
-            FilesystemJobQueue(self.db).mark_completed(job=job, result={"working_copy_id": existing.id, "idempotent": True})
+            existing_relative_path = (
+                f"{working_root.relative_storage_path}/{existing.relative_path}"
+            )
+            existing_target = self.storage.working_copy_path(existing_relative_path)
+            if existing.status != "ACTIVE":
+                # 回收站中的工作副本只能由确认后的恢复流程处理，后台导入不得复活。
+                FilesystemJobQueue(self.db).mark_completed(
+                    job=job,
+                    result={
+                        "working_copy_id": existing.id,
+                        "idempotent": True,
+                        "skipped_status": existing.status,
+                    },
+                )
+                return
+            if existing_target.is_file():
+                expected_sha256 = (
+                    existing.imported_source_sha256 or existing.content_sha256
+                )
+                if expected_sha256 and self.storage.sha256_file(existing_target) != expected_sha256:
+                    raise RuntimeError("工作副本路径已存在但内容校验失败，禁止自动覆盖")
+                FilesystemJobQueue(self.db).mark_completed(
+                    job=job,
+                    result={"working_copy_id": existing.id, "idempotent": True},
+                )
+                return
+            if existing_target.exists():
+                raise RuntimeError("工作副本目标路径被非文件对象占用，禁止自动覆盖")
+
+            source = resolve_managed_relative_path(
+                root_path=Path(managed_root.container_path),
+                relative_path=managed_file.relative_path,
+            )
+            source_sha256 = managed_file.content_sha256 or self.storage.sha256_file(source)
+            expected_imported_sha256 = (
+                existing.imported_source_sha256 or existing.content_sha256
+            )
+            if expected_imported_sha256 and source_sha256 != expected_imported_sha256:
+                existing.sync_status = "ORIGINAL_CHANGED"
+                raise RuntimeError("原件内容已变化，不能用新内容修复旧版本工作副本")
+            self.storage.import_working_copy(
+                source=source,
+                relative_path=existing_relative_path,
+                expected_sha256=source_sha256,
+            )
+            existing.sync_status = "SYNCED"
+            existing.size_bytes = managed_file.size_bytes
+            existing.content_sha256 = source_sha256
+            existing.imported_source_sha256 = source_sha256
+            existing.updated_at = utcnow()
+            working_root.status = "ACTIVE"
+            working_root.updated_at = utcnow()
+            FilesystemJobQueue(self.db).mark_completed(
+                job=job,
+                result={
+                    "working_copy_id": existing.id,
+                    "idempotent": False,
+                    "physical_copy_repaired": True,
+                },
+            )
             return
         source = resolve_managed_relative_path(
             root_path=Path(managed_root.container_path),

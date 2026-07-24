@@ -15,8 +15,19 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.logging import log_context, log_event, new_request_id
-from app.db.models import AgentRun, FilesystemJob, ManagedFile, ManagedRoot, ToolInvocation, User, utcnow
+from app.db.models import (
+    AgentRun,
+    FilesystemJob,
+    ManagedFile,
+    ManagedRoot,
+    ToolInvocation,
+    User,
+    WorkingCopy,
+    WorkingCopyRoot,
+    utcnow,
+)
 from app.modules.file_lifecycle.repository import FileLifecycleRepository
+from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.changesets.service import persist_changeset_from_document_results
 from app.modules.classification.classifier_service import DocumentClassificationService
@@ -310,14 +321,61 @@ def _enqueue_import_jobs_for_files(*, db: Session, root_id: str, files: list[Man
     queue = FilesystemJobQueue(db)
     lifecycle_repository = FileLifecycleRepository(db)
     shared_workspace_id = get_shared_workspace_id(db)
+    storage = FileLifecycleStorageService()
     root = db.get(ManagedRoot, root_id)
     fallback_user = (
         str(root.created_by)
         if root is not None and root.created_by
         else (str(db.query(User.id).order_by(User.created_at.asc()).scalar() or ""))
     )
+    managed_file_ids = [managed_file.id for managed_file in files]
+    existing_rows = (
+        db.query(WorkingCopy, WorkingCopyRoot)
+        .join(
+            WorkingCopyRoot,
+            WorkingCopy.working_copy_root_id == WorkingCopyRoot.id,
+        )
+        .filter(
+            WorkingCopy.workspace_id == shared_workspace_id,
+            WorkingCopy.managed_file_id.in_(managed_file_ids),
+        )
+        .all()
+        if managed_file_ids
+        else []
+    )
+    existing_by_managed_file_id = {
+        working_copy.managed_file_id: (working_copy, working_root)
+        for working_copy, working_root in existing_rows
+    }
     job_ids: list[str] = []
     for managed_file in files:
+        existing_pair = existing_by_managed_file_id.get(managed_file.id)
+        if existing_pair is not None:
+            working_copy, working_root = existing_pair
+            # 用户主动移入回收站的工作副本不能被后台扫描自动恢复。
+            if working_copy.status != "ACTIVE":
+                continue
+            expected_source_sha256 = (
+                working_copy.imported_source_sha256 or working_copy.content_sha256
+            )
+            if (
+                managed_file.content_sha256
+                and expected_source_sha256
+                and managed_file.content_sha256 != expected_source_sha256
+            ):
+                # 原件内容已经变化时必须进入现有 ORIGINAL_CHANGED 流程，不能拿新原件
+                # 字节修补仍绑定旧 DocumentVersion 的工作副本。
+                continue
+            storage_relative_path = (
+                f"{working_root.relative_storage_path}/{working_copy.relative_path}"
+            )
+            try:
+                if storage.working_copy_path(storage_relative_path).is_file():
+                    continue
+            except OSError:
+                # 无法读取工作目录时仍创建修复任务，由生命周期 worker 记录结构化失败。
+                pass
+
         user_id = fallback_user
         if managed_file.source_type == "UPLOAD_ARCHIVE" and managed_file.source_upload_version_id:
             review = lifecycle_repository.get_review_by_version(managed_file.source_upload_version_id)
@@ -332,6 +390,9 @@ def _enqueue_import_jobs_for_files(*, db: Session, root_id: str, files: list[Man
             root_id=root_id,
             created_by=user_id,
             deduplication_key=f"working-copy-import:{shared_workspace_id}:{managed_file.id}",
+            # 数据库已有完成任务但当前部署的本地工作文件缺失时，必须重置原任务。
+            # 这用于开发数据库跨 Windows/macOS 复用或本地目录意外丢失后的修复。
+            reuse_completed=True,
             payload={
                 "managed_file_id": managed_file.id,
                 "workspace_id": shared_workspace_id,

@@ -72,9 +72,9 @@ git diff --check
 当前阶段期望：
 
 ```text
-后端（macOS/Linux）：523 passed, 19 skipped
-后端（Windows 有 symlink 权限）：523 passed, 19 skipped
-后端（Windows 无 symlink 权限）：522 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
+后端（macOS/Linux）：524 passed, 19 skipped
+后端（Windows 有 symlink 权限）：524 passed, 19 skipped
+后端（Windows 无 symlink 权限）：523 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
 前端：TypeScript 检查和 Vite build 成功
 Alembic：单一 head 20260724_0003
 Python：No broken requirements found
@@ -172,7 +172,8 @@ PYTHONPATH=apps/api \
 Windows CMD 从仓库根目录执行以下脚本即可。它会分别打开扫描 worker、导入/生命周期 worker 和
 scheduler 三个窗口；扫描每批发现文件后，导入 worker 可立即消费 IMPORT 任务，不必等待全量扫描。
 脚本会在打开子窗口前同步并校验当前 Windows `.env` 中的受管目录，因此必须从 Windows 本机仓库
-根目录执行，不能使用文档中的 macOS `/Users/...` 路径。
+根目录执行，不能使用文档中的 macOS `/Users/...` 路径。`.env` 必须位于 Windows 仓库根目录，
+例如 `E:\PycharmProject\file-agent\.env`；放在 Downloads 中的 `.env` 不会被自动读取。
 
 ~~~cmd
 scripts\start-file-agent-workers.cmd
@@ -208,7 +209,10 @@ MANAGED_ROOT_UNAVAILABLE
 
 `MANAGED_ROOT_SCAN_BATCH_SIZE`、`MANAGED_ROOT_SCAN_BATCH_MAX_SECONDS` 等全局参数不能出现在
 `root_keys` 中。旧版本曾经误登记的同名伪目录会在预检阶段停用，其待执行扫描任务会被标记失败，
-不会继续被扫描 worker 领取。
+不会继续被扫描 worker 领取。使用共享开发数据库但每台电脑保留本地
+`WORKING_COPY_STORAGE_ROOT` 时，数据库已有 WorkingCopy、当前机器物理文件缺失的情况会在下次扫描
+重新入队；生命周期 worker 只从哈希一致的不可变原件修复同一副本，不新增重复 WorkingCopy，也不会
+自动恢复已进入回收站的文件。
 
 以下是 macOS/Linux 的等价分终端启动方式。
 

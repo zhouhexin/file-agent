@@ -20,6 +20,8 @@ def test_windows_worker_launcher_starts_required_isolated_processes():
     assert 'start "File Agent - Scan Worker"' in content
     assert 'start "File Agent - Lifecycle Worker"' in content
     assert "if errorlevel 1" in content
+    assert 'pushd "%PROJECT_ROOT%"' in content
+    assert "popd" in content
     assert content.index("startup_preflight") < content.index('start "File Agent - Scan Worker"')
     assert content.index('start "File Agent - Lifecycle Scheduler"') < content.index(
         'start "File Agent - Scan Worker"'

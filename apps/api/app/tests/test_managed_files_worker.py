@@ -12,6 +12,8 @@ from app.db.models import (
     FilesystemJob,
     ManagedFile,
     ManagedRoot,
+    WorkingCopy,
+    WorkingCopyRoot,
 )
 from app.modules.managed_files.worker import _public_job_error_message, process_next_filesystem_job
 from app.modules.managed_files.scanner import ManagedFileScanner
@@ -174,6 +176,107 @@ def test_scan_publishes_import_jobs_by_batch_before_full_root_completion(monkeyp
 
         console_output = capsys.readouterr().out
         assert console_output.count("扫描批次已提交") == 3
+    finally:
+        get_settings.cache_clear()
+        clear_overrides()
+
+
+def test_scan_requeues_completed_import_when_local_working_copy_is_missing(
+    monkeypatch,
+    tmp_path: Path,
+):
+    """共享开发库已有记录但本机文件缺失时，扫描必须重新物化同一工作副本。"""
+
+    managed_dir = tmp_path / "managed"
+    managed_dir.mkdir()
+    source = managed_dir / "科研通知.txt"
+    source.write_text("科研项目材料提交要求", encoding="utf-8")
+    working_dir = tmp_path / "working"
+    monkeypatch.setenv("WORKING_COPY_STORAGE_ROOT", str(working_dir))
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "uploads"))
+    monkeypatch.setenv("EMBEDDING_ENABLED", "false")
+    monkeypatch.setenv("GRAPH_CLASSIFICATION_ENABLED", "false")
+    get_settings.cache_clear()
+    client, session_factory = client_with_database()
+    try:
+        registered = client.post(
+            "/api/auth/register",
+            json={
+                "username": "working-copy-repair-user",
+                "password": "password123",
+                "display_name": "working-copy-repair-user",
+            },
+        )
+        assert registered.status_code == 200
+        with session_factory() as db:
+            root = ManagedRoot(
+                root_key="school_files",
+                display_name="school_files",
+                container_path=str(managed_dir),
+            )
+            db.add(root)
+            db.flush()
+            first_scan = FilesystemJob(
+                job_type="SCAN_MANAGED_ROOT",
+                queue_name="SCAN",
+                root_id=root.id,
+                status="PENDING",
+                payload_json={"root_key": root.root_key},
+                result_json={},
+            )
+            db.add(first_scan)
+            db.commit()
+            root_id = root.id
+
+        assert process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="repair-scan-worker",
+            queue_names={"SCAN"},
+        )
+        first_import_job_id = process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="repair-import-worker",
+            queue_names={"IMPORT"},
+        )
+        assert first_import_job_id is not None
+
+        with session_factory() as db:
+            working_copy = db.query(WorkingCopy).one()
+            working_root = db.get(WorkingCopyRoot, working_copy.working_copy_root_id)
+            assert working_root is not None
+            physical_path = working_dir / working_root.relative_storage_path / working_copy.relative_path
+            assert physical_path.read_text(encoding="utf-8") == "科研项目材料提交要求"
+            physical_path.unlink()
+            second_scan = FilesystemJob(
+                job_type="SCAN_MANAGED_ROOT",
+                queue_name="SCAN",
+                root_id=root_id,
+                status="PENDING",
+                payload_json={"root_key": "school_files", "reason": "repair-test"},
+                result_json={},
+            )
+            db.add(second_scan)
+            db.commit()
+
+        assert process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="repair-scan-worker",
+            queue_names={"SCAN"},
+        )
+        repaired_job_id = process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="repair-import-worker",
+            queue_names={"IMPORT"},
+        )
+
+        assert repaired_job_id == first_import_job_id
+        assert physical_path.read_text(encoding="utf-8") == "科研项目材料提交要求"
+        with session_factory() as db:
+            repaired_job = db.get(FilesystemJob, repaired_job_id)
+            assert repaired_job is not None
+            assert repaired_job.status == "COMPLETED"
+            assert repaired_job.result_json["physical_copy_repaired"] is True
+            assert db.query(WorkingCopy).count() == 1
     finally:
         get_settings.cache_clear()
         clear_overrides()
