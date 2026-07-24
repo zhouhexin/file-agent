@@ -690,6 +690,10 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
 
 三层文件生命周期上线后，生产环境应拆分队列，避免归档或导入占满普通任务资源：
 
+Windows CMD 开发环境可以直接运行 `scripts\start-file-agent-workers.cmd`，脚本会以独立窗口启动
+`RECONCILE,SCAN`、`DUPLICATE_CHECK,ARCHIVE,IMPORT,FILE_OPERATION` 和 scheduler。它适合本地
+开发与烟测；生产环境仍可按以下命令基于容量分别部署更多 worker。
+
 ```bash
 PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=duplicate-archive-1 \
   FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE \

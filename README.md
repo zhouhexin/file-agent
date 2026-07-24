@@ -70,6 +70,10 @@ Neo4j 图谱增强分类默认关闭。第二版本支持目录角色 Profile、
 
 除 API 外，三层文件生命周期至少需要独立启动 worker 和 scheduler；需要近实时同步时再启动 watcher：
 
+Windows CMD 可直接执行 `scripts\start-file-agent-workers.cmd`。它会分别启动扫描 worker、导入/生命周期
+worker 和 scheduler；增加 `--with-watcher` 才会额外启动 watcher。若 Python 不在 PATH，先设置
+`FILE_AGENT_PYTHON` 为解释器绝对路径。以下是 macOS/Linux 的等价分终端命令：
+
 ```bash
 # 可在不同进程中分别设置 FILESYSTEM_WORKER_QUEUES。SCAN 每完成一批就提交
 # IMPORT 任务，因此扫描 worker 与导入 worker 同时运行时，工作副本无需等待全量扫描结束。
