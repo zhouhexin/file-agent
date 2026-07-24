@@ -21,6 +21,7 @@ from app.db.models import (
     DocumentSummary,
     WorkingCopy,
 )
+from app.modules.retrieval.query_parser import exact_short_chinese_phrase
 
 
 class Stage1DocumentRecallService:
@@ -139,6 +140,10 @@ class Stage1DocumentRecallService:
         query_text = parsed_query.cleaned if hasattr(parsed_query, "cleaned") else ""
         if not query_text:
             return []
+        short_phrase = exact_short_chinese_phrase(query_text)
+        if short_phrase:
+            # 短人名和短业务实体必须连续匹配，不能退化为单字 OR 或文件名模糊匹配。
+            return self._exact_short_phrase_match(short_phrase, scope)
 
         candidates = []
         seen_wc_ids: set[str] = set()
@@ -201,6 +206,47 @@ class Stage1DocumentRecallService:
                 "_hit_source": "exact_filename",
             }
             for r in rows
+        ]
+
+    def _exact_short_phrase_match(self, phrase: str, scope: Any) -> list[dict]:
+        """在有索引的文件名和瘦投影中连续匹配短中文实体。"""
+
+        import sqlalchemy as sa
+
+        from app.modules.retrieval.search_profile import _normalize_text
+
+        normalized = _normalize_text(phrase)
+        if not normalized:
+            return []
+        rows = (
+            self.db.query(
+                DocumentSearchProfile.working_copy_id,
+                DocumentSearchProfile.document_id,
+                DocumentSearchProfile.document_version_id,
+            )
+            .filter(
+                DocumentSearchProfile.workspace_id == self.workspace_id,
+                DocumentSearchProfile.status == "ACTIVE",
+                sa.or_(
+                    DocumentSearchProfile.normalized_filename.contains(normalized),
+                    # combined_search_text 有 pg_trgm GIN；直接匹配连续汉字可同时兼容
+                    # Jieba 词项和 deterministic fallback 保存的完整中文片段。
+                    DocumentSearchProfile.combined_search_text.contains(phrase),
+                ),
+                *self._scope_predicates(scope),
+            )
+            .limit(self.config.retrieval_document_candidate_limit)
+            .all()
+        )
+        return [
+            {
+                "working_copy_id": row.working_copy_id,
+                "document_id": row.document_id,
+                "document_version_id": row.document_version_id,
+                "_score": 1.0,
+                "_hit_source": "exact_short_phrase",
+            }
+            for row in rows
         ]
 
     def _gin_search(self, query_text: str, scope: Any) -> list[dict]:
@@ -349,6 +395,9 @@ class Stage1DocumentRecallService:
         query_text = parsed_query.cleaned if hasattr(parsed_query, "cleaned") else ""
         if not query_text:
             return []
+        short_phrase = exact_short_chinese_phrase(query_text)
+        if short_phrase:
+            return self._exact_short_phrase_match(short_phrase, scope)
 
         terms = self._get_terms(query_text)
         if not terms:

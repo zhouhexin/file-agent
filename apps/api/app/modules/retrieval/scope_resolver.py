@@ -3,7 +3,7 @@
 范围规则：
 - L0 严格范围：用户说"这些文件""刚上传的文件""第二个附件"时，只搜索明确附件
 - L1 排序范围：用户点名会话中某个文件时，精确搜索或明确集合
-- L4 全局搜索：用户说"找我的……材料"等全局请求时，搜索整个工作区
+- L4 全局搜索：进入文件检索 Tool 且没有明确附件指代时，搜索整个共享工作区
 
 范围只能由后端根据真实消息附件、会话记录和所有权解析；
 Planner 或 LLM 不能自行猜测文件 ID。
@@ -102,10 +102,15 @@ class FileSearchScopeResolver:
                 scope_mode="global",
             )
 
-        # 默认：如果既不是全局也不是严格，返回空严格范围
+        # 当前方法只会由已经确定为 SEARCH_FILES 的 Tool/API 调用。没有“这些文件”
+        # 等严格指代且没有附件时，普通主题、人名、单位和关键词查询必须搜索共享
+        # 工作区；不能因为未命中少量措辞白名单而退化成空严格集合。
+        session_ids = self._get_session_file_ids(conversation_id)
         return ResolvedSearchScope(
             strict_document_ids=tuple(attachment_ids),
-            scope_mode="strict",
+            conversation_document_ids=tuple(session_ids),
+            include_workspace=True,
+            scope_mode="global",
         )
 
     def _is_strict_scope(self, query: str) -> bool:

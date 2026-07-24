@@ -28,6 +28,7 @@ from app.db.models import (
     EvidenceSpan,
     WorkingCopy,
 )
+from app.modules.retrieval.scope_resolver import FileSearchScopeResolver
 from app.modules.retrieval.two_stage_search import TwoStageFileSearchService
 
 
@@ -357,6 +358,61 @@ def test_shared_workspace_search_returns_content_owned_by_another_audit_user(mon
         )
         assert completed["fallback_version_count"] == 1
         assert completed["result_count"] == 1
+    finally:
+        db.close()
+
+
+def test_person_name_search_uses_global_scope_and_rejects_single_character_noise():
+    """无附件人名查询必须搜索共享目录，并且只保留连续出现完整姓名的正文。"""
+
+    db = _db_session()
+    try:
+        _setup_full_doc(
+            db,
+            suffix="person-target",
+            user_id="import-auditor",
+            workspace_id="shared-workspace",
+            filename="干部面谈名单.docx",
+            summary_text="干部面谈工作安排",
+            chunk_text="本次面谈人员包括金海燕，具体时间另行通知。",
+        )
+        _setup_full_doc(
+            db,
+            suffix="person-noise",
+            user_id="import-auditor",
+            workspace_id="shared-workspace",
+            filename="教学活动通知.docx",
+            summary_text="金老师组织海边燕子观察活动。",
+            chunk_text="金老师组织海边燕子观察活动，正文没有目标人员姓名。",
+        )
+        # 阶段一投影不保存正文，人名必须由精确 Chunk 补召回；噪声文件含同名单字。
+        for profile_id in ("prof-person-target", "prof-person-noise"):
+            profile = db.get(DocumentSearchProfile, profile_id)
+            profile.combined_search_text = "干部 面谈 工作 安排"
+            profile.summary_search_text = "干部 面谈 工作 安排"
+        db.commit()
+
+        scope = FileSearchScopeResolver(session_file_service=None).resolve(
+            query="查找金海燕相关文件",
+            explicit_attachment_ids=[],
+            conversation_id="conv-person",
+        )
+        result = TwoStageFileSearchService(
+            db=db,
+            user_id="current-chat-user",
+            workspace_id="shared-workspace",
+        ).search(
+            query="查找金海燕相关文件",
+            parsed_query=_FakeParsedQuery(
+                cleaned="金海燕",
+                terms=["金", "海", "燕"],
+            ),
+            scope=scope,
+        )
+
+        assert scope.scope_mode == "global"
+        assert [item["filename"] for item in result["results"]] == ["干部面谈名单.docx"]
+        assert "金海燕" in result["results"][0]["evidence_preview"]
     finally:
         db.close()
 

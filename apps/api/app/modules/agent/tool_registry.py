@@ -375,7 +375,10 @@ def _search_handler(
         # 启用新链路：两阶段检索
         # 文件检索读取唯一共享工作目录；default workspace 只保留用户会话来源。
         from app.modules.retrieval.two_stage_search import TwoStageFileSearchService
-        from app.modules.retrieval.query_parser import FileSearchQueryParser
+        from app.modules.retrieval.query_parser import (
+            FileSearchQueryParser,
+            exact_short_chinese_phrase,
+        )
         from app.modules.retrieval.scope_resolver import (
             ConversationFileSearchContextService,
             FileSearchScopeResolver,
@@ -403,6 +406,7 @@ def _search_handler(
             query_chars=len(search_query),
             cleaned_query_chars=len(parsed.cleaned),
             query_term_count=len(parsed.terms),
+            exact_short_phrase_mode=exact_short_chinese_phrase(parsed.cleaned) is not None,
             has_year=parsed.year is not None or parsed.relative_year is not None,
             has_doc_number=parsed.doc_number is not None,
             message="文件检索查询解析完成",

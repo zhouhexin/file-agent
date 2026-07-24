@@ -11,7 +11,11 @@
 from datetime import datetime, timezone
 from typing import Any
 
-from app.modules.retrieval.query_parser import FileSearchQueryParser, ParsedQuery
+from app.modules.retrieval.query_parser import (
+    FileSearchQueryParser,
+    ParsedQuery,
+    exact_short_chinese_phrase,
+)
 
 
 class _FakeTokenizer:
@@ -78,6 +82,23 @@ def test_normalizes_person_related_search_to_stable_core_query():
 
         assert result.cleaned == "金海燕老师"
         assert result.terms == ["金海燕老师"]
+
+
+def test_short_chinese_phrase_removes_person_honorifics():
+    """短人名必须转为连续匹配核心，不能拆成单字 OR 召回无关文件。"""
+
+    assert exact_short_chinese_phrase("金海燕") == "金海燕"
+    assert exact_short_chinese_phrase("金海燕老师") == "金海燕"
+    assert exact_short_chinese_phrase("欧阳小明同志") == "欧阳小明"
+    assert exact_short_chinese_phrase("国家励志奖学金") is None
+
+
+def test_find_my_query_does_not_leave_leading_grammar_particle():
+    """“找我的”清洗后不能残留句首“的”，否则短主题会被错误精确匹配。"""
+
+    result = _make_parser().parse("找我的奖学金材料")
+
+    assert result.cleaned == "奖学金"
 
 
 def test_extracts_explicit_year():

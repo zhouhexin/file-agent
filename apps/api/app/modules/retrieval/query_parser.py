@@ -48,6 +48,7 @@ _FILLER_PHRASES = [
 _YEAR_PATTERN = re.compile(r"(20\d{2})年?")
 _RELATIVE_YEAR_PATTERN = re.compile(r"(去年|前年|今年)")
 _DOC_NUMBER_PATTERN = re.compile(r"[(\[]?\d+\s*号[\])]?")
+_PERSON_HONORIFICS = ("老师", "同志", "先生", "女士")
 
 
 @dataclass(frozen=True)
@@ -129,7 +130,9 @@ class FileSearchQueryParser:
             result = result.replace(phrase, " ")
         # “与某人有关”“关于某人的相关文件”中的关系词只表达检索意图，
         # 不能进入全文词项，否则同一主题的两种说法会产生不同召回结果。
-        result = re.sub(r"^\s*(?:与|和|关于)\s*", "", result)
+        # “找我的……”先移除“找我”后会留下句首“的”，它同样只是语法连接词；
+        # 若保留会把“的奖学金”误判成四字精确实体并导致零召回。
+        result = re.sub(r"^\s*(?:与|和|关于|的)\s*", "", result)
         result = re.sub(r"\s*的\s*$", "", result)
         # 去除多余空白
         result = " ".join(result.split())
@@ -169,3 +172,23 @@ class FileSearchQueryParser:
             return []
         # TODO: 后续任务中实现 taxonomy 别名匹配
         return []
+
+
+def exact_short_chinese_phrase(text: str) -> str | None:
+    """提取需要连续匹配的短中文实体。
+
+    三、四字人名如果按单字 OR 检索会产生大量误召回。这里同时覆盖常见短业务词，
+    并去掉“老师、同志”等称谓，使“金海燕老师”可以匹配正文中的“金海燕”。
+    长主题仍使用普通多词召回，避免把自然语言整句错误当成精确短语。
+    """
+
+    normalized = re.sub(r"\s+", "", str(text or "").strip().lower())
+    for honorific in _PERSON_HONORIFICS:
+        if normalized.endswith(honorific):
+            candidate = normalized[: -len(honorific)]
+            if re.fullmatch(r"[\u3400-\u9fff]{2,4}", candidate):
+                normalized = candidate
+                break
+    if re.fullmatch(r"[\u3400-\u9fff]{2,4}", normalized):
+        return normalized
+    return None

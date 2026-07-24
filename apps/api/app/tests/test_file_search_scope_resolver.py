@@ -5,7 +5,7 @@
 2. L1 会话文件范围
 3. L4 全局搜索（"找我的...材料"）
 4. 跨用户隔离
-5. 无法唯一解析时停止并请求补充
+5. 普通人名和主题查询默认进入共享工作区
 """
 
 from app.modules.retrieval.scope_resolver import (
@@ -73,16 +73,52 @@ def test_global_scope_with_attachments_also_searches_workspace():
     assert scope.scope_mode == "global"
 
 
-def test_ambiguous_query_returns_strict_empty():
-    """无法唯一解析文件时返回空严格范围（无附件、无意图关键词）。"""
+def test_generic_file_search_defaults_to_global_workspace():
+    """进入文件检索 Tool 的普通查询不能因措辞不在白名单而变成空严格范围。"""
     resolver = FileSearchScopeResolver(session_file_service=None)
     scope = resolver.resolve(
         query="帮我查一些资料",
         explicit_attachment_ids=[],
         conversation_id="conv-1",
     )
-    assert scope.scope_mode == "strict"
+    assert scope.scope_mode == "global"
     assert len(scope.strict_document_ids) == 0
+    assert scope.include_workspace is True
+
+
+def test_person_name_search_defaults_to_global_workspace():
+    """无附件的人名查询必须搜索共享目录，保护日志中暴露的空 strict 回归。"""
+
+    resolver = FileSearchScopeResolver(session_file_service=None)
+
+    for query in (
+        "查找金海燕",
+        "查找与金海燕老师有关的文件",
+        "金海燕相关文档",
+    ):
+        scope = resolver.resolve(
+            query=query,
+            explicit_attachment_ids=[],
+            conversation_id="conv-1",
+        )
+
+        assert scope.scope_mode == "global"
+        assert scope.strict_document_ids == ()
+        assert scope.include_workspace is True
+
+
+def test_explicit_attachment_reference_without_resolved_ids_stays_strict_empty():
+    """用户明确说“这些文件”但后端没有解析出附件时不得扩大到共享工作区。"""
+
+    resolver = FileSearchScopeResolver(session_file_service=None)
+    scope = resolver.resolve(
+        query="查找这些文件里的金海燕",
+        explicit_attachment_ids=[],
+        conversation_id="conv-1",
+    )
+
+    assert scope.scope_mode == "strict"
+    assert scope.strict_document_ids == ()
     assert scope.include_workspace is False
 
 

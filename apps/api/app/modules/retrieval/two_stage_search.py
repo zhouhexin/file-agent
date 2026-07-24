@@ -22,6 +22,7 @@ from app.core.logging import log_event
 from app.db.models import Document, WorkingCopy
 from app.modules.retrieval.chunk_lexical_search import DocumentChunkLexicalSearchService
 from app.modules.retrieval.evidence_projector import SearchEvidenceProjector
+from app.modules.retrieval.query_parser import exact_short_chinese_phrase
 from app.modules.retrieval.stage1_document_recall import Stage1DocumentRecallService
 
 
@@ -104,6 +105,7 @@ class TwoStageFileSearchService:
             query_chars=len(query),
             cleaned_query_chars=len(cleaned_query),
             query_term_count=len(list(getattr(parsed_query, "terms", []) or [])),
+            exact_short_phrase_mode=exact_short_chinese_phrase(cleaned_query) is not None,
             query_fingerprint=query_fingerprint,
             scope_mode=scope_mode,
             message="两阶段文件检索开始",
@@ -544,6 +546,8 @@ class TwoStageFileSearchService:
 
         if hit_source == "exact_filename":
             reasons.append("整理后的文件名精确匹配查询")
+        elif hit_source == "exact_short_phrase":
+            reasons.append("文件名、摘要或实体短语连续命中查询")
         elif hit_source == "gin_search" and filename:
             reasons.append(f"文件名命中：{filename}")
         elif hit_source == "trgm_fallback":

@@ -7,11 +7,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import func, or_
+from sqlalchemy import func, literal, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import Document, DocumentChunk, DocumentIndexRun, WorkingCopy
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
+from app.modules.retrieval.query_parser import exact_short_chinese_phrase
 
 
 MAX_QUERY_CHARS = 2000
@@ -52,10 +53,25 @@ class DocumentChunkLexicalSearchService:
         tokens = self.tokenizer.tokenize(str(query or "")[:MAX_QUERY_CHARS])[:MAX_QUERY_TOKENS]
         if not version_ids or not tokens:
             return []
+        exact_phrase = exact_short_chinese_phrase(query)
+        # search_text 有 pg_trgm GIN；保留连续汉字比拼接分词序列更稳定，
+        # 可兼容 Jieba 与 deterministic fallback 的不同切词边界。
+        exact_search_text = exact_phrase
         safe_limit = max(1, min(int(limit), 100))
         if self.db.bind is not None and self.db.bind.dialect.name == "postgresql":
-            return self._search_postgresql(tokens=tokens, version_ids=version_ids, limit=safe_limit)
-        return self._search_deterministic(tokens=tokens, version_ids=version_ids, limit=safe_limit)
+            return self._search_postgresql(
+                tokens=tokens,
+                version_ids=version_ids,
+                limit=safe_limit,
+                exact_search_text=exact_search_text,
+            )
+        return self._search_deterministic(
+            tokens=tokens,
+            version_ids=version_ids,
+            limit=safe_limit,
+            exact_phrase=exact_phrase,
+            exact_search_text=exact_search_text,
+        )
 
     def _base_query(self):
         """构造工作区或用户边界以及成功索引过滤，任何搜索分支都不能绕过。"""
@@ -80,23 +96,41 @@ class DocumentChunkLexicalSearchService:
             )
         )
 
-    def _search_postgresql(self, *, tokens: list[str], version_ids: list[str], limit: int) -> list[dict[str, Any]]:
+    def _search_postgresql(
+        self,
+        *,
+        tokens: list[str],
+        version_ids: list[str],
+        limit: int,
+        exact_search_text: str | None = None,
+    ) -> list[dict[str, Any]]:
         """使用 ``simple`` tsquery 和 pg_trgm 排序，中文分词已在应用层完成。"""
 
         # websearch_to_tsquery 接收绑定参数并解析 OR，不允许用户直接注入 PostgreSQL tsquery 语法。
         query_text = " OR ".join(dict.fromkeys(tokens))
         ts_query = func.websearch_to_tsquery("simple", query_text)
-        rank = func.ts_rank_cd(DocumentChunk.search_vector, ts_query)
+        rank = (
+            literal(1.0)
+            if exact_search_text
+            else func.ts_rank_cd(DocumentChunk.search_vector, ts_query)
+        )
         trigram_score = func.similarity(DocumentChunk.search_text, " ".join(tokens))
-        rows = (
+        query = (
             self._base_query()
             .filter(DocumentChunk.document_version_id.in_(version_ids))
-            .filter(
+        )
+        if exact_search_text:
+            # search_text 有 pg_trgm GIN，连续分词短语不会退化成逐字 OR。
+            query = query.filter(DocumentChunk.search_text.contains(exact_search_text))
+        else:
+            query = query.filter(
                 or_(
                     DocumentChunk.search_vector.op("@@")(ts_query),
                     trigram_score >= 0.1,
                 )
             )
+        rows = (
+            query
             .with_entities(DocumentChunk, rank.label("fts_rank"), trigram_score.label("trigram_score"))
             .order_by(rank.desc(), trigram_score.desc(), DocumentChunk.chunk_index.asc())
             .limit(limit)
@@ -107,13 +141,26 @@ class DocumentChunkLexicalSearchService:
             for chunk, fts_rank, trigram in rows
         ]
 
-    def _search_deterministic(self, *, tokens: list[str], version_ids: list[str], limit: int) -> list[dict[str, Any]]:
+    def _search_deterministic(
+        self,
+        *,
+        tokens: list[str],
+        version_ids: list[str],
+        limit: int,
+        exact_phrase: str | None = None,
+        exact_search_text: str | None = None,
+    ) -> list[dict[str, Any]]:
         """SQLite 测试和数据库降级环境使用同一词项计算确定性覆盖率。"""
 
         unique_tokens = list(dict.fromkeys(tokens))
         chunks = self._base_query().filter(DocumentChunk.document_version_id.in_(version_ids)).all()
         ranked: list[tuple[float, DocumentChunk]] = []
         for chunk in chunks:
+            if exact_phrase and (
+                exact_phrase not in str(chunk.text_content or "").lower()
+                and exact_search_text not in str(chunk.search_text or "").lower()
+            ):
+                continue
             indexed = set(str(chunk.search_text or "").split())
             matched = sum(1 for token in unique_tokens if token in indexed or token in chunk.text_content.lower())
             if matched:
@@ -144,6 +191,8 @@ class DocumentChunkLexicalSearchService:
         tokens = self.tokenizer.tokenize(str(query)[:MAX_QUERY_CHARS])[:MAX_QUERY_TOKENS]
         if not tokens:
             return []
+        exact_phrase = exact_short_chinese_phrase(query)
+        exact_search_text = exact_phrase
 
         max_versions = max(1, min(int(max_versions), 50))
         limit_chunks = max(1, min(int(limit_chunks), 100))
@@ -152,21 +201,29 @@ class DocumentChunkLexicalSearchService:
             return self._fallback_postgresql(
                 tokens=tokens, workspace_id=workspace_id,
                 max_versions=max_versions, limit_chunks=limit_chunks,
+                exact_search_text=exact_search_text,
             )
         return self._fallback_deterministic(
             tokens=tokens, workspace_id=workspace_id,
             max_versions=max_versions, limit_chunks=limit_chunks,
+            exact_phrase=exact_phrase,
+            exact_search_text=exact_search_text,
         )
 
     def _fallback_postgresql(
         self, *, tokens: list[str], workspace_id: str,
         max_versions: int, limit_chunks: int,
+        exact_search_text: str | None = None,
     ) -> list[dict[str, Any]]:
         """PostgreSQL 全局 Chunk GIN 补召回。"""
 
         query_text = " OR ".join(dict.fromkeys(tokens))
         ts_query = func.websearch_to_tsquery("simple", query_text)
-        rank = func.ts_rank_cd(DocumentChunk.search_vector, ts_query)
+        rank = (
+            literal(1.0)
+            if exact_search_text
+            else func.ts_rank_cd(DocumentChunk.search_vector, ts_query)
+        )
 
         # 子查询：当前工作区下 ACTIVE 工作副本的最新版本
         active_subq = (
@@ -195,11 +252,16 @@ class DocumentChunkLexicalSearchService:
                 (active_subq.c.version_id == DocumentChunk.document_version_id)
                 & (active_subq.c.document_id == DocumentChunk.document_id),
             )
-            .filter(
-                DocumentIndexRun.status == "COMPLETED",
-                DocumentChunk.search_vector.op("@@")(ts_query),
-            )
+            .filter(DocumentIndexRun.status == "COMPLETED")
         )
+        if exact_search_text:
+            ranked_query = ranked_query.filter(
+                DocumentChunk.search_text.contains(exact_search_text)
+            )
+        else:
+            ranked_query = ranked_query.filter(
+                DocumentChunk.search_vector.op("@@")(ts_query)
+            )
         if self.workspace_id is None:
             ranked_query = ranked_query.filter(Document.user_id == self.user_id)
         ranked_chunks = (
@@ -226,6 +288,8 @@ class DocumentChunkLexicalSearchService:
     def _fallback_deterministic(
         self, *, tokens: list[str], workspace_id: str,
         max_versions: int, limit_chunks: int,
+        exact_phrase: str | None = None,
+        exact_search_text: str | None = None,
     ) -> list[dict[str, Any]]:
         """SQLite 全局 deterministic Chunk 补召回。"""
 
@@ -255,6 +319,11 @@ class DocumentChunkLexicalSearchService:
 
         ranked: list[tuple[float, DocumentChunk]] = []
         for chunk in chunks:
+            if exact_phrase and (
+                exact_phrase not in str(chunk.text_content or "").lower()
+                and exact_search_text not in str(chunk.search_text or "").lower()
+            ):
+                continue
             indexed = set(str(chunk.search_text or "").split())
             matched = sum(
                 1 for token in unique_tokens
