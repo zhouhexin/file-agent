@@ -65,6 +65,21 @@ def test_removes_common_fillers():
             )
 
 
+def test_normalizes_person_related_search_to_stable_core_query():
+    """“关于/与…有关”必须得到同一个核心主题，关系虚词不能干扰正文召回。"""
+
+    parser = _make_parser()
+
+    for query in [
+        "查找与金海燕老师有关的文件",
+        "查找关于金海燕老师的相关文件",
+    ]:
+        result = parser.parse(query)
+
+        assert result.cleaned == "金海燕老师"
+        assert result.terms == ["金海燕老师"]
+
+
 def test_extracts_explicit_year():
     """提取显式年份。"""
     parser = _make_parser()

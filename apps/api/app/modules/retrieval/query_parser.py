@@ -127,6 +127,10 @@ class FileSearchQueryParser:
         result = text.lower()
         for phrase in _FILLER_PHRASES:
             result = result.replace(phrase, " ")
+        # “与某人有关”“关于某人的相关文件”中的关系词只表达检索意图，
+        # 不能进入全文词项，否则同一主题的两种说法会产生不同召回结果。
+        result = re.sub(r"^\s*(?:与|和|关于)\s*", "", result)
+        result = re.sub(r"\s*的\s*$", "", result)
         # 去除多余空白
         result = " ".join(result.split())
         return result

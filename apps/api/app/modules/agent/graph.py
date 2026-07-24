@@ -219,7 +219,7 @@ def _deterministic_preflight_plan(
     state: AgentGraphState,
     runtime: Runtime[AgentRuntimeContext],
 ):
-    """在 LLM 前识别固定系统命令，避免目录列表等请求被模型网络调用阻塞。"""
+    """在 LLM 前识别稳定意图，避免固定文件任务被模型波动改变路由。"""
 
     plan = runtime.context.planner.plan(
         conversation_id=state["conversation_id"],
@@ -232,6 +232,9 @@ def _deterministic_preflight_plan(
         return plan
     if plan.intent in {
         "LIST_MANAGED_FILES",
+        # “查找与某人/主题有关的文件”是明确的工作副本语义检索。
+        # 必须在 LLM 前固定进入 hybrid-search，不能随机退化成仅查文件名的目录列表。
+        "SEARCH_FILES",
         "RESOLVE_RENAME_REVIEW",
         "CAPABILITY_HELP",
         "LIST_CLASSIFICATION_TAXONOMY",

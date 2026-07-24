@@ -2455,7 +2455,21 @@ def _normalize_managed_filename_keyword(value: str | None) -> str | None:
         keyword,
         flags=re.IGNORECASE,
     ).strip()
-    if not keyword or _is_known_managed_file_extension(keyword):
+    # “与某人有关的文件”可能被旧兼容正则从“有关的文件”中误提取为“的”。
+    # 虚词不能进入 filename_contains，否则会召回大量名称含“的”的无关文件。
+    stopwords = {
+        "的",
+        "与",
+        "和",
+        "及",
+        "或",
+        "有关",
+        "相关",
+        "文件",
+        "文档",
+        "材料",
+    }
+    if not keyword or keyword in stopwords or _is_known_managed_file_extension(keyword):
         return None
     return keyword
 
