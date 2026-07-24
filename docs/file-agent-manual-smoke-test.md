@@ -72,9 +72,9 @@ git diff --check
 当前阶段期望：
 
 ```text
-后端（macOS/Linux）：520 passed, 19 skipped
-后端（Windows 有 symlink 权限）：520 passed, 19 skipped
-后端（Windows 无 symlink 权限）：519 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
+后端（macOS/Linux）：523 passed, 19 skipped
+后端（Windows 有 symlink 权限）：523 passed, 19 skipped
+后端（Windows 无 symlink 权限）：522 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
 前端：TypeScript 检查和 Vite build 成功
 Alembic：单一 head 20260724_0003
 Python：No broken requirements found
@@ -171,6 +171,8 @@ PYTHONPATH=apps/api \
 
 Windows CMD 从仓库根目录执行以下脚本即可。它会分别打开扫描 worker、导入/生命周期 worker 和
 scheduler 三个窗口；扫描每批发现文件后，导入 worker 可立即消费 IMPORT 任务，不必等待全量扫描。
+脚本会在打开子窗口前同步并校验当前 Windows `.env` 中的受管目录，因此必须从 Windows 本机仓库
+根目录执行，不能使用文档中的 macOS `/Users/...` 路径。
 
 ~~~cmd
 scripts\start-file-agent-workers.cmd
@@ -188,6 +190,25 @@ scripts\start-file-agent-workers.cmd --with-watcher
 set "FILE_AGENT_PYTHON=D:\anaconda\envs\myenv\python.exe"
 scripts\start-file-agent-workers.cmd
 ~~~
+
+预检成功时，当前窗口必须先显示类似：
+
+~~~text
+[File Agent Startup] 配置检查通过 managed_roots=1 root_keys=school_files
+~~~
+
+然后才会打开三个子窗口。预检失败时脚本返回非零退出码且不启动 worker，并明确区分：
+
+```text
+MANAGED_ROOT_NOT_FOUND
+MANAGED_ROOT_NOT_DIRECTORY
+MANAGED_ROOT_PERMISSION_DENIED
+MANAGED_ROOT_UNAVAILABLE
+```
+
+`MANAGED_ROOT_SCAN_BATCH_SIZE`、`MANAGED_ROOT_SCAN_BATCH_MAX_SECONDS` 等全局参数不能出现在
+`root_keys` 中。旧版本曾经误登记的同名伪目录会在预检阶段停用，其待执行扫描任务会被标记失败，
+不会继续被扫描 worker 领取。
 
 以下是 macOS/Linux 的等价分终端启动方式。
 

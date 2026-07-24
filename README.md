@@ -18,6 +18,7 @@ File Agent 不是传统网盘，也不是只会问答的知识库系统。用户
 - `docs/classification-topic-summary-implementation-plan.md`：分类主题摘要优先的候选召回、原文证据校验、开源选型和Shadow上线方案。
 - `docs/managed-original-working-copy-trash-implementation-plan.md`：受管原始目录、工作副本目录、回收站目录、重复上传确认和异步归档导入方案。
 - `docs/stage-4-low-resource-two-stage-retrieval-plan.md`：阶段四 CPU-only 两阶段文件检索的边界、数据流与验收依据。
+- `docs/stage-5-llm-efficient-evidence-answer-plan.md`：阶段五 LLM 低耗证据回答、引用校验、缓存、前端和验收计划。
 - `docs/skills-catalog.md`：项目内 Agent Skill 清单。
 - `docs/neo4j-graph-classification-overall-plan.md`：Neo4j 图谱增强分类整体方案。
 - `docs/neo4j-graph-classification-v1-implementation-plan.md`：轻量第一版本实施和验收方案。
@@ -70,9 +71,11 @@ Neo4j 图谱增强分类默认关闭。第二版本支持目录角色 Profile、
 
 除 API 外，三层文件生命周期至少需要独立启动 worker 和 scheduler；需要近实时同步时再启动 watcher：
 
-Windows CMD 可直接执行 `scripts\start-file-agent-workers.cmd`。它会分别启动扫描 worker、导入/生命周期
-worker 和 scheduler；增加 `--with-watcher` 才会额外启动 watcher。若 Python 不在 PATH，先设置
-`FILE_AGENT_PYTHON` 为解释器绝对路径。以下是 macOS/Linux 的等价分终端命令：
+Windows CMD 可直接执行 `scripts\start-file-agent-workers.cmd`。脚本会先读取项目根 `.env`，把当前
+Windows 机器的 `MANAGED_ROOT_*` 路径同步到数据库并真实验证目录可读；预检失败时不会启动任何
+worker。预检通过后分别启动 scheduler、扫描 worker 和导入/生命周期 worker；增加
+`--with-watcher` 才会额外启动 watcher。若 Python 不在 PATH，先设置 `FILE_AGENT_PYTHON` 为解释器
+绝对路径。以下是 macOS/Linux 的等价分终端命令：
 
 ```bash
 # 可在不同进程中分别设置 FILESYSTEM_WORKER_QUEUES。SCAN 每完成一批就提交

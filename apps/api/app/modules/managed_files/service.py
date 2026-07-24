@@ -28,6 +28,20 @@ from app.modules.managed_files.schemas import (
 )
 
 
+# 这些键控制受管目录子系统本身，不是可扫描目录。集中维护常量可以让启动预检
+# 同时清理旧版本曾经误登记的伪目录，避免数值配置被当作物理路径。
+MANAGED_ROOT_GLOBAL_CONFIG_KEYS = frozenset(
+    {
+        "MANAGED_ROOT_WATCH_ENABLED",
+        "MANAGED_ROOT_WATCH_POLL_SECONDS",
+        "MANAGED_ROOT_RECONCILE_INTERVAL_SECONDS",
+        "MANAGED_ROOT_RECONCILE_ON_STARTUP",
+        "MANAGED_ROOT_SCAN_BATCH_SIZE",
+        "MANAGED_ROOT_SCAN_BATCH_MAX_SECONDS",
+    }
+)
+
+
 @dataclass(frozen=True)
 class ManagedFileQueryScope:
     """受管文件查询的最终 root 与子路径范围。"""
@@ -427,17 +441,11 @@ def _configured_root_keys(*, root_key: str | None = None) -> list[str]:
 
     prefix = "MANAGED_ROOT_"
     ignored_suffixes = {"_CLASSIFICATION_MODE", "_NAME", "_DISPLAY_NAME", "_ALLOW_RENAME"}
-    global_config_keys = {
-        "MANAGED_ROOT_WATCH_ENABLED",
-        "MANAGED_ROOT_WATCH_POLL_SECONDS",
-        "MANAGED_ROOT_RECONCILE_INTERVAL_SECONDS",
-        "MANAGED_ROOT_RECONCILE_ON_STARTUP",
-    }
     keys: list[str] = []
     for env_key in os.environ:
         if not env_key.startswith(prefix):
             continue
-        if env_key in global_config_keys:
+        if env_key in MANAGED_ROOT_GLOBAL_CONFIG_KEYS:
             # 全局监听/对账开关不是目录定义，不能被误注册成名为 watch_enabled 的受管根。
             continue
         if env_key.startswith("MANAGED_ROOT_ARCHIVE_"):

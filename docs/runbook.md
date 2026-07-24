@@ -690,9 +690,24 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
 
 三层文件生命周期上线后，生产环境应拆分队列，避免归档或导入占满普通任务资源：
 
-Windows CMD 开发环境可以直接运行 `scripts\start-file-agent-workers.cmd`，脚本会以独立窗口启动
-`RECONCILE,SCAN`、`DUPLICATE_CHECK,ARCHIVE,IMPORT,FILE_OPERATION` 和 scheduler。它适合本地
-开发与烟测；生产环境仍可按以下命令基于容量分别部署更多 worker。
+Windows CMD 开发环境可以直接运行 `scripts\start-file-agent-workers.cmd`。脚本会先执行同步预检：
+读取项目根 `.env`，用当前机器的 `MANAGED_ROOT_*` 更新数据库中的运行时目录路径，真实打开每个目录
+验证可读性，并停用旧版本误登记的 `scan_batch_size` 等伪目录。只有预检成功后，才会以独立窗口启动
+scheduler、`RECONCILE,SCAN` 和 `DUPLICATE_CHECK,ARCHIVE,IMPORT,FILE_OPERATION`。它适合本地开发
+与烟测；生产环境仍可按以下命令基于容量分别部署更多 worker。
+
+Windows 必须从本机仓库根目录使用 Windows 路径执行，例如：
+
+```cmd
+cd /d E:\PycharmProject\file-agent
+set "FILE_AGENT_PYTHON=D:\anaconda\envs\myenv\python.exe"
+scripts\start-file-agent-workers.cmd
+```
+
+不能在 Windows CMD 中执行 macOS 的 `/Users/.../scripts/start-file-agent-workers.cmd`。如果预检返回
+`MANAGED_ROOT_NOT_FOUND`，应修正 Windows 项目根 `.env` 对应目录；只有
+`MANAGED_ROOT_PERMISSION_DENIED` 才表示当前 Windows 账户确实无目录枚举权限。预检失败会在创建任何
+子进程前退出，不能通过管理员启动或跳过预检掩盖错误配置。
 
 ```bash
 PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=duplicate-archive-1 \
