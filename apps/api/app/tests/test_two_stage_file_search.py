@@ -296,9 +296,20 @@ def test_cross_user_isolation():
         db.close()
 
 
-def test_shared_workspace_search_returns_content_owned_by_another_audit_user():
+def test_shared_workspace_search_returns_content_owned_by_another_audit_user(monkeypatch):
     """共享工作区按工作副本授权，Document 创建者只用于审计，不能阻断全员检索。"""
 
+    diagnostic_events: list[tuple[str, dict]] = []
+
+    def capture_log(event: str, **fields) -> None:
+        """捕获阶段化日志，确保空结果可以定位到具体召回或证据步骤。"""
+
+        diagnostic_events.append((event, fields))
+
+    monkeypatch.setattr(
+        "app.modules.retrieval.two_stage_search.log_event",
+        capture_log,
+    )
     db = _db_session()
     try:
         _setup_full_doc(
@@ -334,6 +345,18 @@ def test_shared_workspace_search_returns_content_owned_by_another_audit_user():
         assert [item["filename"] for item in result["results"]] == ["干部面谈名单.docx"]
         assert "金海燕" in result["results"][0]["evidence_preview"]
         assert "原文命中查询" in result["results"][0]["match_reasons"]
+        event_names = [event for event, _fields in diagnostic_events]
+        assert "retrieval.stage1.completed" in event_names
+        assert "retrieval.chunk_fallback.completed" in event_names
+        assert "retrieval.stage2.completed" in event_names
+        assert "retrieval.evidence.completed" in event_names
+        completed = next(
+            fields
+            for event, fields in diagnostic_events
+            if event == "retrieval.search.completed"
+        )
+        assert completed["fallback_version_count"] == 1
+        assert completed["result_count"] == 1
     finally:
         db.close()
 

@@ -16,12 +16,15 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.core.logging import log_event
 from app.db.models import (
     AgentRun,
     ChangeItem,
     ChangeSet,
     Conversation,
     Document,
+    DocumentIndexRun,
+    DocumentSearchProfile,
     DocumentVersion,
     FileObject,
     FileRenameReviewItem,
@@ -60,6 +63,7 @@ from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.path_policy import resolve_managed_relative_path
 from app.modules.classification.service import persist_document_results_classifications
 from app.modules.chunks.service import DocumentIndexService
+from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.retrieval.search_profile import DocumentSearchProfileService
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
@@ -71,6 +75,58 @@ class InitialWorkingPathResolution:
     relative_path: str
     filename: str
     conflict: dict[str, Any] | None = None
+
+
+def working_copy_search_artifact_status(
+    db: Session,
+    working_copy: WorkingCopy,
+) -> dict[str, bool]:
+    """返回工作副本的阶段四检索派生数据状态。
+
+    物理文件存在不代表可以被对话检索。扫描器必须据此补发导入修复任务，
+    避免历史工作副本因为幂等短路永久缺少 SearchProfile 或 Chunk。
+    """
+
+    if working_copy.status != "ACTIVE" or not working_copy.current_version_id:
+        return {
+            "working_copy_active": working_copy.status == "ACTIVE",
+            "current_version_ready": bool(working_copy.current_version_id),
+            "profile_ready": False,
+            "index_ready": False,
+            "ready": False,
+        }
+    profile_exists = (
+        db.query(DocumentSearchProfile.id)
+        .filter(
+            DocumentSearchProfile.working_copy_id == working_copy.id,
+            DocumentSearchProfile.document_version_id == working_copy.current_version_id,
+            DocumentSearchProfile.status == "ACTIVE",
+        )
+        .first()
+        is not None
+    )
+    index_exists = (
+        db.query(DocumentIndexRun.id)
+        .filter(
+            DocumentIndexRun.document_version_id == working_copy.current_version_id,
+            DocumentIndexRun.status == "COMPLETED",
+        )
+        .first()
+        is not None
+    )
+    return {
+        "working_copy_active": True,
+        "current_version_ready": True,
+        "profile_ready": profile_exists,
+        "index_ready": index_exists,
+        "ready": profile_exists and index_exists,
+    }
+
+
+def working_copy_search_artifacts_ready(db: Session, working_copy: WorkingCopy) -> bool:
+    """兼容返回布尔值的扫描器调用，真实判断统一由状态函数完成。"""
+
+    return working_copy_search_artifact_status(db, working_copy)["ready"]
 
 
 class UploadLifecycleService:
@@ -801,9 +857,17 @@ class FileLifecycleJobProcessor:
                 )
                 if expected_sha256 and self.storage.sha256_file(existing_target) != expected_sha256:
                     raise RuntimeError("工作副本路径已存在但内容校验失败，禁止自动覆盖")
+                search_repair = self._ensure_existing_working_copy_search_artifacts(
+                    working_copy=existing,
+                    managed_file=managed_file,
+                )
                 FilesystemJobQueue(self.db).mark_completed(
                     job=job,
-                    result={"working_copy_id": existing.id, "idempotent": True},
+                    result={
+                        "working_copy_id": existing.id,
+                        "idempotent": True,
+                        "search_repair": search_repair,
+                    },
                 )
                 return
             if existing_target.exists():
@@ -832,12 +896,17 @@ class FileLifecycleJobProcessor:
             existing.updated_at = utcnow()
             working_root.status = "ACTIVE"
             working_root.updated_at = utcnow()
+            search_repair = self._ensure_existing_working_copy_search_artifacts(
+                working_copy=existing,
+                managed_file=managed_file,
+            )
             FilesystemJobQueue(self.db).mark_completed(
                 job=job,
                 result={
                     "working_copy_id": existing.id,
                     "idempotent": False,
                     "physical_copy_repaired": True,
+                    "search_repair": search_repair,
                 },
             )
             return
@@ -1187,6 +1256,182 @@ class FileLifecycleJobProcessor:
             if final_target is not None and final_storage_relative_path and final_target_created:
                 final_target.unlink(missing_ok=True)
             raise
+
+    def _ensure_existing_working_copy_search_artifacts(
+        self,
+        *,
+        working_copy: WorkingCopy,
+        managed_file: ManagedFile,
+    ) -> dict[str, Any]:
+        """为历史幂等工作副本补齐解析索引和瘦检索投影。
+
+        该修复只写可重建派生数据，不移动、覆盖或改名工作副本。已有成功索引会
+        直接复用；缺少解析结果时才运行本地确定性解析与分类链路。
+        """
+
+        artifact_status = working_copy_search_artifact_status(self.db, working_copy)
+        if artifact_status["ready"]:
+            return {"status": "READY", "reused": True}
+        document = self.db.get(Document, working_copy.document_id)
+        version = self.db.get(DocumentVersion, working_copy.current_version_id)
+        if document is None or version is None:
+            log_event(
+                "working_copy.search_repair.failed",
+                level="ERROR",
+                document_id=working_copy.document_id,
+                status="FAILED",
+                error_code="WORKING_COPY_LINEAGE_MISSING",
+                working_copy_id=working_copy.id,
+                document_version_id=working_copy.current_version_id,
+                message="历史工作副本缺少当前文档或版本，无法修复检索索引",
+            )
+            raise RuntimeError("历史工作副本缺少当前 Document 或 DocumentVersion，无法修复检索索引")
+        log_event(
+            "working_copy.search_repair.started",
+            document_id=document.id,
+            status="RUNNING",
+            working_copy_id=working_copy.id,
+            document_version_id=version.id,
+            profile_ready=artifact_status["profile_ready"],
+            index_ready=artifact_status["index_ready"],
+            message="历史工作副本检索派生数据补建开始",
+        )
+
+        completed_index = (
+            self.db.query(DocumentIndexRun)
+            .filter(
+                DocumentIndexRun.document_version_id == version.id,
+                DocumentIndexRun.status == "COMPLETED",
+            )
+            .order_by(DocumentIndexRun.updated_at.desc())
+            .first()
+        )
+        index_result: dict[str, Any] = {
+            "ok": True,
+            "status": "COMPLETED",
+            "reused": True,
+            "index_run_id": completed_index.id if completed_index is not None else None,
+        }
+        if completed_index is None:
+            reusable = FileExtractionRepository(
+                self.db,
+                user_id=document.user_id,
+            ).get_latest_successful_extraction(document_id=document.id)
+            extraction_run_id = str(reusable["run"].id) if reusable is not None else ""
+            if extraction_run_id:
+                log_event(
+                    "working_copy.search_repair.extraction_reused",
+                    document_id=document.id,
+                    status="COMPLETED",
+                    working_copy_id=working_copy.id,
+                    document_version_id=version.id,
+                    extraction_run_id=extraction_run_id,
+                    message="复用已有成功解析结果补建正文索引",
+                )
+            if not extraction_run_id:
+                log_event(
+                    "working_copy.search_repair.extraction_started",
+                    document_id=document.id,
+                    status="RUNNING",
+                    working_copy_id=working_copy.id,
+                    document_version_id=version.id,
+                    message="未找到可复用解析结果，开始本地确定性解析",
+                )
+                try:
+                    decision = InitialWorkingCopyOrganizer(
+                        db=self.db,
+                        user_id=document.user_id,
+                        settings=self.settings,
+                    ).decide(
+                        document=document,
+                        version=version,
+                        managed_file=managed_file,
+                    )
+                except Exception as exc:
+                    log_event(
+                        "working_copy.search_repair.extraction_failed",
+                        level="ERROR",
+                        document_id=document.id,
+                        status="FAILED",
+                        error_code=exc.__class__.__name__,
+                        working_copy_id=working_copy.id,
+                        document_version_id=version.id,
+                        message="历史工作副本本地解析失败",
+                    )
+                    raise
+                extraction_run_id = str(
+                    (decision.extraction_result or {}).get("extraction_run_id") or ""
+                )
+            if extraction_run_id:
+                log_event(
+                    "working_copy.search_repair.index_started",
+                    document_id=document.id,
+                    status="RUNNING",
+                    working_copy_id=working_copy.id,
+                    document_version_id=version.id,
+                    extraction_run_id=extraction_run_id,
+                    message="历史工作副本正文 Chunk 索引补建开始",
+                )
+                index_result = DocumentIndexService(
+                    db=self.db,
+                    settings=self.settings,
+                ).build(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    extraction_run_id=extraction_run_id,
+                )
+            else:
+                index_result = {
+                    "ok": False,
+                    "status": "FAILED",
+                    "error": {
+                        "code": "EXTRACTION_NOT_READY",
+                        "message": "历史工作副本未生成可用于正文检索的解析结果。",
+                    },
+                }
+
+        # 即使正文解析失败，也必须补齐文件名/摘要投影，使用户至少能够按文件名查找。
+        log_event(
+            "working_copy.search_repair.profile_started",
+            document_id=document.id,
+            status="RUNNING",
+            working_copy_id=working_copy.id,
+            document_version_id=version.id,
+            message="历史工作副本文件级检索投影补建开始",
+        )
+        try:
+            DocumentSearchProfileService(db=self.db).upsert_current_profile(working_copy.id)
+        except Exception as exc:
+            log_event(
+                "working_copy.search_repair.profile_failed",
+                level="ERROR",
+                document_id=document.id,
+                status="FAILED",
+                error_code=exc.__class__.__name__,
+                working_copy_id=working_copy.id,
+                document_version_id=version.id,
+                message="历史工作副本文件级检索投影补建失败",
+            )
+            raise
+        result = {
+            "status": "READY" if index_result.get("ok") else "NEEDS_REVIEW",
+            "reused": bool(index_result.get("reused")),
+            "index_run_id": index_result.get("index_run_id"),
+            "error": index_result.get("error"),
+        }
+        error = result.get("error") if isinstance(result.get("error"), dict) else {}
+        log_event(
+            "working_copy.search_repair.completed",
+            level="INFO" if result["status"] == "READY" else "WARNING",
+            document_id=document.id,
+            status=result["status"],
+            error_code=error.get("code"),
+            working_copy_id=working_copy.id,
+            document_version_id=version.id,
+            index_run_id=result.get("index_run_id"),
+            message="历史工作副本检索派生数据补建完成",
+        )
+        return result
 
     def _cleanup_upload_temp(self, job: FilesystemJob) -> None:
         """异步清理已取消或已经使用已有文件的上传暂存。"""

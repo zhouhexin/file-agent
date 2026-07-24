@@ -35,13 +35,14 @@ def _add_working_copy(
     filename: str,
     overview: str,
     category_path: list[str],
+    workspace_id: str | None = None,
 ) -> Document:
     """写入一份带当前版本摘要和分类建议的工作副本。"""
 
     document = Document(
         id=f"document-{suffix}",
         user_id=user_id,
-        workspace_id=f"workspace-{user_id}",
+        workspace_id=workspace_id or f"workspace-{user_id}",
         original_filename=f"internal-source-{suffix}.docx",
         content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         size_bytes=100,
@@ -205,3 +206,29 @@ def test_search_can_be_restricted_to_backend_resolved_document_ids():
     finally:
         db.close()
 
+
+def test_shared_workspace_summary_fallback_ignores_import_audit_user():
+    """关闭两阶段检索时，共享摘要回退也必须允许其他用户召回工作目录文件。"""
+
+    db = _db_session()
+    try:
+        shared_document = _add_working_copy(
+            db,
+            suffix="f",
+            user_id="import-auditor",
+            workspace_id="shared-workspace",
+            filename="干部面谈记录.docx",
+            overview="本次面谈对象包括金海燕老师。",
+            category_path=["学校", "人事"],
+        )
+        db.commit()
+
+        payload = WorkingCopySummarySearchService(
+            db=db,
+            user_id="another-user",
+            workspace_id="shared-workspace",
+        ).search(query="查找与金海燕老师有关的文件")
+
+        assert [item["document_id"] for item in payload["results"]] == [shared_document.id]
+    finally:
+        db.close()

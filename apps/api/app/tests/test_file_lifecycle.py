@@ -9,8 +9,10 @@ from app.db.models import (
     DocumentClassificationSummary,
     DocumentChunk,
     DocumentIndexRun,
+    DocumentSearchProfile,
     DocumentSummary,
     DocumentVersion,
+    EvidenceSpan,
     FileRenameReviewItem,
     ManagedFile,
     TrashEntry,
@@ -24,6 +26,7 @@ from app.db.models import (
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
 from app.modules.file_lifecycle.risk import inspect_basic_file_risks
+from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.worker import process_next_filesystem_job
 from app.tests.helpers import clear_overrides, client_with_database
 
@@ -142,6 +145,108 @@ def test_upload_is_archived_then_imported_by_separate_jobs(monkeypatch, tmp_path
         assert db.query(ChangeItem).filter(ChangeItem.change_type == "ORIGINAL_FILE_ARCHIVED").count() == 1
         assert db.query(ChangeItem).filter(ChangeItem.change_type == "WORKING_COPY_IMPORTED").count() == 1
         assert db.query(ChangeItem).filter(ChangeItem.change_type == "DOCUMENT_INDEX_CREATED").count() == 1
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_existing_working_copy_repairs_missing_search_artifacts(monkeypatch, tmp_path):
+    """历史物理副本存在时仍必须补建 Profile、Chunk 和 Evidence，不能幂等短路。"""
+
+    diagnostic_events: list[str] = []
+
+    def capture_log(event: str, **_kwargs) -> None:
+        """捕获诊断事件，验证部署现场能定位扫描、解析和索引补建阶段。"""
+
+        diagnostic_events.append(event)
+
+    monkeypatch.setattr(
+        "app.modules.file_lifecycle.service.log_event",
+        capture_log,
+    )
+    monkeypatch.setattr(
+        "app.modules.managed_files.worker.log_event",
+        capture_log,
+    )
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "search-repair-owner")
+    upload = _upload(
+        client,
+        headers,
+        filename="干部面谈名单.txt",
+        content="面谈人员包括金海燕老师。".encode("utf-8"),
+    )
+    _drain(SessionLocal)
+
+    db = SessionLocal()
+    try:
+        archive = db.query(UploadArchiveRecord).filter_by(
+            upload_document_version_id=upload["upload_document_version_id"]
+        ).one()
+        working_copy = db.query(WorkingCopy).filter_by(
+            managed_file_id=archive.managed_file_id,
+        ).one()
+        working_copy_id = working_copy.id
+        document = db.get(Document, working_copy.document_id)
+        version_id = working_copy.current_version_id
+
+        # 模拟阶段四上线前已经存在物理工作副本、但检索派生数据完全缺失的历史状态。
+        chunk_ids = [
+            row.id
+            for row in db.query(DocumentChunk.id).filter_by(
+                document_version_id=version_id,
+            )
+        ]
+        if chunk_ids:
+            db.query(EvidenceSpan).filter(EvidenceSpan.chunk_id.in_(chunk_ids)).delete(
+                synchronize_session=False
+            )
+        db.query(DocumentChunk).filter_by(document_version_id=version_id).delete(
+            synchronize_session=False
+        )
+        db.query(DocumentIndexRun).filter_by(document_version_id=version_id).delete(
+            synchronize_session=False
+        )
+        db.query(DocumentSearchProfile).filter_by(
+            working_copy_id=working_copy.id,
+        ).delete(synchronize_session=False)
+
+        FilesystemJobQueue(db).create_job(
+            job_type="SCAN_MANAGED_ROOT",
+            queue_name="SCAN",
+            root_id=archive.managed_root_id,
+            created_by=document.user_id,
+            deduplication_key=f"search-artifact-repair-scan:{archive.managed_root_id}",
+            payload={"reason": "test-search-artifact-repair"},
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    diagnostic_events.clear()
+    _drain(SessionLocal)
+
+    db = SessionLocal()
+    try:
+        assert (
+            db.query(DocumentSearchProfile)
+            .filter_by(working_copy_id=working_copy_id, status="ACTIVE")
+            .count()
+            == 1
+        )
+        assert (
+            db.query(DocumentIndexRun)
+            .filter_by(document_version_id=version_id, status="COMPLETED")
+            .count()
+            == 1
+        )
+        assert db.query(DocumentChunk).filter_by(document_version_id=version_id).count() >= 1
+        assert "working_copy.search_repair.queued" in diagnostic_events
+        assert "working_copy.search_repair.started" in diagnostic_events
+        assert "working_copy.search_repair.index_started" in diagnostic_events
+        assert "working_copy.search_repair.profile_started" in diagnostic_events
+        assert "working_copy.search_repair.completed" in diagnostic_events
     finally:
         db.close()
         clear_overrides()

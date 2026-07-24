@@ -202,6 +202,22 @@ logs/file-agent-YYYY-MM-DD.log
 
 每行是一条 JSON，包含 `request_id`、`agent_run_id`、`user_id`、`conversation_id`、`tool_name`、`document_id`、`status`、`duration_ms` 和 `error_code` 等字段。启动时会按 `LOG_RETENTION_DAYS` 清理超过保留期的旧日志，默认保留 7 天。
 
+文件检索会额外记录 `retrieval.route.selected`、`retrieval.query.parsed`、
+`retrieval.scope.resolved`、`retrieval.stage1.*`、`retrieval.chunk_fallback.*`、
+`retrieval.stage2.*`、`retrieval.evidence.*` 和 `retrieval.search.completed`。这些事件只保存
+查询长度、不可逆短指纹、候选数、Chunk 数、证据数和结果数，不保存用户查询原文或文件正文。
+历史工作副本自动补建索引时记录 `working_copy.search_repair.*` 和 `document.index.*`，用于区分
+扫描未入队、解析失败、正文索引失败和文件级投影失败。
+
+Windows CMD 从仓库根启动项目后，可以直接检查：
+
+```cmd
+findstr /I /C:"retrieval." /C:"working_copy.search_repair" logs\file-agent-*.log
+```
+
+如果显式配置了绝对 `LOG_DIR`，日志以该目录为准；相对 `LOG_DIR` 始终相对于启动对应进程时的当前
+目录，因此推荐 API 和 worker 都从仓库根启动。
+
 ## 4.1 LLM 配置
 
 默认 `LLM_ENABLED=false`，消息入口会继续使用确定性 Planner，便于本地开发和测试稳定运行。

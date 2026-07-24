@@ -677,20 +677,64 @@ GET /api/changesets/{changeset_id}
 
 ### SMOKE-015 日志和敏感信息
 
-检查当天 JSONL 日志：
+API、scheduler 和 worker 都从仓库根启动时，检查仓库根 `logs/` 下的当天 JSONL 日志：
 
 ```bash
 tail -n 50 logs/file-agent-"$(date +%F)".log
 
+rg -n '"event": "retrieval\.|"event": "working_copy\.search_repair' \
+  logs/file-agent-"$(date +%F)".log
+
 rg -n 'Bearer |LLM_API_KEY|password|text_content|病毒扫描通过' \
   logs/file-agent-"$(date +%F)".log
+```
+
+Windows PowerShell：
+
+```powershell
+$log = ".\logs\file-agent-$(Get-Date -Format yyyy-MM-dd).log"
+Get-Content $log -Tail 100
+Select-String -Path $log -Pattern '"event": "retrieval\.','"event": "working_copy\.search_repair'
+```
+
+Windows CMD 不依赖日期格式时可以检查当天所在的全部日志文件：
+
+```cmd
+findstr /I /C:"retrieval." /C:"working_copy.search_repair" logs\file-agent-*.log
+```
+
+检索故障按以下事件顺序定位：
+
+```text
+retrieval.route.selected
+retrieval.query.parsed
+retrieval.scope.resolved
+retrieval.stage1.completed
+retrieval.chunk_fallback.completed / failed
+retrieval.stage2.completed / failed / skipped
+retrieval.evidence.completed / failed / skipped
+retrieval.search.completed
+```
+
+历史工作副本缺索引时按以下事件顺序定位：
+
+```text
+working_copy.search_repair.queued
+working_copy.search_repair.started
+working_copy.search_repair.extraction_reused / extraction_started / extraction_failed
+working_copy.search_repair.index_started
+document.index.completed / failed
+working_copy.search_repair.profile_started / profile_failed
+working_copy.search_repair.completed
 ```
 
 通过标准：
 
 - 每行是合法 JSON。
 - API 日志包含 request_id；Agent、Tool 和文件事件尽量包含关联 ID 与耗时。
-- 第二条命令不应发现 JWT、密码、API key、文件全文或虚假病毒扫描结论。
+- 检索日志能看到每阶段的候选数、Chunk 命中数、证据数和最终结果数，但不能出现查询正文或文件正文。
+- 补建日志能区分缺少文件级 Profile、正文索引、解析结果或证据投影。
+- 敏感信息检查命令不应发现 JWT、密码、API key、文件全文或虚假病毒扫描结论。
 - 日志不能替代 AgentRun、ToolInvocation、ChangeSet 和 ChangeItem 审计事实。
 
 ## 8. 最终原件复核

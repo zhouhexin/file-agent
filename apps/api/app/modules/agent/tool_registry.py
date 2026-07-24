@@ -330,19 +330,50 @@ def _search_handler(
             }
 
         settings = get_settings()
-        if not settings.two_stage_retrieval_enabled:
-            # 默认路径：保持原有摘要优先检索，行为不变
-            return WorkingCopySummarySearchService(db=db, user_id=user_id).search(
-                query=getattr(tool_input, "query"),
-                document_ids=list(getattr(tool_input, "document_ids", [])),
-            )
-
-        # 启用新链路：两阶段检索
-        # 文件检索读取唯一共享工作目录；default workspace 只保留用户会话来源。
+        # 新旧检索实现都必须使用唯一共享工作区作为读取权限边界；
+        # Document.user_id 仅记录导入审计，不能阻止其他用户查找共享文件。
         from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
         workspace_id = get_shared_workspace_id(db)
+        search_query = str(getattr(tool_input, "query") or "")
+        explicit_document_ids = list(getattr(tool_input, "document_ids", []) or [])
+        log_event(
+            "retrieval.route.selected",
+            tool_name="hybrid-search",
+            status="COMPLETED",
+            workspace_id=workspace_id,
+            retrieval_mode=(
+                "two_stage"
+                if settings.two_stage_retrieval_enabled
+                else "summary_fallback"
+            ),
+            query_chars=len(search_query),
+            explicit_document_count=len(explicit_document_ids),
+            message="文件检索路由选择完成",
+        )
+        if not settings.two_stage_retrieval_enabled:
+            # 紧急回退只更换检索算法，不能退回按导入用户隔离的旧权限模型。
+            result = WorkingCopySummarySearchService(
+                db=db,
+                user_id=user_id,
+                workspace_id=workspace_id,
+            ).search(
+                query=search_query,
+                document_ids=explicit_document_ids,
+            )
+            log_event(
+                "retrieval.summary_fallback.completed",
+                level="WARNING" if not result.get("results") else "INFO",
+                tool_name="hybrid-search",
+                status="COMPLETED",
+                workspace_id=workspace_id,
+                result_count=len(list(result.get("results") or [])),
+                message="摘要回退检索完成",
+            )
+            return result
 
+        # 启用新链路：两阶段检索
+        # 文件检索读取唯一共享工作目录；default workspace 只保留用户会话来源。
         from app.modules.retrieval.two_stage_search import TwoStageFileSearchService
         from app.modules.retrieval.query_parser import FileSearchQueryParser
         from app.modules.retrieval.scope_resolver import (
@@ -362,7 +393,20 @@ def _search_handler(
             tokenizer = None
 
         parser = FileSearchQueryParser(tokenizer=tokenizer)
-        parsed = parser.parse(getattr(tool_input, "query") or "")
+        parsed = parser.parse(search_query)
+        log_event(
+            "retrieval.query.parsed",
+            level="WARNING" if not parsed.cleaned else "INFO",
+            tool_name="hybrid-search",
+            status="COMPLETED" if parsed.cleaned else "EMPTY",
+            workspace_id=workspace_id,
+            query_chars=len(search_query),
+            cleaned_query_chars=len(parsed.cleaned),
+            query_term_count=len(parsed.terms),
+            has_year=parsed.year is not None or parsed.relative_year is not None,
+            has_doc_number=parsed.doc_number is not None,
+            message="文件检索查询解析完成",
+        )
 
         conversation_id = conversation_id_getter() if conversation_id_getter else None
         resolver = FileSearchScopeResolver(
@@ -372,9 +416,24 @@ def _search_handler(
             ),
         )
         scope = resolver.resolve(
-            query=getattr(tool_input, "query") or "",
-            explicit_attachment_ids=list(getattr(tool_input, "document_ids", []) or []),
+            query=search_query,
+            explicit_attachment_ids=explicit_document_ids,
             conversation_id=conversation_id,
+        )
+        log_event(
+            "retrieval.scope.resolved",
+            tool_name="hybrid-search",
+            status="COMPLETED",
+            workspace_id=workspace_id,
+            scope_mode=str(getattr(scope, "scope_mode", "global") or "global"),
+            strict_document_count=len(
+                list(getattr(scope, "strict_document_ids", ()) or ())
+            ),
+            conversation_document_count=len(
+                list(getattr(scope, "conversation_document_ids", ()) or ())
+            ),
+            include_workspace=bool(getattr(scope, "include_workspace", True)),
+            message="文件检索范围解析完成",
         )
 
         service = TwoStageFileSearchService(
@@ -382,7 +441,7 @@ def _search_handler(
             config=settings, tokenizer=tokenizer,
         )
         result = service.search(
-            query=getattr(tool_input, "query") or "",
+            query=search_query,
             parsed_query=parsed,
             scope=scope,
         )

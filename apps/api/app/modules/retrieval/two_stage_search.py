@@ -13,9 +13,12 @@ embedding 分支关闭时，其权重重新分配给 Chunk 词法相关度。
 
 from __future__ import annotations
 
+import hashlib
+import time
 from typing import Any
 
 import sqlalchemy as sa
+from app.core.logging import log_event
 from app.db.models import Document, WorkingCopy
 from app.modules.retrieval.chunk_lexical_search import DocumentChunkLexicalSearchService
 from app.modules.retrieval.evidence_projector import SearchEvidenceProjector
@@ -84,8 +87,40 @@ class TwoStageFileSearchService:
     ) -> dict[str, Any]:
         """执行两阶段检索，返回确定性融合结果。"""
 
+        started_at = time.perf_counter()
         query = str(query or "")[: min(int(self.config.retrieval_query_max_chars), 500)]
+        cleaned_query = str(getattr(parsed_query, "cleaned", "") or "")
+        query_fingerprint = (
+            hashlib.sha256(cleaned_query.encode("utf-8")).hexdigest()[:12]
+            if cleaned_query
+            else None
+        )
+        scope_mode = str(getattr(scope, "scope_mode", "global") or "global")
+        log_event(
+            "retrieval.search.started",
+            tool_name="hybrid-search",
+            status="RUNNING",
+            workspace_id=self.workspace_id,
+            query_chars=len(query),
+            cleaned_query_chars=len(cleaned_query),
+            query_term_count=len(list(getattr(parsed_query, "terms", []) or [])),
+            query_fingerprint=query_fingerprint,
+            scope_mode=scope_mode,
+            message="两阶段文件检索开始",
+        )
         if not query or not (parsed_query and parsed_query.cleaned):
+            log_event(
+                "retrieval.query.rejected",
+                level="WARNING",
+                tool_name="hybrid-search",
+                status="SKIPPED",
+                workspace_id=self.workspace_id,
+                query_chars=len(query),
+                cleaned_query_chars=len(cleaned_query),
+                query_fingerprint=query_fingerprint,
+                error_code="EMPTY_CLEANED_QUERY",
+                message="查询清洗后为空，停止检索",
+            )
             return {
                 "ok": True,
                 "kind": "workspace_file_search",
@@ -99,14 +134,42 @@ class TwoStageFileSearchService:
         self._apply_postgresql_statement_timeout()
 
         # 一阶段：文档级索引召回
-        stage1_candidates = self.stage1.recall(
-            parsed_query=parsed_query, scope=scope,
+        stage1_started_at = time.perf_counter()
+        try:
+            stage1_candidates = self.stage1.recall(
+                parsed_query=parsed_query, scope=scope,
+            )
+        except Exception as exc:
+            log_event(
+                "retrieval.stage1.failed",
+                level="ERROR",
+                tool_name="hybrid-search",
+                status="FAILED",
+                duration_ms=int((time.perf_counter() - stage1_started_at) * 1000),
+                workspace_id=self.workspace_id,
+                query_fingerprint=query_fingerprint,
+                error_code=exc.__class__.__name__,
+                message="文件级候选召回失败",
+            )
+            raise
+        log_event(
+            "retrieval.stage1.completed",
+            tool_name="hybrid-search",
+            status="COMPLETED",
+            duration_ms=int((time.perf_counter() - stage1_started_at) * 1000),
+            workspace_id=self.workspace_id,
+            query_fingerprint=query_fingerprint,
+            candidate_count=len(stage1_candidates),
+            scope_mode=scope_mode,
+            message="文件级候选召回完成",
         )
 
         # 必要时补召回
         candidate_limit = min(int(self.config.retrieval_document_candidate_limit), 50)
         chunk_degraded = False
+        fallback_count = 0
         if len(stage1_candidates) < candidate_limit:
+            fallback_started_at = time.perf_counter()
             try:
                 if getattr(scope, "scope_mode", "global") == "strict":
                     fallback_versions = self._strict_scope_fallback(
@@ -118,6 +181,7 @@ class TwoStageFileSearchService:
                         workspace_id=self.workspace_id,
                         max_versions=10,
                     )
+                fallback_count = len(fallback_versions)
                 stage1_candidates = self._merge_fallback(
                     stage1_candidates,
                     self.stage1.enrich_fallback_versions(
@@ -125,9 +189,43 @@ class TwoStageFileSearchService:
                         scope=scope,
                     ),
                 )
-            except Exception:
+                log_event(
+                    "retrieval.chunk_fallback.completed",
+                    tool_name="hybrid-search",
+                    status="COMPLETED",
+                    duration_ms=int((time.perf_counter() - fallback_started_at) * 1000),
+                    workspace_id=self.workspace_id,
+                    query_fingerprint=query_fingerprint,
+                    fallback_version_count=fallback_count,
+                    merged_candidate_count=len(stage1_candidates),
+                    scope_mode=scope_mode,
+                    message="正文 Chunk 补召回完成",
+                )
+            except Exception as exc:
                 # 补召回失败不阻塞主路径
                 chunk_degraded = True
+                log_event(
+                    "retrieval.chunk_fallback.failed",
+                    level="ERROR",
+                    tool_name="hybrid-search",
+                    status="DEGRADED",
+                    duration_ms=int((time.perf_counter() - fallback_started_at) * 1000),
+                    workspace_id=self.workspace_id,
+                    query_fingerprint=query_fingerprint,
+                    error_code=exc.__class__.__name__,
+                    message="正文 Chunk 补召回失败，检索降级为文件级候选",
+                )
+        else:
+            log_event(
+                "retrieval.chunk_fallback.skipped",
+                tool_name="hybrid-search",
+                status="SKIPPED",
+                workspace_id=self.workspace_id,
+                query_fingerprint=query_fingerprint,
+                candidate_count=len(stage1_candidates),
+                candidate_limit=candidate_limit,
+                message="文件级候选已达到上限，无需正文补召回",
+            )
 
         # 取 top N 候选进入第二阶段
         detail_limit = min(int(self.config.retrieval_document_detail_limit), 20)
@@ -140,6 +238,7 @@ class TwoStageFileSearchService:
         # 二阶段：在候选版本内精查
         chunk_results = []
         if version_ids:
+            detail_started_at = time.perf_counter()
             try:
                 chunk_results = self.stage2.search(
                     query=parsed_query.cleaned,
@@ -147,22 +246,93 @@ class TwoStageFileSearchService:
                     limit=min(int(self.config.retrieval_chunk_global_limit), 24),
                 )
                 chunk_results = self._limit_chunks_per_document(chunk_results)
-            except Exception:
+                log_event(
+                    "retrieval.stage2.completed",
+                    tool_name="hybrid-search",
+                    status="COMPLETED",
+                    duration_ms=int((time.perf_counter() - detail_started_at) * 1000),
+                    workspace_id=self.workspace_id,
+                    query_fingerprint=query_fingerprint,
+                    candidate_version_count=len(version_ids),
+                    chunk_result_count=len(chunk_results),
+                    message="候选文档内正文精查完成",
+                )
+            except Exception as exc:
                 chunk_results = []
                 chunk_degraded = True
+                log_event(
+                    "retrieval.stage2.failed",
+                    level="ERROR",
+                    tool_name="hybrid-search",
+                    status="DEGRADED",
+                    duration_ms=int((time.perf_counter() - detail_started_at) * 1000),
+                    workspace_id=self.workspace_id,
+                    query_fingerprint=query_fingerprint,
+                    candidate_version_count=len(version_ids),
+                    error_code=exc.__class__.__name__,
+                    message="候选文档内正文精查失败",
+                )
+        else:
+            log_event(
+                "retrieval.stage2.skipped",
+                level="WARNING",
+                tool_name="hybrid-search",
+                status="SKIPPED",
+                workspace_id=self.workspace_id,
+                query_fingerprint=query_fingerprint,
+                candidate_version_count=0,
+                error_code="NO_CANDIDATE_VERSIONS",
+                message="没有可进入正文精查的当前文档版本",
+            )
 
         # Evidence 投影
         evidence_map = {}
         if chunk_results:
             chunk_ids = [c["chunk_id"] for c in chunk_results if c.get("chunk_id")]
             if chunk_ids:
+                evidence_started_at = time.perf_counter()
                 try:
                     evidence_map = self.evidence.project(
                         chunk_ids=chunk_ids,
                         max_preview_chars=self.config.retrieval_preview_max_chars,
                     )
-                except Exception:
+                    log_event(
+                        "retrieval.evidence.completed",
+                        tool_name="hybrid-search",
+                        status="COMPLETED",
+                        duration_ms=int((time.perf_counter() - evidence_started_at) * 1000),
+                        workspace_id=self.workspace_id,
+                        query_fingerprint=query_fingerprint,
+                        requested_chunk_count=len(chunk_ids),
+                        projected_evidence_count=len(evidence_map),
+                        message="检索证据投影完成",
+                    )
+                except Exception as exc:
                     evidence_map = {}
+                    chunk_degraded = True
+                    log_event(
+                        "retrieval.evidence.failed",
+                        level="ERROR",
+                        tool_name="hybrid-search",
+                        status="DEGRADED",
+                        duration_ms=int((time.perf_counter() - evidence_started_at) * 1000),
+                        workspace_id=self.workspace_id,
+                        query_fingerprint=query_fingerprint,
+                        requested_chunk_count=len(chunk_ids),
+                        error_code=exc.__class__.__name__,
+                        message="检索证据投影失败",
+                    )
+        else:
+            log_event(
+                "retrieval.evidence.skipped",
+                level="WARNING",
+                tool_name="hybrid-search",
+                status="SKIPPED",
+                workspace_id=self.workspace_id,
+                query_fingerprint=query_fingerprint,
+                error_code="NO_CHUNK_RESULTS",
+                message="没有正文命中，跳过证据投影",
+            )
 
         # 融合排序
         fused = self._fuse_and_rank(
@@ -174,6 +344,23 @@ class TwoStageFileSearchService:
         )
 
         partial = chunk_degraded
+        log_event(
+            "retrieval.search.completed",
+            level="WARNING" if partial or not fused else "INFO",
+            tool_name="hybrid-search",
+            status="DEGRADED" if partial else "COMPLETED",
+            duration_ms=int((time.perf_counter() - started_at) * 1000),
+            workspace_id=self.workspace_id,
+            query_fingerprint=query_fingerprint,
+            stage1_candidate_count=len(stage1_candidates),
+            fallback_version_count=fallback_count,
+            detail_version_count=len(version_ids),
+            chunk_result_count=len(chunk_results),
+            evidence_count=len(evidence_map),
+            result_count=len(fused),
+            partial=partial,
+            message="两阶段文件检索完成",
+        )
         return {
             "ok": True,
             "kind": "workspace_file_search",

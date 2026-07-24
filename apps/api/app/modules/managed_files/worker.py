@@ -36,7 +36,10 @@ from app.modules.classification.result_builder import (
     format_document_results_response,
 )
 from app.modules.classification.service import persist_document_results_classifications
-from app.modules.file_lifecycle.service import FileLifecycleJobProcessor
+from app.modules.file_lifecycle.service import (
+    FileLifecycleJobProcessor,
+    working_copy_search_artifact_status,
+)
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
@@ -371,10 +374,34 @@ def _enqueue_import_jobs_for_files(*, db: Session, root_id: str, files: list[Man
             )
             try:
                 if storage.working_copy_path(storage_relative_path).is_file():
-                    continue
+                    artifact_status = working_copy_search_artifact_status(db, working_copy)
+                    if artifact_status["ready"]:
+                        continue
+                    log_event(
+                        "working_copy.search_repair.queued",
+                        document_id=working_copy.document_id,
+                        status="PENDING",
+                        working_copy_id=working_copy.id,
+                        document_version_id=working_copy.current_version_id,
+                        managed_file_id=managed_file.id,
+                        root_id=root_id,
+                        profile_ready=artifact_status["profile_ready"],
+                        index_ready=artifact_status["index_ready"],
+                        message="物理工作副本存在但检索派生数据缺失，准备补发导入修复任务",
+                    )
             except OSError:
                 # 无法读取工作目录时仍创建修复任务，由生命周期 worker 记录结构化失败。
-                pass
+                log_event(
+                    "working_copy.search_repair.path_check_failed",
+                    level="WARNING",
+                    document_id=working_copy.document_id,
+                    status="PENDING",
+                    error_code="WORKING_COPY_PATH_UNREADABLE",
+                    working_copy_id=working_copy.id,
+                    managed_file_id=managed_file.id,
+                    root_id=root_id,
+                    message="工作副本路径状态读取失败，仍将提交修复任务",
+                )
 
         user_id = fallback_user
         if managed_file.source_type == "UPLOAD_ARCHIVE" and managed_file.source_upload_version_id:

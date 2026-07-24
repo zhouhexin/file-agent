@@ -57,13 +57,25 @@ class _SearchCandidate:
 
 
 class WorkingCopySummarySearchService:
-    """在当前用户工作副本范围内执行轻量、确定性的摘要优先检索。"""
+    """在授权工作区内执行轻量、确定性的摘要优先检索。"""
 
-    def __init__(self, *, db: Any, user_id: str, max_candidates: int = 500) -> None:
-        """绑定当前数据库会话和用户，防止跨用户召回工作副本。"""
+    def __init__(
+        self,
+        *,
+        db: Any,
+        user_id: str,
+        workspace_id: str | None = None,
+        max_candidates: int = 500,
+    ) -> None:
+        """绑定检索权限边界。
+
+        正式对话检索传入共享 ``workspace_id``，允许所有用户读取唯一共享工作目录；
+        未传工作区仅用于旧调用兼容，此时继续按 ``Document.user_id`` 隔离。
+        """
 
         self.db = db
         self.user_id = user_id
+        self.workspace_id = workspace_id
         self.max_candidates = max(1, max_candidates)
 
     def search(
@@ -103,7 +115,7 @@ class WorkingCopySummarySearchService:
         }
 
     def _load_candidates(self, *, document_ids: list[str]) -> list[_SearchCandidate]:
-        """只读取当前用户 ACTIVE 工作副本的当前版本摘要。"""
+        """只读取授权范围内 ACTIVE 工作副本的当前版本摘要。"""
 
         query = (
             self.db.query(WorkingCopy, Document, DocumentSummary)
@@ -115,10 +127,15 @@ class WorkingCopySummarySearchService:
             )
             .filter(
                 WorkingCopy.status == "ACTIVE",
-                Document.user_id == self.user_id,
                 DocumentSummary.status == "COMPLETED",
             )
         )
+        if self.workspace_id:
+            # 共享工作目录以 workspace 作为读取权限边界，Document.user_id 仅保留导入审计含义。
+            query = query.filter(WorkingCopy.workspace_id == self.workspace_id)
+        else:
+            # 保留旧服务直接调用的用户隔离语义，避免无工作区上下文时扩大权限。
+            query = query.filter(Document.user_id == self.user_id)
         if document_ids:
             query = query.filter(Document.id.in_(document_ids))
         rows = query.order_by(DocumentSummary.updated_at.desc()).limit(self.max_candidates).all()
