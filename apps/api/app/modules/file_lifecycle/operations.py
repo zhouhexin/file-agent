@@ -40,6 +40,7 @@ from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.operations.repository import OperationPlanRepository
 from app.modules.operations.schemas import OperationPlanCreateRequest
 from app.modules.retrieval.search_profile import DocumentSearchProfileService
+from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
 
 WORKING_COPY_OPERATION_TYPES = {
@@ -71,16 +72,16 @@ class WorkingCopyOperationService:
             raise HTTPException(status_code=400, detail="Restore plans must be created from a trash entry")
         if request.operation_type == "RESOLVE_FILENAME_CONFLICT":
             raise HTTPException(status_code=400, detail="Conflict plans must be created from a pending review")
-        if not current_user.default_workspace_id:
-            raise HTTPException(status_code=400, detail="Default workspace is required")
+        shared_workspace_id = get_shared_workspace_id(self.db)
         normalized_items: list[dict[str, Any]] = []
         prepared_records: list[WorkingCopyPathRecord] = []
         for requested in request.items:
             if not requested.working_copy_id:
                 raise HTTPException(status_code=400, detail="working_copy_id is required")
-            working_copy = self.repository.get_owned_working_copy(
+            working_copy = self.repository.get_user_working_copy(
                 working_copy_id=requested.working_copy_id,
-                workspace_id=current_user.default_workspace_id,
+                workspace_id=shared_workspace_id,
+                user_id=current_user.id,
             )
             if working_copy is None or working_copy.status != "ACTIVE":
                 raise HTTPException(status_code=404, detail="Working copy not found")
@@ -117,7 +118,7 @@ class WorkingCopyOperationService:
             }
             normalized_items.append(item)
         plan = self.plan_repository.create_plan(
-            workspace_id=current_user.default_workspace_id,
+            workspace_id=shared_workspace_id,
             conversation_id=request.conversation_id,
             user_id=current_user.id,
             operation_type=request.operation_type,
@@ -172,11 +173,12 @@ class WorkingCopyOperationService:
     ) -> OperationPlan:
         """从持久化冲突记录创建计划，禁止 Planner 自报工作副本和目标路径。"""
 
-        if not current_user.default_workspace_id or review.user_id != current_user.id:
+        if review.user_id != current_user.id:
             raise HTTPException(status_code=404, detail="Filename conflict review not found")
         if review.status != "NEEDS_REVIEW" or review.conversation_id != conversation_id:
             raise HTTPException(status_code=409, detail="Filename conflict review is not pending")
-        if pending_copy.workspace_id != current_user.default_workspace_id or existing_copy.workspace_id != current_user.default_workspace_id:
+        shared_workspace_id = get_shared_workspace_id(self.db)
+        if pending_copy.workspace_id != shared_workspace_id or existing_copy.workspace_id != shared_workspace_id:
             raise HTTPException(status_code=404, detail="Working copy not found")
         if pending_copy.status != "ACTIVE" or existing_copy.status != "ACTIVE":
             raise HTTPException(status_code=409, detail="Filename conflict working copy is not active")
@@ -195,7 +197,7 @@ class WorkingCopyOperationService:
                 )
             )
         plan = self.plan_repository.create_plan(
-            workspace_id=current_user.default_workspace_id,
+            workspace_id=shared_workspace_id,
             conversation_id=conversation_id,
             agent_run_id=agent_run_id,
             user_id=current_user.id,
@@ -293,14 +295,16 @@ class WorkingCopyOperationService:
     ) -> OperationPlan:
         """为当前工作区回收站条目创建恢复计划，路径冲突时使用稳定备用路径。"""
 
-        if not current_user.default_workspace_id:
-            raise HTTPException(status_code=400, detail="Default workspace is required")
+        shared_workspace_id = get_shared_workspace_id(self.db)
         entry = (
             self.db.query(TrashEntry)
+            .join(WorkingCopy, WorkingCopy.id == TrashEntry.working_copy_id)
+            .join(Document, Document.id == WorkingCopy.document_id)
             .filter(
                 TrashEntry.id == trash_entry_id,
-                TrashEntry.workspace_id == current_user.default_workspace_id,
+                TrashEntry.workspace_id == shared_workspace_id,
                 TrashEntry.status == "ACTIVE",
+                Document.user_id == current_user.id,
             )
             .one_or_none()
         )
@@ -318,7 +322,7 @@ class WorkingCopyOperationService:
         if target.exists():
             target_relative_path = f"restored/{entry.id}/{working_copy.filename}"
         plan = self.plan_repository.create_plan(
-            workspace_id=current_user.default_workspace_id,
+            workspace_id=shared_workspace_id,
             conversation_id=conversation_id,
             user_id=current_user.id,
             operation_type="RESTORE_WORKING_COPIES",

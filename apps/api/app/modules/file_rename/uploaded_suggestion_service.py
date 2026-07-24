@@ -31,6 +31,7 @@ from app.modules.file_rename.validation_service import RenameValidationService
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.readable_source import ReadableDocumentSourceResolver, apply_readable_source_metadata
 from app.modules.operations.schemas import OperationPlanCreateRequest, OperationPlanItem
+from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
 
 class UploadedRenameSuggestionService:
@@ -64,8 +65,8 @@ class UploadedRenameSuggestionService:
         """解析明确附件对应的工作副本并创建重命名 OperationPlan。"""
 
         user = self.db.get(User, self.user_id)
-        if user is None or not user.default_workspace_id:
-            return _error("USER_WORKSPACE_REQUIRED", "当前用户缺少默认工作区，无法创建重命名计划。")
+        if user is None:
+            return _error("USER_NOT_FOUND", "当前用户不存在，无法创建重命名计划。")
         run = self.db.get(AgentRun, agent_run_id)
         if run is None or run.user_id != self.user_id or run.conversation_id != conversation_id:
             return _error("AGENT_RUN_SCOPE_INVALID", "重命名计划与当前 AgentRun 范围不一致。")
@@ -187,10 +188,12 @@ class UploadedRenameSuggestionService:
 
         direct = (
             self.db.query(WorkingCopy)
+            .join(Document, Document.id == WorkingCopy.document_id)
             .filter(
                 WorkingCopy.document_id == source_document.id,
-                WorkingCopy.workspace_id == source_document.workspace_id,
+                WorkingCopy.workspace_id == get_shared_workspace_id(self.db),
                 WorkingCopy.status == "ACTIVE",
+                Document.user_id == self.user_id,
             )
             .one_or_none()
         )
@@ -222,9 +225,8 @@ class UploadedRenameSuggestionService:
             .join(Document, Document.id == WorkingCopy.document_id)
             .filter(
                 WorkingCopy.managed_file_id == archive.managed_file_id,
-                WorkingCopy.workspace_id == source_document.workspace_id,
+                WorkingCopy.workspace_id == get_shared_workspace_id(self.db),
                 WorkingCopy.status == "ACTIVE",
-                Document.user_id == self.user_id,
             )
             .one_or_none()
         )

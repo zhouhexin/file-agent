@@ -22,7 +22,13 @@ from app.db.models import (
     WorkingCopy,
     WorkingCopyPathRecord,
     WorkingCopyRoot,
+    Workspace,
     utcnow,
+)
+from app.modules.file_lifecycle.shared_workspace import (
+    SHARED_WORKSPACE_STORAGE_KEY,
+    SHARED_WORKSPACE_TYPE,
+    get_shared_workspace_id,
 )
 
 
@@ -161,7 +167,7 @@ class FileLifecycleRepository:
             can_use_existing = bool(
                 working_copy
                 and candidate_document
-                and working_copy.workspace_id == review.workspace_id
+                and working_copy.workspace_id == get_shared_workspace_id(self.db)
                 and candidate_document.user_id == review.user_id
                 and working_copy.status == "ACTIVE"
             )
@@ -193,8 +199,8 @@ class FileLifecycleRepository:
         self.db.flush()
         return candidates
 
-    @staticmethod
     def _candidate_scope(
+        self,
         *,
         review: UploadDuplicateReview,
         working_copy: WorkingCopy | None,
@@ -202,8 +208,6 @@ class FileLifecycleRepository:
     ) -> str:
         """根据工作区和用户关系确定候选展示范围。"""
 
-        if working_copy and working_copy.workspace_id == review.workspace_id:
-            return "SAME_WORKSPACE"
         if candidate_document and candidate_document.user_id == review.user_id:
             return "SAME_USER"
         return "CROSS_USER"
@@ -276,7 +280,11 @@ class FileLifecycleRepository:
         workspace_id: str,
         managed_root: ManagedRoot,
     ) -> WorkingCopyRoot:
-        """创建工作区到受管原始目录的唯一工作副本根映射。"""
+        """创建工作区到受管原始目录的唯一工作副本根映射。
+
+        系统共享工作区固定使用 ``shared/<root_key>``，绝不能把 UUID 工作区 ID
+        写入物理目录，从而避免同一原始文件按用户重复复制。
+        """
 
         root = (
             self.db.query(WorkingCopyRoot)
@@ -287,7 +295,15 @@ class FileLifecycleRepository:
             .one_or_none()
         )
         if root is None:
-            relative_storage_path = f"{workspace_id}/{managed_root.root_key}"
+            workspace = self.db.get(Workspace, workspace_id)
+            if workspace is None:
+                raise ValueError("工作副本根缺少有效工作区")
+            storage_scope = (
+                SHARED_WORKSPACE_STORAGE_KEY
+                if workspace.workspace_type == SHARED_WORKSPACE_TYPE
+                else workspace.id
+            )
+            relative_storage_path = f"{storage_scope}/{managed_root.root_key}"
             root = WorkingCopyRoot(
                 workspace_id=workspace_id,
                 managed_root_id=managed_root.id,
@@ -323,12 +339,42 @@ class FileLifecycleRepository:
             .all()
         )
 
+    def list_user_working_copies(self, *, workspace_id: str, user_id: str) -> list[tuple[WorkingCopy, WorkingCopyRoot]]:
+        """列出用户逻辑可见的共享工作副本。
+
+        物理目录是共享的，但上传来源和普通用户的数据可见范围仍由 Document.user_id
+        约束；不能因为去重复制就意外放宽跨用户访问。
+        """
+
+        return (
+            self.db.query(WorkingCopy, WorkingCopyRoot)
+            .join(WorkingCopyRoot, WorkingCopy.working_copy_root_id == WorkingCopyRoot.id)
+            .join(Document, WorkingCopy.document_id == Document.id)
+            .filter(WorkingCopy.workspace_id == workspace_id, Document.user_id == user_id)
+            .order_by(WorkingCopy.relative_path.asc())
+            .all()
+        )
+
     def get_owned_working_copy(self, *, working_copy_id: str, workspace_id: str) -> WorkingCopy | None:
         """查询当前工作区的工作副本。"""
 
         return (
             self.db.query(WorkingCopy)
             .filter(WorkingCopy.id == working_copy_id, WorkingCopy.workspace_id == workspace_id)
+            .one_or_none()
+        )
+
+    def get_user_working_copy(self, *, working_copy_id: str, workspace_id: str, user_id: str) -> WorkingCopy | None:
+        """读取用户逻辑可见的共享工作副本，不把物理共享误当作跨用户授权。"""
+
+        return (
+            self.db.query(WorkingCopy)
+            .join(Document, Document.id == WorkingCopy.document_id)
+            .filter(
+                WorkingCopy.id == working_copy_id,
+                WorkingCopy.workspace_id == workspace_id,
+                Document.user_id == user_id,
+            )
             .one_or_none()
         )
 

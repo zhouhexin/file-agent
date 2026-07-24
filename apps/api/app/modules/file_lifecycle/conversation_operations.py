@@ -26,6 +26,7 @@ from app.db.models import (
 from app.modules.file_lifecycle.operations import WorkingCopyOperationService
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.operations.schemas import OperationPlanCreateRequest, OperationPlanItem
+from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
 
 class ConversationalWorkingCopyPlanService:
@@ -52,8 +53,8 @@ class ConversationalWorkingCopyPlanService:
 
         user = self.db.get(User, self.user_id)
         run = self.db.get(AgentRun, agent_run_id)
-        if user is None or not user.default_workspace_id:
-            return _error("USER_WORKSPACE_REQUIRED", "当前用户缺少默认工作区。")
+        if user is None:
+            return _error("USER_NOT_FOUND", "当前用户不存在。")
         if run is None or run.user_id != user.id or run.conversation_id != conversation_id:
             return _error("AGENT_RUN_SCOPE_INVALID", "本次文件操作与当前对话范围不一致。")
         try:
@@ -105,7 +106,7 @@ class ConversationalWorkingCopyPlanService:
     ):
         """把后端确定的附件解析为活动工作副本，并只创建回收站计划。"""
 
-        copies = self._resolve_working_copies(document_ids=document_ids, workspace_id=user.default_workspace_id)
+        copies = self._resolve_working_copies(document_ids=document_ids, workspace_id=get_shared_workspace_id(self.db))
         if not copies:
             raise ValueError("请明确选择要移入回收站的当前会话文件。")
         inactive = [item.filename for item in copies if item.status != "ACTIVE"]
@@ -134,14 +135,15 @@ class ConversationalWorkingCopyPlanService:
     ):
         """从附件追溯到唯一活动回收站条目，歧义时停止而不猜测。"""
 
-        copies = self._resolve_working_copies(document_ids=document_ids, workspace_id=user.default_workspace_id)
+        shared_workspace_id = get_shared_workspace_id(self.db)
+        copies = self._resolve_working_copies(document_ids=document_ids, workspace_id=shared_workspace_id)
         trashed = [item for item in copies if item.status == "TRASHED"]
         if len(trashed) != 1:
             raise ValueError("请在当前对话中明确指定一个已移入回收站的文件。")
         entries = (
             self.db.query(TrashEntry)
             .filter(
-                TrashEntry.workspace_id == user.default_workspace_id,
+                TrashEntry.workspace_id == shared_workspace_id,
                 TrashEntry.working_copy_id == trashed[0].id,
                 TrashEntry.status == "ACTIVE",
             )
@@ -229,7 +231,11 @@ class ConversationalWorkingCopyPlanService:
         )
 
     def _resolve_working_copies(self, *, document_ids: list[str], workspace_id: str) -> list[WorkingCopy]:
-        """把上传附件或工作副本文档 ID 解析为当前用户工作副本，保持输入顺序去重。"""
+        """把会话已确定的文档 ID 解析为共享工作副本，保持输入顺序去重。
+
+        调用方已由 AgentRun 与会话附件上下文约束，不能再用 Document.user_id 排除
+        共享资料；否则不同用户会看到同一文件却无法在对话中创建确认计划。
+        """
 
         if not document_ids:
             return []

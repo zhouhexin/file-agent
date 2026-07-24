@@ -19,6 +19,7 @@ from app.db.models import (
     User,
     WorkingCopy,
     WorkingCopyPathRecord,
+    Workspace,
 )
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
@@ -144,6 +145,33 @@ def test_upload_is_archived_then_imported_by_separate_jobs(monkeypatch, tmp_path
     finally:
         db.close()
         clear_overrides()
+
+
+def test_each_uploaded_file_is_imported_once_into_shared_working_directory(monkeypatch, tmp_path):
+    """多个用户上传不同文件时只能创建一个共享工作区和每文件一份物理副本。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    first_headers = _auth(client, "shared-first-owner")
+    second_headers = _auth(client, "shared-second-owner")
+    first = _upload(client, first_headers, "first-shared.txt", b"first shared body")
+    second = _upload(client, second_headers, "second-shared.txt", b"second shared body")
+    _drain(SessionLocal)
+
+    db = SessionLocal()
+    try:
+        copies = db.query(WorkingCopy).order_by(WorkingCopy.filename.asc()).all()
+        shared_workspaces = db.query(Workspace).filter(Workspace.workspace_type == "SYSTEM_SHARED").all()
+        assert len(copies) == 2
+        assert len(shared_workspaces) == 1
+        assert {copy.workspace_id for copy in copies} == {shared_workspaces[0].id}
+        assert all(version.storage_path.startswith("shared/upload_archive/") for version in (
+            db.get(DocumentVersion, copy.current_version_id) for copy in copies
+        ))
+        assert first["upload_document_version_id"]
+        assert second["upload_document_version_id"]
+    finally:
+        db.close()
 
 
 def test_duplicate_upload_waits_for_dialog_and_can_use_existing(monkeypatch, tmp_path):

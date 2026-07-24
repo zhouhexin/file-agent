@@ -61,6 +61,7 @@ from app.modules.managed_files.path_policy import resolve_managed_relative_path
 from app.modules.classification.service import persist_document_results_classifications
 from app.modules.chunks.service import DocumentIndexService
 from app.modules.retrieval.search_profile import DocumentSearchProfileService
+from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
 
 @dataclass(slots=True)
@@ -297,9 +298,10 @@ class UploadLifecycleService:
         archive = self.repository.get_archive_by_version(upload_version_id)
         if archive is None:
             raise HTTPException(status_code=404, detail="Archive status not found")
+        shared_workspace_id = get_shared_workspace_id(self.db)
         working_copy = (
             self.db.query(WorkingCopy)
-            .filter(WorkingCopy.managed_file_id == archive.managed_file_id, WorkingCopy.workspace_id == document.workspace_id)
+            .filter(WorkingCopy.managed_file_id == archive.managed_file_id, WorkingCopy.workspace_id == shared_workspace_id)
             .first()
             if archive.managed_file_id
             else None
@@ -371,7 +373,7 @@ class UploadLifecycleService:
         return working_copy.document_id if working_copy else None
 
     def _validate_existing_candidate(self, *, review: UploadDuplicateReview, working_copy_id: str) -> WorkingCopy:
-        """重新校验候选仍属于当前用户工作区且处于活动状态。"""
+        """重新校验候选仍属于共享工作目录且处于活动状态。"""
 
         candidate = (
             self.db.query(UploadDuplicateCandidate)
@@ -390,14 +392,14 @@ class UploadLifecycleService:
         return working_copy
 
     def _candidate_accessible(self, *, review: UploadDuplicateReview, candidate: UploadDuplicateCandidate) -> bool:
-        """候选只有在同工作区且 Document 属于当前用户时才能被选择。"""
+        """候选仅在共享目录中且逻辑上属于当前上传用户时才能被选择。"""
 
         working_copy = self.db.get(WorkingCopy, candidate.candidate_working_copy_id) if candidate.candidate_working_copy_id else None
         document = self.db.get(Document, working_copy.document_id) if working_copy else None
         return bool(
             working_copy
             and document
-            and working_copy.workspace_id == review.workspace_id
+            and working_copy.workspace_id == get_shared_workspace_id(self.db)
             and document.user_id == review.user_id
             and working_copy.status == "ACTIVE"
         )
@@ -741,10 +743,10 @@ class FileLifecycleJobProcessor:
             queue_name="IMPORT",
             root_id=root.id,
             created_by=document.user_id,
-            deduplication_key=f"working-copy-import:{document.workspace_id}:{managed_file.id}",
+            deduplication_key=f"working-copy-import:{get_shared_workspace_id(self.db)}:{managed_file.id}",
             payload={
                 "managed_file_id": managed_file.id,
-                "workspace_id": document.workspace_id,
+                "workspace_id": get_shared_workspace_id(self.db),
                 "user_id": document.user_id,
                 "source_upload_document_id": document.id,
             },
@@ -763,7 +765,9 @@ class FileLifecycleJobProcessor:
 
         payload = dict(job.payload_json or {})
         managed_file = self.db.get(ManagedFile, str(payload.get("managed_file_id") or ""))
-        workspace_id = str(payload.get("workspace_id") or "")
+        # 历史队列可能仍携带用户默认工作区；worker 只能导入唯一共享工作区，
+        # 不信任任务载荷中的物理范围，避免旧任务重新制造按用户副本。
+        workspace_id = get_shared_workspace_id(self.db)
         user_id = str(payload.get("user_id") or job.created_by or "")
         if managed_file is None or managed_file.status != "ACTIVE" or not workspace_id or not user_id:
             raise RuntimeError("IMPORT_WORKING_COPIES 缺少有效原始文件、工作区或用户")
@@ -1214,7 +1218,10 @@ class FileLifecycleJobProcessor:
                 working_copy=working_copy,
                 candidate_document=candidate_document,
             )
-            accessible = working_copy.workspace_id == review.workspace_id and candidate_document.user_id == review.user_id
+            accessible = (
+                working_copy.workspace_id == get_shared_workspace_id(self.db)
+                and candidate_document.user_id == review.user_id
+            )
             summary = (
                 {"message": "系统检测到高度相似内容", "similarity_bucket": _similarity_bucket(score)}
                 if scope == "CROSS_USER"
@@ -1429,7 +1436,11 @@ class FileLifecycleJobProcessor:
 
 
 class WorkingCopyQueryService:
-    """工作副本只读查询服务，所有查询都强制限制当前默认工作区。"""
+    """共享工作副本只读查询服务。
+
+    用户身份仍用于认证与审计，但物理副本范围固定为系统共享工作区，不能再按
+    ``default_workspace_id`` 过滤而造成用户看到不同的文件集合。
+    """
 
     def __init__(self, db: Session) -> None:
         """注入数据库会话。"""
@@ -1438,11 +1449,16 @@ class WorkingCopyQueryService:
         self.repository = FileLifecycleRepository(db)
 
     def list(self, current_user: User) -> list[WorkingCopyResponse]:
-        """列出当前工作区工作副本。"""
+        """列出系统共享工作目录中的工作副本。"""
 
-        if not current_user.default_workspace_id:
-            return []
-        return [self._to_response(copy, root) for copy, root in self.repository.list_owned_working_copies(workspace_id=current_user.default_workspace_id)]
+        shared_workspace_id = get_shared_workspace_id(self.db)
+        return [
+            self._to_response(copy, root)
+            for copy, root in self.repository.list_user_working_copies(
+                workspace_id=shared_workspace_id,
+                user_id=current_user.id,
+            )
+        ]
 
     def get(self, *, working_copy_id: str, current_user: User) -> WorkingCopyResponse:
         """读取当前工作区工作副本元数据。"""
@@ -1509,13 +1525,14 @@ class WorkingCopyQueryService:
         }) for item in self.repository.list_path_records(copy.id)]
 
     def trash_entries(self, *, current_user: User) -> list[TrashEntryResponse]:
-        """列出当前默认工作区的回收站条目，不返回物理回收站路径。"""
+        """列出共享工作目录的回收站条目，不返回物理回收站路径。"""
 
-        if not current_user.default_workspace_id:
-            return []
+        shared_workspace_id = get_shared_workspace_id(self.db)
         entries = (
             self.db.query(TrashEntry)
-            .filter(TrashEntry.workspace_id == current_user.default_workspace_id)
+            .join(WorkingCopy, WorkingCopy.id == TrashEntry.working_copy_id)
+            .join(Document, Document.id == WorkingCopy.document_id)
+            .filter(TrashEntry.workspace_id == shared_workspace_id, Document.user_id == current_user.id)
             .order_by(TrashEntry.deleted_at.desc())
             .all()
         )
@@ -1548,13 +1565,12 @@ class WorkingCopyQueryService:
         return path, copy.filename, document.content_type
 
     def _owned(self, *, working_copy_id: str, current_user: User) -> WorkingCopy:
-        """校验工作副本属于当前默认工作区。"""
+        """校验工作副本属于唯一共享工作目录。"""
 
-        if not current_user.default_workspace_id:
-            raise HTTPException(status_code=404, detail="Working copy not found")
-        copy = self.repository.get_owned_working_copy(
+        copy = self.repository.get_user_working_copy(
             working_copy_id=working_copy_id,
-            workspace_id=current_user.default_workspace_id,
+            workspace_id=get_shared_workspace_id(self.db),
+            user_id=current_user.id,
         )
         if copy is None:
             raise HTTPException(status_code=404, detail="Working copy not found")

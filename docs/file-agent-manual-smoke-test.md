@@ -19,7 +19,7 @@
 - TXT、MD、CSV、PDF、DOC、DOCX、XLS、XLSX 的代表性解析。
 - 普通用户任务回执不暴露 Skill、Tool、AgentRun、服务器路径或密钥。
 - 工作副本重命名、移入回收站和恢复必须经过 OperationPlan 确认。
-- 用户之间的数据隔离，以及 ops/admin 审计接口权限。
+- 所有用户仅有一个共享物理工作目录、用户间逻辑数据隔离，以及 ops/admin 审计接口权限。
 - 原件内容和路径在全部测试过程中保持不变。
 
 以下能力当前不作为通过条件：
@@ -72,11 +72,11 @@ git diff --check
 当前阶段期望：
 
 ```text
-后端（macOS/Linux）：513 passed, 19 skipped
-后端（Windows 有 symlink 权限）：513 passed, 19 skipped
-后端（Windows 无 symlink 权限）：512 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
+后端（macOS/Linux）：517 passed, 19 skipped
+后端（Windows 有 symlink 权限）：517 passed, 19 skipped
+后端（Windows 无 symlink 权限）：516 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
 前端：TypeScript 检查和 Vite build 成功
-Alembic：单一 head 20260724_0002
+Alembic：单一 head 20260724_0003
 Python：No broken requirements found
 ```
 
@@ -132,6 +132,27 @@ python -m pytest -v `
 删除数据库记录；需要清理时必须以后续受控产品能力执行。
 
 如果当前数据库 schema 与运行代码不兼容，应停止烟测并报告环境问题，而不是在烟测过程中修改数据库。
+
+### 4.1.1 共享工作目录的干净开发重置
+
+仅当需要从零验证“每个文件只导入一次”时，先停止 API、scheduler、watcher 和全部 worker，再在仓库根目录
+执行 migration，随后运行以下受控命令：
+
+```bash
+PYTHONPATH=apps/api \
+/opt/homebrew/anaconda3/envs/py311/bin/python \
+  -m app.scripts.reset_development_shared_workspace \
+  --confirm-reset-shared-workspace
+```
+
+该命令会清空：数据库业务表（保留 `alembic_version`）、`WORKING_COPY_STORAGE_ROOT`、
+`TRASH_STORAGE_ROOT`、`FILE_STORAGE_ROOT` 下的 `uploads`/`quarantine`/`temp`，以及
+`MANAGED_ROOT_ARCHIVE_WRITE_PATH` 中旧上传归档原件。它明确不会删除外部
+`MANAGED_ROOT_*` 受管原始资料目录，例如 `MANAGED_ROOT_SCHOOL_FILES`。
+
+命令会拒绝空归档路径、项目根、文件系统根、重复目标以及任何与外部受管原始资料目录重叠的路径；出现
+拒绝时必须修正 `.env`，不能手动用递归删除命令绕过。完成后重新启动服务，系统会创建唯一的
+`SYSTEM_SHARED` 工作区；首次扫描会把外部资料按批次导入 `shared/<root_key>`，不会再按用户复制。
 
 ### 4.2 LibreOffice
 

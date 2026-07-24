@@ -158,7 +158,9 @@ Jieba 在应用层生成中文词项，PostgreSQL 使用 `simple` FTS/GIN 和 `p
 进程安装或加载 embedding 模型。后续如接独立 GPU 推理服务，先实现受控 provider 和异步回填任务，
 再把 `RETRIEVAL_MODE` 调整为 `hybrid`。关闭或回填失败时必须继续使用词法索引。
 
-阶段四的 `document_search_profiles` 是可重建的工作副本级瘦检索投影。执行 migration 后，上传导入、
+阶段四的 `document_search_profiles` 是可重建的工作副本级瘦检索投影。工作副本固定属于唯一
+`SYSTEM_SHARED` 系统工作区并使用 `shared/<root_key>` 存储前缀；用户 default workspace 只保存会话和
+上传来源，不能导致同一原始文件被重复复制。执行 migration 后，上传导入、
 重命名/移动、恢复、摘要完成和分类建议写入会在同一事务更新投影；旧数据可由
 `DocumentSearchProfileService.backfill_profiles()` 或 `reconcile_profiles()` 幂等补齐。生产迁移完成后，
 用以下两类对话烟测确认：上传后搜索文件名或分类主题；再搜索仅出现于原文中的短语，确认系统能返回

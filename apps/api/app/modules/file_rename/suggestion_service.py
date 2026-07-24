@@ -26,6 +26,7 @@ from app.modules.managed_files.directory_scope_resolver import (
 from app.modules.managed_files.repository import ManagedFileRepository
 from app.modules.managed_files.service import resolve_managed_file_query_scope, sync_configured_managed_roots
 from app.modules.managed_files.snapshot_service import ManagedFileSnapshotService
+from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
 
 _SPREADSHEET_RENAME_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".csv", ".tsv"}
@@ -68,8 +69,8 @@ class RenameSuggestionService:
         """为匹配文件生成建议，并只把 READY 项写入 OperationPlan。"""
 
         user = self.db.get(User, self.user_id)
-        if user is None or not user.default_workspace_id:
-            return _error("USER_WORKSPACE_REQUIRED", "当前用户缺少默认工作区，无法创建重命名计划。")
+        if user is None:
+            return _error("USER_NOT_FOUND", "当前用户不存在，无法创建重命名计划。")
         self._llm_validation_calls = 0
         scope = resolve_managed_file_query_scope(root_key=root_key, path_prefix=path_prefix)
         if scope.unresolved_root_key:

@@ -21,6 +21,7 @@ from app.modules.retrieval.scope_resolver import (
     FileSearchScopeResolver,
 )
 from app.modules.retrieval.two_stage_search import TwoStageFileSearchService
+from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
 
 router = APIRouter(prefix="/api", tags=["search"])
@@ -44,15 +45,8 @@ def search_files(
 ) -> dict:
     """执行与聊天一致的低耗两阶段文件检索并返回安全用户投影。"""
 
-    workspace_id = current_user.default_workspace_id
-    if not workspace_id:
-        return {
-            "query": request.query,
-            "total_returned": 0,
-            "partial": False,
-            "user_message": "当前用户尚未配置默认工作区，暂时无法搜索文件。",
-            "files": [],
-        }
+    # 检索范围是唯一共享工作目录；默认工作区只保存用户会话与上传来源。
+    workspace_id = get_shared_workspace_id(db)
     tokenizer = ChineseLexicalTokenizer(load_default_business_terms())
     parsed = FileSearchQueryParser(tokenizer=tokenizer).parse(request.query)
     scope = FileSearchScopeResolver(

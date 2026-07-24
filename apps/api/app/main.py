@@ -19,6 +19,7 @@ from app.modules.files.router import router as files_router
 from app.modules.file_rename.router import router as file_rename_router
 from app.modules.file_lifecycle.router import router as file_lifecycle_router
 from app.modules.file_lifecycle.scheduler import enqueue_reconciliation_jobs
+from app.modules.file_lifecycle.shared_workspace import get_or_create_shared_workspace
 from app.modules.managed_files.router import router as managed_files_router
 from app.modules.operations.router import router as operations_router
 from app.modules.retrieval.router import router as retrieval_router
@@ -36,6 +37,10 @@ async def lifespan(app: FastAPI):
 
     init_database()
     cleanup_old_logs()
+    # 共享工作区是物理工作副本的唯一归属；用户默认工作区仍只保存会话和上传来源。
+    with SessionLocal() as db:
+        get_or_create_shared_workspace(db)
+        db.commit()
     settings = get_settings()
     if settings.managed_root_reconcile_on_startup and settings.filesystem_async_jobs_enabled:
         # 启动钩子只提交持久化任务；全量扫描、归档和复制由独立 worker 完成。

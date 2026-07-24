@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.db.models import FileRenameBatch, FileRenameBatchItem, FileRenameReviewItem, User, utcnow
 from app.modules.file_rename.schemas import RenameSuggestion
 from app.modules.operations.repository import OperationPlanRepository
+from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
 
 EXECUTABLE_STATUSES = {"READY", "USER_NAMED"}
@@ -34,10 +35,10 @@ class RenameBatchService:
         """创建仍处于分析阶段的批次。"""
 
         user = self.db.get(User, self.user_id)
-        if user is None or not user.default_workspace_id:
-            raise ValueError("当前用户缺少默认工作区，无法创建重命名批次。")
+        if user is None:
+            raise ValueError("当前用户不存在，无法创建重命名批次。")
         batch = FileRenameBatch(
-            workspace_id=user.default_workspace_id,
+            workspace_id=get_shared_workspace_id(self.db),
             conversation_id=conversation_id,
             agent_run_id=agent_run_id,
             user_id=self.user_id,

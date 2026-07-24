@@ -6,6 +6,7 @@
 from uuid import uuid4
 
 from app.db.models import Document, DocumentSearchProfile, DocumentSummary, DocumentVersion, User, WorkingCopy
+from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.tests.helpers import client_with_database
 
 
@@ -29,10 +30,11 @@ def _add_profile(db, *, user: User, filename: str, summary_text: str) -> str:
     document_id = str(uuid4())
     version_id = str(uuid4())
     working_copy_id = str(uuid4())
+    shared_workspace_id = get_shared_workspace_id(db)
     document = Document(
         id=document_id,
         user_id=user.id,
-        workspace_id=user.default_workspace_id,
+        workspace_id=shared_workspace_id,
         original_filename=filename,
         content_type="text/plain",
         size_bytes=12,
@@ -53,7 +55,7 @@ def _add_profile(db, *, user: User, filename: str, summary_text: str) -> str:
     working_copy = WorkingCopy(
         id=working_copy_id,
         working_copy_root_id=str(uuid4()),
-        workspace_id=user.default_workspace_id,
+        workspace_id=shared_workspace_id,
         managed_file_id=str(uuid4()),
         document_id=document_id,
         current_version_id=version_id,
@@ -82,7 +84,7 @@ def _add_profile(db, *, user: User, filename: str, summary_text: str) -> str:
     profile = DocumentSearchProfile(
         id=str(uuid4()),
         user_id=user.id,
-        workspace_id=user.default_workspace_id,
+        workspace_id=shared_workspace_id,
         working_copy_id=working_copy_id,
         document_id=document_id,
         document_version_id=version_id,

@@ -21,6 +21,7 @@ from app.modules.file_rename.batch_service import RenameBatchService
 from app.modules.file_rename.execution_service import ConfirmedRenameService
 from app.modules.file_rename.schemas import RenameSuggestion
 from app.modules.operations.repository import OperationPlanRepository
+from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
 
 _CORRECTION_PATTERN = re.compile(r"^\s*文件\s*(?P<source>.+?)\s*更正为\s*(?P<target>.+?)\s*[。；;]?\s*$")
@@ -268,10 +269,10 @@ class RenameReviewService:
         elif executable:
             # 迁移前遗留待复核项没有批次关系，继续兼容原来的单次人工确认执行。
             user = self.db.get(User, self.user_id)
-            if user is None or not user.default_workspace_id:
-                return _resolution_error("USER_WORKSPACE_REQUIRED", "当前用户缺少默认工作区。")
+            if user is None:
+                return _resolution_error("USER_NOT_FOUND", "当前用户不存在。")
             plan = self.repository.create_plan(
-                workspace_id=user.default_workspace_id,
+                workspace_id=get_shared_workspace_id(self.db),
                 conversation_id=conversation_id,
                 agent_run_id=agent_run_id,
                 user_id=self.user_id,

@@ -62,7 +62,11 @@ class User(Base):
 
 
 class Workspace(Base):
-    """默认工作区表的最小 ORM 模型。"""
+    """用户默认工作区与系统共享工作区。
+
+    普通用户的默认工作区用于会话、上传来源和审计归属；所有可操作文件则统一
+    导入唯一的 ``SYSTEM_SHARED`` 工作区，避免按用户复制同一物理文件。
+    """
 
     __tablename__ = "workspaces"
 
@@ -70,6 +74,8 @@ class Workspace(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     owner_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
     is_default: Mapped[bool] = mapped_column(default=False, nullable=False)
+    workspace_type: Mapped[str] = mapped_column(String(30), nullable=False, default="USER")
+    system_key: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 

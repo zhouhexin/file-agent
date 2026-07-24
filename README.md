@@ -53,6 +53,7 @@ python -m pytest
 如果在项目根目录直接执行 `python -m uvicorn app.main:app ...` 且没有设置 `PYTHONPATH=apps/api`，会报 `ModuleNotFoundError: No module named 'app'`。
 上传文件先保存到 `FILE_STORAGE_ROOT=./storage/uploads` 暂存目录并创建异步查重任务。无重复候选时自动异步归档；发现相同或高度相似文件时，聊天页逐文件要求用户选择“继续上传”“使用已有文件”或“取消上传”。
 文件生命周期固定使用三层名词：`受管原始目录`保存不可变原始文件，`工作副本目录`承载 Agent 的增删改查，`回收站目录`保存可恢复的工作副本删除结果。重命名和移动只改变工作副本路径，不新增 `DocumentVersion`；原始文件始终不变。普通用户可以在 `/chat` 通过自然语言处理同名冲突、移入回收站和恢复文件，所有物理动作都必须先展示并确认 OperationPlan。
+所有用户共用唯一物理工作目录：受管资料和上传归档每个文件只导入一份，固定保存于 `shared/<root_key>`，不再按用户 default workspace 复制。用户 default workspace 仍只保存会话、上传来源和审计；普通用户的可见性校验不会因物理共享而放宽。共享目录上的改名、移动、回收站和恢复计划会明确提示其影响范围，仍须由发起用户确认。
 服务端结构化日志默认保存到 `LOG_DIR=./logs`，按天生成 `file-agent-YYYY-MM-DD.log`，启动时会删除超过 `LOG_RETENTION_DAYS=7` 天的日志。
 旧版 `.xls` 不再通过 `xlrd` 直读：系统必须先用 LibreOffice/`soffice` 在隔离临时目录和独立 profile 中转换为临时 `.xlsx`，校验输出后再由 `openpyxl` 解析全部工作表。转换器缺失或输出无效时返回结构化失败，原 `.xls` 字节不变，临时 `.xlsx` 不登记为上传原件。
 上传采用分块流式写入，`UPLOAD_MAX_FILE_SIZE_MB` 是可按部署容量调整的资源保护上限，默认 1024 MB，并非固定业务限制。当前阶段只执行扩展名、基础 MIME、宏和加密风险检查，不实现、也不宣称已执行病毒扫描。

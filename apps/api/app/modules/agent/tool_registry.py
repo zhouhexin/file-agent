@@ -338,15 +338,10 @@ def _search_handler(
             )
 
         # 启用新链路：两阶段检索
-        # 解析用户的 default workspace
-        user = db.get(User, user_id)
-        workspace_id = user.default_workspace_id if user and user.default_workspace_id else None
-        if not workspace_id:
-            # 没有 workspace 时降级到旧链路，避免新功能破坏现有调用
-            return WorkingCopySummarySearchService(db=db, user_id=user_id).search(
-                query=getattr(tool_input, "query"),
-                document_ids=list(getattr(tool_input, "document_ids", [])),
-            )
+        # 文件检索读取唯一共享工作目录；default workspace 只保留用户会话来源。
+        from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
+
+        workspace_id = get_shared_workspace_id(db)
 
         from app.modules.retrieval.two_stage_search import TwoStageFileSearchService
         from app.modules.retrieval.query_parser import FileSearchQueryParser
@@ -855,19 +850,16 @@ def _generate_rename_suggestions_handler(db: Any, user_id: str | None) -> ToolHa
                 code="MANAGED_FILE_SCOPE_EMPTY",
                 message="指定受管原始目录范围内没有找到文件。",
             )
-        user = db.get(User, user_id)
-        if user is None or not user.default_workspace_id:
-            return _working_copy_scope_error(
-                code="USER_WORKSPACE_REQUIRED",
-                message="当前用户缺少默认工作区。",
-            )
+        from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
+
+        shared_workspace_id = get_shared_workspace_id(db)
         managed_file_ids = [managed_file.id for managed_file, _root in rows]
         working_copies = (
             db.query(WorkingCopy)
             .join(Document, Document.id == WorkingCopy.document_id)
             .filter(
                 WorkingCopy.managed_file_id.in_(managed_file_ids),
-                WorkingCopy.workspace_id == user.default_workspace_id,
+                WorkingCopy.workspace_id == shared_workspace_id,
                 WorkingCopy.status == "ACTIVE",
                 Document.user_id == user_id,
             )

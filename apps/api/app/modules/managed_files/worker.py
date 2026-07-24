@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.logging import log_context, log_event, new_request_id
-from app.db.models import AgentRun, FilesystemJob, ManagedFile, ToolInvocation, Workspace, utcnow
+from app.db.models import AgentRun, FilesystemJob, ManagedFile, ManagedRoot, ToolInvocation, User, utcnow
 from app.modules.file_lifecycle.repository import FileLifecycleRepository
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.changesets.service import persist_changeset_from_document_results
@@ -26,6 +26,7 @@ from app.modules.classification.result_builder import (
 )
 from app.modules.classification.service import persist_document_results_classifications
 from app.modules.file_lifecycle.service import FileLifecycleJobProcessor
+from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
 from app.modules.managed_files.scanner import ManagedFileScanner
@@ -300,34 +301,44 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
 
 
 def _enqueue_import_jobs_for_files(*, db: Session, root_id: str, files: list[ManagedFile]) -> list[str]:
-    """为当前扫描批次创建导入任务，不等待整轮扫描结束。"""
+    """为当前扫描批次创建唯一共享目录导入任务，不等待整轮扫描结束。
+
+    外部受管文件与上传归档文件都只生成一份共享工作副本；``user_id`` 仅作为
+    导入审计与上传回执的来源，不能再用它派生物理副本数量。
+    """
 
     queue = FilesystemJobQueue(db)
     lifecycle_repository = FileLifecycleRepository(db)
-    workspaces = db.query(Workspace).filter(Workspace.owner_id.isnot(None)).all()
+    shared_workspace_id = get_shared_workspace_id(db)
+    root = db.get(ManagedRoot, root_id)
+    fallback_user = (
+        str(root.created_by)
+        if root is not None and root.created_by
+        else (str(db.query(User.id).order_by(User.created_at.asc()).scalar() or ""))
+    )
     job_ids: list[str] = []
     for managed_file in files:
-        targets: list[tuple[str, str]] = []
+        user_id = fallback_user
         if managed_file.source_type == "UPLOAD_ARCHIVE" and managed_file.source_upload_version_id:
             review = lifecycle_repository.get_review_by_version(managed_file.source_upload_version_id)
             if review is not None:
-                targets = [(review.workspace_id, review.user_id)]
-        else:
-            targets = [(workspace.id, str(workspace.owner_id)) for workspace in workspaces if workspace.owner_id]
-        for workspace_id, user_id in targets:
-            import_job = queue.create_job(
-                job_type="IMPORT_WORKING_COPIES",
-                queue_name="IMPORT",
-                root_id=root_id,
-                created_by=user_id,
-                deduplication_key=f"working-copy-import:{workspace_id}:{managed_file.id}",
-                payload={
-                    "managed_file_id": managed_file.id,
-                    "workspace_id": workspace_id,
-                    "user_id": user_id,
-                },
-            )
-            job_ids.append(import_job.id)
+                user_id = review.user_id
+        # 新部署尚无用户时不能伪造审计人；下次有管理员或上传者后再调度即可。
+        if not user_id:
+            continue
+        import_job = queue.create_job(
+            job_type="IMPORT_WORKING_COPIES",
+            queue_name="IMPORT",
+            root_id=root_id,
+            created_by=user_id,
+            deduplication_key=f"working-copy-import:{shared_workspace_id}:{managed_file.id}",
+            payload={
+                "managed_file_id": managed_file.id,
+                "workspace_id": shared_workspace_id,
+                "user_id": user_id,
+            },
+        )
+        job_ids.append(import_job.id)
     return job_ids
 
 
