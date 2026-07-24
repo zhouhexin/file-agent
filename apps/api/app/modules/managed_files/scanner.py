@@ -69,6 +69,9 @@ class ManagedFileScanner:
         files_discovered = 0
         files_updated = 0
         errors = 0
+        # 记录本轮已经处理的真实相对路径，供原件重命名/移动识别使用。该集合必须
+        # 在遍历前初始化；否则历史索引存在且路径变化时会触发 NameError，中断启动扫描。
+        seen_paths: set[str] = set()
         # `sorted(root.rglob(...))` 会先枚举完整目录树，百万文件时首批导入仍会被
         # 卡住。这里保持惰性遍历，满足一批后即可提交给独立 import worker。
         for path in root_path.rglob("*"):
@@ -86,13 +89,21 @@ class ManagedFileScanner:
             stat = resolved.stat()
             relative_path_hash = _path_hash(relative_path)
             fingerprint = _fingerprint(relative_path=relative_path, size_bytes=stat.st_size, modified_at=stat.st_mtime)
-            file_identity = f"{stat.st_dev}:{stat.st_ino}"
+            file_identity = _file_identity(stat)
             existing = existing_by_path.get(relative_path)
-            if existing is None:
+            if existing is None and file_identity is not None:
                 # 同一设备和 inode 在本轮出现在新路径时视为原始文件重命名/移动，
-                # 继续沿用 ManagedFile 稳定 ID，工作副本路径保持不变。
+                # 继续沿用 ManagedFile 稳定 ID，工作副本路径保持不变。只有旧索引
+                # 路径已经确定不存在时才能复用；硬链接或权限不明时不得合并记录。
                 identity_match = existing_by_identity.get(file_identity)
-                if identity_match is not None and identity_match.relative_path not in seen_paths:
+                if (
+                    identity_match is not None
+                    and identity_match.relative_path not in seen_paths
+                    and not _indexed_source_still_exists(
+                        root_path=root_path,
+                        relative_path=identity_match.relative_path,
+                    )
+                ):
                     existing = identity_match
             # 全量内容哈希只在异步扫描 worker 中计算；元数据未变化时复用既有哈希，
             # 避免查询请求承担大文件 I/O，同时保证查重不用轻量 fingerprint 冒充内容事实。
@@ -123,6 +134,7 @@ class ManagedFileScanner:
                 )
                 self.db.add(existing)
             else:
+                existing.relative_path = relative_path
                 existing.filename = resolved.name
                 existing.relative_path_hash = relative_path_hash
                 existing.category_path = category_path
@@ -136,6 +148,7 @@ class ManagedFileScanner:
                 existing.last_seen_scan_run_id = scan_run.id
                 existing.updated_at = utcnow()
                 self._sync_working_copy_status(managed_file=existing, source_sha256=content_sha256)
+            seen_paths.add(relative_path)
             batch_files.append(existing)
             files_discovered += 1
             files_updated += 1
@@ -232,6 +245,41 @@ class ManagedFileScanner:
                 else "ORIGINAL_CHANGED"
             )
             working_copy.updated_at = utcnow()
+
+
+def _file_identity(stat_result) -> str | None:
+    """生成可用于同轮移动识别的文件身份；不可靠的零 inode 必须禁用复用。
+
+    部分 Windows 网络盘或特殊文件系统可能把 inode 返回为 0。此时若继续以
+    ``device:0`` 建索引，会把大量不同文件误判为同一个文件，因此安全回退路径匹配。
+    """
+
+    device = getattr(stat_result, "st_dev", None)
+    inode = getattr(stat_result, "st_ino", None)
+    if device is None or inode in {None, 0}:
+        return None
+    return f"{device}:{inode}"
+
+
+def _indexed_source_still_exists(*, root_path: Path, relative_path: str) -> bool:
+    """确认旧索引路径是否仍存在；权限或路径策略不明确时按“仍存在”保护。
+
+    只有明确的 FileNotFoundError 才能证明原路径已消失。其他异常不能成为复用
+    ManagedFile ID 的依据，避免初始化扫描把硬链接或不可访问文件错误合并。
+    """
+
+    try:
+        indexed_path = resolve_managed_relative_path(
+            root_path=root_path,
+            relative_path=relative_path,
+            must_exist=False,
+        )
+        indexed_path.stat()
+        return True
+    except FileNotFoundError:
+        return False
+    except (OSError, PathPolicyError):
+        return True
 
 
 def _fingerprint(*, relative_path: str, size_bytes: int, modified_at: float) -> str:

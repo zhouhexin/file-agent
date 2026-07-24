@@ -13,7 +13,7 @@ from app.db.models import (
     ManagedFile,
     ManagedRoot,
 )
-from app.modules.managed_files.worker import process_next_filesystem_job
+from app.modules.managed_files.worker import _public_job_error_message, process_next_filesystem_job
 from app.modules.managed_files.scanner import ManagedFileScanner
 from app.modules.managed_files.service import sync_configured_managed_roots
 from app.modules.file_lifecycle.service import FileLifecycleJobProcessor
@@ -90,6 +90,25 @@ def test_scanner_reports_unavailable_managed_root_instead_of_silent_empty_scan(t
     finally:
         db.close()
         clear_overrides()
+
+
+def test_scan_job_error_message_distinguishes_path_failure_from_internal_failure():
+    """扫描内部回归不得再误报成目录权限问题，同时不能向普通响应泄露异常正文。"""
+
+    job = FilesystemJob(job_type="SCAN_MANAGED_ROOT", queue_name="SCAN", status="RUNNING")
+    unavailable = _public_job_error_message(
+        job=job,
+        error=FileNotFoundError("C:/private/path"),
+    )
+    internal = _public_job_error_message(
+        job=job,
+        error=NameError("secret internal detail"),
+    )
+
+    assert "目录不可访问" in unavailable
+    assert "扫描失败" in internal
+    assert "目录不可访问" not in internal
+    assert "secret internal detail" not in internal
 
 
 def test_scan_publishes_import_jobs_by_batch_before_full_root_completion(monkeypatch, tmp_path: Path, capsys):

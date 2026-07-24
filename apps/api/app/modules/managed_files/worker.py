@@ -570,8 +570,15 @@ def _public_job_error_message(*, job: FilesystemJob, error: Exception) -> str:
 
     if job.job_type == "CLASSIFY_MANAGED_FILES":
         return "受管文件后台分类失败，请稍后重试或联系管理员。"
-    if job.job_type in {"RECONCILE_MANAGED_ROOT", "SCAN_MANAGED_ROOT"}:
+    if job.job_type in {"RECONCILE_MANAGED_ROOT", "SCAN_MANAGED_ROOT"} and isinstance(
+        error,
+        (FileNotFoundError, NotADirectoryError, PermissionError),
+    ):
         return "受管原始目录不可访问，请检查 MANAGED_ROOT 配置、目录是否存在及服务账户读取权限。"
+    if job.job_type in {"RECONCILE_MANAGED_ROOT", "SCAN_MANAGED_ROOT"}:
+        # 扫描器内部异常不能伪装成路径配置问题；普通响应不暴露异常正文和绝对路径，
+        # 运维人员可通过同一 job_id 在 JSONL 日志中读取 error_code。
+        return "受管原始目录扫描失败，原始文件未被修改；请根据 job_id 查看服务器日志。"
     if FileLifecycleJobProcessor.supports(job.job_type):
         return "文件后台处理失败，系统将按策略重试；达到上限后请联系管理员。"
     return str(error)[:2000] or "文件系统任务执行失败。"

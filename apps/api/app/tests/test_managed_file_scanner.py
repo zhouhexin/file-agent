@@ -37,6 +37,40 @@ def test_scanner_records_file_metadata_and_marks_missing(tmp_path):
         clear_overrides()
 
 
+def test_scanner_reuses_stable_record_after_source_file_is_renamed(tmp_path):
+    """原件改名后的重复初始化扫描必须复用稳定记录，不能因路径集合未初始化而失败。"""
+
+    inbox = tmp_path / "student-affairs"
+    inbox.mkdir()
+    old_path = inbox / "旧名称.txt"
+    old_path.write_text("受管目录初始化回归", encoding="utf-8")
+    _client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        root = ManagedRoot(root_key="student_affairs", display_name="学工收件箱", container_path=str(inbox))
+        db.add(root)
+        db.commit()
+
+        ManagedFileScanner(db).scan_root(root)
+        original_record = db.query(ManagedFile).one()
+        original_id = original_record.id
+        old_path.rename(inbox / "新名称.txt")
+
+        second_run = ManagedFileScanner(db).scan_root(root)
+
+        records = db.query(ManagedFile).all()
+        assert second_run.status == "COMPLETED"
+        assert second_run.files_discovered == 1
+        assert second_run.files_missing == 0
+        assert len(records) == 1
+        assert records[0].id == original_id
+        assert records[0].relative_path == "新名称.txt"
+        assert records[0].status == "ACTIVE"
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def test_scanner_fingerprint_is_fixed_length_for_deep_paths(tmp_path):
     """fingerprint 不能保存完整路径，深层中文目录也必须稳定落库。"""
 

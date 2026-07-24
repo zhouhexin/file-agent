@@ -72,9 +72,9 @@ git diff --check
 当前阶段期望：
 
 ```text
-后端（macOS/Linux）：518 passed, 19 skipped
-后端（Windows 有 symlink 权限）：518 passed, 19 skipped
-后端（Windows 无 symlink 权限）：517 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
+后端（macOS/Linux）：520 passed, 19 skipped
+后端（Windows 有 symlink 权限）：520 passed, 19 skipped
+后端（Windows 无 symlink 权限）：519 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
 前端：TypeScript 检查和 Vite build 成功
 Alembic：单一 head 20260724_0003
 Python：No broken requirements found
