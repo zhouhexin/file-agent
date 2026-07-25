@@ -171,6 +171,11 @@ def test_upload_is_archived_then_imported_by_separate_jobs(monkeypatch, tmp_path
         assert db.query(ChangeItem).filter(ChangeItem.change_type == "ORIGINAL_FILE_ARCHIVED").count() == 1
         assert db.query(ChangeItem).filter(ChangeItem.change_type == "WORKING_COPY_IMPORTED").count() == 1
         assert db.query(ChangeItem).filter(ChangeItem.change_type == "DOCUMENT_INDEX_CREATED").count() == 1
+        archive_messages = db.query(Message).filter(
+            Message.content.like("%的原件已归档，正在创建工作副本。")
+        ).all()
+        assert archive_messages
+        assert all(message.role == "SYSTEM_AUDIT" for message in archive_messages)
     finally:
         db.close()
         clear_overrides()
@@ -933,6 +938,12 @@ def test_chat_creates_and_confirms_trash_then_restore_plans(monkeypatch, tmp_pat
     )
     assert trash_confirmation.json()["status"] == "EXECUTED"
     assert client.get(f"/api/working-copies/{working_copy['id']}", headers=headers).json()["status"] == "TRASHED"
+    with SessionLocal() as db:
+        operation_messages = db.query(Message).filter(
+            Message.content.like("工作副本操作完成：%")
+        ).all()
+        assert operation_messages
+        assert all(message.role == "SYSTEM_AUDIT" for message in operation_messages)
     trashed_history = client.get(
         "/api/conversations/chat-trash-conv",
         headers=headers,

@@ -33,6 +33,7 @@ import {
   canPreviewFileInfo,
   canPreviewInBrowser,
   deduplicateAttachmentsByDocumentId,
+  isVisibleConversationHistoryMessage,
 } from './presentation';
 import type { ChatAttachment, ChatTurn } from './presentation';
 
@@ -73,8 +74,9 @@ type ChatPageProps = {
 const HISTORY_PAGE_SIZE = 10;
 
 function historyMessagesToTurns(messages: ConversationHistoryMessage[]): ChatTurn[] {
-  // 后端已保证分页消息按时间正序返回，前端只负责转换为聊天展示结构。
-  return messages.map((historyMessage) => {
+  // 后端已保证分页消息按时间正序返回。转换前再过滤内部审计角色和旧生命周期文案，
+  // 防止旧 API 进程或历史数据把后台状态插到用户上传文件卡片之前。
+  return messages.filter(isVisibleConversationHistoryMessage).map((historyMessage) => {
     const attachments = deduplicateAttachmentsByDocumentId(historyMessage.attachments);
     return {
       id: historyMessage.id,

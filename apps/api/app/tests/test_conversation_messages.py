@@ -818,6 +818,55 @@ def test_same_document_id_is_deduplicated_in_message_and_legacy_history():
     clear_overrides()
 
 
+def test_legacy_lifecycle_status_messages_are_hidden_from_history_projection():
+    """升级前已写入 assistant 的生命周期状态消息也不能继续出现在聊天页。"""
+
+    client, session_factory = client_with_database()
+    headers = _auth_header(client, "legacy-lifecycle-message-user")
+    with session_factory() as db:
+        user_id = client.get("/api/auth/me", headers=headers).json()["id"]
+        conversation = Conversation(
+            id="legacy-lifecycle-message-chat",
+            user_id=user_id,
+            title="",
+        )
+        db.add(conversation)
+        db.add_all(
+            [
+                Message(
+                    conversation_id=conversation.id,
+                    user_id=user_id,
+                    role="assistant",
+                    content="文件“旧通知.txt”的原件已归档，正在创建工作副本。",
+                    attachments_json=[],
+                ),
+                Message(
+                    conversation_id=conversation.id,
+                    user_id=user_id,
+                    role="assistant",
+                    content="工作副本操作完成：TRASH_WORKING_COPIES",
+                    attachments_json=[],
+                ),
+                Message(
+                    conversation_id=conversation.id,
+                    user_id=user_id,
+                    role="user",
+                    content="保留在对话中的真实消息",
+                    attachments_json=[],
+                ),
+            ]
+        )
+        db.commit()
+
+    history = client.get(
+        "/api/conversations/legacy-lifecycle-message-chat",
+        headers=headers,
+    )
+    assert history.status_code == 200
+    assert [message["content"] for message in history.json()["messages"]] == ["保留在对话中的真实消息"]
+    clear_overrides()
+
+
 def test_post_message_rejects_invalid_attachment():
     """附件引用缺少 document_id 时必须由请求 schema 拒绝。"""
 

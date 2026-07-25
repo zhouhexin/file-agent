@@ -803,6 +803,9 @@ class FileLifecycleJobProcessor:
                 "sha256": version.sha256,
                 "risk_assessment": risk_assessment.to_dict(),
             },
+            # 归档是后台生命周期事件；普通用户只在任务回执中看到最终处理结果，
+            # 不在对话流中展示“正在创建工作副本”的内部中间状态。
+            visible_in_conversation=False,
         )
         archive.changeset_id = audit[0].id
         import_job = FilesystemJobQueue(self.db).create_job(

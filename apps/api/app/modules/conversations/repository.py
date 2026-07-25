@@ -43,6 +43,9 @@ LEGACY_INTERNAL_MESSAGE_PREFIXES = (
     "重复上传处理：",
     "已记录重复上传决策：",
 )
+LEGACY_INTERNAL_MESSAGE_SUFFIXES = (
+    "的原件已归档，正在创建工作副本。",
+)
 
 
 @dataclass(frozen=True)
@@ -532,8 +535,11 @@ class ConversationRepository:
         """
 
         return tuple(
-            Message.content.notlike(f"{prefix}%")
-            for prefix in LEGACY_INTERNAL_MESSAGE_PREFIXES
+            [
+                *(Message.content.notlike(f"{prefix}%") for prefix in LEGACY_INTERNAL_MESSAGE_PREFIXES),
+                *(Message.content.notlike(f"%{suffix}") for suffix in LEGACY_INTERNAL_MESSAGE_SUFFIXES),
+                Message.content.notlike("工作副本操作完成：%"),
+            ]
         )
 
     def _load_document_map(self, *, messages: list[Message], user_id: str) -> dict[str, Document]:

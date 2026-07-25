@@ -1,5 +1,5 @@
 // 聊天页展示工具只负责前端呈现规则，不承担文件权限或后端路径校验。
-import type { UploadedFile } from '../../types';
+import type { ConversationHistoryMessage, UploadedFile } from '../../types';
 
 export type ChatAttachment = UploadedFile & {
   // 图片预览使用浏览器本地 object URL，发送后仍仅以 document_id 作为后端引用。
@@ -39,6 +39,26 @@ export function deduplicateAttachmentsByDocumentId(
     seen.add(attachment.document_id);
     return true;
   });
+}
+
+export function isVisibleConversationHistoryMessage(
+  message: Pick<ConversationHistoryMessage, 'role' | 'content'>,
+): boolean {
+  // 普通聊天页只接收用户消息和最终助手消息。SYSTEM_AUDIT 等内部角色应由后端过滤，
+  // 这里保留展示层防线，避免旧服务或旧数据库记录把生命周期状态渲染成聊天气泡。
+  if (!['user', 'assistant'].includes(message.role)) {
+    return false;
+  }
+  if (message.role !== 'assistant') {
+    return true;
+  }
+  const content = message.content.trim();
+  return !(
+    content.startsWith('重复上传处理：')
+    || content.startsWith('已记录重复上传决策：')
+    || content.startsWith('工作副本操作完成：')
+    || content.endsWith('的原件已归档，正在创建工作副本。')
+  );
 }
 
 export function formatFileSize(sizeBytes: number): string {

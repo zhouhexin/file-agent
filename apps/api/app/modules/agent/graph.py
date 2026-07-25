@@ -1031,7 +1031,9 @@ def _build_managed_file_list_response(payload: Dict[str, Any]) -> str:
     path_prefix = str(query.get("path_prefix") or "").strip("/")
     scope_label = f"{root_key}/{path_prefix}" if path_prefix else root_key
     if not files:
-        return f"未找到相关文件。"
+        # 受管目录列表与主题检索含义不同；空结果必须保留用户选择的目录范围，
+        # 不能使用“未找到相关文件”这种会让用户误以为执行了正文检索的文案。
+        return f"{scope_label} 下暂未找到文件。"
     lines = [f"{scope_label} 下共有 {len(files)} 个文件："]
     lines.extend(_format_managed_file_tree(files[:50]))
     if len(files) > 50:

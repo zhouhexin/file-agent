@@ -609,6 +609,9 @@ class WorkingCopyOperationService:
             before_value={"relative_path": first.get("before_relative_path")},
             after_value=first,
             execution_status=first.get("status", "FAILED"),
+            # OperationPlan 的确认卡本身已经向用户展示结果，审计摘要不能再次作为
+            # “工作副本操作完成：...”消息插入普通聊天流。
+            visible_in_conversation=False,
         )
         plan.agent_run_id = changeset.agent_run_id
         for result in results[1:]:
