@@ -409,11 +409,15 @@ def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
 
 
 def _trash_restore_result(result: AgentRunResult) -> dict[str, Any] | None:
-    """投影完整文件名命中的回收站候选，不暴露工作副本、版本或内容哈希。"""
+    """投影回收站候选，不暴露工作副本、版本或内容哈希。
+
+    除文件检索外，表格分析、正文解析和文件预览也可能明确命中一个已删除的
+    document_id；这些入口必须复用同一张恢复选择卡，不能把历史正文直接显示出来。
+    """
 
     for invocation in result.tool_invocations:
         output = invocation.output_json
-        if invocation.tool_name != "hybrid-search" or not isinstance(output, dict):
+        if not isinstance(output, dict):
             continue
         selection = output.get("trash_restore_selection")
         if not isinstance(selection, dict):

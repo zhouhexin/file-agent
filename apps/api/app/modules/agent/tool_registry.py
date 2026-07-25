@@ -64,6 +64,7 @@ from app.modules.files.extractors import extract_document_text, extraction_confi
 from app.modules.files.readable_source import ReadableDocumentSourceResolver, apply_readable_source_metadata
 from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
 from app.modules.file_lifecycle.conversation_operations import ConversationalWorkingCopyPlanService
+from app.modules.file_lifecycle.trash_lookup import ExactTrashFilenameLookupService
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
 from app.modules.managed_files.service import (
@@ -274,6 +275,36 @@ def _document_handler(tool_name: str) -> ToolHandler:
         }
 
     return handler
+
+
+def _attach_trash_restore_selection(
+    *,
+    result: Dict[str, Any],
+    db: Any,
+    user_id: str | None,
+    filename: str,
+) -> Dict[str, Any]:
+    """为明确命中的回收站文件附加恢复选择数据，禁止继续返回正文。
+
+    解析、表格分析和工作台 Tool 可能绕过 ``hybrid-search`` 直接读取
+    ``document_id``，也必须复用同一张恢复选择卡。
+    """
+
+    error = result.get("error") if isinstance(result.get("error"), dict) else {}
+    if error.get("code") != "FILE_TRASHED" or db is None or user_id is None:
+        return result
+    selection = ExactTrashFilenameLookupService(
+        db=db,
+        user_id=user_id,
+    ).lookup(query=filename)
+    if selection:
+        result["trash_restore_selection"] = selection
+        result["user_message"] = str(selection.get("message") or "文件已删除，请选择是否恢复。")
+    else:
+        result["user_message"] = str(
+            error.get("message") or "文件已删除并保存在回收站中，请先恢复后再读取。"
+        )
+    return result
 
 
 def _chunk_build_handler(db: Any, user_id: str | None) -> ToolHandler:
@@ -803,6 +834,19 @@ def _document_insights_handler(db: Any, user_id: str | None) -> ToolHandler:
             if document_ids
             else []
         )
+        for document in documents:
+            lifecycle = FileExtractionRepository(db, user_id).resolve_original_file_for_document(document)
+            if not lifecycle.get("ok") and (lifecycle.get("error") or {}).get("code") == "FILE_TRASHED":
+                return _attach_trash_restore_selection(
+                    result={
+                        "ok": False,
+                        "status": "FAILED",
+                        "error": lifecycle.get("error") or {},
+                    },
+                    db=db,
+                    user_id=user_id,
+                    filename=str(document.original_filename or ""),
+                )
         insights = {
             insight.document_id: insight
             for insight in (
@@ -849,6 +893,19 @@ def _document_classifications_handler(db: Any, user_id: str | None) -> ToolHandl
             if document_ids
             else []
         )
+        for document in documents:
+            lifecycle = FileExtractionRepository(db, user_id).resolve_original_file_for_document(document)
+            if not lifecycle.get("ok") and (lifecycle.get("error") or {}).get("code") == "FILE_TRASHED":
+                return _attach_trash_restore_selection(
+                    result={
+                        "ok": False,
+                        "status": "FAILED",
+                        "error": lifecycle.get("error") or {},
+                    },
+                    db=db,
+                    user_id=user_id,
+                    filename=str(document.original_filename or ""),
+                )
         document_lookup = {document.id: document for document in documents}
         if not document_lookup:
             return {"ok": True, "documents": []}
@@ -1770,6 +1827,28 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
                 message=error.get("message"),
             )
             return _failed_extraction_output(document_id=document_id, error=error)
+        # 即使已有成功的 document_pages，也不能在工作副本进入回收站后复用历史正文。
+        lifecycle = repository.resolve_original_file_for_document(document)
+        if (
+            not lifecycle.get("ok")
+            and (lifecycle.get("error") or {}).get("code") == "FILE_TRASHED"
+        ):
+            error = lifecycle.get("error") or {}
+            log_event(
+                "file.extract.failed",
+                level="WARNING" if error.get("code") == "FILE_TRASHED" else "ERROR",
+                document_id=document_id,
+                status="FAILED",
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                error_code=error.get("code"),
+                message=error.get("message"),
+            )
+            return _attach_trash_restore_selection(
+                result=_failed_extraction_output(document_id=document_id, error=error),
+                db=db,
+                user_id=user_id,
+                filename=str(document.original_filename or ""),
+            )
 
         force_reprocess = bool(getattr(tool_input, "force_reprocess", False))
         force_reconvert = bool(getattr(tool_input, "force_reconvert", False))
@@ -1848,7 +1927,12 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
                 error_code=error.get("code"),
                 message=error.get("message"),
             )
-            return _failed_extraction_output(document_id=document.id, error=error)
+            return _attach_trash_restore_selection(
+                result=_failed_extraction_output(document_id=document.id, error=error),
+                db=db,
+                user_id=user_id,
+                filename=str(document.original_filename or ""),
+            )
 
         readable_source = readable_source_resolver.resolve(
             document=document,
@@ -2063,18 +2147,23 @@ def _analyze_spreadsheet_handler(db: Any, user_id: str | None) -> ToolHandler:
         repository = FileExtractionRepository(db, user_id)
         resolved = repository.resolve_original_file(document_id)
         if not resolved.get("ok"):
-            return {
+            error = resolved.get("error") or {
+                "code": "FILE_RESOLUTION_FAILED",
+                "message": "无法定位已授权的原始文件。",
+            }
+            result = {
                 "kind": "spreadsheet_analysis",
                 "ok": False,
                 "status": "FAILED",
                 "document_id": document_id,
-                "error": resolved.get("error") or {
-                    "code": "FILE_RESOLUTION_FAILED",
-                    "message": "无法定位已授权的原始文件。",
-                    "retryable": False,
-                    "user_action_required": False,
-                },
+                "error": error,
             }
+            return _attach_trash_restore_selection(
+                result=result,
+                db=db,
+                user_id=user_id,
+                filename=str(error.get("filename") or document_id),
+            )
 
         document = resolved["document"]
         return SpreadsheetAnalysisService().analyze(
@@ -2110,18 +2199,23 @@ def _spreadsheet_workbench_handler(db: Any, user_id: str | None, *, action: str)
         repository = FileExtractionRepository(db, user_id)
         resolved = repository.resolve_original_file(document_id)
         if not resolved.get("ok"):
-            return {
+            error = resolved.get("error") or {
+                "code": "FILE_RESOLUTION_FAILED",
+                "message": "无法定位已授权的原始文件。",
+            }
+            result = {
                 "kind": f"spreadsheet_{action}",
                 "ok": False,
                 "status": "FAILED",
                 "document_id": document_id,
-                "error": resolved.get("error") or {
-                    "code": "FILE_RESOLUTION_FAILED",
-                    "message": "无法定位已授权的原始文件。",
-                    "retryable": False,
-                    "user_action_required": False,
-                },
+                "error": error,
             }
+            return _attach_trash_restore_selection(
+                result=result,
+                db=db,
+                user_id=user_id,
+                filename=str(error.get("filename") or document_id),
+            )
 
         document = resolved["document"]
         service = SpreadsheetWorkbenchService()

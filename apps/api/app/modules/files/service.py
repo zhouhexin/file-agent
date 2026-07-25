@@ -162,6 +162,15 @@ class FileUploadService:
         document = self.repository.get_document_for_user(document_id=document_id, user_id=current_user.id)
         if document is None:
             raise HTTPException(status_code=404, detail="Document not found")
+        lifecycle = FileExtractionRepository(
+            self.db,
+            current_user.id,
+        ).resolve_original_file_for_document(document)
+        if not lifecycle.get("ok"):
+            error = lifecycle.get("error") or {}
+            if error.get("code") == "FILE_TRASHED":
+                raise HTTPException(status_code=410, detail=str(error.get("message") or "文件已删除，请先恢复。"))
+            raise HTTPException(status_code=404, detail=str(error.get("message") or "Stored file not found"))
 
         file_object = next(
             (
@@ -206,6 +215,15 @@ class FileUploadService:
         )
         if document is None:
             raise HTTPException(status_code=404, detail="Document not found")
+        lifecycle = FileExtractionRepository(
+            self.db,
+            current_user.id,
+        ).resolve_original_file_for_document(document)
+        if not lifecycle.get("ok"):
+            error = lifecycle.get("error") or {}
+            if error.get("code") == "FILE_TRASHED":
+                raise HTTPException(status_code=410, detail=str(error.get("message") or "文件已删除，请先恢复。"))
+            raise HTTPException(status_code=404, detail=str(error.get("message") or "文件不可读取"))
         extraction = FileExtractionRepository(
             self.db,
             current_user.id,

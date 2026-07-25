@@ -8,7 +8,17 @@ from typing import Any, Dict, List
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import Document, DocumentElement, DocumentExtractionRun, DocumentPage, DocumentVersion, FileObject, utcnow
+from app.db.models import (
+    Document,
+    DocumentElement,
+    DocumentExtractionRun,
+    DocumentPage,
+    DocumentVersion,
+    FileObject,
+    UploadArchiveRecord,
+    WorkingCopy,
+    utcnow,
+)
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 
 
@@ -64,7 +74,67 @@ class FileExtractionRepository:
         )
 
     def resolve_original_file_for_document(self, document: Document) -> Dict[str, Any]:
-        """在已校验文档归属后解析本地原件路径。"""
+        """在已校验文档归属后解析本地文件路径。
+
+        回收站中的工作副本仍然保留正文页、摘要和历史文件对象，不能因为物理
+        `trash_local` 文件仍存在就继续被读取。所有正文解析、表格分析和预览
+        入口都必须经过这里的生命周期检查。
+        """
+
+        trashed_copy = (
+            self.db.query(WorkingCopy)
+            .filter(
+                WorkingCopy.document_id == document.id,
+                WorkingCopy.status == "TRASHED",
+            )
+            .order_by(WorkingCopy.updated_at.desc())
+            .first()
+        )
+        if trashed_copy is None:
+            # 聊天附件通常仍携带“上传来源 Document”的 ID，而回收站状态记录在
+            # 归档后生成的共享 WorkingCopy 上。必须沿 UploadArchiveRecord 映射检查，
+            # 否则上传来源的历史 FileObject 会绕过回收站边界继续被读取。
+            managed_file_ids = [
+                value
+                for (value,) in (
+                    self.db.query(UploadArchiveRecord.managed_file_id)
+                    .join(
+                        DocumentVersion,
+                        DocumentVersion.id == UploadArchiveRecord.upload_document_version_id,
+                    )
+                    .filter(
+                        DocumentVersion.document_id == document.id,
+                        UploadArchiveRecord.managed_file_id.isnot(None),
+                    )
+                    .all()
+                )
+                if value
+            ]
+            if managed_file_ids:
+                copies = (
+                    self.db.query(WorkingCopy)
+                    .filter(WorkingCopy.managed_file_id.in_(managed_file_ids))
+                    .order_by(WorkingCopy.updated_at.desc())
+                    .all()
+                )
+                # 只有没有活动副本、但仍存在回收站副本时，才阻止这个上传来源。
+                if not any(copy.status == "ACTIVE" for copy in copies):
+                    trashed_copy = next(
+                        (copy for copy in copies if copy.status == "TRASHED"),
+                        None,
+                    )
+        if trashed_copy is not None:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "FILE_TRASHED",
+                    "message": f"文件“{trashed_copy.filename or document.original_filename}”已删除并保存在回收站中，请先恢复后再读取。",
+                    "retryable": False,
+                    "user_action_required": True,
+                    "file_availability": "TRASHED",
+                    "filename": trashed_copy.filename or document.original_filename,
+                },
+            }
 
         file_object = (
             self.db.query(FileObject)

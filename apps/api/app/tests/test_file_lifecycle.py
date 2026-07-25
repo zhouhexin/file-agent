@@ -29,6 +29,7 @@ from app.db.models import (
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
 from app.modules.file_lifecycle.risk import inspect_basic_file_risks
+from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.worker import process_next_filesystem_job
 from app.tests.helpers import clear_overrides, client_with_database
@@ -179,6 +180,60 @@ def test_upload_is_archived_then_imported_by_separate_jobs(monkeypatch, tmp_path
     finally:
         db.close()
         clear_overrides()
+
+
+def test_trashed_upload_source_cannot_read_historical_content(monkeypatch, tmp_path):
+    """上传来源 ID 映射到已删除工作副本时，也不能复用历史正文或回收站文件。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "trashed-source-reader")
+    upload = _upload(
+        client,
+        headers,
+        filename="资助汇总表.xlsx",
+        content=b"placeholder workbook bytes",
+    )
+    _drain(SessionLocal)
+    working_copy = client.get("/api/working-copies", headers=headers).json()[0]
+    _trash_working_copy(client, headers, working_copy["id"], "trashed-source-read-conv")
+
+    content_response = client.get(
+        f"/api/files/{upload['document_id']}/content",
+        headers=headers,
+    )
+    preview_response = client.get(
+        f"/api/files/{upload['document_id']}/preview",
+        headers=headers,
+    )
+    assert content_response.status_code == 410
+    assert "已删除" in content_response.json()["detail"]
+    assert preview_response.status_code == 410
+    assert "已删除" in preview_response.json()["detail"]
+
+    spreadsheet_request = client.post(
+        "/api/conversations/trashed-source-read-conv/messages",
+        headers=headers,
+        json={
+            "content": "汇总资助汇总表.xlsx中的资助金额",
+            "attachments": [{"document_id": upload["document_id"]}],
+        },
+    )
+    assert spreadsheet_request.status_code == 200
+    receipt = spreadsheet_request.json()["task_result"]
+    assert receipt["response_type"] == "trash_restore_selection"
+    assert receipt["trash_restore_result"]["candidates"]
+
+    with SessionLocal() as db:
+        source_document = db.get(Document, upload["document_id"])
+        assert source_document is not None
+        resolved = FileExtractionRepository(
+            db,
+            source_document.user_id,
+        ).resolve_original_file(upload["document_id"])
+        assert resolved["ok"] is False
+        assert resolved["error"]["code"] == "FILE_TRASHED"
+    clear_overrides()
 
 
 def test_existing_working_copy_repairs_missing_search_artifacts(monkeypatch, tmp_path):
