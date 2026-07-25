@@ -250,6 +250,21 @@ def test_uploaded_xlsx_person_total_routes_to_deterministic_analysis(monkeypatch
     assert "筛选条件：“申请人”等于“金海燕”" in task_result["final_response"]
     assert "Sheet“论文” B3, C3" in task_result["final_response"]
     assert "分类建议" not in task_result["final_response"]
+
+    scoped_response = client.post(
+        "/api/conversations/uploaded-xlsx-person-total-chat/messages",
+        headers=headers,
+        json={
+            "content": "2024科研成果资助汇总表中金海燕的资助总金额是多少",
+            "attachments": [{"document_id": upload_response.json()["document_id"]}],
+        },
+    )
+
+    assert scoped_response.status_code == 200
+    scoped_result = scoped_response.json()["task_result"]
+    assert "结果：6,500" in scoped_result["final_response"]
+    assert "筛选条件：“申请人”等于“金海燕”" in scoped_result["final_response"]
+    assert "研成果资助汇总表中金海燕" not in scoped_result["final_response"]
     run, tool_names = _latest_agent_audit(session_factory)
     assert run.intent == "ANALYZE_SPREADSHEET"
     assert tool_names == ["analyze-spreadsheet"]
@@ -294,6 +309,7 @@ def test_post_message_starts_agent_run():
     assert task_result["task_id"] == run.id
     assert task_result["task_status"] == "completed"
     assert task_result["response_type"] == "file_results"
+    assert task_result["display_mode"] == "classification_cards"
     assert "selected_skills" not in task_result
     assert "tool_invocations" not in task_result
     assert "tool_results" not in task_result

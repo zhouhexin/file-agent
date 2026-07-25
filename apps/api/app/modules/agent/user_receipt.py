@@ -33,6 +33,7 @@ class UserTaskReceipt(BaseModel):
         "async_job",
         "file_search_results",
     ] = "text"
+    display_mode: Literal["default", "classification_cards"] = "default"
     final_response: str | None = None
     processed_count: int = 0
     document_results: list[dict[str, Any]] = Field(default_factory=list)
@@ -89,6 +90,11 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         task_id=result.agent_run_id,
         task_status=task_status,
         response_type=response_type,
+        display_mode=(
+            "classification_cards"
+            if result.intent in {"CLASSIFY_FILES", "CLASSIFY_MANAGED_FILES"}
+            else "default"
+        ),
         final_response=result.final_response,
         processed_count=len(document_results),
         document_results=document_results,

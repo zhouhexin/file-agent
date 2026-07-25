@@ -645,6 +645,10 @@
   gap: 6px;
 }
 
+.document-result-list--standalone {
+  width: min(760px, 100%);
+}
+
 .document-result-card {
   display: block;
   border: 1px solid #e1e8f2;
@@ -989,6 +993,109 @@
   font-size: 16px;
   line-height: 1.8;
   white-space: pre-line;
+}
+
+.document-preview-backdrop {
+  position: fixed;
+  z-index: 1000;
+  display: grid;
+  align-items: center;
+  justify-items: center;
+  inset: 0;
+  background: rgb(15 23 42 / 0.45);
+  padding: 28px;
+}
+
+.document-preview-dialog {
+  display: grid;
+  width: min(920px, 100%);
+  max-height: min(820px, calc(100vh - 56px));
+  grid-template-rows: auto minmax(0, 1fr);
+  border: 1px solid #dbe3ef;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 24px 72px rgb(15 23 42 / 0.24);
+  overflow: hidden;
+}
+
+.document-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid #e5eaf1;
+  padding: 14px 18px;
+}
+
+.document-preview-header div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.document-preview-header strong {
+  overflow: hidden;
+  color: #1f2933;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.document-preview-header span {
+  color: #667789;
+  font-size: 12px;
+}
+
+.document-preview-header button {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #526273;
+  cursor: pointer;
+}
+
+.document-preview-header button:hover {
+  background: #f1f5f9;
+}
+
+.document-preview-content {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  overflow: auto;
+  padding: 20px;
+}
+
+.document-preview-section {
+  min-width: 0;
+}
+
+.document-preview-section h3 {
+  margin: 0 0 8px;
+  color: #526273;
+  font-size: 13px;
+}
+
+.document-preview-section pre {
+  margin: 0;
+  color: #1f2933;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.document-preview-empty,
+.document-preview-truncated {
+  margin: 0;
+  color: #667789;
+  font-size: 13px;
 }
 
 /* 受管文件按目录树展示，点击文件时仍走后端授权预览接口。 */

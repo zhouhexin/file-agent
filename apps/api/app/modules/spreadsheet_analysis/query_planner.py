@@ -38,6 +38,18 @@ SPREADSHEET_QUERY_PLAN_PROMPT = """你是 File Agent 的受控表格分析规划
 8. 你只做计划，不计算结果。
 """
 
+PERSON_COLUMN_TERMS = (
+    "姓名",
+    "申请人",
+    "申报人",
+    "教师",
+    "人员",
+    "负责人",
+    "作者",
+    "获奖人",
+    "学生",
+)
+
 
 def build_query_plan(
     *,
@@ -107,7 +119,7 @@ def build_deterministic_query_plans(
     """
 
     operation = _deterministic_operation(question)
-    filter_value = _person_filter_value(question)
+    filter_value = _person_filter_value(question, profile=profile)
     if operation is None or filter_value is None:
         return []
 
@@ -163,10 +175,23 @@ def _deterministic_operation(question: str) -> Aggregation | None:
     return None
 
 
-def _person_filter_value(question: str) -> str | None:
-    """提取“金海燕的资助总金额”等表达中的人员名称。"""
+def _person_filter_value(
+    question: str,
+    *,
+    profile: WorkbookProfile,
+) -> str | None:
+    """从问题中提取人员名称，并禁止把工作簿名称误当作筛选值。
+
+    Profile 只提供受控的列结构和少量样本。优先使用人员语义列中的精确样本；样本未覆盖时，
+    必须先移除真实工作簿名称和范围连接词，再使用严格长度的人名规则降级提取。
+    """
 
     normalized = re.sub(r"[\s，。！？、,.!?:：;；“”\"'（）()]+", "", question)
+    normalized = _remove_workbook_scope(normalized, filename=profile.filename)
+    known_value = _known_person_sample_value(normalized, profile=profile)
+    if known_value is not None:
+        return known_value
+
     match = re.search(
         r"(?:请问|查询|查找|统计|计算|帮我|看看|想知道)*"
         r"(?P<name>[\u4e00-\u9fff·]{2,12}?)(?:老师|同志)?的"
@@ -179,7 +204,70 @@ def _person_filter_value(question: str) -> str | None:
     name = match.group("name")
     # 前置礼貌语可能被非贪婪表达保留，统一剥离，不修改人名主体。
     name = re.sub(r"^(?:请问|查询|查找|统计|计算|帮我|看看|想知道)+", "", name)
-    return name or None
+    # “某工作簿中金海燕”的范围连接词属于文件定位，不得进入申请人筛选值。
+    name = re.split(r"(?:文件|表格|工作簿)?[中内里]", name)[-1]
+    name = re.sub(r"^(?:在|从|于|这个|该|上述|上面)+", "", name)
+    return name if _is_plausible_person_name(name) else None
+
+
+def _known_person_sample_value(
+    normalized_question: str,
+    *,
+    profile: WorkbookProfile,
+) -> str | None:
+    """从人员语义列的少量样本中解析问题明确提到的人员值。"""
+
+    matches: dict[str, str] = {}
+    for sheet in profile.sheets:
+        for column in sheet.columns:
+            normalized_name = _normalize_text(column.name)
+            if not any(term in normalized_name for term in PERSON_COLUMN_TERMS):
+                continue
+            for sample in column.sample_values:
+                display_value = str(sample or "").strip()
+                normalized_value = _normalize_text(display_value)
+                if (
+                    _is_plausible_person_name(display_value)
+                    and normalized_value
+                    and normalized_value in _normalize_text(normalized_question)
+                ):
+                    matches[normalized_value] = display_value
+    if not matches:
+        return None
+    # 较长姓名优先，避免短样本恰好是另一完整姓名的子串。
+    return sorted(matches.items(), key=lambda item: (-len(item[0]), item[0]))[0][1]
+
+
+def _remove_workbook_scope(question: str, *, filename: str) -> str:
+    """移除问题中真实工作簿文件名，保留其后的人员和统计语义。"""
+
+    normalized_filename = _normalize_text(filename)
+    filename_stem = re.sub(r"\.[^.]+$", "", str(filename or ""))
+    normalized_stem = _normalize_text(filename_stem)
+    result = question
+    # 先移除完整文件名，再移除不带扩展名的文件名；按长度排序避免只删掉局部。
+    for candidate in sorted(
+        {normalized_filename, normalized_stem},
+        key=len,
+        reverse=True,
+    ):
+        if candidate:
+            result = result.replace(candidate, "")
+    return result
+
+
+def _is_plausible_person_name(value: str) -> bool:
+    """限制确定性筛选值为合理姓名，长标题必须交由澄清或 LLM 规划。"""
+
+    normalized = str(value or "").strip()
+    if "·" in normalized:
+        return bool(
+            re.fullmatch(
+                r"[\u4e00-\u9fffA-Za-z]+(?:·[\u4e00-\u9fffA-Za-z]+)+",
+                normalized,
+            )
+        )
+    return bool(re.fullmatch(r"[\u4e00-\u9fff]{2,6}", normalized))
 
 
 def _select_metric_column(
@@ -231,7 +319,6 @@ def _select_person_filter_column(
     ]
     if not string_columns:
         return None
-    person_terms = ["姓名", "申请人", "申报人", "教师", "人员", "负责人", "作者", "获奖人", "学生"]
     scored = []
     for column in string_columns:
         normalized_name = _normalize_text(column.name)
@@ -239,7 +326,7 @@ def _select_person_filter_column(
             _normalize_text(value) == _normalize_text(filter_value)
             for value in column.sample_values
         )
-        semantic_score = sum(1 for term in person_terms if term in normalized_name)
+        semantic_score = sum(1 for term in PERSON_COLUMN_TERMS if term in normalized_name)
         score = (20 if sample_match else 0) + semantic_score * 3
         scored.append((score, column.column_index, column))
     scored.sort(key=lambda item: (-item[0], item[1]))

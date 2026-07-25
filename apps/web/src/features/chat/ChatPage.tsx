@@ -10,16 +10,25 @@ import {
   getUploadArchiveStatus,
   fetchManagedFileBlob,
   fetchUploadedFileBlob,
+  getFilePreview,
   getConversationDetail,
   getFilesystemJob,
   sendAgentMessage,
   uploadFile,
 } from '../../api/client';
 import { formatError } from '../../api/errors';
-import type { ConversationHistoryMessage, DuplicateDecisionResponse, DuplicateReview, ManagedFileResult, User } from '../../types';
+import type {
+  ConversationHistoryMessage,
+  DuplicateDecisionResponse,
+  DuplicateReview,
+  FilePreviewResponse,
+  ManagedFileResult,
+  User,
+} from '../../types';
 import { AttachmentRail } from './AttachmentRail';
 import { ChatTurnView } from './ChatTurnView';
 import { DuplicateUploadReviewCard } from './DuplicateUploadReviewCard';
+import { DocumentPreviewDialog } from './DocumentPreviewDialog';
 import { canPreviewFileInfo, canPreviewInBrowser } from './presentation';
 import type { ChatAttachment, ChatTurn } from './presentation';
 
@@ -97,6 +106,7 @@ export function ChatPage({
   const [duplicateReviews, setDuplicateReviews] = useState<Record<string, DuplicateReview>>({});
   const [chatTurns, setChatTurns] = useState<ChatTurn[]>([]);
   const [error, setError] = useState('');
+  const [documentPreview, setDocumentPreview] = useState<FilePreviewResponse | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
@@ -572,13 +582,24 @@ export function ChatPage({
   }
 
   async function openAttachment(file: ChatAttachment) {
-    // 附件内容通过鉴权接口取回 Blob，再交给浏览器预览或下载。
+    // Office 文件优先展示已解析正文；浏览器原生支持的格式继续使用鉴权 Blob 预览。
     setError('');
     if (file.status === 'MISSING') {
       setError('原始文件已不存在，无法打开附件。');
       return;
     }
     try {
+      if (!canPreviewInBrowser(file)) {
+        try {
+          setDocumentPreview(await getFilePreview(token, file.document_id));
+          return;
+        } catch (previewError) {
+          // 尚未生成 document_pages 时保留原有下载能力；权限或文件不存在错误必须关闭式失败。
+          if (!(previewError instanceof ApiError) || previewError.status !== 409) {
+            throw previewError;
+          }
+        }
+      }
       const blob = await fetchUploadedFileBlob(token, file.document_id);
       const objectUrl = URL.createObjectURL(blob);
       previewUrls.current.add(objectUrl);
@@ -648,7 +669,8 @@ export function ChatPage({
   }
 
   return (
-    <main className="app-shell">
+    <>
+      <main className="app-shell">
       <header className="topbar">
         <div className="topbar-title">
           <MessageSquare size={22} />
@@ -770,6 +792,13 @@ export function ChatPage({
           {error ? <p className="form-message error">{error}</p> : null}
         </div>
       </section>
-    </main>
+      </main>
+      {documentPreview ? (
+        <DocumentPreviewDialog
+          preview={documentPreview}
+          onClose={() => setDocumentPreview(null)}
+        />
+      ) : null}
+    </>
   );
 }

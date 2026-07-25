@@ -5,6 +5,7 @@ import type {
   ConversationDetailResponse,
   DuplicateDecisionResponse,
   DuplicateReview,
+  FilePreviewResponse,
   UploadArchiveStatus,
   FilesystemJobResponse,
   OperationConfirmResponse,
@@ -131,6 +132,14 @@ export async function fetchUploadedFileBlob(token: string, documentId: string): 
     throw new ApiError(response.status, String(message));
   }
   return response.blob();
+}
+
+export async function getFilePreview(
+  token: string,
+  documentId: string,
+): Promise<FilePreviewResponse> {
+  // Office 文件预览只读取后端已解析正文，不把本地存储位置或原始二进制交给页面解析。
+  return request<FilePreviewResponse>(`/files/${documentId}/preview`, { token });
 }
 
 export async function fetchManagedFileBlob(

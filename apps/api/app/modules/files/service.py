@@ -17,8 +17,14 @@ from app.db.models import Document, User
 from app.modules.file_lifecycle.service import UploadLifecycleService
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.files.artifact_repository import DocumentArtifactRepository
+from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.repository import FileRepository
-from app.modules.files.schemas import FileDeleteResponse, FileUploadResponse
+from app.modules.files.schemas import (
+    FileDeleteResponse,
+    FilePreviewResponse,
+    FilePreviewSection,
+    FileUploadResponse,
+)
 
 
 class FileUploadService:
@@ -179,6 +185,59 @@ class FileUploadService:
             path=file_path,
             media_type=document.content_type,
             filename=document.original_filename,
+        )
+
+    def get_preview(
+        self,
+        *,
+        document_id: str,
+        current_user: User,
+        max_chars: int = 100_000,
+    ) -> FilePreviewResponse:
+        """返回当前用户文件的受控正文预览。
+
+        Office 文件不能依赖浏览器原生渲染，因此只返回已经持久化的 ``document_pages`` 文本。
+        预览不能触发临时解析、不能读取其他用户文件，也不能返回存储路径或解析器内部信息。
+        """
+
+        document = self.repository.get_document_for_user(
+            document_id=document_id,
+            user_id=current_user.id,
+        )
+        if document is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        extraction = FileExtractionRepository(
+            self.db,
+            current_user.id,
+        ).get_latest_successful_extraction(document_id=document.id)
+        if extraction is None:
+            raise HTTPException(status_code=409, detail="文件正文尚未完成解析，暂时无法预览")
+
+        sections: list[FilePreviewSection] = []
+        remaining = max(1, max_chars)
+        truncated = False
+        for page in extraction["pages"]:
+            text = str(page.text_content or "")
+            if not text:
+                continue
+            visible_text = text[:remaining]
+            sections.append(
+                FilePreviewSection(
+                    page_number=page.page_number,
+                    sheet_name=page.sheet_name,
+                    text=visible_text,
+                )
+            )
+            remaining -= len(visible_text)
+            if len(visible_text) < len(text) or remaining <= 0:
+                truncated = True
+                break
+        return FilePreviewResponse(
+            document_id=document.id,
+            filename=document.original_filename,
+            content_type=document.content_type,
+            sections=sections,
+            truncated=truncated,
         )
 
     async def _stream_upload_to_quarantine(self, *, file: UploadFile) -> tuple[Path, int, str]:

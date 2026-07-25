@@ -230,10 +230,23 @@ def test_person_total_amount_uses_deterministic_multi_sheet_plan_without_llm(tmp
         question="金海燕的资助总金额是多少",
         profile=profile,
     )
+    scoped_plans = build_deterministic_query_plans(
+        question="2024科研成果资助汇总表中金海燕的资助总金额是多少",
+        profile=profile,
+    )
+    fallback_plans = build_deterministic_query_plans(
+        question="2024科研成果资助汇总表中欧阳娜娜的资助总金额是多少",
+        profile=profile,
+    )
 
     assert [plan.sheet_id for plan in plans] == ["sheet_1", "sheet_2"]
     assert all(plan.metric and plan.metric.operation.value == "sum" for plan in plans)
     assert all(plan.filters[0].value == "金海燕" for plan in plans)
+    assert [plan.sheet_id for plan in scoped_plans] == ["sheet_1", "sheet_2"]
+    assert all(plan.filters[0].value == "金海燕" for plan in scoped_plans)
+    # Profile 样本未包含目标人员时，也必须先剥离文件范围，不能恢复旧的长标题误识别。
+    assert [plan.sheet_id for plan in fallback_plans] == ["sheet_1", "sheet_2"]
+    assert all(plan.filters[0].value == "欧阳娜娜" for plan in fallback_plans)
 
     result = SpreadsheetAnalysisService(
         settings=SimpleNamespace(llm_enabled=False),
@@ -251,3 +264,14 @@ def test_person_total_amount_uses_deterministic_multi_sheet_plan_without_llm(tmp
     assert "结果：6,500" in response
     assert "Sheet“论文” B3, C3" in response
     assert "Sheet“专利” B2, C2" in response
+
+    scoped_result = SpreadsheetAnalysisService(
+        settings=SimpleNamespace(llm_enabled=False),
+    ).analyze(
+        document_id="doc-person-total",
+        filename=path.name,
+        file_path=path,
+        question="2024科研成果资助汇总表中金海燕的资助总金额是多少",
+    )
+    assert scoped_result["results"] == [{"group": "全部", "value": "6500"}]
+    assert scoped_result["filters"][0]["value"] == "金海燕"

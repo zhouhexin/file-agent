@@ -11,6 +11,7 @@ type DocumentResultCardProps = {
   index: number;
   attachment?: ChatAttachment;
   onOpenFile?: (file: ChatAttachment) => void;
+  onOpenDocument?: (documentId: string, filename: string) => void;
 };
 
 /** 展示一个文件的安全处理回执，并把文件打开动作交给受控上层回调。 */
@@ -19,12 +20,22 @@ export function DocumentResultCard({
   index,
   attachment,
   onOpenFile,
+  onOpenDocument,
   token,
 }: DocumentResultCardProps) {
   // 每个文件单独成卡，避免把批量结果挤成一整段文本。
   const failed = result.extraction_status === 'FAILED';
   const filename = result.filename || attachment?.filename || result.document_id;
   const primaryCategory = result.categories[0];
+  const canOpen = Boolean((attachment && onOpenFile) || onOpenDocument);
+  const openFile = () => {
+    // 当前轮优先复用完整附件信息；历史回执则只用稳定 document_id 重新鉴权预览。
+    if (attachment && onOpenFile) {
+      onOpenFile(attachment);
+      return;
+    }
+    onOpenDocument?.(result.document_id, filename);
+  };
 
   return (
     <article className={failed ? 'document-result-card document-result-card--failed' : 'document-result-card'}>
@@ -37,10 +48,10 @@ export function DocumentResultCard({
             <div className="document-result-main">
               <button
                 className="document-result-title"
-                disabled={!attachment || !onOpenFile}
+                disabled={!canOpen}
                 type="button"
-                onClick={() => attachment && onOpenFile?.(attachment)}
-                title={attachment ? '打开附件' : undefined}
+                onClick={openFile}
+                title={canOpen ? '预览文件' : undefined}
               >
                 {index}. {filename}
               </button>
@@ -62,10 +73,10 @@ export function DocumentResultCard({
             <div className="document-result-main">
               <button
                 className="document-result-title"
-                disabled={!attachment || !onOpenFile}
+                disabled={!canOpen}
                 type="button"
-                onClick={() => attachment && onOpenFile?.(attachment)}
-                title={attachment ? '打开附件' : undefined}
+                onClick={openFile}
+                title={canOpen ? '预览文件' : undefined}
               >
                 {index}. {filename}
               </button>

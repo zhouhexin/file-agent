@@ -27,6 +27,7 @@ export type TaskResult = {
     | 'operation_plan'
     | 'async_job'
     | 'file_search_results';
+  display_mode: 'default' | 'classification_cards';
   final_response: string | null;
   processed_count: number;
   document_results: DocumentResult[];
@@ -151,6 +152,20 @@ export type UploadedFile = {
   archive_status?: string;
   duplicate_review_status?: string;
   working_copy_id?: string | null;
+};
+
+export type FilePreviewSection = {
+  page_number: number | null;
+  sheet_name: string | null;
+  text: string;
+};
+
+export type FilePreviewResponse = {
+  document_id: string;
+  filename: string;
+  content_type: string;
+  sections: FilePreviewSection[];
+  truncated: boolean;
 };
 
 export type DuplicateCandidate = {

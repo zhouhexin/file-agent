@@ -9,7 +9,11 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.db.models import User
 from app.modules.auth.dependencies import get_current_user
-from app.modules.files.schemas import FileDeleteResponse, FileUploadResponse
+from app.modules.files.schemas import (
+    FileDeleteResponse,
+    FilePreviewResponse,
+    FileUploadResponse,
+)
 from app.modules.files.service import FileUploadService
 
 router = APIRouter(prefix="/api/files", tags=["files"])
@@ -51,3 +55,17 @@ def get_file_content(
     """返回原始附件内容，供前端点击预览或下载。"""
 
     return FileUploadService(db).get_content_response(document_id=document_id, current_user=current_user)
+
+
+@router.get("/{document_id}/preview", response_model=FilePreviewResponse)
+def preview_file(
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> FilePreviewResponse:
+    """返回已解析正文的安全预览，供聊天文件卡点击查看。"""
+
+    return FileUploadService(db).get_preview(
+        document_id=document_id,
+        current_user=current_user,
+    )

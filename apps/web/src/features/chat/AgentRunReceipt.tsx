@@ -182,6 +182,28 @@ export function AgentRunReceipt({
     ) : null;
   }
 
+  if (
+    taskResult.display_mode === 'classification_cards'
+    && pendingDecisions.length === 0
+  ) {
+    // 分类任务只展示逐文件卡；完整分类证据继续留在后端审计，不在聊天流重复铺成长文本。
+    return (
+      <div className="document-result-list document-result-list--standalone">
+        {results.map((result, index) => (
+          <DocumentResultCard
+            attachment={findAttachmentByDocumentId(attachments, result.document_id)}
+            index={index + 1}
+            key={`${result.document_id}-${index}`}
+            result={result}
+            token={token}
+            onOpenDocument={onOpenDocument}
+            onOpenFile={onOpenAttachment}
+          />
+        ))}
+      </div>
+    );
+  }
+
   return (
     <section className="agent-run-receipt">
       <div className="agent-run-summary">
@@ -210,6 +232,7 @@ export function AgentRunReceipt({
               key={`${result.document_id}-${index}`}
               result={result}
               token={token}
+              onOpenDocument={onOpenDocument}
               onOpenFile={onOpenAttachment}
             />
           ))}

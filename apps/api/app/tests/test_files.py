@@ -12,6 +12,7 @@ from app.db.models import (
     UploadDuplicateReview,
 )
 from app.modules.managed_files.worker import process_next_filesystem_job
+from app.modules.files.extraction_repository import FileExtractionRepository
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -184,6 +185,57 @@ def test_get_file_content_enforces_owner(monkeypatch, tmp_path):
 
     assert own_response.status_code == 200
     assert own_response.content == b"preview-content"
+    assert cross_response.status_code == 404
+    clear_overrides()
+
+
+def test_get_file_preview_returns_extracted_pages_and_enforces_owner(monkeypatch, tmp_path):
+    """文件卡正文预览必须读取已解析页面，并拒绝其他用户访问。"""
+
+    _configure_storage(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    owner = _auth_header(client, "preview-page-owner")
+    viewer = _auth_header(client, "preview-page-viewer")
+    upload = client.post(
+        "/api/files/upload",
+        headers=owner,
+        files={
+            "file": (
+                "分类材料.docx",
+                b"docx-placeholder",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    document_id = upload.json()["document_id"]
+    db = SessionLocal()
+    try:
+        document = db.get(Document, document_id)
+        repository = FileExtractionRepository(db, document.user_id)
+        run = repository.create_extraction_run(
+            document_id=document_id,
+            extractor="test-extractor",
+        )
+        repository.complete_extraction_run(
+            run=run,
+            pages=[
+                {"page_number": 1, "text": "第一页面正文"},
+                {"page_number": 2, "text": "第二页面正文"},
+            ],
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    own_response = client.get(f"/api/files/{document_id}/preview", headers=owner)
+    cross_response = client.get(f"/api/files/{document_id}/preview", headers=viewer)
+
+    assert own_response.status_code == 200
+    assert own_response.json()["filename"] == "分类材料.docx"
+    assert own_response.json()["sections"] == [
+        {"page_number": 1, "sheet_name": None, "text": "第一页面正文"},
+        {"page_number": 2, "sheet_name": None, "text": "第二页面正文"},
+    ]
     assert cross_response.status_code == 404
     clear_overrides()
 

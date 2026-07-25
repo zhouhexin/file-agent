@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class FileUploadResponse(BaseModel):
@@ -28,3 +28,21 @@ class FileDeleteResponse(BaseModel):
 
     deleted: bool
     cleanup_job_id: str | None = None
+
+
+class FilePreviewSection(BaseModel):
+    """文件预览中的一个可定位页面或工作表文本区段。"""
+
+    page_number: int | None = None
+    sheet_name: str | None = None
+    text: str
+
+
+class FilePreviewResponse(BaseModel):
+    """经过权限校验和长度限制的文件正文预览。"""
+
+    document_id: str
+    filename: str
+    content_type: str
+    sections: list[FilePreviewSection] = Field(default_factory=list)
+    truncated: bool = False
