@@ -1,7 +1,7 @@
-// 两阶段文件搜索结果卡片：逐文件展示文件名、分类、推荐原因和原文位置。
-// 不展示 Skill、Tool、Chunk、SQL 分数或内部路径。
+// 文件搜索结果只展示普通用户需要的文件名、分类标签和打开入口。
+// 推荐原因、摘要预览、索引降级、Skill、Tool、Chunk、SQL 分数和内部路径都不进入聊天页面。
 import { useState } from 'react';
-import { FileText, MapPin } from 'lucide-react';
+import { FileText, Tag } from 'lucide-react';
 
 import type { ChatAttachment } from './presentation';
 import type { FileSearchResult, FileSearchResultFile } from '../../types';
@@ -12,22 +12,6 @@ type SearchResultsReceiptProps = {
   onOpenAttachment?: (file: ChatAttachment) => void;
   onOpenDocument?: (documentId: string, filename: string) => void;
 };
-
-function formatLocation(
-  location: FileSearchResultFile['match_location']
-): string {
-  if (!location) return '';
-  const parts: string[] = [];
-  if (location.page_number) {
-    parts.push(`第 ${location.page_number} 页`);
-  }
-  if (location.sheet_name) {
-    let s = location.sheet_name;
-    if (location.cell_range) s += ` ${location.cell_range}`;
-    parts.push(s);
-  }
-  return parts.join(' · ');
-}
 
 function SearchResultCard({
   file,
@@ -44,62 +28,39 @@ function SearchResultCard({
     file.category_path && file.category_path.length > 0
       ? file.category_path.join(' / ')
       : '未分类';
-  const yearLabel = file.year ? `（${file.year}）` : '';
-  const locationLabel = formatLocation(file.match_location);
 
   return (
     <article className="search-result-card">
-      <div className="search-result-header">
+      <span className="search-result-icon">
         <FileText size={18} aria-hidden />
+      </span>
+      <div className="search-result-main">
         <span className="search-result-filename">
           {file.filename}
-          {yearLabel}
         </span>
-        <span className="search-result-category">{categoryLabel}</span>
+        <div className="search-result-tags" aria-label="文件分类">
+          <span className="category-chip category-chip--compact search-result-category-tag">
+            <Tag size={13} aria-hidden />
+            <span>{categoryLabel}</span>
+          </span>
+        </div>
       </div>
 
-      {file.overview ? (
-        <p className="search-result-overview">{file.overview}</p>
-      ) : null}
-
-      {file.match_reasons.length > 0 ? (
-        <ul className="search-result-reasons">
-          {file.match_reasons.map((reason, index) => (
-            <li key={`reason-${index}`}>{reason}</li>
-          ))}
-        </ul>
-      ) : null}
-
-      {locationLabel ? (
-        <div className="search-result-location">
-          <MapPin size={14} aria-hidden />
-          <span>{locationLabel}</span>
-        </div>
-      ) : null}
-
-      {file.evidence_preview ? (
-        <blockquote className="search-result-preview">
-          {file.evidence_preview}
-        </blockquote>
-      ) : null}
-
       {((attachment && onOpenAttachment) || onOpenDocument) ? (
-        <div className="search-result-actions">
-          <button
-            type="button"
-            className="search-result-action"
-            onClick={() => {
-              // 本轮附件优先复用已有预览元数据；全局检索结果只传稳定 document_id。
-              if (attachment && onOpenAttachment) {
-                onOpenAttachment(attachment);
-                return;
-              }
-              onOpenDocument?.(file.document_id, file.filename);
-            }}
-          >
-            查看文件
-          </button>
-        </div>
+        <button
+          type="button"
+          className="search-result-action"
+          onClick={() => {
+            // 本轮附件优先复用已有预览元数据；全局检索结果只传稳定 document_id。
+            if (attachment && onOpenAttachment) {
+              onOpenAttachment(attachment);
+              return;
+            }
+            onOpenDocument?.(file.document_id, file.filename);
+          }}
+        >
+          查看文件
+        </button>
       ) : null}
     </article>
   );
@@ -130,16 +91,7 @@ export function SearchResultsReceipt({
     <section className="search-results-receipt">
       <header className="search-results-summary">
         <strong>找到 {result.total_returned} 个相关文件</strong>
-        {result.partial ? (
-          <span className="search-results-partial">
-            部分文件原文索引暂不可用
-          </span>
-        ) : null}
       </header>
-
-      {result.user_message ? (
-        <p className="search-results-message">{result.user_message}</p>
-      ) : null}
 
       <div className="search-results-list">
         {visibleFiles.map((file) => (
@@ -160,7 +112,7 @@ export function SearchResultsReceipt({
       {visibleCount < result.files.length ? (
         <button
           type="button"
-          className="search-result-action"
+          className="search-results-more"
           onClick={() => setVisibleCount((current) => current + 10)}
         >
           查看更多

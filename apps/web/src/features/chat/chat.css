@@ -853,6 +853,113 @@
   color: #b42318;
 }
 
+.search-results-receipt {
+  display: grid;
+  gap: 10px;
+  width: min(760px, 100%);
+  border: 1px solid #dbe3ef;
+  border-radius: 12px;
+  background: #fff;
+  padding: 14px;
+  box-shadow: 0 10px 28px rgb(31 41 51 / 0.06);
+}
+
+.search-results-summary {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+  color: #1f2933;
+  font-size: 15px;
+}
+
+.search-results-list {
+  display: grid;
+  gap: 8px;
+}
+
+.search-result-card {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid #e1e8f2;
+  border-radius: 9px;
+  background: #fff;
+  padding: 10px 12px;
+}
+
+.search-result-card:hover {
+  border-color: #c6d4e3;
+  background: #fbfdff;
+}
+
+.search-result-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: #eef4ff;
+  color: #2563eb;
+}
+
+.search-result-main {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.search-result-filename {
+  overflow: hidden;
+  color: #1f2933;
+  font-size: 14px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-result-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.search-result-category-tag {
+  width: fit-content;
+  cursor: default;
+}
+
+.search-result-action,
+.search-results-more {
+  border: 1px solid #c8d7ee;
+  border-radius: 7px;
+  background: #fff;
+  color: #1d4ed8;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 7px 11px;
+  white-space: nowrap;
+}
+
+.search-result-action:hover,
+.search-results-more:hover {
+  border-color: #93b4e8;
+  background: #f3f7ff;
+}
+
+.search-results-more {
+  justify-self: start;
+}
+
+.search-results-empty {
+  color: #475569;
+  font-size: 14px;
+}
+
 .document-result-failure {
   color: #9f1239;
   font-size: 13px;
@@ -1251,6 +1358,15 @@
   .composer-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .search-result-card {
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .search-result-action {
+    grid-column: 2;
+    justify-self: start;
   }
 
   .file-picker {
