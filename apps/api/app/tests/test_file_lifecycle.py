@@ -904,12 +904,22 @@ def test_chat_creates_and_confirms_trash_then_restore_plans(monkeypatch, tmp_pat
     _drain(SessionLocal)
     working_copy = client.get("/api/working-copies", headers=headers).json()[0]
 
+    context_message = client.post(
+        "/api/conversations/chat-trash-conv/messages",
+        headers=headers,
+        json={
+            "content": "读取这个文件",
+            "attachments": [{"document_id": upload["document_id"]}],
+        },
+    )
+    assert context_message.status_code == 200
+
     trash_message = client.post(
         "/api/conversations/chat-trash-conv/messages",
         headers=headers,
         json={
-            "content": "把这个文件移入回收站",
-            "attachments": [{"document_id": upload["document_id"]}],
+            "content": "删除待删除通知",
+            "attachments": [],
         },
     )
     assert trash_message.status_code == 200
@@ -923,6 +933,30 @@ def test_chat_creates_and_confirms_trash_then_restore_plans(monkeypatch, tmp_pat
     )
     assert trash_confirmation.json()["status"] == "EXECUTED"
     assert client.get(f"/api/working-copies/{working_copy['id']}", headers=headers).json()["status"] == "TRASHED"
+    trashed_history = client.get(
+        "/api/conversations/chat-trash-conv",
+        headers=headers,
+    )
+    assert trashed_history.status_code == 200
+    historical_attachment = next(
+        message["attachments"][0]
+        for message in trashed_history.json()["messages"]
+        if message["content"] == "读取这个文件"
+    )
+    # 历史卡片必须保留，但要投影最新回收站状态，禁止继续伪装成可打开文件。
+    assert historical_attachment["working_copy_status"] == "TRASHED"
+    assert historical_attachment["file_availability"] == "TRASHED"
+    assert historical_attachment["availability_message"] == "已删除（在回收站，可恢复）"
+    assert historical_attachment["can_open"] is False
+    assert historical_attachment["can_restore"] is True
+
+    repeated_delete = client.post(
+        "/api/conversations/chat-trash-conv/messages",
+        headers=headers,
+        json={"content": "删除待删除通知", "attachments": []},
+    )
+    assert repeated_delete.status_code == 200
+    assert "已经在回收站" in repeated_delete.json()["task_result"]["final_response"]
 
     restore_message = client.post(
         "/api/conversations/chat-trash-conv/messages",
@@ -940,6 +974,41 @@ def test_chat_creates_and_confirms_trash_then_restore_plans(monkeypatch, tmp_pat
     )
     assert restore_confirmation.json()["status"] == "EXECUTED"
     assert client.get(f"/api/working-copies/{working_copy['id']}", headers=headers).json()["status"] == "ACTIVE"
+    restored_history = client.get(
+        "/api/conversations/chat-trash-conv",
+        headers=headers,
+    )
+    restored_attachment = next(
+        message["attachments"][0]
+        for message in restored_history.json()["messages"]
+        if message["content"] == "读取这个文件"
+    )
+    assert restored_attachment["working_copy_status"] == "ACTIVE"
+    assert restored_attachment["file_availability"] == "AVAILABLE"
+    assert restored_attachment["can_open"] is True
+    assert restored_attachment["can_restore"] is False
+
+    # 数据库仍为 ACTIVE 但受控工作目录文件缺失时必须标记异常，不能误报为已删除。
+    with SessionLocal() as db:
+        restored_copy = db.get(WorkingCopy, working_copy["id"])
+        assert restored_copy is not None
+        restored_version = db.get(DocumentVersion, restored_copy.current_version_id)
+        assert restored_version is not None
+        (tmp_path / "working" / restored_version.storage_path).unlink()
+    missing_history = client.get(
+        "/api/conversations/chat-trash-conv",
+        headers=headers,
+    )
+    missing_attachment = next(
+        message["attachments"][0]
+        for message in missing_history.json()["messages"]
+        if message["content"] == "读取这个文件"
+    )
+    assert missing_attachment["working_copy_status"] == "ACTIVE"
+    assert missing_attachment["file_availability"] == "MISSING"
+    assert "工作目录文件不存在" in missing_attachment["availability_message"]
+    assert missing_attachment["can_open"] is False
+    assert missing_attachment["can_restore"] is False
     clear_overrides()
 
 

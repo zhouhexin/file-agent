@@ -6,13 +6,25 @@ Service 通过仓库写入 message，避免 HTTP 路由或 AgentRuntimeService �
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.db.models import AgentRun, Conversation, Document, DocumentVersion, Message, UploadDuplicateReview
+from app.db.models import (
+    AgentRun,
+    Conversation,
+    Document,
+    DocumentVersion,
+    Message,
+    TrashEntry,
+    UploadArchiveRecord,
+    UploadDuplicateReview,
+    WorkingCopy,
+    WorkingCopyRoot,
+)
 from app.modules.agent.repository import AgentRunRepository
 from app.modules.agent.user_receipt import build_user_task_receipt
 from app.modules.conversations.schemas import (
@@ -23,6 +35,7 @@ from app.modules.conversations.schemas import (
     ConversationPagination,
     MessageAttachment,
 )
+from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 
 
 HIDDEN_CONVERSATION_MESSAGE_ROLES = ("CLEARED", "SYSTEM_AUDIT")
@@ -30,6 +43,18 @@ LEGACY_INTERNAL_MESSAGE_PREFIXES = (
     "重复上传处理：",
     "已记录重复上传决策：",
 )
+
+
+@dataclass(frozen=True)
+class AttachmentAvailabilityProjection:
+    """聊天历史附件对应的当前工作副本可用状态。"""
+
+    working_copy_id: str | None
+    working_copy_status: str | None
+    file_availability: str
+    availability_message: str
+    can_open: bool
+    can_restore: bool
 
 
 class ConversationRepository:
@@ -67,7 +92,8 @@ class ConversationRepository:
         """创建用户消息并保存附件引用 JSON。"""
 
         self.ensure_conversation(conversation_id=conversation_id, user_id=user_id)
-        batch_id = str(uuid4()) if attachments and attachment_source == "uploaded" else None
+        unique_attachments = _deduplicate_message_attachments(attachments)
+        batch_id = str(uuid4()) if unique_attachments and attachment_source == "uploaded" else None
         message = Message(
             conversation_id=conversation_id,
             user_id=user_id,
@@ -80,7 +106,7 @@ class ConversationRepository:
                     "source": attachment_source,
                     **({"batch_id": batch_id} if batch_id else {}),
                 }
-                for attachment in attachments
+                for attachment in unique_attachments
             ],
         )
         self.db.add(message)
@@ -344,6 +370,7 @@ class ConversationRepository:
         # 决策完成后卡片本身也不再属于用户对话内容，但审计行仍保留在数据库。
         messages = self._exclude_resolved_duplicate_notifications(messages=messages)
         document_map = self._load_document_map(messages=messages, user_id=user_id)
+        availability_map = self._load_attachment_availability_map(document_map=document_map)
         agent_run_map = self._load_agent_run_map(messages=messages)
         agent_repository = AgentRunRepository(self.db)
         # 同一 AgentRun 只组装一次完整审计结果，再生成普通用户投影；完整结果不进入会话响应。
@@ -364,8 +391,12 @@ class ConversationRepository:
                     role=message.role,
                     content=message.content,
                     attachments=[
-                        self._attachment_to_summary(item=item, document_map=document_map)
-                        for item in message.attachments_json
+                        self._attachment_to_summary(
+                            item=item,
+                            document_map=document_map,
+                            availability_map=availability_map,
+                        )
+                        for item in _deduplicate_document_attachment_items(message.attachments_json)
                         if isinstance(item, dict) and item.get("document_id")
                     ],
                     metadata=[
@@ -537,11 +568,128 @@ class ConversationRepository:
         )
         return {run.message_id: run for run in runs}
 
+    def _load_attachment_availability_map(
+        self,
+        *,
+        document_map: dict[str, Document],
+    ) -> dict[str, AttachmentAvailabilityProjection]:
+        """批量解析历史 Document 到当前 WorkingCopy，并核对受控物理文件状态。
+
+        会话附件必须保留历史引用，但是否可查看、是否已进入回收站必须以当前
+        WorkingCopy 和 TrashEntry 为准，不能继续沿用上传时的 Document.status。
+        """
+
+        document_ids = list(document_map)
+        if not document_ids:
+            return {}
+        direct_copies = (
+            self.db.query(WorkingCopy)
+            .filter(WorkingCopy.document_id.in_(document_ids))
+            .all()
+        )
+        copies_by_document: dict[str, list[WorkingCopy]] = {}
+        for copy in direct_copies:
+            copies_by_document.setdefault(copy.document_id, []).append(copy)
+
+        upload_versions = (
+            self.db.query(DocumentVersion)
+            .filter(
+                DocumentVersion.document_id.in_(document_ids),
+                DocumentVersion.storage_tier == "UPLOAD",
+            )
+            .order_by(DocumentVersion.version_number.desc(), DocumentVersion.created_at.desc())
+            .all()
+        )
+        latest_upload_by_document: dict[str, DocumentVersion] = {}
+        for version in upload_versions:
+            latest_upload_by_document.setdefault(version.document_id, version)
+        version_ids = [version.id for version in latest_upload_by_document.values()]
+        archives = (
+            self.db.query(UploadArchiveRecord)
+            .filter(UploadArchiveRecord.upload_document_version_id.in_(version_ids))
+            .all()
+            if version_ids
+            else []
+        )
+        archive_by_version = {archive.upload_document_version_id: archive for archive in archives}
+        managed_file_ids = {
+            archive.managed_file_id
+            for archive in archives
+            if archive.managed_file_id
+        }
+        managed_copies = (
+            self.db.query(WorkingCopy)
+            .filter(WorkingCopy.managed_file_id.in_(managed_file_ids))
+            .all()
+            if managed_file_ids
+            else []
+        )
+        copies_by_managed_file: dict[str, list[WorkingCopy]] = {}
+        for copy in managed_copies:
+            copies_by_managed_file.setdefault(copy.managed_file_id, []).append(copy)
+
+        selected_by_document: dict[str, WorkingCopy] = {}
+        archive_by_document: dict[str, UploadArchiveRecord] = {}
+        for document_id in document_ids:
+            candidates = list(copies_by_document.get(document_id, []))
+            upload_version = latest_upload_by_document.get(document_id)
+            archive = archive_by_version.get(upload_version.id) if upload_version else None
+            if archive is not None:
+                archive_by_document[document_id] = archive
+                if archive.managed_file_id:
+                    candidates.extend(copies_by_managed_file.get(archive.managed_file_id, []))
+            selected = _select_current_working_copy(candidates)
+            if selected is not None:
+                selected_by_document[document_id] = selected
+
+        copy_ids = [copy.id for copy in selected_by_document.values()]
+        root_ids = {copy.working_copy_root_id for copy in selected_by_document.values()}
+        roots = (
+            self.db.query(WorkingCopyRoot)
+            .filter(WorkingCopyRoot.id.in_(root_ids))
+            .all()
+            if root_ids
+            else []
+        )
+        root_map = {root.id: root for root in roots}
+        trash_entries = (
+            self.db.query(TrashEntry)
+            .filter(
+                TrashEntry.working_copy_id.in_(copy_ids),
+                TrashEntry.status == "ACTIVE",
+            )
+            .all()
+            if copy_ids
+            else []
+        )
+        trash_map = {entry.working_copy_id: entry for entry in trash_entries}
+        storage = FileLifecycleStorageService()
+        return {
+            document_id: _project_attachment_availability(
+                document=document_map[document_id],
+                working_copy=selected_by_document.get(document_id),
+                working_root=(
+                    root_map.get(selected_by_document[document_id].working_copy_root_id)
+                    if document_id in selected_by_document
+                    else None
+                ),
+                trash_entry=(
+                    trash_map.get(selected_by_document[document_id].id)
+                    if document_id in selected_by_document
+                    else None
+                ),
+                archive=archive_by_document.get(document_id),
+                storage=storage,
+            )
+            for document_id in document_ids
+        }
+
     @staticmethod
     def _attachment_to_summary(
         *,
         item: dict,
         document_map: dict[str, Document],
+        availability_map: dict[str, AttachmentAvailabilityProjection],
     ) -> ConversationAttachmentSummary:
         """把消息中的 document_id 引用扩展为前端可展示的附件摘要。"""
 
@@ -556,7 +704,10 @@ class ConversationRepository:
                 sha256="",
                 status="MISSING",
                 ingest_status="FAILED",
+                file_availability="MISSING",
+                availability_message="文件记录已不存在",
             )
+        availability = availability_map.get(document.id)
         return ConversationAttachmentSummary(
             document_id=document.id,
             filename=document.original_filename,
@@ -565,6 +716,12 @@ class ConversationRepository:
             sha256=document.sha256,
             status=document.status,
             ingest_status=document.ingest_status,
+            working_copy_id=availability.working_copy_id if availability else None,
+            working_copy_status=availability.working_copy_status if availability else None,
+            file_availability=availability.file_availability if availability else "UNAVAILABLE",
+            availability_message=availability.availability_message if availability else "工作副本状态不可用",
+            can_open=availability.can_open if availability else False,
+            can_restore=availability.can_restore if availability else False,
         )
 
     @staticmethod
@@ -579,19 +736,182 @@ class ConversationRepository:
             content=message.content,
             attachments=[
                 MessageAttachment.model_validate(item)
-                for item in message.attachments_json
+                for item in _deduplicate_document_attachment_items(message.attachments_json)
             ],
         )
+
+
+def _deduplicate_message_attachments(
+    attachments: list[MessageAttachment],
+) -> list[MessageAttachment]:
+    """按 document_id 保序去重消息附件，不合并同名但不同 ID 的文件。"""
+
+    unique: list[MessageAttachment] = []
+    seen: set[str] = set()
+    for attachment in attachments:
+        if attachment.document_id in seen:
+            continue
+        seen.add(attachment.document_id)
+        unique.append(attachment)
+    return unique
+
+
+def _deduplicate_document_attachment_items(items: list[dict]) -> list[dict]:
+    """清理历史消息里的重复文档引用，同时保留不同 document_id 的同名文件。"""
+
+    unique: list[dict] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        document_id = str(item.get("document_id") or "")
+        if not document_id or document_id in seen:
+            continue
+        seen.add(document_id)
+        unique.append(item)
+    return unique
+
+
+def _select_current_working_copy(candidates: list[WorkingCopy]) -> WorkingCopy | None:
+    """从同一历史引用的候选中选择当前状态，优先活动、回收站再到处理中。"""
+
+    if not candidates:
+        return None
+    unique = {candidate.id: candidate for candidate in candidates}
+    status_priority = {
+        "ACTIVE": 0,
+        "TRASHED": 1,
+        "IMPORTING": 2,
+        "NEEDS_REVIEW": 3,
+        "FAILED": 4,
+    }
+    return sorted(
+        unique.values(),
+        key=lambda copy: (
+            status_priority.get(copy.status, 5),
+            -(copy.updated_at.timestamp() if copy.updated_at else 0),
+            copy.id,
+        ),
+    )[0]
+
+
+def _project_attachment_availability(
+    *,
+    document: Document,
+    working_copy: WorkingCopy | None,
+    working_root: WorkingCopyRoot | None,
+    trash_entry: TrashEntry | None,
+    archive: UploadArchiveRecord | None,
+    storage: FileLifecycleStorageService,
+) -> AttachmentAvailabilityProjection:
+    """把数据库状态与受控存储事实合并为普通用户可见的附件状态。"""
+
+    if working_copy is None:
+        processing_archive_statuses = {
+            "DUPLICATE_CHECK_PENDING",
+            "WAITING_DUPLICATE_DECISION",
+            "PENDING",
+            "ARCHIVING",
+            "ARCHIVED",
+        }
+        if archive is not None and archive.status in processing_archive_statuses:
+            return AttachmentAvailabilityProjection(
+                working_copy_id=None,
+                working_copy_status=None,
+                file_availability="PROCESSING",
+                availability_message="文件正在进入工作目录",
+                can_open=False,
+                can_restore=False,
+            )
+        if document.status == "MISSING":
+            message = "文件记录已不存在"
+            availability = "MISSING"
+        else:
+            message = "文件尚未形成可用工作副本"
+            availability = "UNAVAILABLE"
+        return AttachmentAvailabilityProjection(
+            working_copy_id=None,
+            working_copy_status=None,
+            file_availability=availability,
+            availability_message=message,
+            can_open=False,
+            can_restore=False,
+        )
+
+    if working_copy.status == "TRASHED":
+        if trash_entry is None:
+            return AttachmentAvailabilityProjection(
+                working_copy_id=working_copy.id,
+                working_copy_status=working_copy.status,
+                file_availability="MISSING",
+                availability_message="回收站记录异常，请联系管理员检查",
+                can_open=False,
+                can_restore=False,
+            )
+        try:
+            trash_exists = storage.trash_path(trash_entry.trash_relative_path).is_file()
+        except (OSError, RuntimeError, ValueError):
+            trash_exists = False
+        if not trash_exists:
+            return AttachmentAvailabilityProjection(
+                working_copy_id=working_copy.id,
+                working_copy_status=working_copy.status,
+                file_availability="MISSING",
+                availability_message="回收站文件缺失，请联系管理员检查",
+                can_open=False,
+                can_restore=False,
+            )
+        return AttachmentAvailabilityProjection(
+            working_copy_id=working_copy.id,
+            working_copy_status=working_copy.status,
+            file_availability="TRASHED",
+            availability_message="已删除（在回收站，可恢复）",
+            can_open=False,
+            can_restore=True,
+        )
+
+    if working_copy.status == "ACTIVE":
+        if working_root is None:
+            exists = False
+        else:
+            try:
+                exists = storage.working_copy_path(
+                    f"{working_root.relative_storage_path}/{working_copy.relative_path}"
+                ).is_file()
+            except (OSError, RuntimeError, ValueError):
+                exists = False
+        if not exists:
+            return AttachmentAvailabilityProjection(
+                working_copy_id=working_copy.id,
+                working_copy_status=working_copy.status,
+                file_availability="MISSING",
+                availability_message="文件状态异常：工作目录文件不存在",
+                can_open=False,
+                can_restore=False,
+            )
+        return AttachmentAvailabilityProjection(
+            working_copy_id=working_copy.id,
+            working_copy_status=working_copy.status,
+            file_availability="AVAILABLE",
+            availability_message="文件可用",
+            can_open=True,
+            can_restore=False,
+        )
+
+    return AttachmentAvailabilityProjection(
+        working_copy_id=working_copy.id,
+        working_copy_status=working_copy.status,
+        file_availability="PROCESSING",
+        availability_message="文件正在后台处理",
+        can_open=False,
+        can_restore=False,
+    )
 
 
 def _uploaded_attachment_items(message: Message) -> list[dict]:
     """读取消息中的真实上传附件项，跳过后端自动补齐的上下文附件。"""
 
-    attachments = [
-        item
-        for item in message.attachments_json
-        if isinstance(item, dict) and item.get("document_id")
-    ]
+    attachments = _deduplicate_document_attachment_items(message.attachments_json)
     if not attachments:
         return []
     uploaded_items = [item for item in attachments if item.get("source") == "uploaded"]

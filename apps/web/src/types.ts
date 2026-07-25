@@ -192,6 +192,11 @@ export type UploadedFile = {
   archive_status?: string;
   duplicate_review_status?: string;
   working_copy_id?: string | null;
+  working_copy_status?: string | null;
+  file_availability?: 'AVAILABLE' | 'TRASHED' | 'PROCESSING' | 'MISSING' | 'UNAVAILABLE' | string;
+  availability_message?: string | null;
+  can_open?: boolean;
+  can_restore?: boolean;
 };
 
 export type FilePreviewSection = {

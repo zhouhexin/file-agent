@@ -168,13 +168,15 @@
   cursor: default;
 }
 
-.file-card-missing {
+.file-card-missing,
+.file-card-unavailable {
   background: #f8fafc;
   color: #94a3b8;
   opacity: 0.82;
 }
 
-.file-card-missing:hover {
+.file-card-missing:hover,
+.file-card-unavailable:hover {
   border-color: #dbe3ef;
   box-shadow: none;
 }
@@ -275,6 +277,24 @@
 .file-card-remove:hover {
   background: #eef2f7;
   color: #0f172a;
+}
+
+.file-card-restore {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 8px;
+}
+
+.file-card-restore:hover {
+  background: #dbeafe;
 }
 
 @keyframes spin {

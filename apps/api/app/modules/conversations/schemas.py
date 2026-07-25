@@ -53,6 +53,12 @@ class ConversationAttachmentSummary(BaseModel):
     status: str
     ingest_status: str
     deduplicated: bool = False
+    working_copy_id: str | None = None
+    working_copy_status: str | None = None
+    file_availability: str = "UNAVAILABLE"
+    availability_message: str | None = None
+    can_open: bool = False
+    can_restore: bool = False
 
 
 class ConversationHistoryMessage(BaseModel):

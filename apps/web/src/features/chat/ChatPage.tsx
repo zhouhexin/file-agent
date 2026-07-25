@@ -29,7 +29,11 @@ import { AttachmentRail } from './AttachmentRail';
 import { ChatTurnView } from './ChatTurnView';
 import { DuplicateUploadReviewCard } from './DuplicateUploadReviewCard';
 import { DocumentPreviewDialog } from './DocumentPreviewDialog';
-import { canPreviewFileInfo, canPreviewInBrowser } from './presentation';
+import {
+  canPreviewFileInfo,
+  canPreviewInBrowser,
+  deduplicateAttachmentsByDocumentId,
+} from './presentation';
 import type { ChatAttachment, ChatTurn } from './presentation';
 
 function getWebConversationId(userId: string): string {
@@ -70,27 +74,30 @@ const HISTORY_PAGE_SIZE = 10;
 
 function historyMessagesToTurns(messages: ConversationHistoryMessage[]): ChatTurn[] {
   // 后端已保证分页消息按时间正序返回，前端只负责转换为聊天展示结构。
-  return messages.map((historyMessage) => ({
-    id: historyMessage.id,
-    userText: historyMessage.content,
-    attachments: historyMessage.attachments,
-    response: historyMessage.task_result
-      ? {
-          message: {
-            id: historyMessage.id,
-            conversation_id: historyMessage.conversation_id,
-            user_id: historyMessage.user_id,
-            role: historyMessage.role,
-            content: historyMessage.content,
-            attachments: historyMessage.attachments.map((file) => ({ document_id: file.document_id })),
-          },
-          task_result: historyMessage.task_result!,
-        }
-      : undefined,
-    status: 'completed',
-    role: historyMessage.role,
-    metadata: historyMessage.metadata,
-  }));
+  return messages.map((historyMessage) => {
+    const attachments = deduplicateAttachmentsByDocumentId(historyMessage.attachments);
+    return {
+      id: historyMessage.id,
+      userText: historyMessage.content,
+      attachments,
+      response: historyMessage.task_result
+        ? {
+            message: {
+              id: historyMessage.id,
+              conversation_id: historyMessage.conversation_id,
+              user_id: historyMessage.user_id,
+              role: historyMessage.role,
+              content: historyMessage.content,
+              attachments: attachments.map((file) => ({ document_id: file.document_id })),
+            },
+            task_result: historyMessage.task_result!,
+          }
+        : undefined,
+      status: 'completed' as const,
+      role: historyMessage.role,
+      metadata: historyMessage.metadata,
+    };
+  });
 }
 
 export function ChatPage({
@@ -303,7 +310,9 @@ export function ChatPage({
     }
     setError('');
     setSubmitting(true);
-    const attachmentsForTurn = draftAttachments;
+    // 发送前再次按 document_id 收敛，防止重复上传确认把新卡片替换成已有文件后，
+    // 同一文件在请求和聊天流中出现两次。
+    const attachmentsForTurn = deduplicateAttachmentsByDocumentId(draftAttachments);
     const turnId = createClientId();
 
     setChatTurns((current) => [
@@ -426,7 +435,7 @@ export function ChatPage({
           preview_url: previewUrl,
         };
         // 先把单文件加入状态再启动轮询，避免小文件查重瞬间完成时回写不到附件。
-        setDraftAttachments((current) => [...current, attachment]);
+        setDraftAttachments((current) => deduplicateAttachmentsByDocumentId([...current, attachment]));
         if (uploadedFile.filesystem_job_id && uploadedFile.upload_document_version_id) {
           void pollUploadDuplicateReview(attachment);
         }
@@ -529,18 +538,20 @@ export function ChatPage({
       const selectedCandidate = review.candidates.find(
         (candidate) => candidate.existing_document_id === result.selected_existing_document_id,
       );
-      setDraftAttachments((current) => current.map((item) => (
-        item.upload_document_version_id === review.upload_document_version_id
-          ? {
-              ...item,
-              document_id: result.selected_existing_document_id as string,
-              filename: String(selectedCandidate?.summary.filename ?? item.filename),
-              status: 'WORKING_COPY',
-              archive_status: result.archive_status,
-              duplicate_review_status: 'RESOLVED',
-            }
-          : item
-      )));
+      setDraftAttachments((current) => deduplicateAttachmentsByDocumentId(
+        current.map((item) => (
+          item.upload_document_version_id === review.upload_document_version_id
+            ? {
+                ...item,
+                document_id: result.selected_existing_document_id as string,
+                filename: String(selectedCandidate?.summary.filename ?? item.filename),
+                status: 'WORKING_COPY',
+                archive_status: result.archive_status,
+                duplicate_review_status: 'RESOLVED',
+              }
+            : item
+        )),
+      ));
       return;
     }
     setDraftAttachments((current) => current.map((item) => (
@@ -584,6 +595,14 @@ export function ChatPage({
   async function openAttachment(file: ChatAttachment) {
     // Office 文件优先展示已解析正文；浏览器原生支持的格式继续使用鉴权 Blob 预览。
     setError('');
+    if (file.file_availability === 'TRASHED') {
+      setError('文件已删除并保存在回收站中，请先恢复后再查看。');
+      return;
+    }
+    if (file.file_availability && file.file_availability !== 'AVAILABLE') {
+      setError(file.availability_message || '当前文件不可用。');
+      return;
+    }
     if (file.status === 'MISSING') {
       setError('原始文件已不存在，无法打开附件。');
       return;
@@ -622,6 +641,69 @@ export function ChatPage({
         ? '原始文件已不存在，无法打开附件。'
         : formatError(err));
     }
+  }
+
+  async function restoreHistoricalAttachment(file: ChatAttachment) {
+    // 恢复按钮只生成一轮明确的对话请求；真实移动仍必须展示 OperationPlan 并再次确认。
+    if (
+      submitting
+      || uploading
+      || historyLoading
+      || file.file_availability !== 'TRASHED'
+      || !file.can_restore
+    ) {
+      return;
+    }
+    const currentMessage = `恢复文件《${file.filename}》`;
+    const attachmentsForTurn = [file];
+    const turnId = createClientId();
+    setError('');
+    setSubmitting(true);
+    setChatTurns((current) => [
+      ...current,
+      {
+        id: turnId,
+        userText: currentMessage,
+        attachments: attachmentsForTurn,
+        status: 'sending',
+      },
+    ]);
+    scrollMessageListToBottom();
+    try {
+      const result = await sendAgentMessage(
+        token,
+        conversationId,
+        currentMessage,
+        [file.document_id],
+      );
+      setChatTurns((current) => current.map((turn) => (
+        turn.id === turnId ? { ...turn, response: result, status: 'completed' } : turn
+      )));
+      scrollMessageListToBottom();
+    } catch (err) {
+      setChatTurns((current) => current.map((turn) => (
+        turn.id === turnId ? { ...turn, status: 'failed' } : turn
+      )));
+      setError(formatError(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function refreshHistoricalAttachmentStatuses() {
+    // OperationPlan 确认后只刷新附件当前状态，不清空已经加载的聊天分页或本地结果。
+    const conversation = await getConversationDetail(token, conversationId, { limit: 50 });
+    const latestByDocumentId = new Map(
+      conversation.messages.flatMap((historyMessage) => historyMessage.attachments)
+        .map((attachment) => [attachment.document_id, attachment] as const),
+    );
+    setChatTurns((current) => current.map((turn) => ({
+      ...turn,
+      attachments: turn.attachments.map((attachment) => {
+        const latest = latestByDocumentId.get(attachment.document_id);
+        return latest ? { ...attachment, ...latest } : attachment;
+      }),
+    })));
   }
 
   async function openSearchDocument(documentId: string, filename: string) {
@@ -739,8 +821,10 @@ export function ChatPage({
                   token={token}
                   turn={turn}
                   onOpenAttachment={openAttachment}
+                  onRestoreAttachment={restoreHistoricalAttachment}
                   onOpenDocument={openSearchDocument}
                   onOpenManagedFile={openManagedFile}
+                  onOperationConfirmed={refreshHistoricalAttachmentStatuses}
                   onFollowupResult={(response) => {
                     // 选择卡续跑会在后端创建真实消息和 AgentRun；页面直接追加该轮，
                     // 不伪造本地搜索结果，刷新后仍能从同一会话历史恢复。

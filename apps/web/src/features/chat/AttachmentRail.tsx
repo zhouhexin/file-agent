@@ -9,6 +9,7 @@ export function AttachmentRail({
   locked = false,
   onOpen,
   onRemove,
+  onRestore,
 }: AttachmentListProps) {
   const [expanded, setExpanded] = useState(false);
 
@@ -31,6 +32,7 @@ export function AttachmentRail({
             file={file}
             onOpen={onOpen}
             onRemove={!locked ? onRemove : undefined}
+            onRestore={onRestore}
             showStatus={!locked}
           />
         ))}

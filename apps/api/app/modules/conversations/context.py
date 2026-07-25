@@ -54,7 +54,10 @@ class ConversationAttachmentContextService:
 
         if explicit_attachments:
             return ResolvedAttachmentContext(
-                attachments=list(explicit_attachments),
+                # 重复上传确认选择“使用已有文件”后，多个前端卡片可能暂时指向同一
+                # document_id。这里只按稳定 ID 去重；同名但 ID 不同的文件必须保留，
+                # 后续仍由用户明确选择，不能按文件名或内容哈希擅自合并。
+                attachments=_deduplicate_attachments(explicit_attachments),
                 source="uploaded",
                 scope="current_message",
             )
@@ -90,6 +93,22 @@ class ConversationAttachmentContextService:
                     source="inferred_context",
                     scope="single_latest_rename_confirmation",
                 )
+        if (
+            has_trash_working_copy_intent(content)
+            and not has_contextual_file_removal_reference(content)
+        ):
+            # “删除整个工作簿文件”等表达没有“这个/刚才”，但当前会话只有一个不同文件时，
+            # 后端可以确定唯一对象；存在多个文件则保持空范围并要求用户选择，绝不批量猜测。
+            recent_attachments = self.repository.get_recent_attachment_references(
+                conversation_id=conversation_id,
+                user_id=user_id,
+            )
+            if len(recent_attachments) == 1:
+                return ResolvedAttachmentContext(
+                    attachments=recent_attachments,
+                    source="inferred_context",
+                    scope="single_conversation_file_removal",
+                )
         if not _should_infer_recent_attachments(content):
             return ResolvedAttachmentContext(attachments=[], source="uploaded", scope="none")
 
@@ -113,13 +132,28 @@ class ConversationAttachmentContextService:
             scope = "all_recent_context"
 
         return ResolvedAttachmentContext(
-            attachments=_select_referenced_attachments(
-                content=content,
-                recent_attachments=recent_attachments,
+            attachments=_deduplicate_attachments(
+                _select_referenced_attachments(
+                    content=content,
+                    recent_attachments=recent_attachments,
+                )
             ),
             source="inferred_context",
             scope=scope,
         )
+
+
+def _deduplicate_attachments(attachments: list[MessageAttachment]) -> list[MessageAttachment]:
+    """按 document_id 保序去重，不合并同名或同内容的不同文档。"""
+
+    unique: list[MessageAttachment] = []
+    seen: set[str] = set()
+    for attachment in attachments:
+        if attachment.document_id in seen:
+            continue
+        seen.add(attachment.document_id)
+        unique.append(attachment)
+    return unique
 
 
 def _should_infer_recent_attachments(content: str) -> bool:

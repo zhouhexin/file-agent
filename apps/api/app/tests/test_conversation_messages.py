@@ -764,6 +764,60 @@ def test_uploaded_message_attachments_share_batch_id():
     clear_overrides()
 
 
+def test_same_document_id_is_deduplicated_in_message_and_legacy_history():
+    """同一 document_id 重复提交或残留在旧消息中都只展示一次。"""
+
+    client, session_factory = client_with_database()
+    headers = _auth_header(client, "same-document-attachment-user")
+    document_id = _upload_document(
+        client,
+        headers,
+        filename="重复附件.txt",
+        content=b"same attachment reference",
+    )
+
+    response = client.post(
+        "/api/conversations/same-document-attachment-chat/messages",
+        headers=headers,
+        json={
+            "content": "读取这个文件",
+            "attachments": [
+                {"document_id": document_id},
+                {"document_id": document_id},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["message"]["attachments"] == [{"document_id": document_id}]
+    with session_factory() as db:
+        message = (
+            db.query(Message)
+            .filter(Message.conversation_id == "same-document-attachment-chat")
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .first()
+        )
+        assert message is not None
+        assert len(message.attachments_json) == 1
+        # 模拟修复前已经写入数据库的重复引用，历史接口也必须防御性折叠。
+        original_item = dict(message.attachments_json[0])
+        message.attachments_json = [original_item, dict(original_item)]
+        db.commit()
+
+    history = client.get(
+        "/api/conversations/same-document-attachment-chat",
+        headers=headers,
+    )
+    assert history.status_code == 200
+    user_message = next(
+        item
+        for item in history.json()["messages"]
+        if item["role"] == "user"
+    )
+    assert [item["document_id"] for item in user_message["attachments"]] == [document_id]
+    clear_overrides()
+
+
 def test_post_message_rejects_invalid_attachment():
     """附件引用缺少 document_id 时必须由请求 schema 拒绝。"""
 

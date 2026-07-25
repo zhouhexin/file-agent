@@ -23,7 +23,23 @@ export type AttachmentListProps = {
   locked?: boolean;
   onOpen?: (file: ChatAttachment) => void;
   onRemove?: (documentId: string) => void;
+  onRestore?: (file: ChatAttachment) => void;
 };
+
+export function deduplicateAttachmentsByDocumentId(
+  attachments: ChatAttachment[],
+): ChatAttachment[] {
+  // 只折叠相同 document_id；同名、同大小甚至同哈希但 ID 不同的文件仍需分别展示，
+  // 避免前端替用户决定应该保留或操作哪一份文件。
+  const seen = new Set<string>();
+  return attachments.filter((attachment) => {
+    if (seen.has(attachment.document_id)) {
+      return false;
+    }
+    seen.add(attachment.document_id);
+    return true;
+  });
+}
 
 export function formatFileSize(sizeBytes: number): string {
   // 文件大小只用于界面展示，后端仍保存精确字节数。

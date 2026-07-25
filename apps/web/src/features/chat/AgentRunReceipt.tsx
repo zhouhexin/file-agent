@@ -29,6 +29,7 @@ type AgentRunReceiptProps = {
   onOpenDocument?: (documentId: string, filename: string) => void;
   onOpenManagedFile?: (file: ManagedFileResult) => void;
   onFollowupResult?: (response: SendMessageResponse) => void;
+  onOperationConfirmed?: () => Promise<void>;
 };
 
 export function AgentRunReceipt({
@@ -40,6 +41,7 @@ export function AgentRunReceipt({
   onOpenDocument,
   onOpenManagedFile,
   onFollowupResult,
+  onOperationConfirmed,
 }: AgentRunReceiptProps) {
   const [operationPlan, setOperationPlan] = useState<OperationPlanResponse | null>(null);
   const results = taskResult?.document_results ?? [];
@@ -132,6 +134,7 @@ export function AgentRunReceipt({
             token={token}
             onConfirmed={async () => {
               setOperationPlan(await getOperationPlan(token, operationPlan.id));
+              await onOperationConfirmed?.();
             }}
           />
         ) : null}
@@ -184,6 +187,7 @@ export function AgentRunReceipt({
         token={token}
         onConfirmed={async () => {
           setOperationPlan(await getOperationPlan(token, operationPlan.id));
+          await onOperationConfirmed?.();
         }}
       />
     );

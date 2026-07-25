@@ -52,6 +52,39 @@ class FakeConversationRepository:
         return [MessageAttachment(document_id="named-doc")]
 
 
+class SingleFileConversationRepository(FakeConversationRepository):
+    """模拟当前会话只有一个不同文件，允许泛指删除唯一解析。"""
+
+    def get_recent_attachment_references(self, **_: object) -> list[MessageAttachment]:
+        """只返回当前会话唯一文件。"""
+
+        self.calls.append("recent")
+        return [MessageAttachment(document_id="latest-doc")]
+
+
+def test_context_resolver_deduplicates_same_explicit_document_id_only():
+    """显式附件重复引用同一 ID 时只处理一次，但不同 ID 的同名文件不在此层合并。"""
+
+    repository = FakeConversationRepository()
+    context = ConversationAttachmentContextService(repository).resolve(
+        conversation_id="chat-1",
+        user_id="user-1",
+        content="汇总附件数据",
+        explicit_attachments=[
+            MessageAttachment(document_id="same-doc"),
+            MessageAttachment(document_id="same-doc"),
+            MessageAttachment(document_id="different-doc"),
+        ],
+    )
+
+    assert repository.calls == []
+    assert context.scope == "current_message"
+    assert [attachment.document_id for attachment in context.attachments] == [
+        "same-doc",
+        "different-doc",
+    ]
+
+
 def test_context_resolver_uses_all_conversation_scope_for_history_all_request():
     """“之前所有/历史全部”必须解析为当前会话全部文件，而不是最近几条消息。"""
 
@@ -127,6 +160,22 @@ def test_context_resolver_infers_attachments_for_colloquial_file_removal(
     assert repository.calls == ["filename", expected_call]
     assert context.scope == expected_scope
     assert context.attachments
+
+
+def test_context_resolver_uses_only_conversation_file_for_whole_workbook_removal():
+    """“删除整个工作簿文件”仅在会话只有一个文件时才能确定对象。"""
+
+    repository = SingleFileConversationRepository()
+    context = ConversationAttachmentContextService(repository).resolve(
+        conversation_id="chat-single-workbook",
+        user_id="user-1",
+        content="删除整个工作簿文件",
+        explicit_attachments=[],
+    )
+
+    assert repository.calls == ["filename", "recent"]
+    assert context.scope == "single_conversation_file_removal"
+    assert [item.document_id for item in context.attachments] == ["latest-doc"]
 
 
 @pytest.mark.parametrize(

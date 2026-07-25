@@ -992,6 +992,35 @@ def test_planner_routes_colloquial_file_removal_to_confirmed_trash_plan(message)
 @pytest.mark.parametrize(
     "message",
     [
+        "删除2024科研成果资助汇总表",
+        "删除2024科研成果资助汇总表.xlsx",
+        "把2024科研成果资助汇总表删掉",
+    ],
+)
+def test_planner_routes_backend_resolved_filename_removal_to_trash_plan(message):
+    """删除动作没有“文件”二字时，只能消费后端已按文件名唯一解析的附件。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-trash-filename",
+        user_id="user-1",
+        message_id="msg-trash-filename",
+        message=message,
+        attachments=[
+            {
+                "document_id": "doc-1",
+                "context_scope": "filename_reference",
+            }
+        ],
+    )
+
+    assert plan.intent == "PREPARE_WORKING_COPY_ACTION"
+    assert plan.steps[0].input["action"] == "TRASH"
+    assert plan.confirmation_policy["operation_plan_required"] is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
         "查找 述职报告-鲁晓锋-20200421.pdf",
         "打开文件“2024科研成果资助汇总表.xlsx”",
         "找到文件名为《面谈名单.xlsx》的文件",

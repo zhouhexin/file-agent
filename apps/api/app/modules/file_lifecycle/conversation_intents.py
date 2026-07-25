@@ -129,9 +129,7 @@ def has_trash_working_copy_intent(message: str) -> bool:
     compact = _normalize_message(message)
     if not compact:
         return False
-    if _has_removal_negation(compact):
-        return False
-    if any(target in compact for target in _CONTENT_EDIT_TARGETS):
+    if not has_file_removal_action(message):
         return False
     if any(phrase in compact for phrase in _RECYCLE_BIN_PHRASES):
         return True
@@ -144,6 +142,26 @@ def has_trash_working_copy_intent(message: str) -> bool:
     has_removal_action = any(verb in compact for verb in _FILE_REMOVAL_VERBS)
     no_longer_needed = _has_no_longer_needed_file(compact)
     return has_removal_action or no_longer_needed
+
+
+def has_file_removal_action(message: str) -> bool:
+    """识别删除动作本身，供后端已精确解析文件名后补足目标语义。
+
+    该函数不能单独触发文件操作；只有附件上下文已经按文件名唯一解析时，Planner 才能使用它。
+    这样既支持“删除2024科研成果资助汇总表”，也不会把“删除申请人列”猜成删除文件。
+    """
+
+    compact = _normalize_message(message)
+    if not compact or _has_removal_negation(compact):
+        return False
+    if any(target in compact for target in _CONTENT_EDIT_TARGETS):
+        return False
+    return (
+        any(phrase in compact for phrase in _RECYCLE_BIN_PHRASES)
+        or any(phrase in compact for phrase in _PRONOUN_REMOVAL_PHRASES)
+        or any(verb in compact for verb in _FILE_REMOVAL_VERBS)
+        or _has_no_longer_needed_file(compact)
+    )
 
 
 def has_contextual_file_removal_reference(message: str) -> bool:

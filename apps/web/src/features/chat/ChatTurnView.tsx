@@ -11,18 +11,22 @@ type ChatTurnViewProps = {
   token: string;
   turn: ChatTurn;
   onOpenAttachment: (file: ChatAttachment) => void;
+  onRestoreAttachment: (file: ChatAttachment) => void;
   onOpenDocument: (documentId: string, filename: string) => void;
   onOpenManagedFile: (file: ManagedFileResult) => void;
   onFollowupResult?: (response: SendMessageResponse) => void;
+  onOperationConfirmed?: () => Promise<void>;
 };
 
 export function ChatTurnView({
   token,
   turn,
   onOpenAttachment,
+  onRestoreAttachment,
   onOpenDocument,
   onOpenManagedFile,
   onFollowupResult,
+  onOperationConfirmed,
 }: ChatTurnViewProps) {
   const [resolvedDuplicateHidden, setResolvedDuplicateHidden] = useState(false);
   const hideResolvedDuplicate = useCallback(() => setResolvedDuplicateHidden(true), []);
@@ -51,6 +55,7 @@ export function ChatTurnView({
                 token={token}
                 onOpenDocument={onOpenDocument}
                 onFollowupResult={onFollowupResult}
+                onOperationConfirmed={onOperationConfirmed}
               />
             ) : (
               <p className="agent-chat-response">{turn.userText}</p>
@@ -72,6 +77,7 @@ export function ChatTurnView({
               layout="stack"
               locked
               onOpen={onOpenAttachment}
+              onRestore={onRestoreAttachment}
             />
           )}
           <div className="user-message-bubble">
@@ -97,6 +103,7 @@ export function ChatTurnView({
               onOpenDocument={onOpenDocument}
               onOpenManagedFile={onOpenManagedFile}
               onFollowupResult={onFollowupResult}
+              onOperationConfirmed={onOperationConfirmed}
             />
           ) : null}
         </div>

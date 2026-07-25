@@ -109,9 +109,24 @@ class ConversationalWorkingCopyPlanService:
         copies = self._resolve_working_copies(document_ids=document_ids, workspace_id=get_shared_workspace_id(self.db))
         if not copies:
             raise ValueError("请明确选择要移入回收站的当前会话文件。")
-        inactive = [item.filename for item in copies if item.status != "ACTIVE"]
-        if inactive:
-            raise ValueError(f"以下文件当前不能移入回收站：{'、'.join(inactive)}")
+        already_trashed = [
+            item.filename for item in copies if item.status == "TRASHED"
+        ]
+        if already_trashed:
+            raise ValueError(
+                f"以下文件已经在回收站中，无需再次删除：{'、'.join(already_trashed)}。"
+                "如需继续使用，请先恢复文件。"
+            )
+        unavailable = [
+            item.filename
+            for item in copies
+            if item.status not in {"ACTIVE", "TRASHED"}
+        ]
+        if unavailable:
+            raise ValueError(
+                f"以下文件仍在后台处理中，暂时不能移入回收站：{'、'.join(unavailable)}。"
+                "请等待文件处理完成后重试。"
+            )
         plan = self.operations.create_plan(
             current_user=user,
             request=OperationPlanCreateRequest(

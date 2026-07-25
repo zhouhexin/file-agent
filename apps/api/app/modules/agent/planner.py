@@ -13,7 +13,10 @@ from typing import Any, Dict, List
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.modules.agent.capability_router import route_user_intent
-from app.modules.file_lifecycle.conversation_intents import has_trash_working_copy_intent
+from app.modules.file_lifecycle.conversation_intents import (
+    has_file_removal_action,
+    has_trash_working_copy_intent,
+)
 from app.modules.llm.schemas import UserIntentPlan
 
 
@@ -202,7 +205,7 @@ class DeterministicPlanner:
                 action="RESTORE",
                 document_ids=_document_ids(attachments),
             )
-        if has_trash_working_copy_intent(message):
+        if _has_resolved_trash_intent(message=message, attachments=attachments):
             return _working_copy_action_plan(
                 user_goal=message,
                 action="TRASH",
@@ -584,7 +587,7 @@ def build_plan_from_user_intent(
             response_style=intent_plan.response_style,
             llm_intent_plan=intent_plan.model_dump(),
         )
-    if has_trash_working_copy_intent(message):
+    if _has_resolved_trash_intent(message=message, attachments=attachments):
         return _working_copy_action_plan(
             user_goal=intent_plan.user_goal or message,
             action="TRASH",
@@ -1473,6 +1476,28 @@ def _working_copy_action_plan(
         ],
         evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
         confirmation_policy={"operation_plan_required": True},
+    )
+
+
+def _has_resolved_trash_intent(
+    *,
+    message: str,
+    attachments: List[Dict[str, Any]],
+) -> bool:
+    """识别普通删除表达，并要求无文件目标的表达已由后端按文件名唯一解析。
+
+    `context_scope=filename_reference` 由 ConversationAttachmentContextService 生成，
+    LLM 不能自行写入或猜测该范围。
+    """
+
+    if has_trash_working_copy_intent(message):
+        return True
+    if not has_file_removal_action(message):
+        return False
+    return any(
+        str(item.get("context_scope") or "") == "filename_reference"
+        for item in attachments
+        if isinstance(item, dict)
     )
 
 
