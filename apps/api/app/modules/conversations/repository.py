@@ -25,6 +25,13 @@ from app.modules.conversations.schemas import (
 )
 
 
+HIDDEN_CONVERSATION_MESSAGE_ROLES = ("CLEARED", "SYSTEM_AUDIT")
+LEGACY_INTERNAL_MESSAGE_PREFIXES = (
+    "重复上传处理：",
+    "已记录重复上传决策：",
+)
+
+
 class ConversationRepository:
     """封装 conversation 和 message 的最小持久化操作。"""
 
@@ -97,7 +104,10 @@ class ConversationRepository:
 
         messages = (
             self.db.query(Message)
-            .filter(Message.conversation_id == conversation_id, Message.role != "CLEARED")
+            .filter(
+                Message.conversation_id == conversation_id,
+                Message.role.notin_(HIDDEN_CONVERSATION_MESSAGE_ROLES),
+            )
             .order_by(Message.created_at.desc(), Message.id.desc())
             .limit(limit)
             .all()
@@ -141,7 +151,10 @@ class ConversationRepository:
 
         messages = (
             self.db.query(Message)
-            .filter(Message.conversation_id == conversation_id)
+            .filter(
+                Message.conversation_id == conversation_id,
+                Message.role.notin_(HIDDEN_CONVERSATION_MESSAGE_ROLES),
+            )
             .order_by(Message.created_at.asc(), Message.id.asc())
             .all()
         )
@@ -167,7 +180,10 @@ class ConversationRepository:
 
         messages = (
             self.db.query(Message)
-            .filter(Message.conversation_id == conversation_id)
+            .filter(
+                Message.conversation_id == conversation_id,
+                Message.role.notin_(HIDDEN_CONVERSATION_MESSAGE_ROLES),
+            )
             .order_by(Message.created_at.asc(), Message.id.asc())
             .all()
         )
@@ -212,7 +228,10 @@ class ConversationRepository:
 
         messages = (
             self.db.query(Message)
-            .filter(Message.conversation_id == conversation_id)
+            .filter(
+                Message.conversation_id == conversation_id,
+                Message.role.notin_(HIDDEN_CONVERSATION_MESSAGE_ROLES),
+            )
             .order_by(Message.created_at.desc(), Message.id.desc())
             .limit(limit)
             .all()
@@ -321,6 +340,9 @@ class ConversationRepository:
             limit=limit,
             before_message_id=before_message_id,
         )
+        # 兼容修复前已经写入普通 assistant 消息的重复上传确认卡：
+        # 决策完成后卡片本身也不再属于用户对话内容，但审计行仍保留在数据库。
+        messages = self._exclude_resolved_duplicate_notifications(messages=messages)
         document_map = self._load_document_map(messages=messages, user_id=user_id)
         agent_run_map = self._load_agent_run_map(messages=messages)
         agent_repository = AgentRunRepository(self.db)
@@ -377,7 +399,8 @@ class ConversationRepository:
         self.get_conversation_for_user(conversation_id=conversation_id, user_id=user_id)
         query = self.db.query(Message).filter(
             Message.conversation_id == conversation_id,
-            Message.role != "CLEARED",
+            Message.role.notin_(HIDDEN_CONVERSATION_MESSAGE_ROLES),
+            *self._legacy_internal_message_filters(),
         )
         cleared_count = query.count()
         if cleared_count:
@@ -407,7 +430,8 @@ class ConversationRepository:
         # 已清空的消息仍保留为审计锚点，但不能再次出现在聊天历史中。
         query = self.db.query(Message).filter(
             Message.conversation_id == conversation_id,
-            Message.role != "CLEARED",
+            Message.role.notin_(HIDDEN_CONVERSATION_MESSAGE_ROLES),
+            *self._legacy_internal_message_filters(),
         )
         if before_message_id:
             before_message = (
@@ -415,7 +439,8 @@ class ConversationRepository:
                 .filter(
                     Message.conversation_id == conversation_id,
                     Message.id == before_message_id,
-                    Message.role != "CLEARED",
+                    Message.role.notin_(HIDDEN_CONVERSATION_MESSAGE_ROLES),
+                    *self._legacy_internal_message_filters(),
                 )
                 .one_or_none()
             )
@@ -436,6 +461,49 @@ class ConversationRepository:
         page = rows[:limit]
         page.reverse()
         return page, has_more
+
+    def _exclude_resolved_duplicate_notifications(self, *, messages: list[Message]) -> list[Message]:
+        """隐藏已经完成决策的历史重复上传确认卡。
+
+        这里只调整普通用户会话投影，不删除 Message、UploadDuplicateReview 或其审计链。
+        新数据会在决策事务中改为 ``SYSTEM_AUDIT``；该兼容分支用于立即隐藏旧数据库数据。
+        """
+
+        message_ids = [message.id for message in messages]
+        if not message_ids:
+            return messages
+        resolved_notification_ids = {
+            str(notification_message_id)
+            for (notification_message_id,) in (
+                self.db.query(UploadDuplicateReview.notification_message_id)
+                .filter(
+                    UploadDuplicateReview.notification_message_id.in_(message_ids),
+                    UploadDuplicateReview.status != "WAITING_CONFIRMATION",
+                )
+                .all()
+            )
+            if notification_message_id
+        }
+        if not resolved_notification_ids:
+            return messages
+        return [
+            message
+            for message in messages
+            if message.id not in resolved_notification_ids
+        ]
+
+    @staticmethod
+    def _legacy_internal_message_filters() -> tuple:
+        """返回历史内部决策文本过滤条件，避免升级后要求清库。
+
+        这些固定前缀只由旧版生命周期代码生成；真实决策仍由 Review、AgentRun、
+        ToolInvocation 和 ChangeSet 保存，普通会话接口不得继续暴露内部枚举。
+        """
+
+        return tuple(
+            Message.content.notlike(f"{prefix}%")
+            for prefix in LEGACY_INTERNAL_MESSAGE_PREFIXES
+        )
 
     def _load_document_map(self, *, messages: list[Message], user_id: str) -> dict[str, Document]:
         """批量加载历史消息引用的文档，避免逐条消息查询。"""

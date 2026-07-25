@@ -152,13 +152,19 @@ class ConversationFileSearchContextService:
     """
 
     def __init__(self, *, db: Any, user_id: str) -> None:
+        """保存请求级会话；会话范围读取失败时必须能够回滚独立 savepoint。"""
+
+        self.db = db
         self.repository = ConversationRepository(db)
         self.user_id = user_id
 
     def get_session_document_ids(self, conversation_id: str) -> list[str]:
         """返回当前用户会话中曾出现过的受权文件 ID。"""
-        references = self.repository.get_all_attachment_references(
-            conversation_id=conversation_id,
-            user_id=self.user_id,
-        )
+        # L1 只是排序增强，读取失败允许回退为空；savepoint 防止 PostgreSQL 的失败状态
+        # 泄漏到后续两阶段检索和 ToolInvocation 审计写入。
+        with self.db.begin_nested():
+            references = self.repository.get_all_attachment_references(
+                conversation_id=conversation_id,
+                user_id=self.user_id,
+            )
         return [str(item.document_id) for item in references if item.document_id]

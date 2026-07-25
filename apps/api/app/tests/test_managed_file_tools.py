@@ -264,6 +264,45 @@ def test_managed_file_read_document_tool_reuses_unchanged_snapshot(monkeypatch, 
         clear_overrides()
 
 
+def test_managed_file_read_document_tool_repairs_corrupted_snapshot(monkeypatch, tmp_path):
+    """旧版遗留的截断快照必须从原文件自动修复，不能永久复用损坏副本。"""
+
+    managed_root = tmp_path / "downloads"
+    target_dir = managed_root / "党办"
+    target_dir.mkdir(parents=True)
+    source_file = target_dir / "述职报告.txt"
+    source_file.write_text("完整述职报告正文", encoding="utf-8")
+    storage_root = tmp_path / "storage"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(storage_root))
+    client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        registry = ToolRegistry(db=db, user_id="user-1")
+        first = registry.invoke(
+            "managed-file-read-document",
+            {"root_key": "downloads", "path_prefix": "党办", "filename_contains": "述职报告"},
+        )
+        file_object = db.query(FileObject).one()
+        snapshot_path = storage_root / file_object.storage_path
+        snapshot_path.write_bytes(b"truncated")
+
+        second = registry.invoke(
+            "managed-file-read-document",
+            {"root_key": "downloads", "path_prefix": "党办", "filename_contains": "述职报告"},
+        )
+
+        assert first.output_json["snapshot_status"] == "CREATED"
+        assert second.output_json["snapshot_status"] == "REUSED"
+        assert snapshot_path.read_bytes() == source_file.read_bytes()
+        assert db.query(FileObject).count() == 1
+        assert db.query(Document).count() == 1
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def test_managed_file_read_document_tool_creates_new_snapshot_when_content_changes(monkeypatch, tmp_path):
     """同一路径文件内容变化后应创建新快照，并保留旧 Document 与解析结果。"""
 

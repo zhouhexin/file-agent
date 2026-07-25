@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.core import config
 from app.db.models import (
+    AgentRun,
     ChangeItem,
     Document,
     DocumentClassificationSummary,
@@ -15,7 +16,9 @@ from app.db.models import (
     EvidenceSpan,
     FileRenameReviewItem,
     ManagedFile,
+    Message,
     TrashEntry,
+    ToolInvocation,
     UploadArchiveRecord,
     UploadDuplicateReview,
     User,
@@ -325,6 +328,99 @@ def test_duplicate_upload_waits_for_dialog_and_can_use_existing(monkeypatch, tmp
     finally:
         db.close()
         clear_overrides()
+
+
+def test_duplicate_upload_decision_is_audited_but_hidden_from_chat(monkeypatch, tmp_path):
+    """重复上传内部枚举必须保留完整审计，但不能进入普通用户对话历史。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "duplicate-chat-projection-owner")
+    _upload(client, headers, "first.txt", b"identical chat projection body")
+    _drain(SessionLocal)
+    second_response = client.post(
+        "/api/files/upload",
+        headers=headers,
+        data={"conversation_id": "duplicate-chat-projection"},
+        files={"file": ("second.txt", b"identical chat projection body", "text/plain")},
+    )
+    assert second_response.status_code == 202
+    second = second_response.json()
+
+    process_next_filesystem_job(session_factory=SessionLocal, worker_id="duplicate-chat-test")
+    review_response = client.get(
+        f"/api/uploads/{second['upload_document_version_id']}/duplicate-review",
+        headers=headers,
+    )
+    assert review_response.status_code == 200
+    review = review_response.json()
+    existing_copy_id = review["candidates"][0]["existing_working_copy_id"]
+
+    decision = client.post(
+        f"/api/uploads/{second['upload_document_version_id']}/duplicate-review/decision",
+        headers=headers,
+        json={
+            "duplicate_review_id": review["id"],
+            "decision": "USE_EXISTING_FILE",
+            "selected_existing_working_copy_id": existing_copy_id,
+        },
+    )
+    assert decision.status_code == 202
+    history = client.get(
+        "/api/conversations/duplicate-chat-projection",
+        headers=headers,
+    )
+    assert history.status_code == 200
+    assert history.json()["messages"] == []
+
+    db = SessionLocal()
+    try:
+        audit_messages = (
+            db.query(Message)
+            .filter(Message.conversation_id == "duplicate-chat-projection")
+            .order_by(Message.created_at.asc(), Message.id.asc())
+            .all()
+        )
+        assert len(audit_messages) == 3
+        assert {message.role for message in audit_messages} == {"SYSTEM_AUDIT"}
+        assert any("重复上传处理：USE_EXISTING_FILE" in message.content for message in audit_messages)
+        assert any("已记录重复上传决策：USE_EXISTING_FILE" in message.content for message in audit_messages)
+
+        decision_item = (
+            db.query(ChangeItem)
+            .filter(ChangeItem.change_type == "UPLOAD_DUPLICATE_DECISION_RECORDED")
+            .one()
+        )
+        decision_run = (
+            db.query(AgentRun)
+            .filter(AgentRun.changeset_id == decision_item.changeset_id)
+            .one()
+        )
+        invocation = (
+            db.query(ToolInvocation)
+            .filter(ToolInvocation.agent_run_id == decision_run.id)
+            .one()
+        )
+        assert invocation.tool_name == "upload-duplicate-decision-record"
+        assert invocation.output_json["decision"] == "USE_EXISTING_FILE"
+
+        # 模拟升级前数据库中的旧 role，确保无需清库也不会重新显示截图中的内部文本和已完成卡片。
+        for message in audit_messages:
+            if message.content.startswith("重复上传处理："):
+                message.role = "user"
+            else:
+                message.role = "assistant"
+        db.commit()
+    finally:
+        db.close()
+
+    legacy_history = client.get(
+        "/api/conversations/duplicate-chat-projection",
+        headers=headers,
+    )
+    assert legacy_history.status_code == 200
+    assert legacy_history.json()["messages"] == []
+    clear_overrides()
 
 
 def test_low_confidence_initial_name_keeps_upload_name_and_returns_pending_receipt(monkeypatch, tmp_path):

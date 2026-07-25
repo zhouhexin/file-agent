@@ -487,6 +487,9 @@ curl -sS http://127.0.0.1:8000/api/working-copies/<working_copy_id>/versions \
 - “使用已有文件”返回已有工作副本，不重复导入。
 - “继续上传”才允许进入归档和导入任务。
 - 相同 SHA-256 不能在没有用户决策时被系统静默合并。
+- 用户完成选择后，确认卡应退出普通消息流；刷新页面也不得展示 `CANCEL_UPLOAD`、
+  `USE_EXISTING_FILE`、`CONTINUE_UPLOAD`、“重复上传处理”或“已记录重复上传决策”等内部审计载荷。
+- 该 UI 隐藏不能删除后端 Review、AgentRun、ToolInvocation、ChangeSet 或 ChangeItem 审计记录。
 
 ### SMOKE-007 加密文件和宏风险
 
@@ -501,6 +504,11 @@ curl -sS http://127.0.0.1:8000/api/working-copies/<working_copy_id>/versions \
 - 系统提示上传可读取版本，不尝试密码或破解。
 - F12 显示宏风险，但系统不执行宏、脚本、链接或嵌入对象。
 - 页面和日志不得出现“病毒扫描通过”或同义表述。
+- 对能够被 PyMuPDF 修复读取、但 Docling 会报告页数不一致的 PDF，系统应自动改用本地逐页解析；
+  页面不得暴露 `Inconsistent number of pages`、`Input document ... is not valid` 或服务器绝对路径。
+- 对确实截断或结构无效的 PDF，应返回“文件结构无效或文件不完整”的逐文件失败说明，不得生成伪摘要。
+- 若旧版本曾留下损坏的 `managed-snapshots` 快照，再次读取时应从受管原文件自动校验并原子修复，
+  无需清库；受管原文件本身保持不变。
 
 ### SMOKE-008 DocumentVersion 原文索引（CPU-only）
 
@@ -552,6 +560,7 @@ curl -sS http://127.0.0.1:8000/api/documents/<document_id>/chunks \
 述职报告-鲁晓锋-20200421.pdf 总结一下这个文档。
 把统计表的每个工作表分别概括一下。
 按单位汇总统计表中的人数或金额。
+金海燕的资助总金额是多少？
 给这些文件生成标准化文件名建议，但先不要改。
 ```
 
@@ -566,6 +575,9 @@ curl -sS http://127.0.0.1:8000/api/documents/<document_id>/chunks \
   不依赖相对路径。
 - 页面和普通消息/API 响应不显示 Skill、Tool、Chunk、内部路径、搜索词项、SQL 分数或完整正文。
 - Excel 数字汇总由确定性表格服务完成，不能让 LLM 心算。
+- 当前消息只提交附件 ID 时，后端必须用授权文档记录补全真实文件名和类型；上述人员金额问题应进入
+  表格分析而不是文件分类。明确的“人员 + 总金额”应在关闭 LLM 时仍能跨结构兼容 Sheet 筛选求和，
+  并展示筛选字段、分 Sheet 明细及真实单元格依据。
 - 对话中出现完整文件名时，前后两种“总结”语序都必须精确定位同一个活动工作副本；不能把“这个”
   或“总结一下”误识别成目录或文件名关键词。
 - `LLM_ENABLED=false` 或文档阅读 LLM 暂不可用时，系统仍须基于持久化的完整
@@ -745,6 +757,11 @@ working_copy.search_repair.completed
 - 每行是合法 JSON。
 - API 日志包含 request_id；Agent、Tool 和文件事件尽量包含关联 ID 与耗时。
 - 检索日志能看到每阶段的候选数、Chunk 命中数、证据数和最终结果数，但不能出现查询正文或文件正文。
+- 任一 `retrieval.chunk_fallback.failed`、`retrieval.stage2.failed` 或
+  `retrieval.evidence.failed` 只能使当次结果降级；消息接口仍应返回结构化结果，随后在同一会话发送
+  普通消息也必须成功。控制台不得出现 `InFailedSqlTransaction` 或 ToolInvocation 写入失败。
+- 两阶段主查询整体失败时允许回退文件名和摘要检索；两路都不可用时应显示“文件检索暂时不可用”，
+  不能把 ASGI Traceback 展示给普通用户。
 - 补建日志能区分缺少文件级 Profile、正文索引、解析结果或证据投影。
 - 敏感信息检查命令不应发现 JWT、密码、API key、文件全文或虚假病毒扫描结论。
 - 日志不能替代 AgentRun、ToolInvocation、ChangeSet 和 ChangeItem 审计事实。

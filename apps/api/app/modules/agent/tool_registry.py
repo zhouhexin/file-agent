@@ -444,11 +444,63 @@ def _search_handler(
             db=db, user_id=user_id, workspace_id=workspace_id,
             config=settings, tokenizer=tokenizer,
         )
-        result = service.search(
-            query=search_query,
-            parsed_query=parsed,
-            scope=scope,
-        )
+        try:
+            result = service.search(
+                query=search_query,
+                parsed_query=parsed,
+                scope=scope,
+            )
+        except Exception as exc:
+            # 两阶段索引属于可重建派生能力。迁移未完成、扩展不可用或 SQL 超时时，
+            # 必须在已回滚的 savepoint 之后降级，不能让 PostgreSQL aborted 状态
+            # 继续污染 ToolInvocation 和 AgentRun 审计写入。
+            log_event(
+                "retrieval.two_stage.failed",
+                level="ERROR",
+                tool_name="hybrid-search",
+                status="DEGRADED",
+                workspace_id=workspace_id,
+                error_code=exc.__class__.__name__,
+                message="两阶段检索失败，尝试摘要级安全回退",
+            )
+            try:
+                with db.begin_nested():
+                    result = WorkingCopySummarySearchService(
+                        db=db,
+                        user_id=user_id,
+                        workspace_id=workspace_id,
+                    ).search(
+                        query=search_query,
+                        document_ids=explicit_document_ids,
+                    )
+                result["partial"] = True
+                result["user_message"] = (
+                    result.get("user_message")
+                    or "正文索引暂不可用，当前结果来自文件名和摘要检索。"
+                )
+            except Exception as fallback_exc:
+                log_event(
+                    "retrieval.summary_fallback.failed",
+                    level="ERROR",
+                    tool_name="hybrid-search",
+                    status="FAILED",
+                    workspace_id=workspace_id,
+                    error_code=fallback_exc.__class__.__name__,
+                    message="摘要级检索回退失败",
+                )
+                return {
+                    "kind": "workspace_file_search",
+                    "ok": False,
+                    "query": search_query,
+                    "total_returned": 0,
+                    "partial": True,
+                    "results": [],
+                    "error": {
+                        "code": "FILE_SEARCH_TEMPORARILY_UNAVAILABLE",
+                        "message": "文件检索暂时不可用，请稍后重试。",
+                    },
+                    "user_message": "文件检索暂时不可用，请稍后重试。",
+                }
         result["kind"] = "workspace_file_search"
         return result
 

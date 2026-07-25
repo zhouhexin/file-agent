@@ -136,14 +136,19 @@ def collect_context(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext
 def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
     """调用 Planner，并且只保存通过校验的声明式计划。"""
 
+    planning_attachments = _planning_attachments(state)
     if state.get("planner_mode") == "llm":
-        preflight_plan = _deterministic_preflight_plan(state=state, runtime=runtime)
+        preflight_plan = _deterministic_preflight_plan(
+            state=state,
+            runtime=runtime,
+            attachments=planning_attachments,
+        )
         if preflight_plan is not None:
             return _planner_state_update(plan=preflight_plan, user_intent_plan={"source": "deterministic_preflight"})
         try:
             intent_plan = runtime.context.llm_intent_service.understand_user_request(
                 message=state["message"],
-                attachments=state.get("attachments", []),
+                attachments=planning_attachments,
                 context_documents=state.get("context_documents", []),
             )
             log_event(
@@ -163,7 +168,7 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
             plan = build_plan_from_user_intent(
                 intent_plan=intent_plan,
                 message=state["message"],
-                attachments=state.get("attachments", []),
+                attachments=planning_attachments,
             )
             log_event(
                 "agent.planning.tool_plan",
@@ -187,7 +192,7 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                 user_id=state["user_id"],
                 message_id=state["message_id"],
                 message=state["message"],
-                attachments=state.get("attachments", []),
+                attachments=planning_attachments,
             )
             user_intent_plan = {
                 "fallback_reason": "LLM_INTENT_FAILED",
@@ -200,7 +205,7 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
             user_id=state["user_id"],
             message_id=state["message_id"],
             message=state["message"],
-            attachments=state.get("attachments", []),
+            attachments=planning_attachments,
         )
         user_intent_plan = {}
     log_event(
@@ -218,6 +223,7 @@ def _deterministic_preflight_plan(
     *,
     state: AgentGraphState,
     runtime: Runtime[AgentRuntimeContext],
+    attachments: List[Dict[str, Any]],
 ):
     """在 LLM 前识别稳定意图，避免固定文件任务被模型波动改变路由。"""
 
@@ -226,7 +232,7 @@ def _deterministic_preflight_plan(
         user_id=state["user_id"],
         message_id=state["message_id"],
         message=state["message"],
-        attachments=state.get("attachments", []),
+        attachments=attachments,
     )
     if plan.intent == "SUGGEST_RENAME" and plan.slots.get("document_ids"):
         return plan
@@ -238,9 +244,43 @@ def _deterministic_preflight_plan(
         "RESOLVE_RENAME_REVIEW",
         "CAPABILITY_HELP",
         "LIST_CLASSIFICATION_TAXONOMY",
+        # 表格统计的文件类型来自后端已校验附件元数据，属于稳定路由。
+        # 简单筛选聚合由确定性查询计划执行，不应因 LLM 意图波动退回分类。
+        "ANALYZE_SPREADSHEET",
     }:
         return plan
     return None
+
+
+def _planning_attachments(state: AgentGraphState) -> List[Dict[str, Any]]:
+    """把附件 ID 与后端已校验的文档元数据合并，仅供本次 Planning 使用。
+
+    用户请求仍只能提交 ``document_id``；文件名、MIME 和状态必须来自 ContextLoader 的授权查询，
+    不能采用前端自报值，也不能把服务对象或正文写入 Graph State。
+    """
+
+    context_by_document_id = {
+        str(document.get("document_id") or ""): document
+        for document in state.get("context_documents", [])
+        if document.get("document_id")
+    }
+    enriched: List[Dict[str, Any]] = []
+    for attachment in state.get("attachments", []):
+        document_id = str(attachment.get("document_id") or "")
+        if not document_id:
+            continue
+        context_document = context_by_document_id.get(document_id, {})
+        enriched.append(
+            {
+                **attachment,
+                "document_id": document_id,
+                "filename": context_document.get("filename"),
+                "content_type": context_document.get("content_type"),
+                "status": context_document.get("status"),
+                "ingest_status": context_document.get("ingest_status"),
+            }
+        )
+    return enriched
 
 
 def _planner_state_update(*, plan, user_intent_plan: Dict[str, Any]) -> Dict[str, Any]:

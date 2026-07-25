@@ -397,6 +397,10 @@ def test_extract_document_text_prefers_docling_for_pdf(monkeypatch, tmp_path):
     pdf_path = tmp_path / "notice.pdf"
     pdf_path.write_bytes(b"fake-pdf")
     monkeypatch.setattr(
+        "app.modules.files.extractors._inspect_pdf_before_docling",
+        lambda file_path: {"ok": True, "inspectable": True, "repaired": False},
+    )
+    monkeypatch.setattr(
         "app.modules.files.extractors.try_parse_with_docling",
         lambda **kwargs: {
             "ok": True,
@@ -445,6 +449,10 @@ def test_extract_document_text_falls_back_when_docling_fails(monkeypatch, tmp_pa
     pdf_path = tmp_path / "fallback.pdf"
     pdf_path.write_bytes(b"fake-pdf")
     monkeypatch.setattr(
+        "app.modules.files.extractors._inspect_pdf_before_docling",
+        lambda file_path: {"ok": True, "inspectable": True, "repaired": False},
+    )
+    monkeypatch.setattr(
         "app.modules.files.extractors.try_parse_with_docling",
         lambda **kwargs: {
             "ok": False,
@@ -473,6 +481,74 @@ def test_extract_document_text_falls_back_when_docling_fails(monkeypatch, tmp_pa
     assert result["extractor"] == "pdf"
     assert result["pages"][0]["text"] == "现有解析器正文"
     assert result["warnings"][0]["code"] == "DOCLING_NOT_AVAILABLE"
+
+
+def test_extract_document_text_rejects_invalid_pdf_without_calling_docling(monkeypatch, tmp_path):
+    """结构无效的 PDF 必须返回脱敏错误，不能把本地绝对路径交给 Docling 或用户。"""
+
+    pdf_path = tmp_path / "invalid.pdf"
+    pdf_path.write_bytes(b"truncated-pdf")
+    monkeypatch.setattr(
+        "app.modules.files.extractors._inspect_pdf_before_docling",
+        lambda file_path: {"ok": False, "inspectable": True, "repaired": False},
+    )
+
+    def unexpected_docling(**_kwargs):
+        """无效 PDF 不得进入可能打印绝对路径的重量级解析器。"""
+
+        raise AssertionError("无效 PDF 不应调用 Docling")
+
+    monkeypatch.setattr("app.modules.files.extractors.try_parse_with_docling", unexpected_docling)
+
+    result = extract_document_text(
+        file_path=pdf_path,
+        filename=pdf_path.name,
+        content_type="application/pdf",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PDF_INVALID_OR_INCOMPLETE"
+    assert str(pdf_path) not in result["error"]["message"]
+
+
+def test_extract_document_text_skips_docling_for_repaired_pdf(monkeypatch, tmp_path):
+    """MuPDF 已修复的 PDF 应直接走原生逐页解析，避免 Docling 页数不一致错误。"""
+
+    pdf_path = tmp_path / "repaired.pdf"
+    pdf_path.write_bytes(b"repairable-pdf")
+    monkeypatch.setattr(
+        "app.modules.files.extractors._inspect_pdf_before_docling",
+        lambda file_path: {"ok": True, "inspectable": True, "repaired": True, "page_count": 6},
+    )
+    monkeypatch.setattr(
+        "app.modules.files.extractors._extract_pdf_native_pages",
+        lambda file_path: [
+            {
+                "page_number": 1,
+                "sheet_name": None,
+                "text": "可修复 PDF 的正文",
+                "metadata": {"page_index": 0},
+            }
+        ],
+    )
+
+    def unexpected_docling(**_kwargs):
+        """可修复 PDF 已知与严格解析器不兼容时不得再调用 Docling。"""
+
+        raise AssertionError("修复型 PDF 不应调用 Docling")
+
+    monkeypatch.setattr("app.modules.files.extractors.try_parse_with_docling", unexpected_docling)
+
+    result = extract_document_text(
+        file_path=pdf_path,
+        filename=pdf_path.name,
+        content_type="application/pdf",
+    )
+
+    assert result["ok"] is True
+    assert result["extractor"] == "pdf"
+    assert result["pages"][0]["text"] == "可修复 PDF 的正文"
+    assert result["warnings"][0]["code"] == "PDF_REPAIRED_NATIVE_FALLBACK"
 
 
 def test_docling_adapter_serializes_document_elements(monkeypatch, tmp_path):
@@ -652,6 +728,10 @@ def test_empty_pdf_triggers_ocr_fallback(monkeypatch, tmp_path):
     config.get_settings.cache_clear()
     pdf_path = tmp_path / "scan.pdf"
     pdf_path.write_bytes(b"fake-pdf")
+    monkeypatch.setattr(
+        "app.modules.files.extractors._inspect_pdf_before_docling",
+        lambda file_path: {"ok": True, "inspectable": True, "repaired": False},
+    )
     rendered_page = tmp_path / "page-1.png"
     rendered_page.write_bytes(b"fake-render")
     ocr_service = FakeOcrService(text="扫描 PDF OCR 文本")
@@ -686,6 +766,10 @@ def test_empty_pdf_marks_ocr_needed_when_ocr_disabled(monkeypatch, tmp_path):
     config.get_settings.cache_clear()
     pdf_path = tmp_path / "scan.pdf"
     pdf_path.write_bytes(b"fake-pdf")
+    monkeypatch.setattr(
+        "app.modules.files.extractors._inspect_pdf_before_docling",
+        lambda file_path: {"ok": True, "inspectable": True, "repaired": False},
+    )
     monkeypatch.setattr(
         "app.modules.files.extractors._extract_pdf_native_pages",
         lambda file_path: [{"page_number": 1, "sheet_name": None, "text": "", "metadata": {"page_index": 0}}],

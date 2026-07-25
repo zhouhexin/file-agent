@@ -133,14 +133,18 @@ class TwoStageFileSearchService:
                 "user_message": "",
             }
 
-        self._apply_postgresql_statement_timeout()
+        # PostgreSQL 一旦 SQL 失败会把整个事务标记为 aborted。检索与 AgentRun 审计共用
+        # 请求级 Session，因此每段可能降级的只读 SQL 都必须放进独立 savepoint。
+        with self.db.begin_nested():
+            self._apply_postgresql_statement_timeout()
 
         # 一阶段：文档级索引召回
         stage1_started_at = time.perf_counter()
         try:
-            stage1_candidates = self.stage1.recall(
-                parsed_query=parsed_query, scope=scope,
-            )
+            with self.db.begin_nested():
+                stage1_candidates = self.stage1.recall(
+                    parsed_query=parsed_query, scope=scope,
+                )
         except Exception as exc:
             log_event(
                 "retrieval.stage1.failed",
@@ -173,24 +177,25 @@ class TwoStageFileSearchService:
         if len(stage1_candidates) < candidate_limit:
             fallback_started_at = time.perf_counter()
             try:
-                if getattr(scope, "scope_mode", "global") == "strict":
-                    fallback_versions = self._strict_scope_fallback(
-                        query=parsed_query.cleaned, scope=scope,
+                with self.db.begin_nested():
+                    if getattr(scope, "scope_mode", "global") == "strict":
+                        fallback_versions = self._strict_scope_fallback(
+                            query=parsed_query.cleaned, scope=scope,
+                        )
+                    else:
+                        fallback_versions = self.stage2.fallback_recall(
+                            query=parsed_query.cleaned,
+                            workspace_id=self.workspace_id,
+                            max_versions=10,
+                        )
+                    fallback_count = len(fallback_versions)
+                    stage1_candidates = self._merge_fallback(
+                        stage1_candidates,
+                        self.stage1.enrich_fallback_versions(
+                            fallback_versions=fallback_versions,
+                            scope=scope,
+                        ),
                     )
-                else:
-                    fallback_versions = self.stage2.fallback_recall(
-                        query=parsed_query.cleaned,
-                        workspace_id=self.workspace_id,
-                        max_versions=10,
-                    )
-                fallback_count = len(fallback_versions)
-                stage1_candidates = self._merge_fallback(
-                    stage1_candidates,
-                    self.stage1.enrich_fallback_versions(
-                        fallback_versions=fallback_versions,
-                        scope=scope,
-                    ),
-                )
                 log_event(
                     "retrieval.chunk_fallback.completed",
                     tool_name="hybrid-search",
@@ -242,11 +247,12 @@ class TwoStageFileSearchService:
         if version_ids:
             detail_started_at = time.perf_counter()
             try:
-                chunk_results = self.stage2.search(
-                    query=parsed_query.cleaned,
-                    document_version_ids=version_ids,
-                    limit=min(int(self.config.retrieval_chunk_global_limit), 24),
-                )
+                with self.db.begin_nested():
+                    chunk_results = self.stage2.search(
+                        query=parsed_query.cleaned,
+                        document_version_ids=version_ids,
+                        limit=min(int(self.config.retrieval_chunk_global_limit), 24),
+                    )
                 chunk_results = self._limit_chunks_per_document(chunk_results)
                 log_event(
                     "retrieval.stage2.completed",
@@ -294,10 +300,11 @@ class TwoStageFileSearchService:
             if chunk_ids:
                 evidence_started_at = time.perf_counter()
                 try:
-                    evidence_map = self.evidence.project(
-                        chunk_ids=chunk_ids,
-                        max_preview_chars=self.config.retrieval_preview_max_chars,
-                    )
+                    with self.db.begin_nested():
+                        evidence_map = self.evidence.project(
+                            chunk_ids=chunk_ids,
+                            max_preview_chars=self.config.retrieval_preview_max_chars,
+                        )
                     log_event(
                         "retrieval.evidence.completed",
                         tool_name="hybrid-search",

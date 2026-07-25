@@ -10,6 +10,7 @@
 7. 跨用户隔离
 """
 
+import sqlalchemy as sa
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -438,6 +439,62 @@ def test_empty_query_returns_no_results():
             scope=_FakeScope(),
         )
         assert len(result["results"]) == 0
+    finally:
+        db.close()
+
+
+def test_degraded_chunk_query_uses_savepoint_and_keeps_transaction_writable(monkeypatch):
+    """Chunk SQL 失败后必须回滚 savepoint，后续 ToolInvocation 审计事务仍可写入。"""
+
+    db = _db_session()
+    try:
+        _setup_full_doc(
+            db,
+            suffix="savepoint",
+            user_id="import-auditor",
+            workspace_id="shared-workspace",
+            filename="奖学金工作安排.docx",
+            summary_text="奖学金工作安排",
+            chunk_text="奖学金申请时间和材料要求",
+        )
+        db.commit()
+        service = TwoStageFileSearchService(
+            db=db,
+            user_id="chat-user",
+            workspace_id="shared-workspace",
+        )
+
+        def broken_fallback(**_kwargs):
+            """模拟 PostgreSQL Chunk 索引 SQL 失败，而不是普通 Python 异常。"""
+
+            db.execute(sa.text("SELECT * FROM missing_chunk_index_table")).all()
+
+        monkeypatch.setattr(service.stage2, "fallback_recall", broken_fallback)
+
+        result = service.search(
+            query="奖学金",
+            parsed_query=_FakeParsedQuery(cleaned="奖学金", terms=["奖学金"]),
+            scope=_FakeScope(),
+        )
+
+        assert result["ok"] is True
+        assert result["partial"] is True
+        assert result["results"][0]["filename"] == "奖学金工作安排.docx"
+        # 这里模拟 Graph 完成后写 ToolInvocation：事务不能残留为 aborted。
+        assert db.execute(sa.text("SELECT 1")).scalar_one() == 1
+        db.add(
+            Document(
+                id="doc-after-degraded-search",
+                user_id="chat-user",
+                workspace_id="shared-workspace",
+                original_filename="审计锚点.txt",
+                content_type="text/plain",
+                size_bytes=1,
+                sha256="f" * 64,
+            )
+        )
+        db.flush()
+        assert db.get(Document, "doc-after-degraded-search") is not None
     finally:
         db.close()
 

@@ -1,4 +1,5 @@
 // 单轮对话视图负责串联用户消息、附件和 AgentRun 回执，不直接读取文件内容。
+import { useCallback, useState } from 'react';
 import { Bot } from 'lucide-react';
 import { AgentRunReceipt } from './AgentRunReceipt';
 import { AttachmentRail } from './AttachmentRail';
@@ -15,17 +16,27 @@ type ChatTurnViewProps = {
 };
 
 export function ChatTurnView({ token, turn, onOpenAttachment, onOpenDocument, onOpenManagedFile }: ChatTurnViewProps) {
+  const [resolvedDuplicateHidden, setResolvedDuplicateHidden] = useState(false);
+  const hideResolvedDuplicate = useCallback(() => setResolvedDuplicateHidden(true), []);
   // 文件任务按"附件上下文 -> 用户指令 -> 助手结果"展示，减少阅读跳跃。
   if (turn.role === 'assistant') {
     const duplicateMetadata = turn.metadata?.find((item) => item.type === 'duplicate_upload_review');
     const uploadVersionId = String(duplicateMetadata?.upload_document_version_id ?? '');
+    if (uploadVersionId && resolvedDuplicateHidden) {
+      // 用户完成选择后整轮确认卡退出页面，避免留下空头像或内部状态占位。
+      return null;
+    }
     return (
       <section className="chat-turn chat-turn-system">
         <div className="message-row message-row-assistant">
           <div className="avatar avatar-assistant"><Bot size={15} /></div>
           <div className="message-content">
             {uploadVersionId ? (
-              <DuplicateUploadReviewLoader token={token} uploadVersionId={uploadVersionId} />
+              <DuplicateUploadReviewLoader
+                token={token}
+                uploadVersionId={uploadVersionId}
+                onResolved={hideResolvedDuplicate}
+              />
             ) : turn.response ? (
               <AgentRunReceipt
                 taskResult={turn.response.task_result}

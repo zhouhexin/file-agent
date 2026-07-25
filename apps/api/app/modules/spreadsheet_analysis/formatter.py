@@ -55,6 +55,18 @@ def _format_one_result(result: dict[str, Any]) -> str:
         value = _format_number(rows[0].get("value"))
         lines.append(f"结果：{value}")
 
+    sheet_breakdown = [
+        item for item in result.get("sheet_breakdown", [])
+        if isinstance(item, dict) and int(item.get("rows_matched") or 0) > 0
+    ]
+    if sheet_breakdown:
+        lines.append("分工作表明细：")
+        lines.extend(
+            f"- Sheet“{item.get('sheet_name') or '未知'}”："
+            f"{_format_number(item.get('value'))}（匹配 {int(item.get('rows_matched') or 0)} 行）"
+            for item in sheet_breakdown
+        )
+
     lines.append(
         "数据范围："
         f"扫描 {int(result.get('rows_scanned') or 0)} 行，"
@@ -62,6 +74,15 @@ def _format_one_result(result: dict[str, Any]) -> str:
         f"纳入计算 {int(result.get('rows_included') or 0)} 行，"
         f"忽略 {int(result.get('rows_ignored') or 0)} 行。"
     )
+
+    evidence_items = [
+        item for item in result.get("evidence_items", [])
+        if isinstance(item, dict)
+    ]
+    if evidence_items:
+        lines.append("计算依据：" + "；".join(_format_evidence(item) for item in evidence_items[:12]) + "。")
+        if len(evidence_items) > 12:
+            lines.append(f"另有 {len(evidence_items) - 12} 行参与计算，页面仅展示前 12 行定位。")
 
     warnings = [str(item) for item in result.get("warnings", []) if str(item).strip()]
     if warnings:
@@ -104,6 +125,21 @@ def _format_filter(item: dict[str, Any]) -> str:
     else:
         rendered = str(value)
     return f"“{column}”{operator_label}“{rendered}”"
+
+
+def _format_evidence(item: dict[str, Any]) -> str:
+    """把聚合依据压缩为 Sheet 与单元格定位，不展示服务器路径。"""
+
+    sheet_name = str(item.get("sheet_name") or "未知")
+    filter_cells = [
+        str(cell.get("cell") or "")
+        for cell in item.get("filter_cells", [])
+        if isinstance(cell, dict) and str(cell.get("cell") or "")
+    ]
+    metric = item.get("metric_cell") if isinstance(item.get("metric_cell"), dict) else {}
+    metric_cell = str(metric.get("cell") or "")
+    cells = [*filter_cells, *([metric_cell] if metric_cell else [])]
+    return f"Sheet“{sheet_name}” {', '.join(cells)}"
 
 
 def _operation_label(operation: str) -> str:

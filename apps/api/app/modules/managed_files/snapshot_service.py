@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+import os
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,7 +49,15 @@ class ManagedFileSnapshotService:
         if not source_path.is_file():
             raise FileNotFoundError("受管文件已不存在。")
 
+        source_stat_before = source_path.stat()
         source_sha256 = _sha256_file(source_path)
+        source_stat_after = source_path.stat()
+        if (
+            source_stat_before.st_size != source_stat_after.st_size
+            or source_stat_before.st_mtime_ns != source_stat_after.st_mtime_ns
+        ):
+            # 扫描或用户程序仍在写文件时不能生成“看似成功”的半成品快照。
+            raise RuntimeError("受管文件在读取期间发生变化，请等待文件写入完成后重试。")
         existing = self.repository.get_by_source_version(
             user_id=self.user_id,
             managed_file_id=managed_file.id,
@@ -67,7 +77,7 @@ class ManagedFileSnapshotService:
 
         document = self._create_document(
             filename=managed_file.filename,
-            size_bytes=source_path.stat().st_size,
+            size_bytes=source_stat_after.st_size,
             source_sha256=source_sha256,
         )
         target_path: Path | None = None
@@ -83,7 +93,7 @@ class ManagedFileSnapshotService:
                 document_id=document.id,
                 source_fingerprint=managed_file.fingerprint,
                 source_sha256=source_sha256,
-                source_size_bytes=source_path.stat().st_size,
+                source_size_bytes=source_stat_after.st_size,
                 source_modified_at=managed_file.modified_at,
             )
         except Exception:
@@ -117,14 +127,18 @@ class ManagedFileSnapshotService:
         return document
 
     def _copy_snapshot(self, *, document: Document, source_path: Path, source_sha256: str) -> Path:
-        """复制受管文件并创建本地 FileObject。"""
+        """原子复制并校验受管文件，然后创建本地 FileObject。"""
 
         storage_path = Path("managed-snapshots") / self.user_id / document.id / document.original_filename
         target_path = (self.storage_root / storage_path).resolve()
         _require_under_root(target_path, self.storage_root)
-        target_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.copyfile(source_path, target_path)
+            _atomic_verified_copy(
+                source_path=source_path,
+                target_path=target_path,
+                expected_sha256=source_sha256,
+                expected_size=document.size_bytes,
+            )
             self.db.add(
                 FileObject(
                     document_id=document.id,
@@ -169,9 +183,21 @@ class ManagedFileSnapshotService:
             return
         target_path = (self.storage_root / file_object.storage_path).resolve()
         _require_under_root(target_path, self.storage_root)
-        if not target_path.exists():
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source_path, target_path)
+        if _snapshot_matches(
+            path=target_path,
+            expected_sha256=source_sha256,
+            expected_size=document.size_bytes,
+        ):
+            return
+        # 兼容旧版本可能留下的截断快照：从仍受控的原文件原子修复，不新建业务版本。
+        _atomic_verified_copy(
+            source_path=source_path,
+            target_path=target_path,
+            expected_sha256=source_sha256,
+            expected_size=document.size_bytes,
+        )
+        file_object.size_bytes = document.size_bytes
+        file_object.sha256 = source_sha256
 
 
 def _sha256_file(path: Path) -> str:
@@ -182,6 +208,47 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _snapshot_matches(*, path: Path, expected_sha256: str, expected_size: int) -> bool:
+    """校验既有快照大小和内容哈希，截断文件不得继续被摘要链路复用。"""
+
+    if not path.is_file() or path.stat().st_size != expected_size:
+        return False
+    return _sha256_file(path) == expected_sha256
+
+
+def _atomic_verified_copy(
+    *,
+    source_path: Path,
+    target_path: Path,
+    expected_sha256: str,
+    expected_size: int,
+) -> None:
+    """用同目录临时文件提交快照，并在提交前验证完整性。
+
+    临时文件使用固定短前缀，避免 Windows 长路径下把原文件名再次拼入临时名称。
+    """
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".fa-snapshot-",
+        suffix=".part",
+        dir=target_path.parent,
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        shutil.copyfile(source_path, temporary_path)
+        if not _snapshot_matches(
+            path=temporary_path,
+            expected_sha256=expected_sha256,
+            expected_size=expected_size,
+        ):
+            raise RuntimeError("受管文件在快照复制期间发生变化，未保存不完整副本。")
+        os.replace(temporary_path, target_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _require_under_root(path: Path, root: Path) -> None:

@@ -17,17 +17,44 @@ from app.modules.ocr.service import build_default_ocr_service
 from app.modules.spreadsheet_analysis.conversion import SpreadsheetConversionError, convert_xls_to_xlsx
 
 
+class PDFExtractorUnavailableError(RuntimeError):
+    """表示本地 PDF 解析依赖缺失。"""
+
+
+class PDFInvalidDocumentError(RuntimeError):
+    """表示 PDF 结构损坏、截断或没有可读取页面。"""
+
+
 def extract_document_text(*, file_path: Path, filename: str, content_type: str, ocr_service: Any = None) -> Dict[str, Any]:
     """按文件类型解析文本内容，并返回统一结构。"""
 
     suffix = Path(filename).suffix.lower()
     parser_config_hash = extraction_config_hash(filename=filename)
-    docling_failure = _try_docling_first(
-        file_path=file_path,
-        filename=filename,
-        content_type=content_type,
-        suffix=suffix,
-    )
+    is_pdf = suffix == ".pdf" or content_type == "application/pdf"
+    pdf_preflight = _inspect_pdf_before_docling(file_path) if is_pdf else {"ok": True}
+    if not pdf_preflight.get("ok"):
+        return _failed(
+            "pdf",
+            "PDF_INVALID_OR_INCOMPLETE",
+            "PDF 文件结构无效或文件不完整，无法读取。请重新获取完整文件后再试。",
+        )
+    if pdf_preflight.get("repaired"):
+        # MuPDF 能修复但严格 Docling 后端通常会拒绝此类 PDF；直接走本地逐页解析，
+        # 避免控制台打印绝对路径和 “Inconsistent number of pages”。
+        docling_failure = {
+            "ok": False,
+            "error": {
+                "code": "PDF_REPAIRED_NATIVE_FALLBACK",
+                "message": "PDF 结构存在可修复不一致，已使用本地逐页解析器读取。",
+            },
+        }
+    else:
+        docling_failure = _try_docling_first(
+            file_path=file_path,
+            filename=filename,
+            content_type=content_type,
+            suffix=suffix,
+        )
     if docling_failure.get("ok"):
         return _completed(
             docling_failure["extractor"],
@@ -96,6 +123,32 @@ def _try_docling_first(*, file_path: Path, filename: str, content_type: str, suf
         content_type=content_type,
         ocr_enabled=settings.docling_ocr_enabled,
     )
+
+
+def _inspect_pdf_before_docling(file_path: Path) -> Dict[str, Any]:
+    """用轻量 PyMuPDF 预检 PDF，识别损坏文件和自动修复文件。
+
+    缺少 PyMuPDF 时不阻断 Docling；真正进入原生回退时会返回明确的依赖错误。
+    """
+
+    try:
+        import fitz
+    except ImportError:
+        return {"ok": True, "inspectable": False, "repaired": False}
+    try:
+        with fitz.open(file_path) as document:
+            repaired = bool(getattr(document, "is_repaired", False))
+            if document.page_count <= 0:
+                return {"ok": False, "inspectable": True, "repaired": repaired}
+            return {
+                "ok": True,
+                "inspectable": True,
+                "repaired": repaired,
+                "page_count": int(document.page_count),
+            }
+    except Exception:
+        # 不把 PyMuPDF 的异常文本或本地绝对路径返回给 Tool、LLM 或用户。
+        return {"ok": False, "inspectable": True, "repaired": False}
 
 
 def extraction_config_hash(*, filename: str) -> str | None:
@@ -377,8 +430,14 @@ def _extract_pdf_text(file_path: Path, ocr_service: Any = None) -> Dict[str, Any
 
     try:
         native_pages = _extract_pdf_native_pages(file_path)
-    except RuntimeError as exc:
+    except PDFExtractorUnavailableError as exc:
         return _failed("pdf", "PDF_EXTRACTOR_NOT_AVAILABLE", str(exc))
+    except PDFInvalidDocumentError:
+        return _failed(
+            "pdf",
+            "PDF_INVALID_OR_INCOMPLETE",
+            "PDF 文件结构无效或文件不完整，无法读取。请重新获取完整文件后再试。",
+        )
     if any(page.get("text", "").strip() for page in native_pages):
         return _completed("pdf", native_pages)
 
@@ -425,19 +484,24 @@ def _extract_pdf_native_pages(file_path: Path) -> List[Dict[str, Any]]:
     try:
         import fitz
     except ImportError:
-        raise RuntimeError("缺少 PyMuPDF，无法解析 PDF 文件。") from None
+        raise PDFExtractorUnavailableError("缺少 PyMuPDF，无法解析 PDF 文件。") from None
 
     pages: List[Dict[str, Any]] = []
-    with fitz.open(file_path) as document:
-        for index, page in enumerate(document, start=1):
-            pages.append(
-                {
-                    "page_number": index,
-                    "sheet_name": None,
-                    "text": page.get_text("text"),
-                    "metadata": {"page_index": index - 1},
-                }
-            )
+    try:
+        with fitz.open(file_path) as document:
+            for index, page in enumerate(document, start=1):
+                pages.append(
+                    {
+                        "page_number": index,
+                        "sheet_name": None,
+                        "text": page.get_text("text"),
+                        "metadata": {"page_index": index - 1},
+                    }
+                )
+    except Exception:
+        raise PDFInvalidDocumentError("PDF 文件结构无效或文件不完整。") from None
+    if not pages:
+        raise PDFInvalidDocumentError("PDF 没有可读取页面。")
     return pages
 
 
@@ -447,19 +511,22 @@ def _render_pdf_pages_for_ocr(*, file_path: Path, page_numbers: List[int]) -> Di
     try:
         import fitz
     except ImportError as exc:
-        raise RuntimeError("缺少 PyMuPDF，无法渲染 PDF 页面进行 OCR。") from exc
+        raise PDFExtractorUnavailableError("缺少 PyMuPDF，无法渲染 PDF 页面进行 OCR。") from exc
 
     output_dir = Path(tempfile.mkdtemp(prefix="file-agent-pdf-ocr-"))
     rendered_pages: Dict[int, Path] = {}
     wanted = set(page_numbers)
-    with fitz.open(file_path) as document:
-        for index, page in enumerate(document, start=1):
-            if index not in wanted:
-                continue
-            output_path = output_dir / f"page-{index:04d}.png"
-            pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-            pixmap.save(output_path)
-            rendered_pages[index] = output_path
+    try:
+        with fitz.open(file_path) as document:
+            for index, page in enumerate(document, start=1):
+                if index not in wanted:
+                    continue
+                output_path = output_dir / f"page-{index:04d}.png"
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                pixmap.save(output_path)
+                rendered_pages[index] = output_path
+    except Exception:
+        raise PDFInvalidDocumentError("PDF 文件结构无效或文件不完整。") from None
     return rendered_pages
 
 

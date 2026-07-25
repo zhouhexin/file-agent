@@ -92,9 +92,11 @@ export function DuplicateUploadReviewCard({
 export function DuplicateUploadReviewLoader({
   token,
   uploadVersionId,
+  onResolved,
 }: {
   token: string;
   uploadVersionId: string;
+  onResolved?: () => void;
 }) {
   // 历史会话刷新后按上传版本恢复确认卡，候选仍由后端重新做权限和脱敏校验。
   const [review, setReview] = useState<DuplicateReview | null>(null);
@@ -104,7 +106,13 @@ export function DuplicateUploadReviewLoader({
     let cancelled = false;
     getDuplicateReview(token, uploadVersionId)
       .then((result) => {
-        if (!cancelled) setReview(result);
+        if (!cancelled) {
+          setReview(result);
+          if (result.status !== 'WAITING_CONFIRMATION') {
+            // 兼容刷新前已经完成的旧确认卡：通知父视图移除整行，而不是只留下空头像。
+            onResolved?.();
+          }
+        }
       })
       .catch((err) => {
         if (!cancelled) setError(formatError(err));
@@ -112,18 +120,22 @@ export function DuplicateUploadReviewLoader({
     return () => {
       cancelled = true;
     };
-  }, [token, uploadVersionId]);
+  }, [token, uploadVersionId, onResolved]);
 
   if (error) return <p className="duplicate-review-error">{error}</p>;
   if (!review) return <p className="agent-chat-response">正在读取重复文件确认状态…</p>;
   if (review.status !== 'WAITING_CONFIRMATION') {
-    return <p className="agent-chat-response">重复上传确认已处理：{review.decision ?? review.status}</p>;
+    // 决策结果由附件状态体现；内部枚举保留在后端审计中，不进入普通聊天消息流。
+    return null;
   }
   return (
-    <DuplicateUploadReviewCard
+      <DuplicateUploadReviewCard
       token={token}
       review={review}
-      onResolved={(result) => setReview(result.review)}
+      onResolved={(result) => {
+        setReview(result.review);
+        onResolved?.();
+      }}
     />
   );
 }

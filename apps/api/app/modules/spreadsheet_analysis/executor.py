@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
 import openpyxl
+from openpyxl.utils import get_column_letter
 
 from .conversion import prepared_spreadsheet_path
 from .schemas import (
@@ -22,6 +23,10 @@ from .schemas import (
     WorkbookProfile,
 )
 from .validator import find_column, find_sheet
+
+
+_ROW_NUMBER_KEY = "__file_agent_row_number__"
+MAX_EVIDENCE_ROWS = 20
 
 
 def execute_query(
@@ -52,6 +57,7 @@ def execute_query(
     rows_matched = 0
     rows_included = 0
     rows_ignored = 0
+    evidence_items: list[dict[str, Any]] = []
 
     for row in iter_data_rows(file_path=file_path, sheet=sheet):
         rows_scanned += 1
@@ -76,6 +82,15 @@ def execute_query(
             continue
         values_by_group[group_key].append(number)
         rows_included += 1
+        if len(evidence_items) < MAX_EVIDENCE_ROWS:
+            evidence_items.append(
+                _row_evidence(
+                    row=row,
+                    sheet=sheet,
+                    metric_column=metric_column,
+                    filters=plan.filters,
+                )
+            )
 
     results = _aggregate_results(
         values_by_group=values_by_group,
@@ -113,6 +128,7 @@ def execute_query(
         "rows_included": rows_included,
         "rows_ignored": rows_ignored,
         "results": results,
+        "evidence_items": evidence_items,
         "warnings": _build_warnings(
             rows_matched=rows_matched,
             rows_included=rows_included,
@@ -128,9 +144,10 @@ def iter_data_rows(*, file_path: Path, sheet: SheetProfile) -> Iterator[dict[str
     suffix = file_path.suffix.lower()
     if suffix in {".csv", ".tsv"}:
         rows = _read_delimited_rows(file_path=file_path, suffix=suffix)
-        for row in rows[sheet.header_row :]:
+        for row_number, row in enumerate(rows[sheet.header_row :], start=sheet.header_row + 1):
             mapped = _map_row_to_columns(row=row, columns=sheet.columns)
             if _is_nonempty_mapped_row(mapped):
+                mapped[_ROW_NUMBER_KEY] = row_number
                 yield mapped
         return
 
@@ -145,9 +162,13 @@ def iter_data_rows(*, file_path: Path, sheet: SheetProfile) -> Iterator[dict[str
         )
         try:
             worksheet = _open_selected_sheet(workbook=workbook, sheet_id=sheet.sheet_id)
-            for row in worksheet.iter_rows(min_row=sheet.header_row + 1, values_only=True):
+            for row_number, row in enumerate(
+                worksheet.iter_rows(min_row=sheet.header_row + 1, values_only=True),
+                start=sheet.header_row + 1,
+            ):
                 mapped = _map_row_to_columns(row=row, columns=sheet.columns)
                 if _is_nonempty_mapped_row(mapped):
+                    mapped[_ROW_NUMBER_KEY] = row_number
                     yield mapped
         finally:
             workbook.close()
@@ -157,6 +178,38 @@ def matches_filters(row: dict[str, Any], filters: list[SpreadsheetFilter]) -> bo
     """应用经过校验的 AND 筛选条件。"""
 
     return all(_matches_filter(row.get(item.column_id), item) for item in filters)
+
+
+def _row_evidence(
+    *,
+    row: dict[str, Any],
+    sheet: SheetProfile,
+    metric_column: ColumnProfile,
+    filters: list[SpreadsheetFilter],
+) -> dict[str, Any]:
+    """记录参与聚合的真实 Sheet、行号、筛选单元格和数值单元格。"""
+
+    row_number = int(row.get(_ROW_NUMBER_KEY) or 0)
+    filter_cells = []
+    for item in filters:
+        column = find_column(sheet, item.column_id)
+        filter_cells.append(
+            {
+                "cell": f"{get_column_letter(column.column_index)}{row_number}",
+                "column_name": column.name,
+                "value": _display_value(row.get(column.column_id)),
+            }
+        )
+    return {
+        "sheet_name": sheet.sheet_name,
+        "row_number": row_number,
+        "filter_cells": filter_cells,
+        "metric_cell": {
+            "cell": f"{get_column_letter(metric_column.column_index)}{row_number}",
+            "column_name": metric_column.name,
+            "value": _display_value(row.get(metric_column.column_id)),
+        },
+    }
 
 
 def _matches_filter(cell_value: Any, item: SpreadsheetFilter) -> bool:

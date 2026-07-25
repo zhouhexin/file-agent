@@ -273,11 +273,11 @@ class UploadLifecycleService:
         if review.conversation_id:
             conversation = self.db.get(Conversation, review.conversation_id)
             if conversation is not None and conversation.user_id == current_user.id:
-                # 前端确认按钮也是一次明确用户输入，必须形成消息审计，不能只改状态字段。
+                # 前端确认按钮是明确用户输入，必须形成消息审计，但内部决策枚举不能显示在聊天流。
                 confirmation_message = Message(
                     conversation_id=conversation.id,
                     user_id=current_user.id,
-                    role="user",
+                    role="SYSTEM_AUDIT",
                     content=f"重复上传处理：{request.decision}",
                     attachments_json=[
                         {
@@ -291,6 +291,14 @@ class UploadLifecycleService:
                 self.db.add(confirmation_message)
                 self.db.flush()
                 review.confirmation_message_id = confirmation_message.id
+                # 原重复确认卡完成后退出普通消息流；审计消息和 review 记录继续保留。
+                notification_message = (
+                    self.db.get(Message, review.notification_message_id)
+                    if review.notification_message_id
+                    else None
+                )
+                if notification_message is not None:
+                    notification_message.role = "SYSTEM_AUDIT"
         self._append_audit(
             review=review,
             change_type="UPLOAD_DUPLICATE_DECISION_RECORDED",
@@ -299,6 +307,7 @@ class UploadLifecycleService:
                 "decision": request.decision,
                 "selected_existing_working_copy_id": selected_copy.id if selected_copy else None,
             },
+            visible_in_conversation=False,
         )
         self.db.commit()
         return DuplicateDecisionResponse(
@@ -495,6 +504,7 @@ class UploadLifecycleService:
         change_type: str,
         summary: str,
         after_value: dict[str, Any],
+        visible_in_conversation: bool = True,
     ) -> None:
         """为用户确认创建可追溯的系统 AgentRun、ToolInvocation 和 ChangeSet。"""
 
@@ -510,6 +520,7 @@ class UploadLifecycleService:
             target_id=review.upload_document_version_id,
             target_document_id=self.db.get(DocumentVersion, review.upload_document_version_id).document_id,
             after_value=after_value,
+            visible_in_conversation=visible_in_conversation,
         )
 
 
@@ -1920,8 +1931,12 @@ def create_lifecycle_audit(
     execution_status: str = "COMPLETED",
     attachment_metadata: dict[str, Any] | None = None,
     graph_document_results: list[dict[str, Any]] | None = None,
+    visible_in_conversation: bool = True,
 ) -> tuple[ChangeSet, Message]:
-    """创建系统生命周期调用的 AgentRun、ToolInvocation、ChangeSet 和逐文件 ChangeItem。"""
+    """创建系统生命周期调用的 AgentRun、ToolInvocation、ChangeSet 和逐文件 ChangeItem。
+
+    ``visible_in_conversation=false`` 只隐藏普通聊天投影，不删除或弱化任何审计事实。
+    """
 
     safe_conversation_id = conversation_id or f"lifecycle-{user_id.replace('-', '')[:26]}"
     conversation = db.get(Conversation, safe_conversation_id)
@@ -1939,7 +1954,7 @@ def create_lifecycle_audit(
     message = Message(
         conversation_id=conversation.id,
         user_id=user_id,
-        role="assistant",
+        role="assistant" if visible_in_conversation else "SYSTEM_AUDIT",
         content=message_content,
         attachments_json=[attachment_metadata] if attachment_metadata else [],
     )

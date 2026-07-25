@@ -10,7 +10,9 @@ import pytest
 
 from app.modules.agent.planner import DeterministicPlanner
 from app.modules.spreadsheet_analysis.executor import execute_query
+from app.modules.spreadsheet_analysis.formatter import format_spreadsheet_analysis_response
 from app.modules.spreadsheet_analysis.profiler import profile_workbook
+from app.modules.spreadsheet_analysis.query_planner import build_deterministic_query_plans
 from app.modules.spreadsheet_analysis.schemas import SpreadsheetQueryPlan
 from app.modules.spreadsheet_analysis.service import SpreadsheetAnalysisService
 from app.modules.spreadsheet_analysis.validator import SpreadsheetPlanValidationError, validate_plan
@@ -201,3 +203,51 @@ def test_deterministic_planner_routes_uploaded_xlsx_to_spreadsheet_tool() -> Non
 
     assert plan.intent == "ANALYZE_SPREADSHEET"
     assert plan.steps[0].tool_name == "analyze-spreadsheet"
+
+
+def test_person_total_amount_uses_deterministic_multi_sheet_plan_without_llm(tmp_path: Path) -> None:
+    """“某人的总金额”必须按真实列筛选并跨 Sheet 求和，不调用 LLM 计算或猜数。"""
+
+    path = tmp_path / "2024科研成果资助汇总表.xlsx"
+    workbook = openpyxl.Workbook()
+    paper = workbook.active
+    paper.title = "论文"
+    paper.append(["序号", "申请人", "资助金额"])
+    paper.append([1, "张三", 100])
+    paper.append([2, "金海燕", 3000])
+    paper.append([3, "金海燕", 2000])
+    patent = workbook.create_sheet("专利")
+    patent.append(["序号", "申请人", "资助金额"])
+    patent.append([1, "金海燕", 1500])
+    workbook.save(path)
+
+    profile = profile_workbook(
+        document_id="doc-person-total",
+        filename=path.name,
+        file_path=path,
+    )
+    plans = build_deterministic_query_plans(
+        question="金海燕的资助总金额是多少",
+        profile=profile,
+    )
+
+    assert [plan.sheet_id for plan in plans] == ["sheet_1", "sheet_2"]
+    assert all(plan.metric and plan.metric.operation.value == "sum" for plan in plans)
+    assert all(plan.filters[0].value == "金海燕" for plan in plans)
+
+    result = SpreadsheetAnalysisService(
+        settings=SimpleNamespace(llm_enabled=False),
+    ).analyze(
+        document_id="doc-person-total",
+        filename=path.name,
+        file_path=path,
+        question="金海燕的资助总金额是多少",
+    )
+    response = format_spreadsheet_analysis_response([result])
+
+    assert result["results"] == [{"group": "全部", "value": "6500"}]
+    assert result["rows_matched"] == 3
+    assert [item["sheet_name"] for item in result["sheet_breakdown"]] == ["论文", "专利"]
+    assert "结果：6,500" in response
+    assert "Sheet“论文” B3, C3" in response
+    assert "Sheet“专利” B2, C2" in response

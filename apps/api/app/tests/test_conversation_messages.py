@@ -61,6 +61,24 @@ def _xlsx_with_formula_error() -> bytes:
     return buffer.getvalue()
 
 
+def _xlsx_with_person_funding_across_sheets() -> bytes:
+    """构造跨 Sheet 的人员资助数据，验证聊天查询使用确定性总金额。"""
+
+    workbook = openpyxl.Workbook()
+    paper = workbook.active
+    paper.title = "论文"
+    paper.append(["序号", "申请人", "资助金额"])
+    paper.append([1, "张三", 100])
+    paper.append([2, "金海燕", 3000])
+    paper.append([3, "金海燕", 2000])
+    patent = workbook.create_sheet("专利")
+    patent.append(["序号", "申请人", "资助金额"])
+    patent.append([1, "金海燕", 1500])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
 def _docx_for_summary() -> bytes:
     """构造同时包含自然语言说明和代码块的 DOCX，保护页面总结不会退化为代码预览。"""
 
@@ -189,6 +207,52 @@ def test_uploaded_docx_summary_uses_full_text_points_instead_of_preview(monkeypa
     assert "内容概览：" not in final_response
     assert "import numpy as np" not in final_response
     assert "for index in range" not in final_response
+
+    clear_overrides()
+    config.get_settings.cache_clear()
+
+
+def test_uploaded_xlsx_person_total_routes_to_deterministic_analysis(monkeypatch, tmp_path):
+    """附件只传 document_id 时，后端必须补全真实 XLSX 元数据并回答人员总金额。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("LLM_ENABLED", "false")
+    config.get_settings.cache_clear()
+    client, session_factory = client_with_database()
+    headers = _auth_header(client, "uploaded-xlsx-person-total-user")
+    upload_response = client.post(
+        "/api/files/upload",
+        headers=headers,
+        files={
+            "file": (
+                "2024科研成果资助汇总表.xlsx",
+                _xlsx_with_person_funding_across_sheets(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert upload_response.status_code == 202
+
+    response = client.post(
+        "/api/conversations/uploaded-xlsx-person-total-chat/messages",
+        headers=headers,
+        json={
+            "content": "金海燕的资助总金额是多少",
+            "attachments": [{"document_id": upload_response.json()["document_id"]}],
+        },
+    )
+
+    assert response.status_code == 200
+    task_result = response.json()["task_result"]
+    assert task_result["response_type"] == "text"
+    assert "结果：6,500" in task_result["final_response"]
+    assert "筛选条件：“申请人”等于“金海燕”" in task_result["final_response"]
+    assert "Sheet“论文” B3, C3" in task_result["final_response"]
+    assert "分类建议" not in task_result["final_response"]
+    run, tool_names = _latest_agent_audit(session_factory)
+    assert run.intent == "ANALYZE_SPREADSHEET"
+    assert tool_names == ["analyze-spreadsheet"]
 
     clear_overrides()
     config.get_settings.cache_clear()
