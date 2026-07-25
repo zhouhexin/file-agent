@@ -4,6 +4,8 @@
 而是先由后端上下文解析服务转换为确定的 document_id 列表。
 """
 
+import pytest
+
 from app.modules.conversations.context import ConversationAttachmentContextService
 from app.modules.conversations.schemas import MessageAttachment
 
@@ -96,6 +98,58 @@ def test_context_resolver_uses_latest_batch_for_just_uploaded_request():
     assert repository.calls == ["filename", "latest"]
     assert context.scope == "latest_upload_batch"
     assert [attachment.document_id for attachment in context.attachments] == ["latest-doc"]
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_call", "expected_scope"),
+    [
+        ("删除刚刚上传的文件", "latest", "latest_upload_batch"),
+        ("把刚才上传的附件删掉", "latest", "latest_upload_batch"),
+        ("这个文件我不要了", "recent", "all_recent_context"),
+        ("把它删了", "recent", "all_recent_context"),
+    ],
+)
+def test_context_resolver_infers_attachments_for_colloquial_file_removal(
+    content,
+    expected_call,
+    expected_scope,
+):
+    """无显式附件的删除口语必须先由后端解析上文文件，不能让 Planner 猜测对象。"""
+
+    repository = FakeConversationRepository()
+    context = ConversationAttachmentContextService(repository).resolve(
+        conversation_id="chat-removal",
+        user_id="user-1",
+        content=content,
+        explicit_attachments=[],
+    )
+
+    assert repository.calls == ["filename", expected_call]
+    assert context.scope == expected_scope
+    assert context.attachments
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "删除这个对话",
+        "删除这个文件中的空行",
+        "不要删除这个文件",
+    ],
+)
+def test_context_resolver_does_not_infer_files_for_non_file_removal(content):
+    """非文件删除或否定表达不得从历史消息补入附件，避免后续计划作用于错误对象。"""
+
+    repository = FakeConversationRepository()
+    context = ConversationAttachmentContextService(repository).resolve(
+        conversation_id="chat-removal-negative",
+        user_id="user-1",
+        content=content,
+        explicit_attachments=[],
+    )
+
+    assert context.scope == "none"
+    assert context.attachments == []
 
 
 def test_context_resolver_uses_recent_first_for_previous_single_file_request():

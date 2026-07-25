@@ -182,6 +182,61 @@ def test_summary_service_deterministically_aggregates_amounts_by_teacher():
         db.close()
 
 
+def test_disabled_llm_uses_full_text_extractive_summary():
+    """聊天 LLM 关闭时必须用完整正文生成本地摘要，不能只返回短预览或空结果。"""
+
+    db = _db_session()
+    try:
+        run = DocumentExtractionRun(
+            id="run-local-summary",
+            document_id="doc-local-summary",
+            status="COMPLETED",
+            extractor="plain-text",
+        )
+        db.add(run)
+        db.add(
+            DocumentPage(
+                document_id="doc-local-summary",
+                extraction_run_id=run.id,
+                page_number=1,
+                text_content=(
+                    "鲁晓锋同志总结了年度教学工作。"
+                    "报告还介绍了科研项目进展。"
+                    "最后说明了下一年度学生培养计划。"
+                ),
+                metadata_json={},
+            )
+        )
+        db.flush()
+
+        summary = LLMDocumentSummaryService(db=db, enabled=False).summarize_documents(
+            document_results=[
+                {
+                    "document_id": "doc-local-summary",
+                    "filename": "述职报告-鲁晓锋-20200421.pdf",
+                    "extraction_status": "COMPLETED",
+                }
+            ],
+            tool_results=[
+                {
+                    "document_id": "doc-local-summary",
+                    "extraction_run_id": run.id,
+                    # 故意不给 preview，证明降级摘要读取的是持久化完整正文。
+                    "pages": [],
+                }
+            ],
+            user_message="总结一下这个文档",
+        )
+
+        assert summary is not None
+        assert "内容总结（本地抽取式，已读取 1 个文件的完整正文）" in summary
+        assert "主要内容：" in summary
+        assert "鲁晓锋同志总结了年度教学工作" in summary
+        assert "下一年度学生培养计划" in summary
+    finally:
+        db.close()
+
+
 def test_summary_service_chunks_large_documents_and_merges():
     """大文件必须先分块总结，再把分块摘要交给 LLM 汇总。"""
 

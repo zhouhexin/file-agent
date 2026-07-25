@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 from sqlalchemy.orm import Session
 
 from app.db.models import DocumentPage
+from app.modules.classification.summary_service import build_extractive_document_overview
 from app.modules.llm.client import LLMResponseError
 
 
@@ -68,8 +69,12 @@ class LLMDocumentSummaryService:
         )
         if deterministic_answer:
             return deterministic_answer
-        if not documents or not self.enabled or self.client is None:
+        if not documents:
             return None
+        if not self.enabled or self.client is None:
+            # 对话总结关闭 LLM 时仍读取完整正文并使用本地抽取式摘要，
+            # 不能退化成只截取 Tool 的短 text_preview。
+            return _build_local_extractive_summary(documents)
 
         try:
             total_chars = sum(len(document.text) for document in documents)
@@ -84,8 +89,8 @@ class LLMDocumentSummaryService:
                 user_message=user_message,
             )
         except LLMResponseError:
-            # 总结属于体验层能力；模型错误由 Graph 使用确定性回执兜底。
-            return None
+            # 模型异常只降级到本地抽取式摘要，不能让已经成功读取的正文变成空回执。
+            return _build_local_extractive_summary(documents)
 
     def _load_document_texts(
         self,
@@ -235,6 +240,22 @@ def _split_text(text: str, chunk_size: int) -> List[str]:
 
     safe_chunk_size = max(chunk_size, 1)
     return [text[index : index + safe_chunk_size] for index in range(0, len(text), safe_chunk_size)]
+
+
+def _build_local_extractive_summary(documents: List[_DocumentText]) -> str:
+    """使用完整正文生成 CPU-only 抽取式要点，过滤代码块并避免冒充生成式摘要。"""
+
+    blocks = [f"内容总结（本地抽取式，已读取 {len(documents)} 个文件的完整正文）："]
+    for index, document in enumerate(documents, start=1):
+        overview = build_extractive_document_overview(
+            filename=document.filename,
+            full_text=document.text,
+        )
+        blocks.append(
+            f"{index}. {document.filename}\n"
+            f"{overview or '正文中没有可提取的有效内容。'}"
+        )
+    return "\n\n".join(blocks)
 
 
 def _summary_from_parsed(parsed: Dict[str, Any]) -> str:

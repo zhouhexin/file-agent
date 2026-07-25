@@ -278,6 +278,34 @@ def test_deterministic_planner_routes_managed_file_summary_to_read_document():
     assert plan.slots["requested_outputs"] == ["text", "summary", "receipt"]
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "总结一下述职报告-鲁晓锋-20200421.pdf",
+        "述职报告-鲁晓锋-20200421.pdf 总结一下这个文档",
+    ],
+)
+def test_deterministic_planner_uses_explicit_filename_for_managed_summary(message):
+    """按完整文件名总结时必须优先使用该名称，不能把年份、“一下”或“这个”误当查询范围。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-managed-filename-summary",
+        user_id="user-1",
+        message_id="msg-managed-filename-summary",
+        message=message,
+        attachments=[],
+    )
+
+    assert plan.intent == "SUMMARIZE_MANAGED_FILE"
+    assert [step.tool_name for step in plan.steps] == ["managed-file-read-document"]
+    assert plan.steps[0].input == {
+        "extension": "pdf",
+        "filename_contains": "述职报告-鲁晓锋-20200421.pdf",
+    }
+    assert plan.slots["path_prefix"] is None
+    assert plan.slots["requested_outputs"] == ["text", "summary", "receipt"]
+
+
 def test_deterministic_planner_routes_managed_directory_classification():
     """受管目录分类必须使用专用 Tool，不能误判为缺少上传附件。"""
 
@@ -757,6 +785,43 @@ def test_agent_runtime_formats_empty_managed_file_list_response():
     assert "暂未生成可展示的业务结果" not in (result.final_response or "")
 
 
+def test_agent_runtime_returns_managed_document_read_error_instead_of_generic_fallback():
+    """按文件名总结但未找到文件时，应展示可行动原因，不能返回“暂无业务结果”。"""
+
+    class FakeRegistry:
+        """测试用 Registry，模拟共享工作目录中没有匹配文件。"""
+
+        def invoke(self, tool_name, input_json):
+            """返回受控的文件未找到结果，不暴露内部路径。"""
+
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": False,
+                    "status": "FAILED",
+                    "error": {
+                        "code": "MANAGED_FILE_NOT_FOUND",
+                        "message": "未找到匹配文件，请确认文件已完成同步和正文解析。",
+                    },
+                },
+                status="FAILED",
+            )
+
+    service = AgentRuntimeService(registry_factory=lambda db, user_id: FakeRegistry())
+
+    result = service.run_message(
+        conversation_id="conv-managed-summary-missing",
+        user_id="user-1",
+        message_id="msg-managed-summary-missing",
+        message="总结一下述职报告-鲁晓锋-20200421.pdf",
+    )
+
+    assert result.status == "NEEDS_REVIEW"
+    assert "未找到匹配文件" in (result.final_response or "")
+    assert "暂未生成可展示的业务结果" not in (result.final_response or "")
+
+
 def test_response_consumes_aggregated_result_summary_without_rescanning_tool_results():
     """response 节点应消费 evidence_or_change 聚合结果，而不是重新扫描 tool_results。"""
 
@@ -888,6 +953,72 @@ def test_planner_returns_declarative_tool_plan():
     ]
     assert [step.tool_name for step in plan.steps] == ["extract-document-text"]
     assert all(not step.requires_confirmation for step in plan.steps)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "删除刚刚上传的文件",
+        "把刚才上传的附件删掉",
+        "请移除上面的文档",
+        "把这个附件去掉",
+        "清除刚才上传的材料",
+        "撤回刚上传的文件",
+        "把这个文件扔掉",
+        "这个文件我不要了",
+        "刚上传的材料不需要了",
+        "这份表格不用了",
+        "把它删了",
+        "彻底删除这个文件",
+    ],
+)
+def test_planner_routes_colloquial_file_removal_to_confirmed_trash_plan(message):
+    """用户无需知道“回收站”术语，常见删除口语也必须只生成待确认回收站计划。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-trash-synonyms",
+        user_id="user-1",
+        message_id="msg-trash-synonyms",
+        message=message,
+        attachments=[{"document_id": "doc-1"}],
+    )
+
+    assert plan.intent == "PREPARE_WORKING_COPY_ACTION"
+    assert plan.steps[0].tool_name == "working-copy-action-plan-create"
+    assert plan.steps[0].input["action"] == "TRASH"
+    assert plan.confirmation_policy["operation_plan_required"] is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "删除这个对话",
+        "清空聊天记录",
+        "删除这个文件中的空行",
+        "删除附件里的批注",
+        "删除文件名中的日期",
+        "删除文档分类标签",
+        "这个文件不用修改了",
+        "这个文件不需要分类了",
+        "不要删除这个文件",
+        "别把这个文件放入回收站",
+    ],
+)
+def test_planner_does_not_treat_non_file_or_negated_removal_as_trash(message):
+    """对话清理、正文编辑、元数据修改和否定表达都不能误触发文件物理操作计划。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-trash-negative",
+        user_id="user-1",
+        message_id="msg-trash-negative",
+        message=message,
+        attachments=[{"document_id": "doc-1"}],
+    )
+
+    assert not (
+        plan.intent == "PREPARE_WORKING_COPY_ACTION"
+        and plan.steps[0].input.get("action") == "TRASH"
+    )
 
 
 def test_summary_of_previous_uploaded_files_uses_text_summary_plan():

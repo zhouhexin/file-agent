@@ -7,10 +7,14 @@ HTTP 消息必须能进入 LangGraph Agent Runtime，但当前不依赖真实大
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 
+from docx import Document as DocxDocument
 from fastapi.testclient import TestClient
 import openpyxl
 
+from app.core import config
 from app.db.models import AgentRun, Conversation, Message, ToolInvocation
+from app.modules.managed_files.scanner import ManagedFileScanner
+from app.modules.managed_files.service import sync_configured_managed_roots
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -57,6 +61,31 @@ def _xlsx_with_formula_error() -> bytes:
     return buffer.getvalue()
 
 
+def _docx_for_summary() -> bytes:
+    """构造同时包含自然语言说明和代码块的 DOCX，保护页面总结不会退化为代码预览。"""
+
+    document = DocxDocument()
+    document.add_paragraph(
+        "本文介绍一个 Python 数据可视化项目。"
+        "项目使用 NumPy 处理数组，Pandas 整理表格数据，并通过 Matplotlib 绘制动态图表。"
+    )
+    document.add_paragraph(
+        "运行前需要安装依赖，Python 版本为 3.12。"
+        "程序主要完成数据加载、坐标计算、动画生成和结果导出。"
+    )
+    document.add_paragraph(
+        "代码示例：\n"
+        "import numpy as np\n"
+        "import pandas as pd\n"
+        "import matplotlib.pyplot as plt\n"
+        "for index in range(100):\n"
+        "    print(index)"
+    )
+    buffer = BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
 def _latest_agent_audit(session_factory) -> tuple[AgentRun, list[str]]:
     """从测试数据库读取最近一次内部运行，普通消息响应本身不得暴露这些字段。"""
 
@@ -74,6 +103,95 @@ def _latest_agent_audit(session_factory) -> tuple[AgentRun, list[str]]:
         ]
         db.expunge(run)
         return run, tool_names
+
+
+def test_message_summarizes_shared_managed_file_by_explicit_filename(monkeypatch, tmp_path):
+    """用户从搜索结果抄写完整文件名后，消息入口必须读取共享正文并返回总结。"""
+
+    managed_root = tmp_path / "school-files"
+    managed_root.mkdir()
+    filename = "述职报告-鲁晓锋-20200421.txt"
+    (managed_root / filename).write_text(
+        "鲁晓锋同志在述职报告中总结了年度教学、科研和学生培养工作。",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MANAGED_ROOT_SCHOOL_FILES", str(managed_root))
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("CHAT_DOCUMENT_SUMMARY_PROVIDER", "disabled")
+    config.get_settings.cache_clear()
+    client, session_factory = client_with_database()
+    headers = _auth_header(client, "managed-filename-summary-user")
+
+    with session_factory() as db:
+        roots = sync_configured_managed_roots(db, root_key="school_files", scan=False)
+        for root in roots:
+            ManagedFileScanner(db).scan_root(root)
+        db.commit()
+
+    for content in [
+        f"总结一下{filename}",
+        f"{filename} 总结一下这个文档",
+    ]:
+        response = client.post(
+            "/api/conversations/managed-filename-summary-chat/messages",
+            headers=headers,
+            json={"content": content, "attachments": []},
+        )
+
+        assert response.status_code == 200
+        task_result = response.json()["task_result"]
+        assert task_result["response_type"] == "file_results"
+        assert "本次任务已执行完成，但暂未生成可展示的业务结果" not in task_result["final_response"]
+        assert "鲁晓锋同志" in task_result["final_response"]
+
+    clear_overrides()
+    config.get_settings.cache_clear()
+
+
+def test_uploaded_docx_summary_uses_full_text_points_instead_of_preview(monkeypatch, tmp_path):
+    """页面上传 DOCX 后请求总结，应返回完整正文要点并过滤代码，不能展示 280 字预览。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("LLM_ENABLED", "false")
+    monkeypatch.setenv("CHAT_DOCUMENT_SUMMARY_PROVIDER", "disabled")
+    config.get_settings.cache_clear()
+    client, _session_factory = client_with_database()
+    headers = _auth_header(client, "uploaded-docx-summary-user")
+    upload_response = client.post(
+        "/api/files/upload",
+        headers=headers,
+        files={
+            "file": (
+                "python代码.docx",
+                _docx_for_summary(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert upload_response.status_code == 202
+
+    response = client.post(
+        "/api/conversations/uploaded-docx-summary-chat/messages",
+        headers=headers,
+        json={
+            "content": "总结这个文档",
+            "attachments": [{"document_id": upload_response.json()["document_id"]}],
+        },
+    )
+
+    assert response.status_code == 200
+    final_response = response.json()["task_result"]["final_response"]
+    assert "内容总结（本地抽取式" in final_response
+    assert "主要内容：" in final_response
+    assert "Python 数据可视化项目" in final_response
+    assert "内容概览：" not in final_response
+    assert "import numpy as np" not in final_response
+    assert "for index in range" not in final_response
+
+    clear_overrides()
+    config.get_settings.cache_clear()
 
 
 def test_post_message_starts_agent_run():

@@ -659,6 +659,52 @@ def test_chat_creates_and_confirms_trash_then_restore_plans(monkeypatch, tmp_pat
     clear_overrides()
 
 
+def test_chat_colloquial_removal_resolves_latest_file_and_only_creates_plan(monkeypatch, tmp_path):
+    """常见删除口语必须解析到刚上传文件，但每次都只能创建待确认计划而不能直接移动文件。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "chat-trash-synonym-owner")
+    upload = _upload(client, headers, "口语删除测试.txt", b"colloquial trash intent")
+    _drain(SessionLocal)
+    working_copy = client.get("/api/working-copies", headers=headers).json()[0]
+
+    seed_message = client.post(
+        "/api/conversations/chat-trash-synonym-conv/messages",
+        headers=headers,
+        json={
+            "content": "读取这个文件",
+            "attachments": [{"document_id": upload["document_id"]}],
+        },
+    )
+    assert seed_message.status_code == 200
+
+    for content in [
+        "删除刚刚上传的文件",
+        "把刚才上传的附件删掉",
+        "这个文件我不要了",
+        "把它删了",
+    ]:
+        response = client.post(
+            "/api/conversations/chat-trash-synonym-conv/messages",
+            headers=headers,
+            json={"content": content, "attachments": []},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["message"]["attachments"] == [{"document_id": upload["document_id"]}]
+        assert data["task_result"]["response_type"] == "operation_plan"
+        assert data["task_result"]["operation_plan_id"]
+        # 多种口语都只能停在确认前，不能因为识别成功就直接产生物理副作用。
+        assert client.get(
+            f"/api/working-copies/{working_copy['id']}",
+            headers=headers,
+        ).json()["status"] == "ACTIVE"
+
+    clear_overrides()
+
+
 def test_macro_risk_is_reported_without_claiming_virus_scan(tmp_path):
     """宏格式只做风险提示且绝不执行，病毒扫描状态必须明确为未实现。"""
 

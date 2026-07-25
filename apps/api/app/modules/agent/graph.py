@@ -413,7 +413,39 @@ def _aggregate_tool_results(
         "rename_review_resolution": _rename_review_resolution_from_results(tool_results),
         "intent_summary": _intent_summary_from_results(tool_results),
         "filesystem_job": _filesystem_job_from_results(tool_results),
+        "tool_errors": _tool_errors_from_invocations(state.get("tool_invocations", [])),
     }
+
+
+def _tool_errors_from_invocations(tool_invocations: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """提取未形成业务结果的 Tool 失败原因，避免 response 返回无意义的通用兜底。
+
+    这里只保留面向用户的错误消息，不把 Tool 名称、输入参数或内部异常细节暴露到普通消息接口。
+    正文解析失败由逐文件回执负责展示；这里处理受管目录读取等没有逐文件结果的失败。
+    """
+
+    errors: List[Dict[str, str]] = []
+    for invocation in tool_invocations:
+        if str(invocation.get("status") or "").upper() != "FAILED":
+            continue
+        if invocation.get("tool_name") == "extract-document-text":
+            continue
+        result = invocation.get("output_json")
+        if not isinstance(result, dict):
+            continue
+        error = result.get("error")
+        if not isinstance(error, dict):
+            continue
+        message = str(error.get("message") or "").strip()
+        if not message:
+            continue
+        errors.append(
+            {
+                "code": str(error.get("code") or "TOOL_EXECUTION_FAILED"),
+                "message": message,
+            }
+        )
+    return errors
 
 
 def _filesystem_job_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -594,6 +626,20 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
         return {
             "status": "COMPLETED",
             "final_response": _build_general_chat_response(intent_summary),
+        }
+
+    tool_errors = result_summary.get("tool_errors", [])
+    if tool_errors:
+        messages = list(
+            dict.fromkeys(
+                str(item.get("message") or "").strip()
+                for item in tool_errors
+                if str(item.get("message") or "").strip()
+            )
+        )
+        return {
+            "status": "NEEDS_REVIEW",
+            "final_response": "\n".join(messages),
         }
 
     return {
@@ -1083,16 +1129,13 @@ def _build_document_results_response(document_results: List[Dict[str, Any]]) -> 
 
 
 def _build_document_summary_response(*, document_results: List[Dict[str, Any]], extraction_results: List[Dict[str, Any]]) -> str:
-    """根据解析到的正文预览生成内容总结回执。"""
+    """生成摘要不可用回执，禁止把 Tool 的短预览伪装成文档总结。
 
-    preview_by_document_id: Dict[str, str] = {}
-    for result in extraction_results:
-        document_id = str(result.get("document_id") or "")
-        pages = [page for page in result.get("pages", []) if isinstance(page, dict)]
-        preview_text = "\n".join(str(page.get("text_preview") or "").strip() for page in pages).strip()
-        preview_by_document_id[document_id] = preview_text
+    真正的总结必须由文档阅读服务读取完整 ``document_pages`` 后生成；此函数只处理正文为空或摘要服务
+    未取得完整正文的降级场景。
+    """
 
-    blocks = [f"已读取 {len(document_results)} 个文件，以下是内容总结："]
+    blocks = [f"已读取 {len(document_results)} 个文件，但暂时无法生成完整内容总结："]
     for index, result in enumerate(document_results, start=1):
         filename = result.get("filename") or result.get("document_id") or "未知文件"
         if result.get("extraction_status") == "FAILED":
@@ -1101,16 +1144,9 @@ def _build_document_summary_response(*, document_results: List[Dict[str, Any]], 
             blocks.append(f"{index}. {filename}\n无法总结：{message}")
             continue
 
-        preview_text = preview_by_document_id.get(str(result.get("document_id") or ""), "")
-        if not preview_text:
-            blocks.append(f"{index}. {filename}\n暂未提取到可总结的正文内容。")
-            continue
-
-        clipped_preview = preview_text[:280]
-        suffix = "..." if len(preview_text) > len(clipped_preview) else ""
         blocks.append(
             f"{index}. {filename}\n"
-            f"内容概览：{clipped_preview}{suffix}"
+            "未取得可供总结的完整正文，请等待文件解析完成后重试。"
         )
     return "\n\n".join(blocks)
 

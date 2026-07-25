@@ -10,6 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+from app.modules.file_lifecycle.conversation_intents import (
+    has_contextual_file_removal_reference,
+    has_trash_working_copy_intent,
+)
 from app.modules.conversations.repository import ConversationRepository
 from app.modules.conversations.schemas import MessageAttachment
 
@@ -136,12 +140,19 @@ def _should_infer_recent_attachments(content: str) -> bool:
     ]
     has_file_task = _has_file_task_intent(content)
     has_history_reference = any(keyword in content for keyword in reference_keywords)
-    return has_file_task and (has_history_reference or _extract_file_ordinal(content) is not None)
+    has_removal_reference = has_contextual_file_removal_reference(content)
+    return has_file_task and (
+        has_history_reference
+        or has_removal_reference
+        or _extract_file_ordinal(content) is not None
+    )
 
 
 def _has_file_task_intent(content: str) -> bool:
     """判断文本是否像文件任务，用于决定是否尝试解析历史附件引用。"""
 
+    if has_trash_working_copy_intent(content):
+        return True
     file_task_keywords = [
         "文件",
         "附件",

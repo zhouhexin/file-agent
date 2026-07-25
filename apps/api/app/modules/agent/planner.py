@@ -13,6 +13,7 @@ from typing import Any, Dict, List
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.modules.agent.capability_router import route_user_intent
+from app.modules.file_lifecycle.conversation_intents import has_trash_working_copy_intent
 from app.modules.llm.schemas import UserIntentPlan
 
 
@@ -56,6 +57,18 @@ SPREADSHEET_VALIDATE_HINTS = {"validate_spreadsheet", "validate-spreadsheet"}
 MANAGED_FILE_LIST_HINTS = {"managed_file_list", "managed-file-list"}
 MANAGED_FILE_READ_HINTS = {"managed_file_read", "managed-file-read-document", "read_managed_file"}
 MANAGED_FILE_RENAME_HINTS = {"suggest_rename", "generate-rename-suggestions", "file_rename"}
+MANAGED_READ_FILENAME_EXTENSIONS = {
+    "pdf",
+    "doc",
+    "docx",
+    "xls",
+    "xlsx",
+    "xlsm",
+    "txt",
+    "md",
+    "csv",
+    "tsv",
+}
 MANAGED_FILE_CLASSIFICATION_HINTS = {
     "managed_file_classification",
     "classify-managed-files",
@@ -187,7 +200,7 @@ class DeterministicPlanner:
                 action="RESTORE",
                 document_ids=_document_ids(attachments),
             )
-        if _has_trash_working_copy_intent(message):
+        if has_trash_working_copy_intent(message):
             return _working_copy_action_plan(
                 user_goal=message,
                 action="TRASH",
@@ -543,7 +556,7 @@ def build_plan_from_user_intent(
             response_style=intent_plan.response_style,
             llm_intent_plan=intent_plan.model_dump(),
         )
-    if _has_trash_working_copy_intent(message):
+    if has_trash_working_copy_intent(message):
         return _working_copy_action_plan(
             user_goal=intent_plan.user_goal or message,
             action="TRASH",
@@ -1463,12 +1476,6 @@ def _has_restore_working_copy_intent(message: str) -> bool:
     return "恢复" in message and any(value in message for value in ["文件", "附件", "回收站", "刚才", "刚刚"])
 
 
-def _has_trash_working_copy_intent(message: str) -> bool:
-    """识别移入回收站请求；项目不提供自然语言永久删除通道。"""
-
-    return any(value in message for value in ["移入回收站", "放入回收站", "移到回收站", "删除这个文件", "删除刚才", "删掉这个文件"])
-
-
 def _mcp_filesystem_list_plan(
     *,
     user_goal: str,
@@ -2052,25 +2059,35 @@ def _managed_file_read_filters_from_request(*, message: str, lowered: str) -> Di
     if not _has_managed_file_read_intent(message=message, lowered=lowered):
         return None
 
+    explicit_filename = _managed_filename_from_read_request(message)
     root_key = _managed_root_key_from_read_request(message)
     path_prefix = None
-    filename_contains = _managed_filename_contains_from_list_request(message)
-    directory_match = re.search(
-        r"(?:读取|解析|总结|讲解|概括)\s*(?P<prefix>[^，。！？]+?)\s*(?:目录下|下|中|里|里面)\s*(?P<keyword>[^，。！？]+?)(?:的)?(?:相关)?(?:文件|文档|材料)",
-        message,
-    )
-    if directory_match:
-        prefix = directory_match.group("prefix").strip()
-        keyword = directory_match.group("keyword").strip()
-        if root_key and prefix == root_key:
-            path_prefix = None
-        else:
-            path_prefix = _normalize_managed_path_prefix(prefix)
-        filename_contains = _normalize_managed_filename_keyword(keyword) or filename_contains
-    elif root_key:
-        path_prefix = _managed_path_prefix_from_read_request(message=message, root_key=root_key)
+    filename_contains = explicit_filename or _managed_filename_contains_from_list_request(message)
+    if explicit_filename is None:
+        # 完整文件名已经是最精确的受控范围；只有没有完整文件名时才解析“某目录下某主题”。
+        # 否则“文件名 总结一下这个文档”会把“一”误当目录、把“这个”误当文件名关键字。
+        directory_match = re.search(
+            r"(?:读取|解析|总结|讲解|概括)\s*(?P<prefix>[^，。！？]+?)\s*"
+            r"(?:目录下|下|中|里|里面)\s*(?P<keyword>[^，。！？]+?)"
+            r"(?:的)?(?:相关)?(?:文件|文档|材料)",
+            message,
+        )
+        if directory_match:
+            prefix = directory_match.group("prefix").strip()
+            keyword = directory_match.group("keyword").strip()
+            if root_key and prefix == root_key:
+                path_prefix = None
+            else:
+                path_prefix = _normalize_managed_path_prefix(prefix)
+            filename_contains = _normalize_managed_filename_keyword(keyword) or filename_contains
+        elif root_key:
+            path_prefix = _managed_path_prefix_from_read_request(message=message, root_key=root_key)
 
-    extension = _managed_extension_from_list_request(message)
+    extension = (
+        explicit_filename.rsplit(".", maxsplit=1)[-1].lower()
+        if explicit_filename
+        else _managed_extension_from_list_request(message)
+    )
     if not any([root_key, path_prefix, filename_contains, extension]):
         return None
     filters: Dict[str, str] = {}
@@ -2240,16 +2257,55 @@ def _managed_path_prefix_from_rename_request(*, message: str, root_key: str | No
 def _has_managed_file_read_intent(*, message: str, lowered: str) -> bool:
     """判断用户是否想读取受管目录里的文件正文。"""
 
-    if "文件" not in message and "文档" not in message and "材料" not in message:
+    explicit_filename = _managed_filename_from_read_request(message)
+    if (
+        "文件" not in message
+        and "文档" not in message
+        and "材料" not in message
+        and explicit_filename is None
+    ):
         return False
     if not (
         any(keyword in message for keyword in ["读取", "解析", "总结", "讲解", "概括", "内容"])
         or any(keyword in lowered for keyword in ["read", "summarize", "summary", "parse"])
     ):
         return False
-    return any(keyword in message for keyword in ["下", "目录", "中", "里", "里面"]) or bool(
-        _managed_root_key_from_read_request(message)
+    return bool(explicit_filename) or any(
+        keyword in message for keyword in ["下", "目录", "中", "里", "里面"]
+    ) or bool(_managed_root_key_from_read_request(message))
+
+
+def _managed_filename_from_read_request(message: str) -> str | None:
+    """提取总结或读取请求中明确写出的完整文件名。
+
+    完整文件名比年份、主题词和宽泛目录表达更精确，必须优先作为受管文件范围。
+    这里只返回逻辑文件名，不解析服务器路径，也不允许用户提供绝对路径。
+    """
+
+    extension_pattern = "|".join(
+        sorted(
+            (re.escape(extension) for extension in MANAGED_READ_FILENAME_EXTENSIONS),
+            key=len,
+            reverse=True,
+        )
     )
+    match = re.search(
+        rf"(?P<filename>[^/\\，。！？\r\n]+?\.(?:{extension_pattern}))",
+        message,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    candidate = match.group("filename").strip().strip("“”\"'")
+    candidate = re.sub(
+        r"^(?:请|麻烦)?(?:帮我)?(?:对|把|将)?\s*"
+        r"(?:总结一下|总结|概括一下|概括|讲解一下|讲解|说明一下|读取|解析)\s*",
+        "",
+        candidate,
+    ).strip()
+    if not candidate or "/" in candidate or "\\" in candidate:
+        return None
+    return candidate
 
 
 def _managed_root_key_from_read_request(message: str) -> str | None:

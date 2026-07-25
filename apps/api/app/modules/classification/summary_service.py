@@ -558,6 +558,77 @@ def _extractive_summary(
     return payload
 
 
+def build_extractive_document_overview(*, filename: str, full_text: str) -> str:
+    """基于完整正文生成 CPU-only 抽取式概览，供聊天总结的无模型降级路径复用。
+
+    该函数只抽取原文句子，不把摘要当成事实证据；页码引用仍应由 Evidence 或正文问答链路提供。
+    对代码类文档会过滤 import、安装命令和代码表达式，避免把代码块误当成内容总结。
+    """
+
+    normalized_text = full_text.strip()
+    if not normalized_text:
+        return ""
+    candidates, _truncated = _build_sentence_candidates(
+        full_text=normalized_text,
+        pages=[],
+    )
+    prose_candidates = [
+        candidate
+        for candidate in candidates
+        if not _is_code_like_summary_sentence(candidate.text)
+    ]
+    ranked = _rank_sentences_with_lexrank(prose_candidates or candidates)
+    selected = _select_summary_sentences(ranked, limit=4)
+    selected_in_source_order = sorted(selected, key=lambda item: item[0].order)
+    points = [
+        candidate.text.strip()
+        for candidate, _score in selected_in_source_order
+        if candidate.text.strip()
+    ]
+    if not points:
+        return ""
+    return "主要内容：\n" + "\n".join(f"- {point}" for point in points)
+
+
+def _is_code_like_summary_sentence(text: str) -> bool:
+    """识别不应占据聊天摘要的代码、命令和纯配置行。
+
+    该过滤只作用于无模型聊天摘要，不修改原始正文、Chunk、Evidence 或后台分类摘要。
+    """
+
+    stripped = text.strip()
+    lowered = stripped.lower()
+    if not stripped:
+        return True
+    command_prefixes = (
+        "import ",
+        "from ",
+        "pip ",
+        "pip3 ",
+        "python -m ",
+        "conda ",
+        "def ",
+        "class ",
+        "for ",
+        "while ",
+        "if ",
+        "elif ",
+        "else:",
+        "return ",
+        "print(",
+        "plt.",
+        "np.",
+        "pd.",
+    )
+    if lowered.startswith(command_prefixes):
+        return True
+    if re.match(r"^[a-zA-Z_][\w.]*\s*(?:=|\+=|-=|\*=|/=)\s*.+$", stripped):
+        return True
+    if stripped.count("(") + stripped.count(")") >= 4 and not re.search(r"[。！？；]", stripped):
+        return True
+    return False
+
+
 def _build_extractive_summary(
     *,
     filename: str,
