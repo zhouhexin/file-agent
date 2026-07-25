@@ -62,10 +62,47 @@ class SpreadsheetDocumentInput(StrictToolInput):
 
 
 class SearchToolInput(StrictToolInput):
-    """检索类 Tool 的输入。"""
+    """检索类 Tool 的输入。
 
-    query: str = Field(min_length=1)
+    普通 Planner 只提供 query 和 document_ids。其余字段只允许后端在用户解决已持久化
+    歧义选择后生成，不能由前端直接提交短语数组绕过选择校验。
+    """
+
+    query: str = Field(min_length=1, max_length=500)
     document_ids: List[str] = Field(default_factory=list)
+    match_mode: Literal["AUTO", "LITERAL", "RELATED", "BROAD"] = "AUTO"
+    phrases: List[str] = Field(default_factory=list, max_length=8)
+    require_body_evidence: bool | None = None
+    clarification_id: str | None = Field(default=None, min_length=1, max_length=36)
+    clarification_option_id: str | None = Field(
+        default=None, min_length=1, max_length=80
+    )
+
+    @field_validator("phrases")
+    @classmethod
+    def validate_search_phrases(cls, values: List[str]) -> List[str]:
+        """限制服务端续跑短语，拒绝空值、控制字符和超长内容。"""
+
+        normalized: List[str] = []
+        for value in values:
+            phrase = " ".join(str(value or "").strip().split())
+            if len(phrase) < 1 or len(phrase) > 30:
+                raise ValueError("search phrase length must be between 1 and 30")
+            if any(ord(char) < 32 for char in phrase):
+                raise ValueError("search phrase contains control characters")
+            if phrase not in normalized:
+                normalized.append(phrase)
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_resolution_fields(self) -> "SearchToolInput":
+        """续跑字段必须成组出现，AUTO 模式不能夹带短语。"""
+
+        if self.match_mode == "AUTO" and self.phrases:
+            raise ValueError("AUTO search cannot include explicit phrases")
+        if bool(self.clarification_id) != bool(self.clarification_option_id):
+            raise ValueError("clarification id and option id must be provided together")
+        return self
 
 
 class EvidenceAnswerInput(StrictToolInput):

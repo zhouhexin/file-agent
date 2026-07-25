@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 
 _FILLER_PHRASES = [
@@ -49,6 +49,26 @@ _YEAR_PATTERN = re.compile(r"(20\d{2})年?")
 _RELATIVE_YEAR_PATTERN = re.compile(r"(去年|前年|今年)")
 _DOC_NUMBER_PATTERN = re.compile(r"[(\[]?\d+\s*号[\])]?")
 _PERSON_HONORIFICS = ("老师", "同志", "先生", "女士")
+_QUESTION_FILE_SELECTOR_PATTERN = re.compile(
+    r"^(?:哪个|哪些|哪份|哪一份|哪几个|哪几份|哪篇|哪几篇|哪张|哪几张)"
+    r"\s*(?:文件|文档|文章|材料|证明|表格|报告)?\s*"
+)
+_CONTENT_RELATION_PATTERN = re.compile(
+    r"^(?:(?:正文|内容)?(?:中|里|里面)\s*)?"
+    r"(?:有\s*)?"
+    r"(?:"
+    r"提到(?:了|过)?|提及(?:了|过)?|"
+    r"包含(?:了|有)?|含有|"
+    r"出现(?:了|过)?|"
+    r"写到(?:了|过)?|写有|"
+    r"涉及(?:了|过)?"
+    r")\s*"
+)
+_LITERAL_RELATION_PATTERN = re.compile(
+    r"(?:提到(?:了|过)?|提及(?:了|过)?|包含(?:了|有)?|含有|出现(?:了|过)?|"
+    r"写到(?:了|过)?|写有|涉及(?:了|过)?|原文(?:中)?有)"
+)
+_RELATED_RELATION_PATTERN = re.compile(r"(?:相关|有关|关于|类似|相近)")
 
 
 @dataclass(frozen=True)
@@ -57,6 +77,7 @@ class ParsedQuery:
 
     original: str
     cleaned: str
+    relation_mode: Literal["LITERAL", "RELATED", "UNSPECIFIED"] = "UNSPECIFIED"
     terms: list[str] = field(default_factory=list)
     year: int | None = None
     relative_year: int | None = None
@@ -116,6 +137,7 @@ class FileSearchQueryParser:
         return ParsedQuery(
             original=query,
             cleaned=cleaned,
+            relation_mode=self._relation_mode(query),
             terms=terms[:64],
             year=year,
             relative_year=relative_year,
@@ -123,16 +145,39 @@ class FileSearchQueryParser:
             taxonomy_candidates=taxonomy_candidates,
         )
 
+    def _relation_mode(
+        self, text: str
+    ) -> Literal["LITERAL", "RELATED", "UNSPECIFIED"]:
+        """根据用户业务措辞区分原文连续匹配和相关主题检索。
+
+        该模式只决定后端证据门槛，不把内部切词细节暴露给用户。原文关系词优先级更高，
+        避免“查找与某主题相关且正文提到……”被错误放宽为摘要命中。
+        """
+
+        normalized = str(text or "").strip().lower()
+        if _LITERAL_RELATION_PATTERN.search(normalized):
+            return "LITERAL"
+        if _RELATED_RELATION_PATTERN.search(normalized):
+            return "RELATED"
+        return "UNSPECIFIED"
+
     def _remove_fillers(self, text: str) -> str:
         """去除查询中的低信息量请求词。"""
         result = text.lower()
         for phrase in _FILLER_PHRASES:
             result = result.replace(phrase, " ")
+        result = " ".join(result.split())
+        # “哪个文件、哪几份材料”等问句选择词只用于表达检索动作，不属于检索主题。
+        # 这里同时移除紧随其后的文件对象，但不能全局删除“报告、通知”等可能的业务主题。
+        result = _QUESTION_FILE_SELECTOR_PATTERN.sub("", result)
         # “与某人有关”“关于某人的相关文件”中的关系词只表达检索意图，
         # 不能进入全文词项，否则同一主题的两种说法会产生不同召回结果。
         # “找我的……”先移除“找我”后会留下句首“的”，它同样只是语法连接词；
         # 若保留会把“的奖学金”误判成四字精确实体并导致零召回。
         result = re.sub(r"^\s*(?:与|和|关于|的)\s*", "", result)
+        # 用户说“提到了、包含、出现过”等是在限定正文匹配关系，真正的查询主题位于其后。
+        # 必须在分词前删除这些关系词，避免短语被拆成宽泛 OR 查询并召回无关文件。
+        result = _CONTENT_RELATION_PATTERN.sub("", result)
         result = re.sub(r"\s*的\s*$", "", result)
         # 去除多余空白
         result = " ".join(result.split())

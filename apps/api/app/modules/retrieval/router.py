@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,9 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.db.models import User
 from app.modules.auth.dependencies import get_current_user
+from app.modules.agent.user_receipt import build_user_task_receipt
+from app.modules.conversations.schemas import SendMessageResponse
+from app.modules.conversations.service import ConversationMessageService
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
 from app.modules.retrieval.query_parser import FileSearchQueryParser
 from app.modules.retrieval.scope_resolver import (
@@ -22,6 +25,10 @@ from app.modules.retrieval.scope_resolver import (
 )
 from app.modules.retrieval.two_stage_search import TwoStageFileSearchService
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
+from app.modules.retrieval.clarification_service import (
+    FileSearchClarificationError,
+    FileSearchClarificationService,
+)
 
 
 router = APIRouter(prefix="/api", tags=["search"])
@@ -35,6 +42,33 @@ class FileSearchRequest(BaseModel):
     attachment_document_ids: list[str] = Field(default_factory=list, max_length=50)
     # API 最多返回 20 个已收敛候选；聊天页默认展示 10 个并在本地展开更多。
     top_k: int = Field(default=10, ge=1, le=20)
+
+
+class FileSearchClarificationResolveRequest(BaseModel):
+    """选择卡只提交服务端 option_id；自定义短语由后端再次校验。"""
+
+    option_id: str = Field(min_length=1, max_length=80)
+    custom_phrase: str | None = Field(default=None, max_length=30)
+
+
+@router.get("/file-search/clarifications/{clarification_id}")
+def get_file_search_clarification(
+    clarification_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """读取选择卡最新状态，使页面刷新后不再显示过期的待选择状态。"""
+
+    try:
+        payload = FileSearchClarificationService(db).get_public(
+            clarification_id=clarification_id,
+            user_id=current_user.id,
+        )
+        db.commit()
+        return payload
+    except FileSearchClarificationError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/search")
@@ -74,3 +108,33 @@ def search_files(
         "user_message": str(result.get("user_message") or ""),
         "files": files,
     }
+
+
+@router.post(
+    "/file-search/clarifications/{clarification_id}/resolve",
+    response_model=SendMessageResponse,
+)
+def resolve_file_search_clarification(
+    clarification_id: str,
+    request: FileSearchClarificationResolveRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> SendMessageResponse:
+    """解决文件检索范围歧义，并通过新的 AgentRun 继续执行所选范围。"""
+
+    try:
+        execution = ConversationMessageService(
+            db=db
+        ).resolve_file_search_clarification(
+            clarification_id=clarification_id,
+            option_id=request.option_id,
+            custom_phrase=request.custom_phrase,
+            user_id=current_user.id,
+        )
+    except FileSearchClarificationError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return SendMessageResponse(
+        message=execution.message,
+        task_result=build_user_task_receipt(execution.agent_run),
+    )

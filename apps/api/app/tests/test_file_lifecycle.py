@@ -88,6 +88,29 @@ def _drain(SessionLocal, maximum: int = 30) -> list[str]:
     return job_ids
 
 
+def _trash_working_copy(client, headers: dict[str, str], working_copy_id: str, conversation_id: str) -> None:
+    """通过真实 OperationPlan 把指定工作副本移入回收站，禁止测试绕过确认链路。"""
+
+    plan_response = client.post(
+        "/api/operations/plans",
+        headers=headers,
+        json={
+            "conversation_id": conversation_id,
+            "operation_type": "TRASH_WORKING_COPIES",
+            "reason": "测试用户明确删除文件",
+            "items": [{"working_copy_id": working_copy_id}],
+        },
+    )
+    assert plan_response.status_code == 200
+    confirmation = client.post(
+        f"/api/operations/plans/{plan_response.json()['id']}/confirm",
+        headers=headers,
+        json={"confirmation": "确认移入回收站"},
+    )
+    assert confirmation.status_code == 200
+    assert confirmation.json()["status"] == "EXECUTED"
+
+
 def test_upload_is_archived_then_imported_by_separate_jobs(monkeypatch, tmp_path):
     """查重、归档和导入必须串联为三个持久化任务并建立完整追溯关系。"""
 
@@ -328,6 +351,171 @@ def test_duplicate_upload_waits_for_dialog_and_can_use_existing(monkeypatch, tmp
     finally:
         db.close()
         clear_overrides()
+
+
+def test_duplicate_upload_reports_deleted_match_and_requires_explicit_reupload(monkeypatch, tmp_path):
+    """相同内容只命中已删除文件时必须询问是否再次上传，不能自动复活或合并。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "deleted-duplicate-owner")
+    first = _upload(client, headers, "已删除通知.txt", b"same deleted content")
+    _drain(SessionLocal)
+    first_copy = client.get("/api/working-copies", headers=headers).json()[0]
+    _trash_working_copy(client, headers, first_copy["id"], "deleted-duplicate-conv")
+
+    second = _upload(client, headers, "再次上传通知.txt", b"same deleted content")
+    process_next_filesystem_job(session_factory=SessionLocal, worker_id="deleted-duplicate-test")
+    review_response = client.get(
+        f"/api/uploads/{second['upload_document_version_id']}/duplicate-review",
+        headers=headers,
+    )
+
+    assert review_response.status_code == 200
+    review = review_response.json()
+    assert review["status"] == "WAITING_CONFIRMATION"
+    assert review["allowed_decisions"] == ["CONTINUE_UPLOAD", "CANCEL_UPLOAD"]
+    assert review["candidates"][0]["summary"]["file_status"] == "TRASHED"
+    assert "此前已删除" in review["candidates"][0]["summary"]["message"]
+    assert review["candidates"][0]["existing_working_copy_id"] is None
+
+    decision = client.post(
+        f"/api/uploads/{second['upload_document_version_id']}/duplicate-review/decision",
+        headers=headers,
+        json={
+            "duplicate_review_id": review["id"],
+            "decision": "CONTINUE_UPLOAD",
+            "selected_existing_working_copy_id": None,
+        },
+    )
+    assert decision.status_code == 202
+    _drain(SessionLocal)
+    copies = client.get("/api/working-copies", headers=headers).json()
+    assert sorted(item["status"] for item in copies) == ["ACTIVE", "TRASHED"]
+    # 用户选择再次上传后形成全新工作副本，已删除副本仍保留在回收站。
+    assert len({item["id"] for item in copies}) == 2
+    assert client.get("/api/trash-entries", headers=headers).json()[0]["status"] == "ACTIVE"
+    assert first["document_id"] != second["document_id"]
+    clear_overrides()
+
+
+def test_exact_filename_search_returns_each_same_version_trash_candidate(monkeypatch, tmp_path):
+    """完整文件名命中多条同名同版本回收站记录时必须逐条返回并等待单选。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "exact-trash-owner")
+    _upload(client, headers, "面谈名单.txt", b"same-version-placeholder")
+    _drain(SessionLocal)
+    first_copy = client.get("/api/working-copies", headers=headers).json()[0]
+    _trash_working_copy(client, headers, first_copy["id"], "exact-trash-conv")
+
+    first_trash_entry_id = ""
+    db = SessionLocal()
+    try:
+        original = db.get(WorkingCopy, first_copy["id"])
+        first_entry = db.query(TrashEntry).filter_by(working_copy_id=original.id, status="ACTIVE").one()
+        first_trash_entry_id = first_entry.id
+        # 构造第二个同名、同 DocumentVersion、同哈希的已删除工作副本，验证查询不能合并。
+        duplicate_copy = WorkingCopy(
+            working_copy_root_id=original.working_copy_root_id,
+            workspace_id=original.workspace_id,
+            managed_file_id=original.managed_file_id,
+            document_id=original.document_id,
+            current_version_id=original.current_version_id,
+            relative_path="待确认/duplicate/面谈名单.txt",
+            relative_path_hash="d" * 64,
+            filename=original.filename,
+            extension=original.extension,
+            size_bytes=original.size_bytes,
+            content_sha256=original.content_sha256,
+            imported_source_sha256=original.imported_source_sha256,
+            is_primary_import=False,
+            status="TRASHED",
+            sync_status="SYNCED",
+        )
+        db.add(duplicate_copy)
+        db.flush()
+        db.add(
+            TrashEntry(
+                workspace_id=original.workspace_id,
+                working_copy_id=duplicate_copy.id,
+                document_version_id=first_entry.document_version_id,
+                entry_type="DELETED",
+                original_relative_path=duplicate_copy.relative_path,
+                trash_relative_path=f"{original.workspace_id}/{duplicate_copy.id}/same/面谈名单.txt",
+                status="ACTIVE",
+                deleted_by=first_entry.deleted_by,
+                deleted_at=first_entry.deleted_at,
+                retention_until=first_entry.retention_until,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    broad_search = client.post(
+        "/api/conversations/exact-trash-conv/messages",
+        headers=headers,
+        json={"content": "查找有关面谈的文件", "attachments": []},
+    )
+    assert broad_search.status_code == 200
+    # 主题或关键词检索不能越过 ACTIVE 边界读取回收站。
+    assert broad_search.json()["task_result"]["response_type"] != "trash_restore_selection"
+
+    response = client.post(
+        "/api/conversations/exact-trash-conv/messages",
+        headers=headers,
+        json={"content": "查找《面谈名单.txt》", "attachments": []},
+    )
+
+    assert response.status_code == 200
+    receipt = response.json()["task_result"]
+    assert receipt["response_type"] == "trash_restore_selection"
+    assert receipt["task_status"] == "needs_attention"
+    selection = receipt["trash_restore_result"]
+    assert selection["query_type"] == "EXACT_FILENAME"
+    assert selection["requires_selection"] is True
+    assert len(selection["candidates"]) == 2
+    assert [item["display_index"] for item in selection["candidates"]] == [1, 2]
+    assert {item["filename"] for item in selection["candidates"]} == {"面谈名单.txt"}
+    assert len({item["trash_entry_id"] for item in selection["candidates"]}) == 2
+    assert len({item["version_number"] for item in selection["candidates"]}) == 1
+    # 回收站候选不能混入普通文件搜索卡，也不能在用户选择前自动创建恢复计划。
+    assert receipt["file_search_result"] is None
+    assert receipt["operation_plan_id"] is None
+
+    selected = next(
+        item for item in selection["candidates"]
+        if item["trash_entry_id"] == first_trash_entry_id
+    )
+    restore_plan = client.post(
+        f"/api/trash-entries/{selected['trash_entry_id']}/restore-plan",
+        headers=headers,
+        json={"conversation_id": "exact-trash-conv"},
+    )
+    assert restore_plan.status_code == 200
+    restored = client.post(
+        f"/api/operations/plans/{restore_plan.json()['id']}/confirm",
+        headers=headers,
+        json={"confirmation": "确认恢复所选文件"},
+    )
+    assert restored.status_code == 200
+    assert restored.json()["status"] == "EXECUTED"
+    # 单选只恢复被选择项，其余同名同版本候选继续留在回收站。
+    copies = client.get("/api/working-copies", headers=headers).json()
+    assert sorted(item["status"] for item in copies) == ["ACTIVE", "TRASHED"]
+
+    active_wins = client.post(
+        "/api/conversations/exact-trash-conv/messages",
+        headers=headers,
+        json={"content": "查找《面谈名单.txt》", "attachments": []},
+    )
+    assert active_wins.status_code == 200
+    # 已有同名活动副本时只返回普通活动文件结果，不再混入同名历史删除项。
+    assert active_wins.json()["task_result"]["response_type"] == "file_search_results"
+    assert active_wins.json()["task_result"]["trash_restore_result"] is None
+    clear_overrides()
 
 
 def test_duplicate_upload_decision_is_audited_but_hidden_from_chat(monkeypatch, tmp_path):

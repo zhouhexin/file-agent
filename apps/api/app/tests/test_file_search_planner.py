@@ -52,6 +52,33 @@ def test_deterministic_planner_routes_list_and_article_search_phrases():
         assert plan.steps[0].tool_name == "hybrid-search"
 
 
+def test_deterministic_planner_routes_common_question_selectors_to_file_search():
+    """用户无需使用固定“哪些”句式，常见文件选择问法都必须稳定进入正文检索。"""
+
+    for message in [
+        "哪个文件提到了公示期限",
+        "哪些文档提到了任职通知",
+        "哪份材料包含国家励志奖学金",
+        "哪一份报告出现过公示期限",
+        "哪几个文件涉及任职通知",
+        "哪几份证明提到了家庭经济困难",
+        "哪篇文章提及师德师风",
+        "哪几篇文档包含科研诚信",
+        "哪张表格出现了金海燕",
+        "哪几张表格提到了资助金额",
+    ]:
+        plan = DeterministicPlanner().plan(
+            conversation_id="conversation-question-selector",
+            user_id="user-question-selector",
+            message_id="message-question-selector",
+            message=message,
+            attachments=[],
+        )
+
+        assert plan.intent == "SEARCH_FILES"
+        assert plan.steps[0].tool_name == "hybrid-search"
+
+
 def test_semantic_search_phrase_does_not_extract_chinese_stopword_as_filename_filter():
     """“与某人有关”是正文语义检索，绝不能把“的”误当成文件名过滤条件。"""
 

@@ -134,17 +134,26 @@ class ToolRegistry:
         self.db = db
         self.user_id = user_id
         self._conversation_id: str | None = None
+        self._agent_run_id: str | None = None
         self._tools = _build_mvp_tools(
             db=db,
             user_id=user_id,
             conversation_id_getter=lambda: self._conversation_id,
+            agent_run_id_getter=lambda: self._agent_run_id,
         )
 
-    def set_conversation_id(self, conversation_id: str) -> None:
-        """为本次 AgentRun 注入会话 ID，供 L1 范围服务读取真实会话附件。
+    def set_run_context(self, *, conversation_id: str, agent_run_id: str) -> None:
+        """为本次 AgentRun 注入会话和运行 ID。
 
-        会话 ID 只保存在运行时 Registry，不能由 Planner 伪造，也不能写入持久化 Graph State。
+        两个 ID 只保存在本次 Registry；Planner 不能伪造，用于 L1 范围和检索澄清审计。
         """
+
+        self._conversation_id = conversation_id
+        self._agent_run_id = agent_run_id
+
+    def set_conversation_id(self, conversation_id: str) -> None:
+        """兼容旧测试的会话注入入口。"""
+
         self._conversation_id = conversation_id
 
     def list_tools(self) -> List[Dict[str, Any]]:
@@ -309,6 +318,7 @@ def _search_handler(
     db: Any,
     user_id: str | None,
     conversation_id_getter: Callable[[], str | None] | None = None,
+    agent_run_id_getter: Callable[[], str | None] | None = None,
 ) -> ToolHandler:
     """创建摘要优先的工作副本文档级检索 handler。
 
@@ -337,6 +347,26 @@ def _search_handler(
         workspace_id = get_shared_workspace_id(db)
         search_query = str(getattr(tool_input, "query") or "")
         explicit_document_ids = list(getattr(tool_input, "document_ids", []) or [])
+        # 普通召回始终排除回收站；仅当用户明确写出完整文件名且没有活动同名副本时，
+        # 才返回待选择的恢复候选。候选不能按版本或哈希自动合并。
+        from app.modules.file_lifecycle.trash_lookup import ExactTrashFilenameLookupService
+
+        trash_restore_selection = ExactTrashFilenameLookupService(
+            db=db,
+            user_id=user_id,
+            workspace_id=workspace_id,
+        ).lookup(query=search_query)
+        if trash_restore_selection:
+            return {
+                "kind": "workspace_file_search",
+                "ok": True,
+                "query": search_query,
+                "total_returned": 0,
+                "partial": False,
+                "results": [],
+                "trash_restore_selection": trash_restore_selection,
+                "user_message": str(trash_restore_selection["message"]),
+            }
         log_event(
             "retrieval.route.selected",
             tool_name="hybrid-search",
@@ -445,10 +475,19 @@ def _search_handler(
             config=settings, tokenizer=tokenizer,
         )
         try:
-            result = service.search(
-                query=search_query,
-                parsed_query=parsed,
+            result = _execute_controlled_file_search(
+                db=db,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                agent_run_id=(
+                    agent_run_id_getter() if agent_run_id_getter else None
+                ),
+                tool_input=tool_input,
+                search_query=search_query,
+                parsed=parsed,
                 scope=scope,
+                tokenizer=tokenizer,
+                search_service=service,
             )
         except Exception as exc:
             # 两阶段索引属于可重建派生能力。迁移未完成、扩展不可用或 SQL 超时时，
@@ -505,6 +544,223 @@ def _search_handler(
         return result
 
     return handler
+
+
+def _execute_controlled_file_search(
+    *,
+    db: Any,
+    user_id: str,
+    conversation_id: str | None,
+    agent_run_id: str | None,
+    tool_input: BaseModel,
+    search_query: str,
+    parsed: Any,
+    scope: Any,
+    tokenizer: Any,
+    search_service: Any,
+) -> Dict[str, Any]:
+    """根据查询关系模式执行精确、同义或待选择检索。
+
+    普通查询的同义扩展只能来自版本化词典。只有服务端续跑 Planner 才能提供显式 phrases；
+    AUTO 模式下任何歧义都必须先持久化选择记录。
+    """
+
+    from app.modules.retrieval.clarification_service import (
+        FileSearchClarificationService,
+    )
+    from app.modules.retrieval.phrase_strategy import (
+        FileSearchPhraseStrategyService,
+    )
+    from app.modules.retrieval.synonym_service import FileSearchSynonymService
+
+    strategy = FileSearchPhraseStrategyService(
+        search_service=search_service,
+        tokenizer=tokenizer,
+    )
+    explicit_mode = str(getattr(tool_input, "match_mode", "AUTO") or "AUTO")
+    explicit_phrases = list(getattr(tool_input, "phrases", []) or [])
+    if explicit_mode != "AUTO" and explicit_phrases:
+        return strategy.search(
+            original_query=search_query,
+            parsed_query=parsed,
+            scope=scope,
+            phrases=explicit_phrases,
+            require_body_evidence=bool(
+                getattr(tool_input, "require_body_evidence", False)
+            ),
+        )
+
+    core_phrase = str(parsed.cleaned or "").strip()
+    synonym_service = FileSearchSynonymService()
+    group = synonym_service.find_group(core_phrase)
+    expanded_phrases = (
+        list(group.phrases) if group is not None else [core_phrase]
+    )
+    relation_mode = str(getattr(parsed, "relation_mode", "UNSPECIFIED"))
+
+    exact = strategy.search(
+        original_query=search_query,
+        parsed_query=parsed,
+        scope=scope,
+        phrases=[core_phrase],
+        require_body_evidence=relation_mode == "LITERAL",
+    )
+    if group is None:
+        return exact
+
+    expanded = strategy.search(
+        original_query=search_query,
+        parsed_query=parsed,
+        scope=scope,
+        phrases=expanded_phrases,
+        require_body_evidence=relation_mode == "LITERAL",
+    )
+    exact_ids = _search_result_ids(exact)
+    expanded_ids = _search_result_ids(expanded)
+
+    if relation_mode == "RELATED":
+        return expanded
+    if relation_mode == "LITERAL" and exact_ids:
+        return exact
+    if relation_mode == "LITERAL" and not expanded_ids:
+        return exact
+    if relation_mode == "UNSPECIFIED" and exact_ids == expanded_ids:
+        return exact
+
+    # 没有真实会话的单元测试或内部调用不能创建悬空选择记录，保持最窄精确结果。
+    if not conversation_id:
+        return exact
+
+    options = _build_search_clarification_options(
+        strategy=strategy,
+        parsed=parsed,
+        scope=scope,
+        search_query=search_query,
+        core_phrase=core_phrase,
+        expanded_phrases=expanded_phrases,
+        broad_topics=list(group.broad_topics),
+        exact_count=len(exact_ids),
+        expanded_count=len(expanded_ids),
+        literal=relation_mode == "LITERAL",
+    )
+    record = FileSearchClarificationService(db).create(
+        conversation_id=conversation_id,
+        user_id=user_id,
+        agent_run_id=agent_run_id,
+        original_query=search_query,
+        core_phrase=core_phrase,
+        relation_mode=relation_mode,
+        options=options,
+    )
+    public = FileSearchClarificationService.public_payload(record)
+    return {
+        "ok": True,
+        "kind": "workspace_file_search",
+        "query": search_query,
+        "total_returned": 0,
+        "partial": bool(exact.get("partial") or expanded.get("partial")),
+        "results": [],
+        "search_clarification": public,
+        "user_message": (
+            f"“{core_phrase}”存在不同的查找范围，请选择后继续。"
+        ),
+    }
+
+
+def _build_search_clarification_options(
+    *,
+    strategy: Any,
+    parsed: Any,
+    scope: Any,
+    search_query: str,
+    core_phrase: str,
+    expanded_phrases: list[str],
+    broad_topics: list[str],
+    exact_count: int,
+    expanded_count: int,
+    literal: bool,
+) -> list[dict[str, Any]]:
+    """构造服务端允许的选择项，并以有上限的预检结果提供数量提示。"""
+
+    options: list[dict[str, Any]] = [
+        {
+            "id": "exact",
+            "label": f"只查“{core_phrase}”",
+            "description": "只返回连续出现该完整短语的文件。",
+            "examples": [core_phrase],
+            "estimated_count": exact_count,
+            "phrases": [core_phrase],
+            "match_mode": "LITERAL" if literal else "RELATED",
+            "require_body_evidence": literal,
+            "display_content": f"只按“{core_phrase}”继续查找",
+        },
+        {
+            "id": "synonyms",
+            "label": "包含相近表达",
+            "description": "按完整同义短语扩大范围，不拆成任意词 OR。",
+            "examples": expanded_phrases,
+            "estimated_count": expanded_count,
+            "phrases": expanded_phrases,
+            "match_mode": "RELATED",
+            "require_body_evidence": literal,
+            "display_content": f"按“{core_phrase}”及相近表达继续查找",
+        },
+    ]
+    for index, topic in enumerate(broad_topics[:2], start=1):
+        broad_result = strategy.search(
+            original_query=search_query,
+            parsed_query=parsed,
+            scope=scope,
+            phrases=[topic],
+            require_body_evidence=False,
+        )
+        options.append(
+            {
+                "id": f"broad-{index}",
+                "label": f"只查“{topic}”相关内容",
+                "description": "这是更宽泛的主题范围，只有选择后才会执行。",
+                "examples": [topic],
+                "estimated_count": len(_search_result_ids(broad_result)),
+                "phrases": [topic],
+                "match_mode": "BROAD",
+                "require_body_evidence": False,
+                "display_content": f"只按“{topic}”主题继续查找",
+            }
+        )
+    options.append(
+        {
+            "id": "custom",
+            "label": "使用其他关键词",
+            "description": "输入你希望连续匹配的其他短语。",
+            "examples": [],
+            "estimated_count": None,
+            "phrases": [],
+            "match_mode": "LITERAL",
+            "require_body_evidence": True,
+            "display_content": "使用自定义短语继续查找",
+        }
+    )
+    return options
+
+
+def _search_result_ids(payload: Dict[str, Any]) -> set[str]:
+    """提取结果集合用于判断是否存在实质歧义。"""
+
+    return {
+        str(
+            item.get("working_copy_id")
+            or item.get("document_version_id")
+            or item.get("document_id")
+            or ""
+        )
+        for item in payload.get("results", [])
+        if isinstance(item, dict)
+        and (
+            item.get("working_copy_id")
+            or item.get("document_version_id")
+            or item.get("document_id")
+        )
+    }
 
 
 def _evidence_answer_handler(tool_input: BaseModel) -> Dict[str, Any]:
@@ -1886,6 +2142,7 @@ def _build_mvp_tools(
     db: Any = None,
     user_id: str | None = None,
     conversation_id_getter: Callable[[], str | None] | None = None,
+    agent_run_id_getter: Callable[[], str | None] | None = None,
 ) -> Dict[str, ToolDefinition]:
     """创建 AGENTS.md 要求的完整 MVP Tool 目录。"""
 
@@ -1906,7 +2163,7 @@ def _build_mvp_tools(
         _tool("intent-summary", "Record LLM-understood user intent without side effects.", IntentSummaryInput, False, False, [], _intent_summary_handler),
         _tool("read-agent-capabilities", "Read fixed File Agent capability catalog.", AgentCapabilitiesReadInput, False, False, [], _agent_capabilities_handler),
         _tool("read-classification-taxonomy", "Read fixed classification taxonomy catalog.", ClassificationTaxonomyReadInput, False, False, [], _classification_taxonomy_handler),
-        _tool("hybrid-search", "Run summary-first workspace retrieval.", SearchToolInput, False, False, [], _search_handler(db, user_id, conversation_id_getter)),
+        _tool("hybrid-search", "Run summary-first workspace retrieval.", SearchToolInput, False, False, [], _search_handler(db, user_id, conversation_id_getter, agent_run_id_getter)),
         _tool("evidence-answer", "Answer from retrieved evidence.", EvidenceAnswerInput, True, False, ["qa_answers", "answer_references"], _evidence_answer_handler),
         _tool("change-report", "Build per-file receipt from changes.", ChangeReportInput, True, False, ["change_sets"], _change_report_handler),
         _tool("operation-plan-create", "Create high-risk operation plan.", OperationPlanCreateInput, True, False, ["operation_plans"], _operation_plan_handler),

@@ -1,0 +1,62 @@
+"""检索选择续跑专用 Planner。
+
+该 Planner 只由后端在校验持久化 option_id 后创建。它仍输出声明式 Tool 计划并经过
+Tool Registry schema 校验，不能直接调用数据库或检索实现。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from app.modules.agent.planner import PlannerOutput
+from app.modules.retrieval.clarification_service import ResolvedSearchSelection
+
+
+class FileSearchClarificationPlanner:
+    """把已校验的用户选择转换为唯一 hybrid-search 计划。"""
+
+    def __init__(self, selection: ResolvedSearchSelection) -> None:
+        """保存不可变选择结果，不接受浏览器短语数组。"""
+
+        self.selection = selection
+
+    def plan(self, **_: Any) -> PlannerOutput:
+        """生成受 Tool schema 约束的检索续跑计划。"""
+
+        value = self.selection
+        tool_input = {
+            "query": value.original_query,
+            "document_ids": [],
+            "match_mode": value.match_mode,
+            "phrases": list(value.phrases),
+            "require_body_evidence": value.require_body_evidence,
+            "clarification_id": value.clarification_id,
+            "clarification_option_id": value.option_id,
+        }
+        return PlannerOutput(
+            intent="SEARCH_FILES",
+            user_goal=value.display_content,
+            slots={
+                "query": value.original_query,
+                "requested_outputs": ["file_search_results"],
+                "search_clarification_id": value.clarification_id,
+            },
+            selected_skills=["file-search"],
+            steps=[
+                {
+                    "step_id": "step-file-search-resolution",
+                    "skill": "file-search",
+                    "tool_name": "hybrid-search",
+                    "input": tool_input,
+                    "requires_confirmation": False,
+                    "risk_level": "low",
+                    "expected_outputs": ["ranked_working_copies"],
+                    "writes": [],
+                }
+            ],
+            evidence_policy={
+                "require_page_or_cell": value.require_body_evidence,
+                "allow_no_evidence_answer": not value.require_body_evidence,
+            },
+            confirmation_policy={"operation_plan_required": False},
+        )

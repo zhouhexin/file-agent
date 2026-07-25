@@ -20,6 +20,9 @@ export function DuplicateUploadReviewCard({
   // 每张卡只处理一个上传版本，一个文件的等待或失败不能阻塞同批其他文件。
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const hasDeletedExactCandidate = review.candidates.some(
+    (candidate) => candidate.match_type === 'EXACT_SHA256' && candidate.summary.file_status === 'TRASHED',
+  ) && !review.candidates.some((candidate) => candidate.existing_working_copy_id);
 
   async function decide(
     decision: 'CONTINUE_UPLOAD' | 'USE_EXISTING_FILE' | 'CANCEL_UPLOAD',
@@ -46,8 +49,12 @@ export function DuplicateUploadReviewCard({
       <header>
         <AlertTriangle size={18} />
         <div>
-          <strong>检测到相同或高度相似文件</strong>
-          <span>{review.filename}</span>
+          <strong>{hasDeletedExactCandidate ? '检测到此前已删除的相同文件' : '检测到相同或高度相似文件'}</strong>
+          <span>
+            {hasDeletedExactCandidate
+              ? `“${review.filename}”的相同内容此前已删除，是否再次上传？`
+              : review.filename}
+          </span>
         </div>
       </header>
 
@@ -78,7 +85,7 @@ export function DuplicateUploadReviewCard({
 
       <footer>
         <button disabled={submitting} onClick={() => void decide('CONTINUE_UPLOAD')} type="button">
-          继续上传并独立保留
+          {hasDeletedExactCandidate ? '再次上传' : '继续上传并独立保留'}
         </button>
         <button className="secondary" disabled={submitting} onClick={() => void decide('CANCEL_UPLOAD')} type="button">
           取消本次上传

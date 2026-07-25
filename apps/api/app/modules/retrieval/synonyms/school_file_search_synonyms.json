@@ -1,0 +1,32 @@
+{
+  "version": "v1",
+  "groups": [
+    {
+      "id": "personnel-appointment-notice",
+      "canonical": "任职通知",
+      "aliases": [
+        "任职通告",
+        "任职告示",
+        "任免通知",
+        "任职公告"
+      ],
+      "broad_topics": [
+        "任职",
+        "通知"
+      ]
+    },
+    {
+      "id": "public-notice-deadline",
+      "canonical": "公示期限",
+      "aliases": [
+        "公示时间",
+        "公示截止日期",
+        "公示截止时间"
+      ],
+      "broad_topics": [
+        "公示",
+        "期限"
+      ]
+    }
+  ]
+}

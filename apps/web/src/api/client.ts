@@ -5,6 +5,7 @@ import type {
   ConversationDetailResponse,
   DuplicateDecisionResponse,
   DuplicateReview,
+  FileSearchClarificationResult,
   FilePreviewResponse,
   UploadArchiveStatus,
   FilesystemJobResponse,
@@ -80,6 +81,32 @@ export async function sendAgentMessage(
       attachments: documentIds.map((documentId) => ({ document_id: documentId })),
     },
   });
+}
+
+export async function resolveFileSearchClarification(
+  token: string,
+  clarificationId: string,
+  payload: { option_id: string; custom_phrase?: string | null },
+): Promise<SendMessageResponse> {
+  // 选择卡只提交后端签发的 option_id；浏览器不能自行构造同义短语数组或检索模式。
+  return request<SendMessageResponse>(
+    `/file-search/clarifications/${clarificationId}/resolve`,
+    {
+      token,
+      body: payload,
+    },
+  );
+}
+
+export async function getFileSearchClarification(
+  token: string,
+  clarificationId: string,
+): Promise<FileSearchClarificationResult> {
+  // 历史消息中的卡片可能已被其他标签页处理，刷新时必须读取后端最新状态。
+  return request<FileSearchClarificationResult>(
+    `/file-search/clarifications/${clarificationId}`,
+    { token },
+  );
 }
 
 export async function getConversationDetail(
@@ -275,6 +302,18 @@ export async function confirmOperationPlan(
       confirmation: '确认执行',
       excluded_rename_batch_item_ids: excludedRenameBatchItemIds,
     },
+  });
+}
+
+export async function createTrashRestorePlan(
+  token: string,
+  trashEntryId: string,
+  conversationId: string,
+): Promise<OperationPlanResponse> {
+  // 完整文件名命中回收站后，只能对用户明确选择的单条记录创建恢复计划。
+  return request(`/trash-entries/${trashEntryId}/restore-plan`, {
+    token,
+    body: { conversation_id: conversationId },
   });
 }
 

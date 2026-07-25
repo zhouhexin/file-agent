@@ -43,7 +43,14 @@ class DocumentChunkLexicalSearchService:
         self.workspace_id = workspace_id
         self.tokenizer = tokenizer or ChineseLexicalTokenizer(load_default_business_terms())
 
-    def search(self, *, query: str, document_version_ids: list[str], limit: int = 20) -> list[dict[str, Any]]:
+    def search(
+        self,
+        *,
+        query: str,
+        document_version_ids: list[str],
+        limit: int = 20,
+        exact_phrase_override: str | None = None,
+    ) -> list[dict[str, Any]]:
         """返回不含正文、分词文本和 embedding 的相关 Chunk 定位结果。"""
 
         # 候选范围和查询词项必须有确定上限，避免异常 Planner 输出放大为超长 IN/tsquery 查询。
@@ -53,7 +60,7 @@ class DocumentChunkLexicalSearchService:
         tokens = self.tokenizer.tokenize(str(query or "")[:MAX_QUERY_CHARS])[:MAX_QUERY_TOKENS]
         if not version_ids or not tokens:
             return []
-        exact_phrase = exact_short_chinese_phrase(query)
+        exact_phrase = exact_phrase_override or exact_short_chinese_phrase(query)
         # search_text 有 pg_trgm GIN；保留连续汉字比拼接分词序列更稳定，
         # 可兼容 Jieba 与 deterministic fallback 的不同切词边界。
         exact_search_text = exact_phrase
@@ -120,8 +127,9 @@ class DocumentChunkLexicalSearchService:
             .filter(DocumentChunk.document_version_id.in_(version_ids))
         )
         if exact_search_text:
-            # search_text 有 pg_trgm GIN，连续分词短语不会退化成逐字 OR。
-            query = query.filter(DocumentChunk.search_text.contains(exact_search_text))
+            # 候选范围已经由一阶段收敛；这里必须检查原始 Chunk 正文的连续短语，
+            # 不能依赖可能插入空格的 search_text，否则不同 Jieba 切词会改变语义。
+            query = query.filter(DocumentChunk.text_content.contains(exact_search_text))
         else:
             query = query.filter(
                 or_(
@@ -175,6 +183,7 @@ class DocumentChunkLexicalSearchService:
         workspace_id: str,
         max_versions: int = MAX_FALLBACK_VERSION_AGGREGATIONS,
         limit_chunks: int = 30,
+        exact_phrase_override: str | None = None,
     ) -> list[dict[str, Any]]:
         """全局 Chunk GIN 候选补召回。
 
@@ -191,7 +200,7 @@ class DocumentChunkLexicalSearchService:
         tokens = self.tokenizer.tokenize(str(query)[:MAX_QUERY_CHARS])[:MAX_QUERY_TOKENS]
         if not tokens:
             return []
-        exact_phrase = exact_short_chinese_phrase(query)
+        exact_phrase = exact_phrase_override or exact_short_chinese_phrase(query)
         exact_search_text = exact_phrase
 
         max_versions = max(1, min(int(max_versions), 50))
@@ -256,7 +265,7 @@ class DocumentChunkLexicalSearchService:
         )
         if exact_search_text:
             ranked_query = ranked_query.filter(
-                DocumentChunk.search_text.contains(exact_search_text)
+                DocumentChunk.text_content.contains(exact_search_text)
             )
         else:
             ranked_query = ranked_query.filter(

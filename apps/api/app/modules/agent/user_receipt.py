@@ -32,6 +32,8 @@ class UserTaskReceipt(BaseModel):
         "operation_plan",
         "async_job",
         "file_search_results",
+        "trash_restore_selection",
+        "file_search_clarification",
     ] = "text"
     display_mode: Literal["default", "classification_cards"] = "default"
     final_response: str | None = None
@@ -40,6 +42,8 @@ class UserTaskReceipt(BaseModel):
     managed_file_result: dict[str, Any] | None = None
     rename_plan_result: dict[str, Any] | None = None
     file_search_result: dict[str, Any] | None = None
+    trash_restore_result: dict[str, Any] | None = None
+    file_search_clarification_result: dict[str, Any] | None = None
     pending_job_ids: list[str] = Field(default_factory=list)
     operation_plan_id: str | None = None
     pending_decisions: list[dict[str, Any]] = Field(default_factory=list)
@@ -57,6 +61,8 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
     managed_file_result = _managed_file_result(result)
     rename_plan_result = _rename_plan_result(result)
     file_search_result = _file_search_result(result)
+    trash_restore_result = _trash_restore_result(result)
+    file_search_clarification_result = _file_search_clarification_result(result)
     initial_organization_results = _initial_organization_results(result)
     document_results = _merge_document_results(
         initial_organization_results,
@@ -67,6 +73,8 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         managed_file_result=managed_file_result,
         rename_plan_result=rename_plan_result,
         file_search_result=file_search_result,
+        trash_restore_result=trash_restore_result,
+        file_search_clarification_result=file_search_clarification_result,
     )
     pending_decisions: list[dict[str, Any]] = []
     if result.operation_plan_id:
@@ -79,6 +87,21 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         )
     if rename_plan_result:
         pending_decisions.extend(_rename_pending_decisions(rename_plan_result))
+    if trash_restore_result:
+        pending_decisions.append(
+            {
+                "type": "trash_restore_selection",
+                "message": "已找到同名已删除文件，请明确选择一个文件后再恢复。",
+            }
+        )
+    if file_search_clarification_result:
+        pending_decisions.append(
+            {
+                "type": "file_search_clarification",
+                "clarification_id": file_search_clarification_result.get("id"),
+                "message": "请选择本次文件查找范围。",
+            }
+        )
     for item in document_results:
         pending = item.get("pending_decision")
         if isinstance(pending, dict) and pending not in pending_decisions:
@@ -101,6 +124,8 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         managed_file_result=managed_file_result,
         rename_plan_result=rename_plan_result,
         file_search_result=file_search_result,
+        trash_restore_result=trash_restore_result,
+        file_search_clarification_result=file_search_clarification_result,
         pending_job_ids=list(result.async_job_ids),
         operation_plan_id=result.operation_plan_id,
         pending_decisions=pending_decisions,
@@ -309,6 +334,8 @@ def _response_type(
     managed_file_result: dict[str, Any] | None,
     rename_plan_result: dict[str, Any] | None,
     file_search_result: dict[str, Any] | None,
+    trash_restore_result: dict[str, Any] | None,
+    file_search_clarification_result: dict[str, Any] | None,
 ) -> str:
     """把内部意图收敛为少量稳定的用户展示类型。"""
 
@@ -316,6 +343,10 @@ def _response_type(
         return "operation_plan"
     if rename_plan_result:
         return "rename_plan"
+    if trash_restore_result:
+        return "trash_restore_selection"
+    if file_search_clarification_result:
+        return "file_search_clarification"
     if file_search_result:
         return "file_search_results"
     if managed_file_result:
@@ -343,6 +374,8 @@ def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
         # 新链路会包含 total_returned 字段
         if "total_returned" not in output:
             continue
+        if isinstance(output.get("trash_restore_selection"), dict):
+            return None
         files = []
         for item in output.get("results", []):
             if not isinstance(item, dict):
@@ -371,6 +404,81 @@ def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
             "partial": bool(output.get("partial", False)),
             "user_message": str(output.get("user_message") or ""),
             "files": files,
+        }
+    return None
+
+
+def _trash_restore_result(result: AgentRunResult) -> dict[str, Any] | None:
+    """投影完整文件名命中的回收站候选，不暴露工作副本、版本或内容哈希。"""
+
+    for invocation in result.tool_invocations:
+        output = invocation.output_json
+        if invocation.tool_name != "hybrid-search" or not isinstance(output, dict):
+            continue
+        selection = output.get("trash_restore_selection")
+        if not isinstance(selection, dict):
+            continue
+        candidates = []
+        for position, item in enumerate(selection.get("candidates", []), start=1):
+            if not isinstance(item, dict):
+                continue
+            candidates.append(
+                {
+                    "trash_entry_id": item.get("trash_entry_id"),
+                    "display_index": position,
+                    "filename": item.get("filename"),
+                    "size_bytes": int(item.get("size_bytes") or 0),
+                    "version_number": int(item.get("version_number") or 0),
+                    "deleted_at": item.get("deleted_at"),
+                    "created_at": item.get("created_at"),
+                }
+            )
+        if not candidates:
+            continue
+        return {
+            "conversation_id": result.conversation_id,
+            "query_type": "EXACT_FILENAME",
+            "requires_selection": True,
+            "message": str(selection.get("message") or "找到了已删除文件，请选择是否恢复。"),
+            "candidates": candidates,
+        }
+    return None
+
+
+def _file_search_clarification_result(
+    result: AgentRunResult,
+) -> dict[str, Any] | None:
+    """投影检索范围选择卡，执行短语与内部模式仍只保存在后端。"""
+
+    for invocation in result.tool_invocations:
+        output = invocation.output_json
+        if invocation.tool_name != "hybrid-search" or not isinstance(output, dict):
+            continue
+        value = output.get("search_clarification")
+        if not isinstance(value, dict) or not value.get("id"):
+            continue
+        return {
+            "id": str(value.get("id")),
+            "status": str(value.get("status") or "WAITING_SELECTION"),
+            "prompt": str(value.get("prompt") or "请选择本次需要查找的范围。"),
+            "core_phrase": str(value.get("core_phrase") or ""),
+            "options": [
+                {
+                    "id": str(item.get("id") or ""),
+                    "label": str(item.get("label") or ""),
+                    "description": str(item.get("description") or ""),
+                    "examples": [
+                        str(example)
+                        for example in item.get("examples", [])
+                        if str(example)
+                    ][:8],
+                    "estimated_count": item.get("estimated_count"),
+                }
+                for item in value.get("options", [])
+                if isinstance(item, dict) and item.get("id")
+            ],
+            "allow_custom_phrase": bool(value.get("allow_custom_phrase", False)),
+            "expires_at": value.get("expires_at"),
         }
     return None
 

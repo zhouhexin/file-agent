@@ -5,7 +5,7 @@ import { AgentRunReceipt } from './AgentRunReceipt';
 import { AttachmentRail } from './AttachmentRail';
 import { DuplicateUploadReviewLoader } from './DuplicateUploadReviewCard';
 import type { ChatAttachment, ChatTurn } from './presentation';
-import type { ManagedFileResult } from '../../types';
+import type { ManagedFileResult, SendMessageResponse } from '../../types';
 
 type ChatTurnViewProps = {
   token: string;
@@ -13,9 +13,17 @@ type ChatTurnViewProps = {
   onOpenAttachment: (file: ChatAttachment) => void;
   onOpenDocument: (documentId: string, filename: string) => void;
   onOpenManagedFile: (file: ManagedFileResult) => void;
+  onFollowupResult?: (response: SendMessageResponse) => void;
 };
 
-export function ChatTurnView({ token, turn, onOpenAttachment, onOpenDocument, onOpenManagedFile }: ChatTurnViewProps) {
+export function ChatTurnView({
+  token,
+  turn,
+  onOpenAttachment,
+  onOpenDocument,
+  onOpenManagedFile,
+  onFollowupResult,
+}: ChatTurnViewProps) {
   const [resolvedDuplicateHidden, setResolvedDuplicateHidden] = useState(false);
   const hideResolvedDuplicate = useCallback(() => setResolvedDuplicateHidden(true), []);
   // 文件任务按"附件上下文 -> 用户指令 -> 助手结果"展示，减少阅读跳跃。
@@ -42,6 +50,7 @@ export function ChatTurnView({ token, turn, onOpenAttachment, onOpenDocument, on
                 taskResult={turn.response.task_result}
                 token={token}
                 onOpenDocument={onOpenDocument}
+                onFollowupResult={onFollowupResult}
               />
             ) : (
               <p className="agent-chat-response">{turn.userText}</p>
@@ -87,6 +96,7 @@ export function ChatTurnView({ token, turn, onOpenAttachment, onOpenDocument, on
               onOpenAttachment={onOpenAttachment}
               onOpenDocument={onOpenDocument}
               onOpenManagedFile={onOpenManagedFile}
+              onFollowupResult={onFollowupResult}
             />
           ) : null}
         </div>

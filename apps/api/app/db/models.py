@@ -788,6 +788,63 @@ class ToolInvocation(Base):
     agent_run: Mapped[AgentRun] = relationship(back_populates="tool_invocations")
 
 
+class FileSearchClarification(Base):
+    """文件检索歧义选择记录。
+
+    选择记录属于持久化业务状态，不能只保存在 LangGraph 快照或浏览器中；前端只能提交
+    `options_json` 中由后端生成的 option_id。
+    """
+
+    __tablename__ = "file_search_clarifications"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    conversation_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    agent_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("agent_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    original_query: Mapped[str] = mapped_column(Text, nullable=False)
+    core_phrase: Mapped[str] = mapped_column(String(120), nullable=False)
+    relation_mode: Mapped[str] = mapped_column(String(30), nullable=False)
+    options_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="WAITING_SELECTION", index=True
+    )
+    selected_option_id: Mapped[Optional[str]] = mapped_column(
+        String(80), nullable=True
+    )
+    resolution_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    result_message_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("messages.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    result_agent_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("agent_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
 class OperationPlan(Base):
     """高风险文件操作的待确认计划。"""
 

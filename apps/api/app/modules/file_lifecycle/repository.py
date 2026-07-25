@@ -177,11 +177,17 @@ class FileLifecycleRepository:
                     "similarity_bucket": "100%",
                 }
             else:
+                is_deleted = bool(working_copy and working_copy.status == "TRASHED")
                 summary = {
-                    "message": "检测到当前账号可访问的相同文件",
+                    "message": (
+                        "检测到相同内容的文件此前已删除，是否再次上传？"
+                        if is_deleted
+                        else "检测到当前账号可访问的相同文件"
+                    ),
                     "filename": working_copy.filename if working_copy else managed_file.filename,
                     "relative_path": working_copy.relative_path if can_use_existing else None,
                     "updated_at": working_copy.updated_at.isoformat() if can_use_existing else None,
+                    "file_status": "TRASHED" if is_deleted else "ACTIVE",
                 }
             candidate = UploadDuplicateCandidate(
                 duplicate_review_id=review.id,

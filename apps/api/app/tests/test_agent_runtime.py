@@ -992,6 +992,34 @@ def test_planner_routes_colloquial_file_removal_to_confirmed_trash_plan(message)
 @pytest.mark.parametrize(
     "message",
     [
+        "查找 述职报告-鲁晓锋-20200421.pdf",
+        "打开文件“2024科研成果资助汇总表.xlsx”",
+        "找到文件名为《面谈名单.xlsx》的文件",
+        "帮我找个人述职报告-金海燕-20200421.doc",
+        "恢复 58号文附件.docx",
+        "我要查看关于加强基层党组织会议的通知.pdf",
+    ],
+)
+def test_planner_routes_explicit_filename_lookup_through_controlled_search(message):
+    """完整文件名查找必须先校验活动文件和回收站候选，不能由 Planner 猜测恢复对象。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-exact-filename",
+        user_id="user-1",
+        message_id="msg-exact-filename",
+        message=message,
+        attachments=[],
+    )
+
+    assert plan.intent == "SEARCH_FILES"
+    assert plan.steps[0].tool_name == "hybrid-search"
+    assert plan.steps[0].input["query"] == message
+    assert plan.confirmation_policy["operation_plan_required"] is False
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
         "删除这个对话",
         "清空聊天记录",
         "删除这个文件中的空行",

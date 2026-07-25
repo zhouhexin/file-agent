@@ -1,0 +1,146 @@
+"""文件检索受控同义短语服务。
+
+正式同义词只来自项目内版本化配置。服务不调用 LLM，也不把单个复合短语自动拆成 OR；
+任何宽泛主题都只能作为待用户选择的候选范围。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+
+
+MAX_SYNONYM_PHRASES = 8
+MAX_PHRASE_CHARS = 30
+
+
+@dataclass(frozen=True)
+class SearchSynonymGroup:
+    """一个经过结构校验的文件检索同义词组。"""
+
+    group_id: str
+    version: str
+    canonical: str
+    aliases: tuple[str, ...]
+    broad_topics: tuple[str, ...]
+
+    @property
+    def phrases(self) -> tuple[str, ...]:
+        """返回去重后的完整短语，canonical 始终位于第一项。"""
+
+        return tuple(dict.fromkeys((self.canonical, *self.aliases)))[:MAX_SYNONYM_PHRASES]
+
+
+class FileSearchSynonymService:
+    """读取并查询正式文件检索同义词组。"""
+
+    def __init__(self, groups: tuple[SearchSynonymGroup, ...] | None = None) -> None:
+        """允许测试注入固定词组，生产默认读取版本化 JSON。"""
+
+        self.groups = groups if groups is not None else load_default_search_synonyms()
+        self._phrase_index = {
+            _normalize_phrase(phrase): group
+            for group in self.groups
+            for phrase in group.phrases
+        }
+
+    def find_group(self, phrase: str) -> SearchSynonymGroup | None:
+        """按 canonical 或 alias 查找同义词组，不做自由语义猜测。"""
+
+        return self._phrase_index.get(_normalize_phrase(phrase))
+
+    def expand(self, phrase: str) -> tuple[str, ...]:
+        """返回受控完整短语；没有词组时只返回原短语。"""
+
+        normalized = _clean_public_phrase(phrase)
+        if not normalized:
+            return ()
+        group = self.find_group(normalized)
+        return group.phrases if group is not None else (normalized,)
+
+
+@lru_cache(maxsize=1)
+def load_default_search_synonyms() -> tuple[SearchSynonymGroup, ...]:
+    """加载默认同义词配置并拒绝重复、空值和超长词项。"""
+
+    path = (
+        Path(__file__).resolve().parent
+        / "synonyms"
+        / "school_file_search_synonyms.json"
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    version = str(payload.get("version") or "").strip()
+    if not version:
+        raise ValueError("文件检索同义词配置缺少 version")
+
+    groups: list[SearchSynonymGroup] = []
+    seen_ids: set[str] = set()
+    seen_phrases: set[str] = set()
+    for raw in payload.get("groups", []):
+        group_id = str(raw.get("id") or "").strip()
+        canonical = _clean_public_phrase(raw.get("canonical"))
+        aliases = tuple(
+            value
+            for value in (
+                _clean_public_phrase(item) for item in raw.get("aliases", [])
+            )
+            if value
+        )
+        broad_topics = tuple(
+            value
+            for value in (
+                _clean_public_phrase(item) for item in raw.get("broad_topics", [])
+            )
+            if value
+        )
+        if not group_id or group_id in seen_ids:
+            raise ValueError("文件检索同义词组 id 为空或重复")
+        if not canonical:
+            raise ValueError(f"同义词组 {group_id} 缺少 canonical")
+        phrases = tuple(dict.fromkeys((canonical, *aliases)))
+        if len(phrases) > MAX_SYNONYM_PHRASES:
+            raise ValueError(f"同义词组 {group_id} 超过短语数量上限")
+        normalized_phrases = {_normalize_phrase(item) for item in phrases}
+        if seen_phrases.intersection(normalized_phrases):
+            raise ValueError(f"同义词组 {group_id} 与其他组存在重复短语")
+        seen_ids.add(group_id)
+        seen_phrases.update(normalized_phrases)
+        groups.append(
+            SearchSynonymGroup(
+                group_id=group_id,
+                version=version,
+                canonical=canonical,
+                aliases=aliases,
+                broad_topics=tuple(dict.fromkeys(broad_topics))[:4],
+            )
+        )
+    return tuple(groups)
+
+
+def validate_custom_search_phrase(value: str) -> str:
+    """校验用户自定义短语，禁止控制字符和超长自由查询进入 Tool。"""
+
+    phrase = _clean_public_phrase(value)
+    if len(phrase) < 2:
+        raise ValueError("自定义查找词至少需要 2 个字符")
+    return phrase
+
+
+def _clean_public_phrase(value: object) -> str:
+    """规范化可公开展示的短语，同时保留中文业务空格。"""
+
+    phrase = " ".join(str(value or "").strip().split())
+    if not phrase or len(phrase) > MAX_PHRASE_CHARS:
+        return ""
+    if re.search(r"[\x00-\x1f\x7f]", phrase):
+        return ""
+    return phrase
+
+
+def _normalize_phrase(value: str) -> str:
+    """生成同义词索引键，大小写和空白不影响查找。"""
+
+    return re.sub(r"\s+", "", str(value or "").strip().lower())

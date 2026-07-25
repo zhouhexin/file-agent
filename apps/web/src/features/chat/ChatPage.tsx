@@ -741,6 +741,26 @@ export function ChatPage({
                   onOpenAttachment={openAttachment}
                   onOpenDocument={openSearchDocument}
                   onOpenManagedFile={openManagedFile}
+                  onFollowupResult={(response) => {
+                    // 选择卡续跑会在后端创建真实消息和 AgentRun；页面直接追加该轮，
+                    // 不伪造本地搜索结果，刷新后仍能从同一会话历史恢复。
+                    setChatTurns((current) => {
+                      if (current.some((item) => item.id === response.message.id)) {
+                        return current;
+                      }
+                      return [
+                        ...current,
+                        {
+                          id: response.message.id,
+                          userText: response.message.content,
+                          attachments: [],
+                          status: 'completed',
+                          response,
+                        },
+                      ];
+                    });
+                    scrollMessageListToBottom();
+                  }}
                 />
               ))}
             </div>

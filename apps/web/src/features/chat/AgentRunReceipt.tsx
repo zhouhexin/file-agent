@@ -3,11 +3,18 @@ import { useEffect, useState } from 'react';
 import { AlertCircle, CheckCircle2, FileText, Folder } from 'lucide-react';
 
 import { getOperationPlan } from '../../api/client';
-import type { ManagedFileResult, OperationPlanResponse, TaskResult } from '../../types';
+import type {
+  ManagedFileResult,
+  OperationPlanResponse,
+  SendMessageResponse,
+  TaskResult,
+} from '../../types';
 import { DocumentResultCard } from './DocumentResultCard';
 import { OperationPlanCard } from './OperationPlanCard';
 import { RenameSuggestionReceipt } from './RenameSuggestionReceipt';
 import { SearchResultsReceipt } from './SearchResultsReceipt';
+import { TrashRestoreSelectionCard } from './TrashRestoreSelectionCard';
+import { FileSearchClarificationCard } from './FileSearchClarificationCard';
 import type { ChatAttachment } from './presentation';
 import { findAttachmentByDocumentId, formatFileSize } from './presentation';
 
@@ -21,6 +28,7 @@ type AgentRunReceiptProps = {
   onOpenAttachment?: (file: ChatAttachment) => void;
   onOpenDocument?: (documentId: string, filename: string) => void;
   onOpenManagedFile?: (file: ManagedFileResult) => void;
+  onFollowupResult?: (response: SendMessageResponse) => void;
 };
 
 export function AgentRunReceipt({
@@ -31,6 +39,7 @@ export function AgentRunReceipt({
   onOpenAttachment,
   onOpenDocument,
   onOpenManagedFile,
+  onFollowupResult,
 }: AgentRunReceiptProps) {
   const [operationPlan, setOperationPlan] = useState<OperationPlanResponse | null>(null);
   const results = taskResult?.document_results ?? [];
@@ -147,6 +156,26 @@ export function AgentRunReceipt({
         onOpenDocument={onOpenDocument}
       />
     );
+  }
+  if (
+    taskResult.response_type === 'file_search_clarification'
+    && taskResult.file_search_clarification_result
+    && token
+  ) {
+    return (
+      <FileSearchClarificationCard
+        result={taskResult.file_search_clarification_result}
+        token={token}
+        onResolved={onFollowupResult}
+      />
+    );
+  }
+  if (
+    taskResult.response_type === 'trash_restore_selection'
+    && taskResult.trash_restore_result
+    && token
+  ) {
+    return <TrashRestoreSelectionCard result={taskResult.trash_restore_result} token={token} />;
   }
   if (operationPlan && token) {
     return (

@@ -85,6 +85,9 @@ class TwoStageFileSearchService:
         query: str,
         parsed_query: Any | None = None,
         scope: Any | None = None,
+        exact_phrase: str | None = None,
+        require_body_evidence: bool = False,
+        include_internal_match_flags: bool = False,
     ) -> dict[str, Any]:
         """执行两阶段检索，返回确定性融合结果。"""
 
@@ -105,7 +108,9 @@ class TwoStageFileSearchService:
             query_chars=len(query),
             cleaned_query_chars=len(cleaned_query),
             query_term_count=len(list(getattr(parsed_query, "terms", []) or [])),
-            exact_short_phrase_mode=exact_short_chinese_phrase(cleaned_query) is not None,
+            exact_short_phrase_mode=bool(
+                exact_phrase or exact_short_chinese_phrase(cleaned_query)
+            ),
             query_fingerprint=query_fingerprint,
             scope_mode=scope_mode,
             message="两阶段文件检索开始",
@@ -174,27 +179,34 @@ class TwoStageFileSearchService:
         candidate_limit = min(int(self.config.retrieval_document_candidate_limit), 50)
         chunk_degraded = False
         fallback_count = 0
-        if len(stage1_candidates) < candidate_limit:
+        if exact_phrase or len(stage1_candidates) < candidate_limit:
             fallback_started_at = time.perf_counter()
             try:
                 with self.db.begin_nested():
                     if getattr(scope, "scope_mode", "global") == "strict":
                         fallback_versions = self._strict_scope_fallback(
-                            query=parsed_query.cleaned, scope=scope,
+                            query=parsed_query.cleaned,
+                            scope=scope,
+                            exact_phrase=exact_phrase,
                         )
                     else:
                         fallback_versions = self.stage2.fallback_recall(
                             query=parsed_query.cleaned,
                             workspace_id=self.workspace_id,
                             max_versions=10,
+                            exact_phrase_override=exact_phrase,
                         )
                     fallback_count = len(fallback_versions)
-                    stage1_candidates = self._merge_fallback(
-                        stage1_candidates,
-                        self.stage1.enrich_fallback_versions(
-                            fallback_versions=fallback_versions,
-                            scope=scope,
-                        ),
+                    enriched_fallback = self.stage1.enrich_fallback_versions(
+                        fallback_versions=fallback_versions,
+                        scope=scope,
+                    )
+                    # 连续短语的正文命中比文件级宽泛候选更可靠，必须优先进入二阶段；
+                    # 否则大量摘要 OR 候选可能挤掉真正含有完整短语的文件。
+                    stage1_candidates = (
+                        self._merge_fallback(enriched_fallback, stage1_candidates)
+                        if exact_phrase
+                        else self._merge_fallback(stage1_candidates, enriched_fallback)
                     )
                 log_event(
                     "retrieval.chunk_fallback.completed",
@@ -252,6 +264,7 @@ class TwoStageFileSearchService:
                         query=parsed_query.cleaned,
                         document_version_ids=version_ids,
                         limit=min(int(self.config.retrieval_chunk_global_limit), 24),
+                        exact_phrase_override=exact_phrase,
                     )
                 chunk_results = self._limit_chunks_per_document(chunk_results)
                 log_event(
@@ -351,6 +364,15 @@ class TwoStageFileSearchService:
             parsed_query=parsed_query,
             scope=scope,
         )
+        if require_body_evidence:
+            # “正文提到/包含/出现”是事实约束；没有 Chunk 连续命中的文件即使文件名或摘要相关，
+            # 也不能作为正文命中返回给用户。
+            fused = [
+                item for item in fused if bool(item.get("_body_phrase_hit"))
+            ]
+        if not include_internal_match_flags:
+            for item in fused:
+                item.pop("_body_phrase_hit", None)
 
         partial = chunk_degraded
         log_event(
@@ -405,7 +427,9 @@ class TwoStageFileSearchService:
                 seen.add(working_copy_id)
         return stage1_candidates
 
-    def _strict_scope_fallback(self, *, query: str, scope: Any) -> list[dict]:
+    def _strict_scope_fallback(
+        self, *, query: str, scope: Any, exact_phrase: str | None = None
+    ) -> list[dict]:
         """只在后端已解析的 L0 文件当前版本内补召回，禁止扩大到工作区。"""
         document_ids = list(getattr(scope, "strict_document_ids", ()) or ())
         if not document_ids:
@@ -428,6 +452,7 @@ class TwoStageFileSearchService:
             query=query,
             document_version_ids=version_ids,
             limit=min(int(self.config.retrieval_chunk_global_limit), 24),
+            exact_phrase_override=exact_phrase,
         )
 
     def _limit_chunks_per_document(self, chunks: list[dict]) -> list[dict]:
@@ -527,6 +552,7 @@ class TwoStageFileSearchService:
                     "match_reasons": reasons,
                     "match_location": match_location,
                     "evidence_preview": evidence_preview,
+                    "_body_phrase_hit": chunk_score > 0,
                     "_score": fused_score,
                 }
             )

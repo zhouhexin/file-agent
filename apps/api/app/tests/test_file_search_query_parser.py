@@ -69,6 +69,26 @@ def test_removes_common_fillers():
             )
 
 
+def test_removes_question_selectors_and_content_relation_phrases():
+    """文件选择词和正文关系词必须被清洗，只把用户真正查询的短语交给检索器。"""
+
+    parser = _make_parser()
+    cases = [
+        ("哪个文件提到了公示期限", "公示期限"),
+        ("哪些文档提到过任职通知", "任职通知"),
+        ("哪份材料包含了国家励志奖学金", "国家励志奖学金"),
+        ("哪几个文件中出现了公示期限", "公示期限"),
+        ("哪篇文章提及任职通告", "任职通告"),
+        ("哪几份报告正文中含有任职告示", "任职告示"),
+    ]
+
+    for query, expected in cases:
+        result = parser.parse(query)
+
+        assert result.cleaned == expected
+        assert result.terms == [expected]
+
+
 def test_normalizes_person_related_search_to_stable_core_query():
     """“关于/与…有关”必须得到同一个核心主题，关系虚词不能干扰正文召回。"""
 

@@ -649,6 +649,13 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
 
     workspace_file_search = result_summary.get("workspace_file_search", {})
     if workspace_file_search:
+        if workspace_file_search.get("search_clarification"):
+            return {
+                "status": "NEEDS_REVIEW",
+                "final_response": _build_workspace_file_search_response(
+                    workspace_file_search
+                ),
+            }
         return {
             "status": "COMPLETED",
             "final_response": _build_workspace_file_search_response(workspace_file_search),
@@ -846,6 +853,16 @@ def _workspace_file_search_from_results(tool_results: List[Dict[str, Any]]) -> D
             "results": [
                 item for item in result.get("results", []) if isinstance(item, dict)
             ],
+            "trash_restore_selection": (
+                result.get("trash_restore_selection")
+                if isinstance(result.get("trash_restore_selection"), dict)
+                else {}
+            ),
+            "search_clarification": (
+                result.get("search_clarification")
+                if isinstance(result.get("search_clarification"), dict)
+                else {}
+            ),
             "error": result.get("error") if isinstance(result.get("error"), dict) else {},
         }
     return {}
@@ -1028,6 +1045,15 @@ def _build_workspace_file_search_response(payload: Dict[str, Any]) -> str:
     if not payload.get("ok"):
         message = str((payload.get("error") or {}).get("message") or "文件检索暂不可用")
         return f"暂时无法查找文件：{message}。"
+    trash_restore_selection = payload.get("trash_restore_selection")
+    if isinstance(trash_restore_selection, dict) and trash_restore_selection:
+        return str(trash_restore_selection.get("message") or "找到了已删除文件，请选择是否恢复。")
+    search_clarification = payload.get("search_clarification")
+    if isinstance(search_clarification, dict) and search_clarification:
+        return str(
+            search_clarification.get("prompt")
+            or "这个查找条件存在不同范围，请选择后继续。"
+        )
     results = [item for item in payload.get("results", []) if isinstance(item, dict)]
     if not results:
         return "没有找到与这段描述明确相关的已整理文件。你可以补充主题、年份、单位或文件类型后再找。"

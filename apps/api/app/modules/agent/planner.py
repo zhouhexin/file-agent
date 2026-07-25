@@ -194,6 +194,8 @@ class DeterministicPlanner:
                 action=conflict_action,
                 document_ids=[],
             )
+        if _has_explicit_filename_lookup_intent(message) and not attachments:
+            return _file_search_plan(user_goal=message, query=message, document_ids=[])
         if _has_restore_working_copy_intent(message):
             return _working_copy_action_plan(
                 user_goal=message,
@@ -298,7 +300,25 @@ class DeterministicPlanner:
                 route_source="deterministic_planner",
             )
 
-        if _has_file_search_intent(message=message, lowered=lowered):
+        has_attached_content_task = bool(attachments) and any(
+            [
+                _should_extract_text(message=message, lowered=lowered),
+                _has_classification_intent(message=message, lowered=lowered),
+                _has_answer_intent(message=message, lowered=lowered),
+                _has_summary_intent(message=message, lowered=lowered),
+                _has_spreadsheet_profile_intent(message=message, lowered=lowered),
+                _has_spreadsheet_validation_intent(message=message, lowered=lowered),
+                _has_spreadsheet_analysis_intent(
+                    message=message,
+                    lowered=lowered,
+                    attachments=attachments,
+                ),
+            ]
+        )
+        if (
+            _has_file_search_intent(message=message, lowered=lowered)
+            and not has_attached_content_task
+        ):
             return _file_search_plan(
                 user_goal=message,
                 query=message,
@@ -548,6 +568,14 @@ def build_plan_from_user_intent(
             response_style=intent_plan.response_style,
             llm_intent_plan=intent_plan.model_dump(),
         )
+    if _has_explicit_filename_lookup_intent(message) and not attachments:
+        return _file_search_plan(
+            user_goal=intent_plan.user_goal or message,
+            query=message,
+            document_ids=[],
+            response_style=intent_plan.response_style,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
     if _has_restore_working_copy_intent(message):
         return _working_copy_action_plan(
             user_goal=intent_plan.user_goal or message,
@@ -743,6 +771,8 @@ def build_plan_from_user_intent(
         or (capability_route is not None and capability_route.tool_name == "hybrid-search")
         or (
             not has_explicit_managed_file_list_request
+            and intent_plan.intent
+            in {"GENERAL_CHAT", "CHAT", "UNKNOWN", "UNSPECIFIED", "FILE_TASK"}
             and _has_file_search_intent(message=message, lowered=lowered)
         )
     ):
@@ -1476,6 +1506,15 @@ def _has_restore_working_copy_intent(message: str) -> bool:
     return "恢复" in message and any(value in message for value in ["文件", "附件", "回收站", "刚才", "刚刚"])
 
 
+def _has_explicit_filename_lookup_intent(message: str) -> bool:
+    """识别带完整文件名的查找、打开或恢复请求，交由后端精确校验。"""
+
+    suffix_pattern = r"\.(?:pdf|docx?|xlsx?|csv|txt|md)(?:$|[\s。！？，,；;”’》】])"
+    has_full_filename = bool(re.search(suffix_pattern, message, flags=re.IGNORECASE))
+    actions = ["找", "查找", "搜索", "打开", "查看", "恢复", "文件名为", "名为"]
+    return has_full_filename and any(action in message for action in actions)
+
+
 def _mcp_filesystem_list_plan(
     *,
     user_goal: str,
@@ -1893,15 +1932,45 @@ def _has_file_search_intent(*, message: str, lowered: str) -> bool:
     # 不能因为没有“找”字而退回普通闲聊回复。
     object_keywords = ["文件", "文档", "文章", "材料", "证明", "通知", "表格", "报告"]
     explicit_actions = ["找", "查找", "搜索", "检索", "寻找", "列出", "展示", "显示"]
-    existence_objects = ["文件", "文档", "文章", "材料", "证明", "通知", "报告"]
+    existence_objects = ["文件", "文档", "文章", "材料", "证明", "通知", "表格", "报告"]
+    question_selectors = [
+        "哪个",
+        "哪些",
+        "哪份",
+        "哪一份",
+        "哪几个",
+        "哪几份",
+        "哪篇",
+        "哪几篇",
+        "哪张",
+        "哪几张",
+    ]
     english_actions = ["find file", "search file", "search document", "find document"]
+    # 疑问代词必须修饰后方的文件对象；不能把“这些材料放到哪个目录”误识别成查文件。
+    selector_object_pattern = re.compile(
+        rf"(?:{'|'.join(re.escape(value) for value in question_selectors)})"
+        rf"[^，。！？,.!?]{{0,8}}"
+        rf"(?:{'|'.join(re.escape(value) for value in existence_objects)})"
+    )
+    object_selector_pattern = re.compile(
+        rf"(?:{'|'.join(re.escape(value) for value in existence_objects)})"
+        rf"[^，。！？,.!?]{{0,2}}"
+        rf"(?:{'|'.join(re.escape(value) for value in question_selectors)})"
+    )
+    # “有没有”只有在后方询问文件对象时才表示存在性检索；
+    # “检查这份表格有没有公式错误”属于表格校验。
+    existence_pattern = re.compile(
+        rf"有没有[^，。！？,.!?]{{0,16}}"
+        rf"(?:{'|'.join(re.escape(value) for value in existence_objects)})"
+    )
     return (
         any(keyword in message for keyword in explicit_actions)
         and any(keyword in message for keyword in object_keywords)
-    ) or (
-        any(keyword in message for keyword in ["有没有", "哪些"])
-        and any(keyword in message for keyword in existence_objects)
-    ) or any(keyword in lowered for keyword in english_actions)
+    ) or bool(selector_object_pattern.search(message)) or bool(
+        object_selector_pattern.search(message)
+    ) or bool(existence_pattern.search(message)) or any(
+        keyword in lowered for keyword in english_actions
+    )
 
 
 def _has_capability_help_intent(*, message: str, lowered: str) -> bool:

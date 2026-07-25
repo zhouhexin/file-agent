@@ -26,7 +26,9 @@ export type TaskResult = {
     | 'rename_plan'
     | 'operation_plan'
     | 'async_job'
-    | 'file_search_results';
+    | 'file_search_results'
+    | 'trash_restore_selection'
+    | 'file_search_clarification';
   display_mode: 'default' | 'classification_cards';
   final_response: string | null;
   processed_count: number;
@@ -34,6 +36,8 @@ export type TaskResult = {
   managed_file_result: { root_key: string; files: ManagedFileResult[] } | null;
   rename_plan_result: import('./features/chat/RenameSuggestionReceipt').RenamePlanResult | null;
   file_search_result: FileSearchResult | null;
+  trash_restore_result: TrashRestoreResult | null;
+  file_search_clarification_result: FileSearchClarificationResult | null;
   pending_job_ids: string[];
   operation_plan_id: string | null;
   pending_decisions: Array<Record<string, unknown>>;
@@ -68,6 +72,42 @@ export type FileSearchResult = {
   partial: boolean;
   user_message: string;
   files: FileSearchResultFile[];
+};
+
+export type TrashRestoreCandidate = {
+  trash_entry_id: string;
+  display_index: number;
+  filename: string;
+  size_bytes: number;
+  version_number: number;
+  deleted_at: string;
+  created_at: string;
+};
+
+export type TrashRestoreResult = {
+  conversation_id: string;
+  query_type: 'EXACT_FILENAME';
+  requires_selection: true;
+  message: string;
+  candidates: TrashRestoreCandidate[];
+};
+
+export type FileSearchClarificationOption = {
+  id: string;
+  label: string;
+  description: string;
+  examples: string[];
+  estimated_count: number | null;
+};
+
+export type FileSearchClarificationResult = {
+  id: string;
+  status: 'WAITING_SELECTION' | 'RESOLVED' | 'SUPERSEDED' | 'EXPIRED' | string;
+  prompt: string;
+  core_phrase: string;
+  options: FileSearchClarificationOption[];
+  allow_custom_phrase: boolean;
+  expires_at: string | null;
 };
 
 export type OperationPlanItem = {

@@ -430,6 +430,8 @@ Response:
     "document_results": [],
     "managed_file_result": null,
     "rename_plan_result": null,
+    "file_search_result": null,
+    "trash_restore_result": null,
     "pending_job_ids": [],
     "operation_plan_id": null,
     "pending_decisions": [],
@@ -1002,6 +1004,18 @@ Response:
 `search_text`、内部路径、SQL 分数或 Tool/Skill 载荷。`attachment_document_ids` 仅作为后端再次
 鉴权的稳定 ID 输入，`top_k` 范围为 1–20。
 
+### 8.2 File Search Clarification
+
+```text
+GET  /api/file-search/clarifications/{clarification_id}
+POST /api/file-search/clarifications/{clarification_id}/resolve
+```
+
+当原短语、同义完整短语或宽泛主题产生不同候选集合时，聊天入口先返回选择卡。前端只能提交
+后端签发的 `option_id`；自定义短语最多 30 个字符，不能直接提交 Tool 参数或短语数组。后端必须
+校验当前用户、状态和过期时间，同一选择重复提交时复用首次生成的消息与 AgentRun，不得重复回答。
+GET 接口用于页面刷新后恢复最新状态，已解决或已过期的卡片不得重新显示为待选择。
+
 ## 9. Evidence Answer Skill API
 
 ### 9.1 Ask Evidence-Backed Question
@@ -1525,5 +1539,14 @@ GET  /api/working-copies/{working_copy_id}/path-records
 GET  /api/trash-entries
 POST /api/trash-entries/{trash_entry_id}/restore-plan
 ```
+
+普通文件检索只读取 `ACTIVE` 工作副本。只有用户消息明确包含带扩展名的完整文件名，且不存在
+同名活动副本时，消息接口才可以返回 `response_type=trash_restore_selection`。对应
+`trash_restore_result` 逐条返回当前用户可恢复的回收站候选；同名、同版本或同内容哈希候选不得
+合并或预选，前端必须使用单选卡取得用户选择后，才可调用恢复计划和确认接口。
+
+上传查重通过 SHA-256 命中已进入回收站的历史工作副本时，确认卡必须说明相同内容此前已删除，
+并且只允许用户选择再次上传或取消。选择再次上传按新文件处理，不能按 WorkingCopy、
+DocumentVersion 或内容哈希自动复活或合并已删除文件。
 
 工作副本高风险计划使用 `RENAME_WORKING_COPIES`、`MOVE_WORKING_COPIES`、`TRASH_WORKING_COPIES` 和 `RESTORE_WORKING_COPIES`。创建请求只能提交 `working_copy_id` 和目标逻辑字段，后端必须从数据库重建 before/version/SHA-256 快照；确认后逐文件执行并写 ChangeSet。任何响应不得返回三个目录的宿主机绝对路径。

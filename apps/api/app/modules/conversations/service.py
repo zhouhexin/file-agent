@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from app.db.models import AgentRun, Message
+from app.modules.agent.repository import AgentRunRepository
 from app.modules.agent.service import AgentRuntimeService
 from app.modules.agent.state import AgentRunResult
 from app.modules.conversations.context import ConversationAttachmentContextService
@@ -20,6 +22,14 @@ from app.modules.conversations.schemas import (
     SendMessageRequest,
 )
 from app.modules.files.repository import FileRepository
+from app.modules.retrieval.clarification_planner import (
+    FileSearchClarificationPlanner,
+)
+from app.modules.retrieval.clarification_service import (
+    FileSearchClarificationError,
+    FileSearchClarificationService,
+    ResolvedSearchSelection,
+)
 
 
 @dataclass(frozen=True)
@@ -55,6 +65,63 @@ class ConversationMessageService:
         HTTP 调用必须传入认证用户 ID；默认值只保留给不经过 HTTP 的最小服务测试。
         """
 
+        selection = None
+        if not request.attachments:
+            selection = FileSearchClarificationService(self.db).resolve_from_text(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                message=request.content,
+            )
+        return self._execute_message(
+            conversation_id=conversation_id,
+            request=request,
+            user_id=user_id,
+            clarification_selection=selection,
+        )
+
+    def resolve_file_search_clarification(
+        self,
+        *,
+        clarification_id: str,
+        option_id: str,
+        custom_phrase: str | None,
+        user_id: str,
+    ) -> ConversationExecutionResult:
+        """根据选择卡提交结果创建一条可见对话消息并续跑文件检索。"""
+
+        selection = FileSearchClarificationService(self.db).resolve(
+            clarification_id=clarification_id,
+            user_id=user_id,
+            option_id=option_id,
+            custom_phrase=custom_phrase,
+        )
+        return self._execute_message(
+            conversation_id=selection.conversation_id,
+            request=SendMessageRequest(
+                content=selection.display_content,
+                attachments=[],
+            ),
+            user_id=user_id,
+            clarification_selection=selection,
+        )
+
+    def _execute_message(
+        self,
+        *,
+        conversation_id: str,
+        request: SendMessageRequest,
+        user_id: str,
+        clarification_selection: ResolvedSearchSelection | None = None,
+    ) -> ConversationExecutionResult:
+        """执行普通消息或已校验检索选择，共用同一 AgentRun 审计链路。"""
+
+        if clarification_selection is not None:
+            existing = self._existing_clarification_execution(
+                clarification_selection
+            )
+            if existing is not None:
+                return existing
+
         attachment_context = ConversationAttachmentContextService(self.repository).resolve(
             conversation_id=conversation_id,
             user_id=user_id,
@@ -88,13 +155,50 @@ class ConversationMessageService:
                 }
                 for attachment in attachments
             ],
+            planner=(
+                FileSearchClarificationPlanner(clarification_selection)
+                if clarification_selection is not None
+                else None
+            ),
             db=self.db,
         )
+        if clarification_selection is not None:
+            FileSearchClarificationService(self.db).mark_execution_result(
+                clarification_id=clarification_selection.clarification_id,
+                user_id=user_id,
+                message_id=message.id,
+                agent_run_id=agent_run.agent_run_id,
+            )
         self.db.commit()
         self.db.refresh(message)
         return ConversationExecutionResult(
             message=self.repository.to_schema(message),
             agent_run=agent_run,
+        )
+
+    def _existing_clarification_execution(
+        self,
+        selection: ResolvedSearchSelection,
+    ) -> ConversationExecutionResult | None:
+        """重复提交选择时返回首次执行结果，不创建第二条消息或 AgentRun。"""
+
+        if not selection.result_message_id or not selection.result_agent_run_id:
+            return None
+        message = self.db.get(Message, selection.result_message_id)
+        agent_run = self.db.get(AgentRun, selection.result_agent_run_id)
+        if (
+            message is None
+            or agent_run is None
+            or message.id != agent_run.message_id
+            or message.conversation_id != selection.conversation_id
+            or agent_run.conversation_id != selection.conversation_id
+            or message.user_id != agent_run.user_id
+        ):
+            # 结果引用异常时不能猜测或复用其他会话数据。
+            raise FileSearchClarificationError("已处理检索的结果引用无效")
+        return ConversationExecutionResult(
+            message=self.repository.to_schema(message),
+            agent_run=AgentRunRepository(self.db).to_result(agent_run),
         )
 
     def get_conversation_detail(
