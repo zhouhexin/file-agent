@@ -72,9 +72,9 @@ git diff --check
 当前阶段期望：
 
 ```text
-后端（macOS/Linux）：604 passed, 19 skipped
-后端（Windows 有 symlink 权限）：604 passed, 19 skipped
-后端（Windows 无 symlink 权限）：603 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
+后端（macOS/Linux）：606 passed, 19 skipped
+后端（Windows 有 symlink 权限）：606 passed, 19 skipped
+后端（Windows 无 symlink 权限）：605 passed, 20 skipped，其中新增跳过项必须是 symlink 权限前置条件
 前端：TypeScript 检查和 Vite build 成功
 Alembic：单一 head 20260724_0003
 Python：No broken requirements found
@@ -554,6 +554,9 @@ curl -sS http://127.0.0.1:8000/api/documents/<document_id>/chunks \
 ```text
 找我刚才上传的奖学金材料。
 找我去年的奖学金材料。
+关于科研的文档。
+查找与科研有关的文档。
+关于科研的文件。
 哪个文件提到了公示期限？
 找包含资助金额的表格。
 打开2026年的学生工作文件。
@@ -573,6 +576,8 @@ curl -sS http://127.0.0.1:8000/api/documents/<document_id>/chunks \
   经 Chunk 补召回命中，并显示真实页码。
 - XLSX 命中“资助金额”时显示真实 Sheet 与单元格范围；不能通过文件名猜测位置。
 - “刚才这些文件”只检索该轮后端确认的附件；“找我去年的奖学金材料”可以在当前用户工作区全局检索。
+- “关于科研的文档”“查找与科研有关的文档”“关于科研的文件”必须归一为同一个
+  `RELATED` 主题查询，并返回相同的有序文件集合；该要求在两阶段检索开启、显式关闭或异常降级时都成立。
 - 结果卡默认显示前 10 个，点击“查看更多”每次追加最多 10 个；点击“查看文件”能通过鉴权下载或预览，
   不依赖相对路径。
 - 页面和普通消息/API 响应不显示 Skill、Tool、Chunk、内部路径、搜索词项、SQL 分数或完整正文。

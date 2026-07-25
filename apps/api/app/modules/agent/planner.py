@@ -1988,12 +1988,27 @@ def _has_file_search_intent(*, message: str, lowered: str) -> bool:
         rf"有没有[^，。！？,.!?]{{0,16}}"
         rf"(?:{'|'.join(re.escape(value) for value in existence_objects)})"
     )
+    related_noun_phrase_pattern = re.compile(
+        rf"^\s*(?:关于|有关)\s*"
+        rf"(?P<topic>[^，。！？,.!?]+?)"
+        rf"(?:的)?(?:相关)?"
+        rf"(?:{'|'.join(re.escape(value) for value in existence_objects)})"
+        rf"(?:有哪些|有吗)?[？?]?\s*$"
+    )
+    related_noun_phrase = related_noun_phrase_pattern.match(message)
+    # “关于科研的文件”在对话中等价于“查找与科研有关的文件”。主题必须是明确名词，
+    # “关于这个文件”仍然需要上文附件解析，不能在无附件时扩大为全局检索。
+    has_related_noun_phrase = bool(
+        related_noun_phrase
+        and related_noun_phrase.group("topic").strip()
+        not in {"这", "这个", "这些", "那", "那个", "那些", "它", "它们"}
+    )
     return (
         any(keyword in message for keyword in explicit_actions)
         and any(keyword in message for keyword in object_keywords)
     ) or bool(selector_object_pattern.search(message)) or bool(
         object_selector_pattern.search(message)
-    ) or bool(existence_pattern.search(message)) or any(
+    ) or bool(existence_pattern.search(message)) or has_related_noun_phrase or any(
         keyword in lowered for keyword in english_actions
     )
 

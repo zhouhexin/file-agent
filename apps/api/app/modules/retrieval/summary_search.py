@@ -17,34 +17,7 @@ from app.db.models import (
     DocumentSummary,
     WorkingCopy,
 )
-
-
-_QUERY_FILLER_PHRASES = (
-    "请帮我",
-    "麻烦帮我",
-    "帮我",
-    "请",
-    "查找",
-    "查一下",
-    "搜索",
-    "检索",
-    "寻找",
-    "找出",
-    "找到",
-    "找我",
-    "找",
-    "有没有",
-    "有哪些",
-    "给我",
-    "相关的",
-    "有关的",
-    "相关",
-    "有关",
-    "文件",
-    "文档",
-    "材料",
-    "一下",
-)
+from app.modules.retrieval.query_parser import normalize_file_search_query
 
 
 @dataclass(frozen=True)
@@ -87,8 +60,11 @@ class WorkingCopySummarySearchService:
     ) -> dict[str, Any]:
         """返回按相关度排序的工作副本，不暴露原始文件名和内部处理状态。"""
 
-        normalized_query = _normalize_text(query)
-        terms = _query_terms(query)
+        # 摘要检索既是显式关闭两阶段检索时的低成本路径，也是数据库索引异常时的
+        # 安全降级路径，必须与主链路使用同一个核心查询，不能重新从原句切出语法噪声。
+        cleaned_query = normalize_file_search_query(query)
+        normalized_query = _normalize_text(cleaned_query)
+        terms = _query_terms(cleaned_query)
         if not normalized_query or not terms:
             return {"kind": "workspace_file_search", "ok": True, "query": query, "results": []}
 
@@ -243,9 +219,7 @@ def _score_candidate(
 def _query_terms(query: str) -> list[str]:
     """从自然语言请求提取稳定检索词，并保留中文主题的二至六字片段。"""
 
-    text = query.lower()
-    for phrase in _QUERY_FILLER_PHRASES:
-        text = text.replace(phrase, " ")
+    text = normalize_file_search_query(query)
     raw_terms = re.findall(r"[a-z0-9][a-z0-9._-]*|[\u4e00-\u9fff]+", text)
     terms: set[str] = set()
     for term in raw_terms:

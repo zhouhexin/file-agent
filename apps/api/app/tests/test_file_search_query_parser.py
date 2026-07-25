@@ -104,6 +104,21 @@ def test_normalizes_person_related_search_to_stable_core_query():
         assert result.terms == ["金海燕老师"]
 
 
+def test_normalizes_equivalent_related_document_phrases_to_same_query():
+    """关于、与主题有关以及文件/文档差异不能改变主题检索核心。"""
+
+    parser = _make_parser()
+    parsed = [
+        parser.parse("关于科研的文档"),
+        parser.parse("查找与科研有关的文档"),
+        parser.parse("关于科研的文件"),
+    ]
+
+    assert {item.cleaned for item in parsed} == {"科研"}
+    assert {item.relation_mode for item in parsed} == {"RELATED"}
+    assert {tuple(item.terms) for item in parsed} == {("科研",)}
+
+
 def test_short_chinese_phrase_removes_person_honorifics():
     """短人名必须转为连续匹配核心，不能拆成单字 OR 召回无关文件。"""
 

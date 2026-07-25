@@ -163,25 +163,7 @@ class FileSearchQueryParser:
 
     def _remove_fillers(self, text: str) -> str:
         """去除查询中的低信息量请求词。"""
-        result = text.lower()
-        for phrase in _FILLER_PHRASES:
-            result = result.replace(phrase, " ")
-        result = " ".join(result.split())
-        # “哪个文件、哪几份材料”等问句选择词只用于表达检索动作，不属于检索主题。
-        # 这里同时移除紧随其后的文件对象，但不能全局删除“报告、通知”等可能的业务主题。
-        result = _QUESTION_FILE_SELECTOR_PATTERN.sub("", result)
-        # “与某人有关”“关于某人的相关文件”中的关系词只表达检索意图，
-        # 不能进入全文词项，否则同一主题的两种说法会产生不同召回结果。
-        # “找我的……”先移除“找我”后会留下句首“的”，它同样只是语法连接词；
-        # 若保留会把“的奖学金”误判成四字精确实体并导致零召回。
-        result = re.sub(r"^\s*(?:与|和|关于|的)\s*", "", result)
-        # 用户说“提到了、包含、出现过”等是在限定正文匹配关系，真正的查询主题位于其后。
-        # 必须在分词前删除这些关系词，避免短语被拆成宽泛 OR 查询并召回无关文件。
-        result = _CONTENT_RELATION_PATTERN.sub("", result)
-        result = re.sub(r"\s*的\s*$", "", result)
-        # 去除多余空白
-        result = " ".join(result.split())
-        return result
+        return normalize_file_search_query(text)
 
     def _extract_year(self, text: str) -> int | None:
         """提取显式年份（如 2024、2024年）。"""
@@ -217,6 +199,31 @@ class FileSearchQueryParser:
             return []
         # TODO: 后续任务中实现 taxonomy 别名匹配
         return []
+
+
+def normalize_file_search_query(text: str) -> str:
+    """把等价文件检索问法归一为稳定核心查询。
+
+    两阶段检索和摘要降级必须共用该入口，避免“关于主题的文档”“与主题有关的文档”
+    因语法连接词不同而产生不同候选。这里只清理检索动作和关系词，不改写业务同义词，
+    同义扩展仍由受控短语策略处理。
+    """
+
+    result = str(text or "").lower()
+    for phrase in _FILLER_PHRASES:
+        result = result.replace(phrase, " ")
+    result = " ".join(result.split())
+    # “哪个文件、哪几份材料”等问句选择词只用于表达检索动作，不属于检索主题。
+    # 这里同时移除紧随其后的文件对象，但不能全局删除“报告、通知”等可能的业务主题。
+    result = _QUESTION_FILE_SELECTOR_PATTERN.sub("", result)
+    # “与某人有关”“关于某人的相关文件”中的关系词只表达检索意图，
+    # 不能进入全文词项，否则同一主题的两种说法会产生不同召回结果。
+    # “找我的……”先移除“找我”后会留下句首“的”，它同样只是语法连接词。
+    result = re.sub(r"^\s*(?:与|和|关于|的)\s*", "", result)
+    # 用户说“提到了、包含、出现过”等是在限定正文匹配关系，真正主题位于其后。
+    result = _CONTENT_RELATION_PATTERN.sub("", result)
+    result = re.sub(r"\s*的\s*$", "", result)
+    return " ".join(result.split())
 
 
 def exact_short_chinese_phrase(text: str) -> str | None:

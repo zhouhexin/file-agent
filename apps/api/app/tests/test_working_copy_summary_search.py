@@ -232,3 +232,44 @@ def test_shared_workspace_summary_fallback_ignores_import_audit_user():
         assert [item["document_id"] for item in payload["results"]] == [shared_document.id]
     finally:
         db.close()
+
+
+def test_summary_fallback_returns_same_results_for_equivalent_related_phrases():
+    """摘要降级链路也必须统一“关于/与…有关/文件/文档”等价表达。"""
+
+    db = _db_session()
+    try:
+        relevant = _add_working_copy(
+            db,
+            suffix="g",
+            user_id="user-a",
+            filename="科研项目汇总.docx",
+            overview="学院科研项目和成果资助汇总。",
+            category_path=["学校", "科研"],
+        )
+        _add_working_copy(
+            db,
+            suffix="h",
+            user_id="user-a",
+            filename="关于日常工作的通知.docx",
+            overview="本文件说明日常值班工作。",
+            category_path=["学校", "行政"],
+        )
+        db.commit()
+        service = WorkingCopySummarySearchService(db=db, user_id="user-a")
+
+        result_sets = [
+            [
+                item["document_id"]
+                for item in service.search(query=query)["results"]
+            ]
+            for query in [
+                "关于科研的文档",
+                "查找与科研有关的文档",
+                "关于科研的文件",
+            ]
+        ]
+
+        assert result_sets == [[relevant.id], [relevant.id], [relevant.id]]
+    finally:
+        db.close()

@@ -37,6 +37,9 @@ def test_deterministic_planner_routes_list_and_article_search_phrases():
     for message in [
         "列出与科研有关的文档",
         "关于科研的文章有哪些",
+        "关于科研的文档",
+        "查找与科研有关的文档",
+        "关于科研的文件",
         "查找与金海燕老师有关的文件",
         "查找关于金海燕老师的相关文件",
     ]:
