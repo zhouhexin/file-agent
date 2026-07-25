@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import func, literal, or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import Document, DocumentChunk, DocumentIndexRun, WorkingCopy
@@ -111,25 +111,31 @@ class DocumentChunkLexicalSearchService:
         limit: int,
         exact_search_text: str | None = None,
     ) -> list[dict[str, Any]]:
-        """使用 ``simple`` tsquery 和 pg_trgm 排序，中文分词已在应用层完成。"""
+        """使用 ``simple`` tsquery 和 pg_trgm 排序，中文分词已在应用层完成。
+
+        连续短语不能直接在未索引的正文列上执行全局 ``LIKE %phrase%``。这里先利用
+        search_vector 的 GIN 索引收敛候选，再在有上限的结果中验证原始正文连续命中。
+        """
 
         # websearch_to_tsquery 接收绑定参数并解析 OR，不允许用户直接注入 PostgreSQL tsquery 语法。
         query_text = " OR ".join(dict.fromkeys(tokens))
         ts_query = func.websearch_to_tsquery("simple", query_text)
-        rank = (
-            literal(1.0)
-            if exact_search_text
-            else func.ts_rank_cd(DocumentChunk.search_vector, ts_query)
+        exact_candidate_query = func.plainto_tsquery(
+            "simple", " ".join(dict.fromkeys(tokens))
         )
+        selected_ts_query = (
+            exact_candidate_query if exact_search_text else ts_query
+        )
+        rank = func.ts_rank_cd(DocumentChunk.search_vector, selected_ts_query)
         trigram_score = func.similarity(DocumentChunk.search_text, " ".join(tokens))
         query = (
             self._base_query()
             .filter(DocumentChunk.document_version_id.in_(version_ids))
         )
         if exact_search_text:
-            # 候选范围已经由一阶段收敛；这里必须检查原始 Chunk 正文的连续短语，
-            # 不能依赖可能插入空格的 search_text，否则不同 Jieba 切词会改变语义。
-            query = query.filter(DocumentChunk.text_content.contains(exact_search_text))
+            query = query.filter(
+                DocumentChunk.search_vector.op("@@")(exact_candidate_query)
+            )
         else:
             query = query.filter(
                 or_(
@@ -137,13 +143,23 @@ class DocumentChunkLexicalSearchService:
                     trigram_score >= 0.1,
                 )
             )
+        candidate_limit = (
+            min(max(limit * 10, limit), 500) if exact_search_text else limit
+        )
         rows = (
             query
             .with_entities(DocumentChunk, rank.label("fts_rank"), trigram_score.label("trigram_score"))
             .order_by(rank.desc(), trigram_score.desc(), DocumentChunk.chunk_index.asc())
-            .limit(limit)
+            .limit(candidate_limit)
             .all()
         )
+        if exact_search_text:
+            normalized_phrase = exact_search_text.lower()
+            rows = [
+                row
+                for row in rows
+                if normalized_phrase in str(row[0].text_content or "").lower()
+            ][:limit]
         return [
             _safe_result(chunk, score=float(fts_rank or 0) + float(trigram or 0) * 0.25)
             for chunk, fts_rank, trigram in rows
@@ -224,15 +240,21 @@ class DocumentChunkLexicalSearchService:
         max_versions: int, limit_chunks: int,
         exact_search_text: str | None = None,
     ) -> list[dict[str, Any]]:
-        """PostgreSQL 全局 Chunk GIN 补召回。"""
+        """PostgreSQL 全局 Chunk GIN 补召回。
+
+        严格短语先用全部词项 AND 的 GIN 查询召回有限 Chunk，再检查正文连续短语；
+        禁止在共享工作区全部正文上执行未索引的 contains 扫描。
+        """
 
         query_text = " OR ".join(dict.fromkeys(tokens))
         ts_query = func.websearch_to_tsquery("simple", query_text)
-        rank = (
-            literal(1.0)
-            if exact_search_text
-            else func.ts_rank_cd(DocumentChunk.search_vector, ts_query)
+        exact_candidate_query = func.plainto_tsquery(
+            "simple", " ".join(dict.fromkeys(tokens))
         )
+        selected_ts_query = (
+            exact_candidate_query if exact_search_text else ts_query
+        )
+        rank = func.ts_rank_cd(DocumentChunk.search_vector, selected_ts_query)
 
         # 子查询：当前工作区下 ACTIVE 工作副本的最新版本
         active_subq = (
@@ -265,7 +287,7 @@ class DocumentChunkLexicalSearchService:
         )
         if exact_search_text:
             ranked_query = ranked_query.filter(
-                DocumentChunk.text_content.contains(exact_search_text)
+                DocumentChunk.search_vector.op("@@")(exact_candidate_query)
             )
         else:
             ranked_query = ranked_query.filter(
@@ -273,12 +295,24 @@ class DocumentChunkLexicalSearchService:
             )
         if self.workspace_id is None:
             ranked_query = ranked_query.filter(Document.user_id == self.user_id)
+        candidate_limit = (
+            min(max(limit_chunks * 10, limit_chunks), 300)
+            if exact_search_text
+            else limit_chunks
+        )
         ranked_chunks = (
             ranked_query
             .order_by(rank.desc(), DocumentChunk.chunk_index.asc())
-            .limit(limit_chunks)
+            .limit(candidate_limit)
             .all()
         )
+        if exact_search_text:
+            normalized_phrase = exact_search_text.lower()
+            ranked_chunks = [
+                row
+                for row in ranked_chunks
+                if normalized_phrase in str(row[0].text_content or "").lower()
+            ][:limit_chunks]
 
         # 按版本聚合
         version_map: dict[str, dict[str, Any]] = {}
