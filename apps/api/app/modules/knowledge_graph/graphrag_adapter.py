@@ -16,7 +16,9 @@ except ImportError:  # pragma: no cover - 本地未安装 graph extras 时由 no
 
 
 DOCUMENT_VECTOR_RETRIEVAL_QUERY = """
-OPTIONAL MATCH (node)-[relation:CONFIRMED_AS|PATH_SUGGESTS]->(category:Category)
+// 新初始化的图谱可能尚无分类关系；用字符串判断类型，避免 Neo4j 把空关系类型报告为模式警告。
+OPTIONAL MATCH (node)-[relation]->(category:Category)
+WHERE type(relation) IN ['CONFIRMED_AS', 'PATH_SUGGESTS']
 WITH node, score, collect(CASE WHEN category IS NULL THEN NULL ELSE {
     category_id: category.category_id,
     graph_key: category.graph_key,

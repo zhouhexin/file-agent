@@ -231,3 +231,19 @@ def test_context_resolver_uses_filename_reference_before_recent_scope():
     assert repository.calls == ["filename"]
     assert context.scope == "filename_reference"
     assert [attachment.document_id for attachment in context.attachments] == ["named-doc"]
+
+
+def test_target_rename_filename_is_not_used_as_historical_source_reference():
+    """“重命名为 B”里的 B 是目标名称，不能碰巧匹配到历史中的另一份文件。"""
+
+    repository = FakeConversationRepository()
+    context = ConversationAttachmentContextService(repository).resolve(
+        conversation_id="chat-rename-target",
+        user_id="user-1",
+        content="重命名为 2019年学院科研成果资助表.xlsx",
+        explicit_attachments=[],
+    )
+
+    assert repository.calls == []
+    assert context.scope == "none"
+    assert context.attachments == []

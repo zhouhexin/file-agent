@@ -124,6 +124,8 @@ def test_expand_candidates_uses_bounded_parameters_and_maps_support():
 
     assert driver.calls[0]["parameters"]["max_hops"] == 2
     assert driver.calls[0]["parameters"]["limit"] == 50
+    assert "[:CONFIRMED_AS]" not in driver.calls[0]["query"]
+    assert "type(support_relation) = 'CONFIRMED_AS'" in driver.calls[0]["query"]
     assert supports[0].category_id == "rules"
     assert supports[0].confirmed_support_score == 0.6
     assert supports[0].paths[0]["type"] == "EXACT"
@@ -187,8 +189,25 @@ def test_replace_suggested_classifications_uses_multiple_parameterized_relations
     )
 
     assert "DELETE relation" in driver.calls[0]["query"]
+    assert "[relation:SUGGESTED_AS]" not in driver.calls[0]["query"]
+    assert "type(relation) = 'SUGGESTED_AS'" in driver.calls[0]["query"]
     assert len(driver.calls[1]["parameters"]["rows"]) == 2
     assert "suggestion-a" not in driver.calls[1]["query"]
+
+
+def test_empty_graph_cleanup_queries_do_not_reference_missing_relationship_tokens():
+    """图谱首次初始化尚无关系时，清理查询不应触发 Neo4j 未知关系类型警告。"""
+
+    driver = RecordingDriver()
+    repository = Neo4jGraphRepository(driver=driver)
+
+    repository.delete_confirmed_classifications_by_source(source_type="user_feedback")
+    repository.replace_weak_path_suggestions(relations=[])
+
+    assert "[relation:CONFIRMED_AS]" not in driver.calls[0]["query"]
+    assert "type(relation) = 'CONFIRMED_AS'" in driver.calls[0]["query"]
+    assert "[relation:PATH_SUGGESTS]" not in driver.calls[1]["query"]
+    assert "type(relation) = 'PATH_SUGGESTS'" in driver.calls[1]["query"]
 
 
 def test_upsert_managed_hierarchy_rebuilds_folder_category_mappings():

@@ -819,6 +819,24 @@ def test_llm_rename_without_backend_file_scope_does_not_scan_all_managed_files()
     assert plan.steps[0].tool_name == "intent-summary"
 
 
+def test_target_only_rename_requires_backend_file_scope():
+    """只给新名称时不能把目标名当源文件匹配，必须要求用户明确具体文件。"""
+
+    plan = build_plan_from_user_intent(
+        intent_plan=UserIntentPlan(
+            intent="SUGGEST_RENAME",
+            user_goal="重命名为 西安理工大学用印申请单.docx",
+            referenced_document_ids=["llm-invented-document"],
+        ),
+        message="重命名为 西安理工大学用印申请单.docx",
+        attachments=[],
+    )
+
+    assert plan.intent == "MISSING_FILE_SCOPE"
+    assert plan.slots["document_ids"] == []
+    assert plan.steps[0].tool_name == "intent-summary"
+
+
 def test_llm_planner_keeps_uploaded_document_scope_for_rename():
     """LLM 结构化意图命中附件重命名时也必须生成临时文件计划，不得丢弃附件范围。"""
 

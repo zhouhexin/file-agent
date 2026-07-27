@@ -2,7 +2,10 @@
 
 from types import SimpleNamespace
 
-from app.modules.knowledge_graph.graphrag_adapter import GraphRAGSemanticRetriever
+from app.modules.knowledge_graph.graphrag_adapter import (
+    DOCUMENT_VECTOR_RETRIEVAL_QUERY,
+    GraphRAGSemanticRetriever,
+)
 
 
 class FakeVectorRetriever:
@@ -77,3 +80,11 @@ def test_semantic_retriever_excludes_current_and_duplicate_content_and_hides_sou
     assert supports[0].support_count == 1
     assert not hasattr(supports[0], "filename")
     assert retriever.calls[0]["query_vector"] == [0.1, 0.2]
+
+
+def test_vector_retrieval_query_accepts_empty_classification_relationship_schema():
+    """新图谱没有分类关系时，查询不能静态引用尚不存在的关系类型。"""
+
+    assert "[relation:CONFIRMED_AS|PATH_SUGGESTS]" not in DOCUMENT_VECTOR_RETRIEVAL_QUERY
+    assert "OPTIONAL MATCH (node)-[relation]->(category:Category)" in DOCUMENT_VECTOR_RETRIEVAL_QUERY
+    assert "type(relation) IN ['CONFIRMED_AS', 'PATH_SUGGESTS']" in DOCUMENT_VECTOR_RETRIEVAL_QUERY

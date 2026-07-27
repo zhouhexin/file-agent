@@ -118,6 +118,15 @@ _CONTENT_EDIT_TARGETS = (
     "文件缓存",
 )
 
+_TARGET_ONLY_RENAME_PATTERN = re.compile(
+    r"^\s*(?:(?:请|麻烦)?(?:帮我)?\s*)?"
+    r"(?:(?:把|将)\s*)?"
+    r"(?:(?:这个|该|当前|它)\s*)?"
+    r"(?:(?:文件|附件|文档)\s*)?"
+    r"(?:重命名|改名|更名)\s*(?:为|成)\s*.+$",
+    flags=re.IGNORECASE,
+)
+
 
 def has_trash_working_copy_intent(message: str) -> bool:
     """识别用户是否要求移除文件，并统一收敛为可恢复回收站计划。
@@ -175,6 +184,16 @@ def has_contextual_file_removal_reference(message: str) -> bool:
     return has_trash_working_copy_intent(message) and any(
         reference in compact for reference in _CONTEXT_REFERENCES
     )
+
+
+def is_target_only_rename_request(message: str) -> bool:
+    """识别只提供目标名称、没有提供源文件身份的重命名请求。
+
+    “重命名为 B.docx”中的 ``B.docx`` 是目标名称，不能反向作为会话历史源文件名
+    进行匹配。只有本轮显式附件或“把 A.docx 重命名为 B.docx”中的 A 才能确定对象。
+    """
+
+    return bool(_TARGET_ONLY_RENAME_PATTERN.fullmatch(message.strip()))
 
 
 def _normalize_message(message: str) -> str:

@@ -252,8 +252,9 @@ class Neo4jGraphRepository:
             raise ValueError("不支持清理该图谱关系来源。")
         self._execute(
             """
-            MATCH (:DocumentVersion)-[relation:CONFIRMED_AS]->(:Category)
-            WHERE relation.source_type = $source_type
+            MATCH (:DocumentVersion)-[relation]->(:Category)
+            WHERE type(relation) = 'CONFIRMED_AS'
+              AND relation.source_type = $source_type
             DELETE relation
             """,
             {"source_type": source_type},
@@ -267,7 +268,11 @@ class Neo4jGraphRepository:
         """全量重建 `SUGGESTED_AS`，普通建议不能参与可信传播。"""
 
         self._execute(
-            "MATCH (:DocumentVersion)-[relation:SUGGESTED_AS]->(:Category) DELETE relation",
+            """
+            MATCH (:DocumentVersion)-[relation]->(:Category)
+            WHERE type(relation) = 'SUGGESTED_AS'
+            DELETE relation
+            """,
             {},
         )
         if not relations:
@@ -290,7 +295,11 @@ class Neo4jGraphRepository:
         """按 Profile 全量重建 `PATH_SUGGESTS`，它不能升级为可信关系。"""
 
         self._execute(
-            "MATCH (:DocumentVersion)-[relation:PATH_SUGGESTS]->(:Category) DELETE relation",
+            """
+            MATCH (:DocumentVersion)-[relation]->(:Category)
+            WHERE type(relation) = 'PATH_SUGGESTS'
+            DELETE relation
+            """,
             {},
         )
         if not relations:
@@ -421,7 +430,8 @@ class Neo4jGraphRepository:
                  + neighbors AS candidate_refs
             UNWIND candidate_refs AS candidate_ref
             MATCH (candidate:Category {graph_key: candidate_ref.graph_key})
-            OPTIONAL MATCH (supporting:DocumentVersion)-[:CONFIRMED_AS]->(candidate)
+            OPTIONAL MATCH (supporting:DocumentVersion)-[support_relation]->(candidate)
+            WHERE type(support_relation) = 'CONFIRMED_AS'
             RETURN seed.category_id AS seed_category_id,
                    candidate.graph_key AS graph_key,
                    candidate.category_id AS category_id,

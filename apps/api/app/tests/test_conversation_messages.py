@@ -360,6 +360,48 @@ def test_post_message_rename_and_classify_returns_plan_before_copy_is_ready():
     clear_overrides()
 
 
+def test_target_only_rename_does_not_bind_historical_file_with_same_target_name():
+    """只写目标名称时，即使历史附件同名也必须要求说明源文件，不能生成错误计划。"""
+
+    client, session_factory = client_with_database()
+    headers = _auth_header(client, "rename-target-only-user")
+    document_id = _upload_document(
+        client,
+        headers,
+        filename="西安理工大学用印申请单.docx",
+        content=b"historical-target-name",
+    )
+    url = "/api/conversations/rename-target-only-conversation/messages"
+    history_response = client.post(
+        url,
+        headers=headers,
+        json={
+            "content": "保存这个文件",
+            "attachments": [{"document_id": document_id}],
+        },
+    )
+    assert history_response.status_code == 200
+
+    response = client.post(
+        url,
+        headers=headers,
+        json={
+            "content": "重命名为 西安理工大学用印申请单.docx",
+            "attachments": [],
+        },
+    )
+
+    assert response.status_code == 200
+    task_result = response.json()["task_result"]
+    assert task_result["operation_plan_id"] is None
+    assert "不能确定要重命名哪一个文件" in task_result["final_response"]
+    assert "原文件名.ext" in task_result["final_response"]
+    run, tool_names = _latest_agent_audit(session_factory)
+    assert run.intent == "MISSING_FILE_SCOPE"
+    assert tool_names == ["intent-summary"]
+    clear_overrides()
+
+
 def test_get_conversation_returns_messages_with_task_results_and_attachments():
     """读取会话详情时必须返回附件和安全任务投影，不返回内部 AgentRun。"""
 

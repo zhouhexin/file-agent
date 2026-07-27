@@ -13,6 +13,7 @@ import re
 from app.modules.file_lifecycle.conversation_intents import (
     has_contextual_file_removal_reference,
     has_trash_working_copy_intent,
+    is_target_only_rename_request,
 )
 from app.modules.conversations.repository import ConversationRepository
 from app.modules.conversations.schemas import MessageAttachment
@@ -61,6 +62,10 @@ class ConversationAttachmentContextService:
                 source="uploaded",
                 scope="current_message",
             )
+        if is_target_only_rename_request(content):
+            # 目标文件名不是源文件引用。这里必须保持空范围，让 Planner 要求用户
+            # 重新附加文件或同时写出源文件名，不能在会话历史中碰巧命中同名文件。
+            return ResolvedAttachmentContext(attachments=[], source="uploaded", scope="none")
         if _has_file_task_intent(content):
             named_attachments = self.repository.get_filename_matched_attachment_references(
                 conversation_id=conversation_id,

@@ -16,6 +16,7 @@ from app.modules.agent.capability_router import route_user_intent
 from app.modules.file_lifecycle.conversation_intents import (
     has_file_removal_action,
     has_trash_working_copy_intent,
+    is_target_only_rename_request,
 )
 from app.modules.llm.schemas import UserIntentPlan
 
@@ -197,6 +198,9 @@ class DeterministicPlanner:
                 action=conflict_action,
                 document_ids=[],
             )
+        if is_target_only_rename_request(message) and not attachments:
+            # 目标名称不能充当源文件选择条件；缺少附件或源文件名时只请求澄清。
+            return _missing_file_scope_plan(user_goal=message)
         if _has_explicit_filename_lookup_intent(message) and not attachments:
             return _file_search_plan(user_goal=message, query=message, document_ids=[])
         if _has_restore_working_copy_intent(message):
@@ -562,6 +566,9 @@ def build_plan_from_user_intent(
             response_style=intent_plan.response_style,
             llm_intent_plan=intent_plan.model_dump(),
         )
+    if is_target_only_rename_request(message) and not attachments:
+        # 即使 LLM 给出重命名意图，也不能用目标文件名或模型自报 ID 猜测源文件。
+        return _missing_file_scope_plan(user_goal=intent_plan.user_goal or message)
     if _has_explicit_filename_lookup_intent(message) and not attachments:
         return _file_search_plan(
             user_goal=intent_plan.user_goal or message,

@@ -717,7 +717,11 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
     intent_summary = result_summary.get("intent_summary", {})
     if intent_summary:
         return {
-            "status": "COMPLETED",
+            "status": (
+                "NEEDS_REVIEW"
+                if intent_summary.get("intent") == "MISSING_FILE_SCOPE"
+                else "COMPLETED"
+            ),
             "final_response": _build_general_chat_response(intent_summary),
         }
 
@@ -1248,6 +1252,13 @@ def _build_general_chat_response(intent_summary: Dict[str, Any]) -> str:
     """为普通对话生成自然回复，避免泄露内部 Tool 审计信息。"""
 
     user_goal = str(intent_summary.get("user_goal") or "").strip()
+    if intent_summary.get("intent") == "MISSING_FILE_SCOPE":
+        if any(keyword in user_goal.lower() for keyword in ["重命名", "改名", "更名", "rename"]):
+            return (
+                "我还不能确定要重命名哪一个文件。请重新附加该文件，"
+                "或者明确回复：把“原文件名.ext”重命名为“新文件名.ext”。"
+            )
+        return "我还不能确定要处理哪一个文件。请重新附加文件或写出完整文件名。"
     if user_goal in {"你好", "您好", "hello", "hi", "Hello", "Hi"}:
         return "你好，我在。请告诉我你想聊什么。"
     return "我已收到。请继续说明你的需求。"
