@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path, PureWindowsPath
 import subprocess
 
@@ -137,6 +138,57 @@ def test_doc_conversion_creates_and_reuses_persistent_artifact(monkeypatch, tmp_
     assert first.file_path.exists()
     assert len(calls) == 1
     assert db.query(DocumentArtifact).count() == 1
+
+
+def test_doc_conversion_stages_output_on_target_volume_before_atomic_replace(
+    monkeypatch,
+    tmp_path,
+):
+    """DOCX 派生件必须在目标目录内暂存，不能从 Windows 系统盘跨卷 replace。"""
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "storage"))
+    source_path = tmp_path / "notice.doc"
+    source_path.write_bytes(b"legacy-doc-cross-volume")
+    executable = tmp_path / "soffice"
+    executable.write_bytes(b"")
+    db = _session()
+    document = _document(source_path=source_path, document_id="document-cross-volume")
+    db.add(document)
+    db.flush()
+    real_replace = os.replace
+    replace_calls: list[tuple[Path, Path]] = []
+
+    def windows_same_volume_replace(source, target):
+        """模拟 Windows：只允许同一目标目录内执行原子替换。"""
+
+        source_path_value = Path(source)
+        target_path_value = Path(target)
+        assert source_path_value.parent == target_path_value.parent
+        replace_calls.append((source_path_value, target_path_value))
+        real_replace(source_path_value, target_path_value)
+
+    monkeypatch.setattr(
+        "app.modules.files.office_conversion.os.replace",
+        windows_same_volume_replace,
+    )
+    service = LegacyOfficeConversionService(
+        db=db,
+        storage_root=tmp_path / "storage",
+        executable=executable,
+        command_runner=_fake_converter([]),
+        converter_version="LibreOffice Test 1.0",
+    )
+
+    artifact = service.get_or_create_docx(
+        document=document,
+        source_path=source_path,
+    )
+
+    assert artifact.file_path.is_file()
+    assert len(replace_calls) == 1
+    staged_path, final_path = replace_calls[0]
+    assert staged_path.name.endswith(".part")
+    assert staged_path.parent == final_path.parent
 
 
 def test_same_content_across_documents_reuses_physical_artifact(monkeypatch, tmp_path):

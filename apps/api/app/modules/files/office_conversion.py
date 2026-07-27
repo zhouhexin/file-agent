@@ -18,7 +18,7 @@ import zipfile
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.logging import log_event
+from app.core.logging import format_exception_traceback, log_event
 from app.db.models import Document, DocumentArtifact
 from app.modules.files.artifact_repository import DocumentArtifactRepository
 
@@ -173,6 +173,7 @@ class LegacyOfficeConversionService:
                 parsed_format="docx",
                 converter="libreoffice",
                 converter_version=self.converter_version,
+                exception_traceback=format_exception_traceback(exc),
             )
             raise
         log_event(
@@ -497,15 +498,30 @@ def _file_sha256(path: Path) -> str:
 
 
 def _replace_with_retry(source: Path, target: Path) -> None:
-    """兼容 Windows 杀毒软件短暂占用，有限重试原子移动。"""
+    """在目标卷内暂存后原子提交，兼容 Windows 跨盘符和短暂文件占用。
+
+    系统临时目录通常位于 C 盘，而 FILE_STORAGE_ROOT 可能位于其他盘符；
+    `os.replace(source, target)` 无法跨卷执行。因此先把内容复制到目标同目录的
+    `.part` 文件，再使用同卷 `os.replace` 原子提交，任何失败都清理残留暂存件。
+    """
 
     last_error: OSError | None = None
     for attempt in range(3):
+        temporary = target.with_name(
+            f".{target.name}.{os.getpid()}.{time.time_ns()}.part"
+        )
         try:
-            os.replace(source, target)
+            with source.open("rb") as source_handle, temporary.open("xb") as target_handle:
+                shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+                target_handle.flush()
+                os.fsync(target_handle.fileno())
+            # temporary 与 target 位于同一目录，因此 Windows 上不会发生跨盘符移动。
+            os.replace(temporary, target)
+            source.unlink(missing_ok=True)
             return
         except OSError as exc:
             last_error = exc
+            temporary.unlink(missing_ok=True)
             if attempt < 2:
                 time.sleep(0.1 * (attempt + 1))
     raise OfficeConversionError("DERIVATIVE_WRITE_FAILED", "无法写入 DOCX 派生件。", retryable=True) from last_error
