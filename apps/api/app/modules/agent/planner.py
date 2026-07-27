@@ -1625,7 +1625,13 @@ def _has_rename_review_resolution_intent(message: str) -> bool:
     normalized = message.strip().rstrip("。！!")
     if normalized in {"不需要", "不需要改名", "无需改名", "不用改名"}:
         return True
-    return bool(re.search(r"文件\s*.+?\s*更正为\s*.+", message, flags=re.DOTALL))
+    return bool(
+        re.search(
+            r"(?:文件\s*)?.+?\s*(?:更正为|改为|重命名为)\s*.+",
+            message,
+            flags=re.DOTALL,
+        )
+    )
 
 
 def _filename_conflict_action(message: str) -> str | None:

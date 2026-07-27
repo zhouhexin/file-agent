@@ -9,6 +9,7 @@ from app.db.models import (
     Document,
     DocumentClassificationSummary,
     DocumentChunk,
+    DocumentExtractionRun,
     DocumentIndexRun,
     DocumentSearchProfile,
     DocumentSummary,
@@ -29,6 +30,7 @@ from app.db.models import (
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
 from app.modules.file_lifecycle.risk import inspect_basic_file_risks
+from app.modules.file_lifecycle.service import working_copy_search_artifact_status
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.worker import process_next_filesystem_job
@@ -298,6 +300,104 @@ def test_deferred_upload_rename_plan_executes_after_background_import(monkeypatc
     clear_overrides()
 
 
+def test_uploaded_low_confidence_name_can_be_corrected_in_same_conversation(monkeypatch, tmp_path):
+    """上传命名证据不足时应保留待确认上下文，并接受带真实文件名的后续更正。"""
+
+    _configure(monkeypatch, tmp_path)
+
+    def needs_review_suggestion(self, *, document):
+        """稳定模拟无法从正文确认标题的上传文件。"""
+
+        return (
+            {
+                "document_id": document.id,
+                "filename": document.original_filename,
+                "source_sha256": document.sha256,
+                "status": "NEEDS_REVIEW",
+                "proposed_filename": None,
+                "warnings": ["正文标题缺失或存在歧义，等待用户确认。"],
+                "errors": [],
+            },
+            None,
+        )
+
+    monkeypatch.setattr(
+        UploadedRenameSuggestionService,
+        "_suggest_one",
+        needs_review_suggestion,
+    )
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "uploaded-review-resolution-owner")
+    upload = _upload(
+        client,
+        headers,
+        filename="西安理工大学用印申请单.docx",
+        content=b"deterministic-low-confidence-content",
+    )
+    url = "/api/conversations/uploaded-review-resolution/messages"
+    initial = client.post(
+        url,
+        headers=headers,
+        json={
+            "content": "对上传文件进行重命名并且分类",
+            "attachments": [{"document_id": upload["document_id"]}],
+        },
+    )
+
+    assert initial.status_code == 200
+    initial_result = initial.json()["task_result"]
+    assert initial_result["response_type"] == "rename_plan"
+    assert initial_result["rename_plan_result"]["needs_review_count"] == 1
+    assert "西安理工大学用印申请单.docx" in initial_result["final_response"]
+    assert "请勿原样发送" in initial_result["final_response"]
+
+    placeholder = client.post(
+        url,
+        headers=headers,
+        json={
+            "content": "文件原文件名更正为新文件名",
+            "attachments": [],
+        },
+    )
+    assert placeholder.status_code == 200
+    placeholder_result = placeholder.json()["task_result"]
+    assert placeholder_result["operation_plan_id"] is None
+    assert "占位词" in placeholder_result["final_response"]
+    assert "西安理工大学用印申请单.docx" in placeholder_result["final_response"]
+    assert "旧待复核项已失效" not in placeholder_result["final_response"]
+
+    corrected = client.post(
+        url,
+        headers=headers,
+        json={
+            "content": "文件“西安理工大学用印申请单.docx”更正为“2026_用印申请单.docx”",
+            "attachments": [],
+        },
+    )
+    assert corrected.status_code == 200
+    corrected_result = corrected.json()["task_result"]
+    plan_id = corrected_result["operation_plan_id"]
+    assert corrected_result["response_type"] == "operation_plan"
+    assert plan_id
+    plan = client.get(f"/api/operations/plans/{plan_id}", headers=headers).json()
+    assert plan["operation_type"] == "RENAME_PENDING_UPLOADS"
+    assert plan["items"][0]["before"]["filename"] == "西安理工大学用印申请单.docx"
+    assert plan["items"][0]["after"]["filename"] == "2026_用印申请单.docx"
+
+    _drain(SessionLocal)
+    confirmation = client.post(
+        f"/api/operations/plans/{plan_id}/confirm",
+        headers=headers,
+        json={"confirmation": "确认执行"},
+    )
+    assert confirmation.status_code == 200
+    assert confirmation.json()["status"] == "EXECUTED"
+    with SessionLocal() as db:
+        working_copy = db.query(WorkingCopy).filter(WorkingCopy.status == "ACTIVE").one()
+        assert working_copy.filename == "2026_用印申请单.docx"
+    clear_overrides()
+
+
 def test_trashed_upload_source_cannot_read_historical_content(monkeypatch, tmp_path):
     """上传来源 ID 映射到已删除工作副本时，也不能复用历史正文或回收站文件。"""
 
@@ -452,6 +552,86 @@ def test_existing_working_copy_repairs_missing_search_artifacts(monkeypatch, tmp
     finally:
         db.close()
         clear_overrides()
+
+
+def test_failed_search_repair_is_not_requeued_on_every_scan(monkeypatch, tmp_path):
+    """当前版本确定性解析失败后，自动扫描不得无限重复创建同一修复任务。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "search-repair-failure-owner")
+    upload = _upload(
+        client,
+        headers,
+        filename="历史材料.txt",
+        content="历史工作副本检索修复测试正文。".encode("utf-8"),
+    )
+    _drain(SessionLocal)
+
+    with SessionLocal() as db:
+        archive = db.query(UploadArchiveRecord).filter_by(
+            upload_document_version_id=upload["upload_document_version_id"]
+        ).one()
+        working_copy = db.query(WorkingCopy).filter_by(
+            managed_file_id=archive.managed_file_id
+        ).one()
+        version_id = working_copy.current_version_id
+        extraction_runs = db.query(DocumentExtractionRun).filter_by(
+            document_id=working_copy.document_id
+        ).all()
+        assert extraction_runs
+        for run in extraction_runs:
+            run.status = "FAILED"
+            run.error_message = "确定性解析失败，等待显式重处理"
+        chunk_ids = [
+            value
+            for (value,) in db.query(DocumentChunk.id).filter_by(
+                document_version_id=version_id
+            )
+        ]
+        if chunk_ids:
+            db.query(EvidenceSpan).filter(EvidenceSpan.chunk_id.in_(chunk_ids)).delete(
+                synchronize_session=False
+            )
+        db.query(DocumentChunk).filter_by(document_version_id=version_id).delete(
+            synchronize_session=False
+        )
+        db.query(DocumentIndexRun).filter_by(document_version_id=version_id).delete(
+            synchronize_session=False
+        )
+        db.commit()
+        db.refresh(working_copy)
+        status = working_copy_search_artifact_status(db, working_copy)
+        assert status["profile_ready"] is True
+        assert status["index_ready"] is False
+        assert status["repair_blocked"] is True
+        extraction_count = db.query(DocumentExtractionRun).filter_by(
+            document_id=working_copy.document_id
+        ).count()
+        root_id = archive.managed_root_id
+        user_id = db.get(Document, working_copy.document_id).user_id
+
+        for suffix in ("first", "second"):
+            FilesystemJobQueue(db).create_job(
+                job_type="SCAN_MANAGED_ROOT",
+                queue_name="SCAN",
+                root_id=root_id,
+                created_by=user_id,
+                deduplication_key=f"blocked-search-repair-scan:{suffix}:{root_id}",
+                payload={"reason": "test-blocked-search-repair"},
+            )
+            db.commit()
+            processed = _drain(SessionLocal)
+            # 每轮只处理扫描本身；不能继续派生 IMPORT_WORKING_COPIES 修复任务。
+            assert len(processed) == 1
+
+        assert db.query(DocumentExtractionRun).filter_by(
+            document_id=working_copy.document_id
+        ).count() == extraction_count
+        assert db.query(DocumentIndexRun).filter_by(
+            document_version_id=version_id
+        ).count() == 0
+    clear_overrides()
 
 
 def test_each_uploaded_file_is_imported_once_into_shared_working_directory(monkeypatch, tmp_path):

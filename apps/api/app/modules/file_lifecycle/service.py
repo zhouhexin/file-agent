@@ -23,6 +23,7 @@ from app.db.models import (
     ChangeSet,
     Conversation,
     Document,
+    DocumentExtractionRun,
     DocumentIndexRun,
     DocumentSearchProfile,
     DocumentVersion,
@@ -93,6 +94,7 @@ def working_copy_search_artifact_status(
             "current_version_ready": bool(working_copy.current_version_id),
             "profile_ready": False,
             "index_ready": False,
+            "repair_blocked": False,
             "ready": False,
         }
     profile_exists = (
@@ -115,11 +117,37 @@ def working_copy_search_artifact_status(
         .first()
         is not None
     )
+    # 当前版本已经留下确定性解析失败时，自动扫描不能每轮再次创建相同修复任务。
+    # 管理员显式重处理会创建新的解析运行；成功后此阻塞条件自然消失。
+    successful_extraction_exists = (
+        db.query(DocumentExtractionRun.id)
+        .filter(
+            DocumentExtractionRun.document_id == working_copy.document_id,
+            DocumentExtractionRun.document_version_id == working_copy.current_version_id,
+            DocumentExtractionRun.status == "COMPLETED",
+        )
+        .first()
+        is not None
+    )
+    repair_blocked = (
+        not index_exists
+        and not successful_extraction_exists
+        and db.query(DocumentExtractionRun.id)
+        .filter(
+            DocumentExtractionRun.document_id == working_copy.document_id,
+            DocumentExtractionRun.document_version_id == working_copy.current_version_id,
+            DocumentExtractionRun.status == "FAILED",
+        )
+        .order_by(DocumentExtractionRun.updated_at.desc())
+        .first()
+        is not None
+    )
     return {
         "working_copy_active": True,
         "current_version_ready": True,
         "profile_ready": profile_exists,
         "index_ready": index_exists,
+        "repair_blocked": repair_blocked,
         "ready": profile_exists and index_exists,
     }
 
@@ -1344,7 +1372,8 @@ class FileLifecycleJobProcessor:
                     extraction_run_id=extraction_run_id,
                     message="复用已有成功解析结果补建正文索引",
                 )
-            if not extraction_run_id:
+            extraction_error: dict[str, Any] = {}
+            if not extraction_run_id and not artifact_status.get("repair_blocked"):
                 log_event(
                     "working_copy.search_repair.extraction_started",
                     document_id=document.id,
@@ -1375,9 +1404,26 @@ class FileLifecycleJobProcessor:
                         message="历史工作副本本地解析失败",
                     )
                     raise
-                extraction_run_id = str(
-                    (decision.extraction_result or {}).get("extraction_run_id") or ""
+                extraction_result = (
+                    decision.extraction_result
+                    if isinstance(decision.extraction_result, dict)
+                    else {}
                 )
+                if extraction_result.get("status") == "COMPLETED":
+                    extraction_run_id = str(
+                        extraction_result.get("extraction_run_id") or ""
+                    )
+                else:
+                    extraction_error = (
+                        dict(extraction_result.get("error") or {})
+                        if isinstance(extraction_result.get("error"), dict)
+                        else {}
+                    )
+            elif artifact_status.get("repair_blocked"):
+                extraction_error = {
+                    "code": "EXTRACTION_REQUIRES_REPROCESS",
+                    "message": "当前文档版本已有解析失败记录，等待显式重处理。",
+                }
             if extraction_run_id:
                 log_event(
                     "working_copy.search_repair.index_started",
@@ -1401,8 +1447,14 @@ class FileLifecycleJobProcessor:
                     "ok": False,
                     "status": "FAILED",
                     "error": {
-                        "code": "EXTRACTION_NOT_READY",
-                        "message": "历史工作副本未生成可用于正文检索的解析结果。",
+                        "code": str(
+                            extraction_error.get("code")
+                            or "EXTRACTION_NOT_READY"
+                        ),
+                        "message": str(
+                            extraction_error.get("message")
+                            or "历史工作副本未生成可用于正文检索的解析结果。"
+                        ),
                     },
                 }
 

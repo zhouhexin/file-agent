@@ -63,6 +63,9 @@ from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text, extraction_config_hash
 from app.modules.files.readable_source import ReadableDocumentSourceResolver, apply_readable_source_metadata
 from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
+from app.modules.file_rename.uploaded_review_service import (
+    UploadedRenameReviewResolutionService,
+)
 from app.modules.evidence_answer.service import EvidenceAnswerService
 from app.modules.file_lifecycle.conversation_operations import ConversationalWorkingCopyPlanService
 from app.modules.file_lifecycle.trash_lookup import ExactTrashFilenameLookupService
@@ -1359,24 +1362,20 @@ def _working_copy_scope_error(*, code: str, message: str) -> Dict[str, Any]:
 
 
 def _resolve_rename_reviews_handler(db: Any, user_id: str | None) -> ToolHandler:
-    """拒绝旧受管原始文件待复核链路，避免重新创建已退役计划。"""
+    """处理上传文件低置信度命名更正，旧受管原件链路仍保持退役。"""
 
     def handler(tool_input: BaseModel) -> Dict[str, Any]:
-        """提示重新选择工作副本生成计划，不执行历史原地重命名。"""
+        """为当前会话最新上传文件创建延后工作副本重命名计划。"""
 
         if db is None:
             return {"ok": False, "status": "FAILED", "error": {"code": "DB_REQUIRED", "message": "处理重命名更正需要数据库会话。"}}
         if user_id is None:
             return {"ok": False, "status": "FAILED", "error": {"code": "AUTH_REQUIRED", "message": "处理重命名更正需要当前用户。"}}
-        return {
-            "ok": False,
-            "kind": "rename_review_resolution",
-            "status": "FAILED",
-            "error": {
-                "code": "LEGACY_RENAME_REVIEW_RETIRED",
-                "message": "旧待复核项已失效，请重新选择文件生成工作副本重命名计划。",
-            },
-        }
+        return UploadedRenameReviewResolutionService(db=db, user_id=user_id).resolve(
+            conversation_id=str(getattr(tool_input, "conversation_id")),
+            agent_run_id=str(getattr(tool_input, "agent_run_id")),
+            message=str(getattr(tool_input, "message")),
+        )
 
     return handler
 

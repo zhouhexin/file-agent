@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from typing import Any, Dict, List
 
 from langgraph.graph import END, StateGraph
@@ -1000,10 +1001,25 @@ def _build_rename_plan_response(payload: Dict[str, Any]) -> str:
             continue
         lines.append(f"{index}. {original_name}")
     if review_count:
-        lines.extend([
-            "如需改名，请回复：文件原文件名更正为新文件名",
-            "不需要改名请回复“不需要”。",
-        ])
+        first_pending = next(
+            (
+                item
+                for item in suggestions
+                if item.get("status") == "NEEDS_REVIEW"
+            ),
+            {},
+        )
+        pending_filename = str(first_pending.get("filename") or "当前文件")
+        pending_suffix = Path(pending_filename).suffix
+        lines.extend(
+            [
+                (
+                    "如需改名，请把尖括号内容替换为实际名称后回复："
+                    f"文件“{pending_filename}”更正为“<请填写实际名称>{pending_suffix}”"
+                ),
+                "请勿原样发送“原文件名/新文件名”等占位文字；不需要改名可回复“不需要”。",
+            ]
+        )
     return "\n".join(lines)
 
 

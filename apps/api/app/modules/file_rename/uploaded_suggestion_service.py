@@ -202,7 +202,11 @@ class UploadedRenameSuggestionService:
         return {
             "ok": True,
             "kind": "rename_plan",
-            "source_kind": "working_copy",
+            "source_kind": (
+                "uploaded_document"
+                if any(item.get("source_kind") == "uploaded_document" for item in suggestions)
+                else "working_copy"
+            ),
             "storage_scope": "working_copy",
             "status": "WAITING_CONFIRMATION" if plan is not None else "NEEDS_REVIEW",
             "operation_plan_id": plan.id if plan is not None else None,

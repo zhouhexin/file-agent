@@ -323,6 +323,7 @@ def _rename_plan_result(result: AgentRunResult) -> dict[str, Any] | None:
             )
         return {
             "ok": bool(output.get("ok")),
+            "source_kind": output.get("source_kind"),
             "status": output.get("status"),
             "matched_count": int(output.get("matched_count") or 0),
             "ready_count": int(output.get("ready_count") or 0),

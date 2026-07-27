@@ -49,6 +49,8 @@ export function RenameSuggestionReceipt({
   const [loading, setLoading] = useState(false);
   const suggestions = loadedSuggestions ?? initialSuggestions;
   const uploadedScope = result.source_kind === 'uploaded_document';
+  const firstFilename = suggestions[0]?.filename ?? '当前文件';
+  const firstExtension = firstFilename.includes('.') ? `.${firstFilename.split('.').pop()}` : '';
   if (suggestions.length === 0) {
     return null;
   }
@@ -103,10 +105,15 @@ export function RenameSuggestionReceipt({
         </button>
       ) : null}
       {uploadedScope ? (
-        <p>请补充可识别的年份和正文标题后重新发起附件重命名。</p>
+        <>
+          <p>如需改名，请把尖括号内容替换为实际名称后回复：</p>
+          <p>文件“{firstFilename}”更正为“&lt;请填写实际名称&gt;{firstExtension}”</p>
+          <p>请勿原样发送“原文件名/新文件名”等占位文字。</p>
+        </>
       ) : (
         <>
-          <p>如需改名，请回复：文件原文件名更正为新文件名</p>
+          <p>如需改名，请把尖括号内容替换为实际名称后回复：</p>
+          <p>文件“{firstFilename}”更正为“&lt;请填写实际名称&gt;{firstExtension}”</p>
           <p>不需要改名请回复“不需要”。</p>
         </>
       )}

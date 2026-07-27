@@ -405,6 +405,10 @@ def _enqueue_import_jobs_for_files(*, db: Session, root_id: str, files: list[Man
                     artifact_status = working_copy_search_artifact_status(db, working_copy)
                     if artifact_status["ready"]:
                         continue
+                    if artifact_status.get("repair_blocked") and artifact_status["profile_ready"]:
+                        # 当前版本已经确定性解析失败且文件级投影可用时，停止自动重试。
+                        # 后续只能由显式重处理创建新的解析运行，避免每次扫描无限消耗。
+                        continue
                     log_event(
                         "working_copy.search_repair.queued",
                         document_id=working_copy.document_id,
