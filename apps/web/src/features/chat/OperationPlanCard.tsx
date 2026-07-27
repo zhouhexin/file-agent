@@ -20,9 +20,10 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
   const [error, setError] = useState('');
   const waiting = plan.status === 'WAITING_CONFIRMATION' || plan.status === 'PLANNED';
   const uploadedTemporaryRename = plan.operation_type === 'RENAME_UPLOADED_FILES';
+  const deferredUploadRename = plan.operation_type === 'RENAME_PENDING_UPLOADS';
   // 工作副本重命名卡已经通过 before/after 和确认按钮表达用户决策；
   // 后端 reason 继续用于审计，但不把内部命名策略说明重复展示在普通对话中。
-  const workingCopyRename = plan.operation_type === 'RENAME_WORKING_COPIES';
+  const workingCopyRename = plan.operation_type === 'RENAME_WORKING_COPIES' || deferredUploadRename;
   const presentation = operationPresentation(plan.operation_type);
   const pathPrefix = readOptionalString(plan.scope, 'path_prefix');
   const renameBatchId = readOptionalString(plan.scope, 'rename_batch_id');
@@ -64,6 +65,10 @@ export function OperationPlanCard({ token, plan, onConfirmed }: OperationPlanCar
 
       {uploadedTemporaryRename ? (
         <p>本次只修改附件在临时存储中的文件名，不执行分类或写入受管目录。</p>
+      ) : null}
+
+      {deferredUploadRename ? (
+        <p>已直接读取上传文件生成建议；归档、工作副本导入和摘要提取正在后台继续。工作副本就绪后可使用此计划确认重命名。</p>
       ) : null}
 
       {!uploadedTemporaryRename && !workingCopyRename && plan.reason ? (

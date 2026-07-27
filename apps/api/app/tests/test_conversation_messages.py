@@ -319,8 +319,8 @@ def test_post_message_starts_agent_run():
     clear_overrides()
 
 
-def test_post_message_rename_and_classify_returns_visible_receipt_while_copy_is_pending():
-    """刚上传文件尚无工作副本时，组合任务仍须返回分类卡和可见的重命名等待说明。"""
+def test_post_message_rename_and_classify_returns_plan_before_copy_is_ready():
+    """刚上传文件尚无工作副本时，也须立即返回分类卡和可复用的重命名计划。"""
 
     client, session_factory = client_with_database()
     headers = _auth_header(client, "rename-classify-message-user")
@@ -342,12 +342,14 @@ def test_post_message_rename_and_classify_returns_visible_receipt_while_copy_is_
 
     assert response.status_code == 200
     task_result = response.json()["task_result"]
-    assert task_result["response_type"] == "rename_plan"
+    assert task_result["response_type"] == "operation_plan"
     assert task_result["display_mode"] == "classification_cards"
     assert task_result["document_results"]
     assert task_result["document_results"][0]["document_id"] == document_id
-    assert "异步归档或导入工作副本" in task_result["final_response"]
-    assert task_result["rename_plan_result"]["suggestions"] == []
+    assert "生成 1 个可执行的重命名建议" in task_result["final_response"]
+    assert task_result["operation_plan_id"]
+    assert task_result["rename_plan_result"]["ready_count"] == 1
+    assert task_result["rename_plan_result"]["suggestions"][0]["proposed_filename"]
 
     run, tool_names = _latest_agent_audit(session_factory)
     assert run.intent == "CLASSIFY_AND_SUGGEST_RENAME"

@@ -27,6 +27,7 @@ from app.db.models import (
     OperationConfirmation,
     OperationPlan,
     TrashEntry,
+    UploadArchiveRecord,
     ToolInvocation,
     User,
     WorkingCopy,
@@ -50,6 +51,7 @@ WORKING_COPY_OPERATION_TYPES = {
     "RESTORE_WORKING_COPIES",
     "RESOLVE_FILENAME_CONFLICT",
 }
+DEFERRED_UPLOAD_RENAME_OPERATION = "RENAME_PENDING_UPLOADS"
 
 
 class WorkingCopyOperationService:
@@ -158,6 +160,180 @@ class WorkingCopyOperationService:
         flag_modified(plan, "plan_json")
         self.db.flush()
         return plan
+
+    def prepare_deferred_upload_rename(
+        self,
+        *,
+        plan: OperationPlan,
+        current_user: User,
+    ) -> None:
+        """把上传阶段生成的命名计划解析为当前活动工作副本快照。
+
+        该方法必须在记录用户确认之前完成。工作副本尚未导入时返回可重试冲突，
+        原计划继续保持 WAITING_CONFIRMATION；就绪后补齐路径记录并交给既有执行器。
+        """
+
+        if plan.operation_type != DEFERRED_UPLOAD_RENAME_OPERATION:
+            raise HTTPException(status_code=409, detail="OperationPlan is not a deferred upload rename")
+        shared_workspace_id = get_shared_workspace_id(self.db)
+        normalized_items: list[dict[str, Any]] = []
+        seen_working_copy_ids: set[str] = set()
+        for requested in [
+            item for item in plan.plan_json.get("items", []) if isinstance(item, dict)
+        ]:
+            source_document_id = str(requested.get("document_id") or "")
+            source_document = self.db.get(Document, source_document_id)
+            if source_document is None or source_document.user_id != current_user.id:
+                raise HTTPException(status_code=404, detail="上传文件不存在或不属于当前用户")
+            working_copy = self._resolve_uploaded_source_working_copy(
+                source_document=source_document,
+                workspace_id=shared_workspace_id,
+                user_id=current_user.id,
+            )
+            if working_copy is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="文件仍在后台归档或导入工作副本，请稍后再次确认此计划。",
+                )
+            if working_copy.id in seen_working_copy_ids:
+                raise HTTPException(
+                    status_code=409,
+                    detail="多个上传文件解析到了同一工作副本，请重新选择文件后生成计划。",
+                )
+            seen_working_copy_ids.add(working_copy.id)
+            version = (
+                self.db.get(DocumentVersion, working_copy.current_version_id)
+                if working_copy.current_version_id
+                else None
+            )
+            if version is None:
+                raise HTTPException(status_code=409, detail="工作副本版本尚未准备完成")
+            expected_sha256 = str((requested.get("before") or {}).get("sha256") or "")
+            if expected_sha256 and working_copy.content_sha256 != expected_sha256:
+                raise HTTPException(status_code=409, detail="文件内容已经变化，请重新生成重命名计划")
+            after_relative_path = self._resolve_after_path(
+                operation_type="RENAME_WORKING_COPIES",
+                working_copy=working_copy,
+                requested_after=dict(requested.get("after") or {}),
+            )
+            sequence = int(
+                self.db.query(func.max(WorkingCopyPathRecord.sequence_number))
+                .filter(WorkingCopyPathRecord.working_copy_id == working_copy.id)
+                .scalar()
+                or 0
+            ) + 1
+            path_record = WorkingCopyPathRecord(
+                working_copy_id=working_copy.id,
+                sequence_number=sequence,
+                operation_type="RENAME",
+                before_relative_path=working_copy.relative_path,
+                after_relative_path=after_relative_path,
+                before_filename=working_copy.filename,
+                after_filename=PurePosixPath(after_relative_path).name,
+                document_version_id=version.id,
+                content_sha256=working_copy.content_sha256,
+                operation_plan_id=plan.id,
+                agent_run_id=plan.agent_run_id,
+                status="PLANNED",
+            )
+            self.db.add(path_record)
+            self.db.flush()
+            normalized_items.append(
+                {
+                    "document_id": working_copy.document_id,
+                    "working_copy_id": working_copy.id,
+                    "managed_file_id": working_copy.managed_file_id,
+                    "operation": "RENAME_WORKING_COPIES",
+                    "before": {
+                        "relative_path": working_copy.relative_path,
+                        "filename": working_copy.filename,
+                        "sha256": working_copy.content_sha256,
+                        "document_version_id": version.id,
+                    },
+                    "after": {
+                        "relative_path": after_relative_path,
+                        "filename": PurePosixPath(after_relative_path).name,
+                    },
+                    "rename_metadata": dict(requested.get("rename_metadata") or {}),
+                    "protection": {
+                        "managed_original_unchanged": True,
+                        "creates_new_version": False,
+                        "recoverable": False,
+                    },
+                    "execution_status": "PLANNED",
+                    "working_copy_path_record_id": path_record.id,
+                    "source_upload_document_id": source_document_id,
+                }
+            )
+        if not normalized_items:
+            raise HTTPException(status_code=409, detail="重命名计划中没有可执行文件")
+        plan.operation_type = "RENAME_WORKING_COPIES"
+        plan.plan_json = {
+            **dict(plan.plan_json or {}),
+            "target": "WORKING_COPY",
+            "deferred_upload_resolved": True,
+            "items": normalized_items,
+        }
+        flag_modified(plan, "plan_json")
+        self.db.flush()
+
+    def _resolve_uploaded_source_working_copy(
+        self,
+        *,
+        source_document: Document,
+        workspace_id: str,
+        user_id: str,
+    ) -> WorkingCopy | None:
+        """把上传 Document 或工作副本 Document 解析为共享目录中的活动副本。"""
+
+        direct = self.repository.get_user_working_copy(
+            working_copy_id=str(
+                self.db.query(WorkingCopy.id)
+                .filter(
+                    WorkingCopy.document_id == source_document.id,
+                    WorkingCopy.workspace_id == workspace_id,
+                    WorkingCopy.status == "ACTIVE",
+                )
+                .scalar()
+                or ""
+            ),
+            workspace_id=workspace_id,
+            user_id=user_id,
+        )
+        if direct is not None:
+            return direct
+        upload_version = (
+            self.db.query(DocumentVersion)
+            .filter(
+                DocumentVersion.document_id == source_document.id,
+                DocumentVersion.storage_tier == "UPLOAD",
+            )
+            .order_by(DocumentVersion.version_number.desc())
+            .first()
+        )
+        if upload_version is None:
+            return None
+        archive = (
+            self.db.query(UploadArchiveRecord)
+            .filter(
+                UploadArchiveRecord.upload_document_version_id == upload_version.id,
+                UploadArchiveRecord.status == "ARCHIVED",
+            )
+            .one_or_none()
+        )
+        if archive is None or not archive.managed_file_id:
+            return None
+        return (
+            self.db.query(WorkingCopy)
+            .join(Document, Document.id == WorkingCopy.document_id)
+            .filter(
+                WorkingCopy.managed_file_id == archive.managed_file_id,
+                WorkingCopy.workspace_id == workspace_id,
+                WorkingCopy.status == "ACTIVE",
+                Document.user_id == user_id,
+            )
+            .one_or_none()
+        )
 
     def create_conflict_resolution_plan(
         self,

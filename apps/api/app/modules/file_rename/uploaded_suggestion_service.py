@@ -21,7 +21,10 @@ from app.db.models import (
     User,
     WorkingCopy,
 )
-from app.modules.file_lifecycle.operations import WorkingCopyOperationService
+from app.modules.file_lifecycle.operations import (
+    DEFERRED_UPLOAD_RENAME_OPERATION,
+    WorkingCopyOperationService,
+)
 from app.modules.file_rename.filename_builder import FilenameBuildError, FilenameBuilder
 from app.modules.file_rename.metadata_resolution_service import RenameMetadataResolutionService
 from app.modules.file_rename.parsing_service import extract_rename_primary
@@ -31,6 +34,7 @@ from app.modules.file_rename.validation_service import RenameValidationService
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.readable_source import ReadableDocumentSourceResolver, apply_readable_source_metadata
 from app.modules.operations.schemas import OperationPlanCreateRequest, OperationPlanItem
+from app.modules.operations.repository import OperationPlanRepository
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
 
@@ -86,36 +90,38 @@ class UploadedRenameSuggestionService:
         if missing_ids:
             return _error("DOCUMENT_NOT_FOUND", "部分附件不存在或不属于当前用户。")
 
-        resolved: list[tuple[str, WorkingCopy, Document]] = []
-        waiting: list[str] = []
+        resolved: list[tuple[str, WorkingCopy | None, Document]] = []
         for source_document_id in document_ids:
-            working_copy = self._resolve_working_copy(source_document=documents_by_id[source_document_id])
-            if working_copy is None:
-                waiting.append(source_document_id)
-                continue
-            working_document = self.db.get(Document, working_copy.document_id)
-            if working_document is None or working_document.user_id != self.user_id:
-                waiting.append(source_document_id)
-                continue
-            resolved.append((source_document_id, working_copy, working_document))
-        if waiting:
-            result = _error(
-                "WORKING_COPY_NOT_READY",
-                "文件仍在异步归档或导入工作副本，请稍后再生成重命名建议。",
+            source_document = documents_by_id[source_document_id]
+            working_copy = self._resolve_working_copy(source_document=source_document)
+            working_document = (
+                self.db.get(Document, working_copy.document_id)
+                if working_copy is not None
+                else None
             )
-            result["status"] = "WAITING_FOR_ASYNC_JOB"
-            result["pending_document_ids"] = waiting
-            return result
+            # 工作副本尚未创建时直接读取隔离区中的上传 Document 生成建议。
+            # 后台归档和导入不再阻塞前台分类、命名建议与 OperationPlan 回执。
+            analysis_document = (
+                working_document
+                if working_document is not None and working_document.user_id == self.user_id
+                else source_document
+            )
+            resolved.append((source_document_id, working_copy, analysis_document))
 
         suggestions: list[dict[str, Any]] = []
         extraction_results: list[dict[str, Any]] = []
-        for source_document_id, working_copy, working_document in resolved:
-            suggestion, extraction_result = self._suggest_one(document=working_document)
+        for source_document_id, working_copy, analysis_document in resolved:
+            suggestion, extraction_result = self._suggest_one(document=analysis_document)
             suggestion.update(
                 {
-                    "source_kind": "working_copy",
-                    "working_copy_id": working_copy.id,
+                    "source_kind": (
+                        "working_copy" if working_copy is not None else "uploaded_document"
+                    ),
+                    "working_copy_id": working_copy.id if working_copy is not None else None,
                     "source_document_id": source_document_id,
+                    "working_copy_status": (
+                        "READY" if working_copy is not None else "IMPORTING"
+                    ),
                 }
             )
             suggestions.append(suggestion)
@@ -125,7 +131,11 @@ class UploadedRenameSuggestionService:
         ready = [item for item in suggestions if item.get("status") == "READY"]
         skipped = [item for item in suggestions if item.get("status") != "READY"]
         plan = None
-        if ready:
+        all_ready_copies_exist = all(
+            item.get("working_copy_id")
+            for item in ready
+        )
+        if ready and all_ready_copies_exist:
             plan = WorkingCopyOperationService(self.db).create_plan(
                 current_user=user,
                 request=OperationPlanCreateRequest(
@@ -144,6 +154,42 @@ class UploadedRenameSuggestionService:
                     ],
                 ),
             )
+        elif ready:
+            # 计划先基于上传 Document 固化建议；确认执行时再解析到同内容的活动工作副本。
+            # 这样归档、导入和后台摘要可以继续异步，而用户无需稍后重新发起命名请求。
+            plan = OperationPlanRepository(self.db).create_plan(
+                workspace_id=get_shared_workspace_id(self.db),
+                conversation_id=conversation_id,
+                agent_run_id=agent_run_id,
+                user_id=user.id,
+                operation_type=DEFERRED_UPLOAD_RENAME_OPERATION,
+                risk_level="medium",
+                reason="工作副本导入完成后按已确认建议重命名",
+                plan_json={
+                    "target": "PENDING_UPLOAD_WORKING_COPY",
+                    "items": [
+                        {
+                            "document_id": str(item["source_document_id"]),
+                            "working_copy_id": item.get("working_copy_id"),
+                            "operation": DEFERRED_UPLOAD_RENAME_OPERATION,
+                            "before": {
+                                "filename": item["filename"],
+                                "sha256": item["source_sha256"],
+                            },
+                            "after": {"filename": item["proposed_filename"]},
+                            "rename_metadata": _rename_metadata(item),
+                            "protection": {
+                                "managed_original_unchanged": True,
+                                "creates_new_version": False,
+                                "deferred_until_working_copy_ready": True,
+                            },
+                            "execution_status": "PLANNED",
+                        }
+                        for item in ready
+                    ],
+                },
+            )
+        if plan is not None:
             plan.agent_run_id = agent_run_id
             plan.plan_json = {
                 **plan.plan_json,
@@ -166,6 +212,10 @@ class UploadedRenameSuggestionService:
             "suggestions": suggestions,
             "extraction_results": extraction_results,
             "query": {"document_ids": document_ids},
+            "background_processing": any(
+                item.get("working_copy_status") == "IMPORTING"
+                for item in suggestions
+            ),
         }
 
     def suggest_for_initial_import(

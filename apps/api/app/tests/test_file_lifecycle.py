@@ -182,6 +182,122 @@ def test_upload_is_archived_then_imported_by_separate_jobs(monkeypatch, tmp_path
         clear_overrides()
 
 
+def test_rename_and_classify_only_returns_uploaded_file_cards(monkeypatch, tmp_path):
+    """组合任务不能把重命名内部解析的工作副本再次展示为额外文件。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "rename-classify-card-owner")
+    first = _upload(
+        client,
+        headers,
+        filename="公文版头通知.txt",
+        content="2023年关于调整更新部分机构公文版头的通知\n请有关单位执行。".encode("utf-8"),
+    )
+    second = _upload(
+        client,
+        headers,
+        filename="印章刻制申请表.txt",
+        content="2025年计算机学院印章刻制申请表\n申请刻制学院业务印章。".encode("utf-8"),
+    )
+    _drain(SessionLocal)
+
+    response = client.post(
+        "/api/conversations/lifecycle-rename-classify/messages",
+        headers=headers,
+        json={
+            "content": "对刚刚上传文件进行重命名和分类",
+            "attachments": [
+                {"document_id": first["document_id"]},
+                {"document_id": second["document_id"]},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    task_result = response.json()["task_result"]
+    document_results = task_result["document_results"]
+    assert len(document_results) == 2
+    assert {item["document_id"] for item in document_results} == {
+        first["document_id"],
+        second["document_id"],
+    }
+    assert all(item["filename"] not in {item["document_id"], ""} for item in document_results)
+
+    with SessionLocal() as db:
+        working_document_ids = {
+            item.document_id
+            for item in db.query(WorkingCopy).filter(WorkingCopy.status == "ACTIVE").all()
+        }
+    assert working_document_ids.isdisjoint(
+        {item["document_id"] for item in document_results}
+    )
+    clear_overrides()
+
+
+def test_deferred_upload_rename_plan_executes_after_background_import(monkeypatch, tmp_path):
+    """上传后立即生成的重命名计划应在后台导入完成后用同一个计划执行。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "deferred-upload-rename-owner")
+    upload = _upload(
+        client,
+        headers,
+        filename="扫描通知.txt",
+        content="2026年关于开展奖学金评审工作的通知\n请各学院按时报送。".encode("utf-8"),
+    )
+
+    message_response = client.post(
+        "/api/conversations/deferred-upload-rename/messages",
+        headers=headers,
+        json={
+            "content": "对刚刚上传文件进行重命名和分类",
+            "attachments": [{"document_id": upload["document_id"]}],
+        },
+    )
+
+    assert message_response.status_code == 200
+    task_result = message_response.json()["task_result"]
+    plan_id = task_result["operation_plan_id"]
+    assert task_result["response_type"] == "operation_plan"
+    assert task_result["document_results"][0]["document_id"] == upload["document_id"]
+    assert plan_id
+    plan_before_import = client.get(
+        f"/api/operations/plans/{plan_id}",
+        headers=headers,
+    ).json()
+    assert plan_before_import["operation_type"] == "RENAME_PENDING_UPLOADS"
+    proposed_filename = plan_before_import["items"][0]["after"]["filename"]
+
+    early_confirmation = client.post(
+        f"/api/operations/plans/{plan_id}/confirm",
+        headers=headers,
+        json={"confirmation": "确认执行"},
+    )
+    assert early_confirmation.status_code == 409
+    assert "后台归档或导入工作副本" in early_confirmation.json()["detail"]
+    assert client.get(
+        f"/api/operations/plans/{plan_id}",
+        headers=headers,
+    ).json()["status"] == "WAITING_CONFIRMATION"
+
+    _drain(SessionLocal)
+    confirmation = client.post(
+        f"/api/operations/plans/{plan_id}/confirm",
+        headers=headers,
+        json={"confirmation": "确认执行"},
+    )
+
+    assert confirmation.status_code == 200
+    assert confirmation.json()["status"] == "EXECUTED"
+    with SessionLocal() as db:
+        working_copy = db.query(WorkingCopy).filter(WorkingCopy.status == "ACTIVE").one()
+        assert working_copy.filename == proposed_filename
+        assert working_copy.last_operation_plan_id == plan_id
+    clear_overrides()
+
+
 def test_trashed_upload_source_cannot_read_historical_content(monkeypatch, tmp_path):
     """上传来源 ID 映射到已删除工作副本时，也不能复用历史正文或回收站文件。"""
 

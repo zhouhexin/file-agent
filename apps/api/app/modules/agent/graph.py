@@ -432,7 +432,15 @@ def _aggregate_tool_results(
 ) -> Dict[str, Any]:
     """把所有 Tool 输出聚合为 response 可直接消费的通用结果结构。"""
 
-    extraction_results = _extraction_results_from_results(tool_results)
+    requested_document_ids = {
+        str(document_id)
+        for document_id in state.get("slots", {}).get("document_ids", [])
+        if str(document_id)
+    }
+    extraction_results = _extraction_results_from_results(
+        tool_results,
+        allowed_document_ids=requested_document_ids or None,
+    )
     insight_documents = _insight_documents_from_results(tool_results)
     classification_documents = _classification_documents_from_results(tool_results)
     return {
@@ -732,21 +740,44 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
     }
 
 
-def _extraction_results_from_results(tool_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """从 Tool 结果中提取 extract-document-text 返回的解析结果。"""
+def _extraction_results_from_results(
+    tool_results: List[Dict[str, Any]],
+    *,
+    allowed_document_ids: set[str] | None = None,
+) -> List[Dict[str, Any]]:
+    """提取面向用户文件范围的解析结果，并按 document_id 去重。
+
+    重命名 Tool 会在内部解析对应工作副本以生成名称建议，这些解析记录属于审计事实，
+    不能再次投影成用户上传的额外文件卡。只要 Planner 已固化附件范围，就仅返回该范围；
+    同一文档被多个 Tool 复用时也只展示一次。
+    """
 
     extraction_results: List[Dict[str, Any]] = []
+    seen_document_ids: set[str] = set()
+
+    def append_visible(item: Any) -> None:
+        """追加一个有效且属于用户请求范围的解析结果。"""
+
+        if not isinstance(item, dict):
+            return
+        if not item.get("extraction_run_id") or item.get("status") not in {"COMPLETED", "FAILED"}:
+            return
+        document_id = str(item.get("document_id") or "")
+        if allowed_document_ids is not None and document_id not in allowed_document_ids:
+            return
+        if document_id and document_id in seen_document_ids:
+            return
+        extraction_results.append(item)
+        if document_id:
+            seen_document_ids.add(document_id)
+
     for result in tool_results:
         batch_results = result.get("extraction_results")
         if isinstance(batch_results, list):
-            extraction_results.extend(
-                item
-                for item in batch_results
-                if isinstance(item, dict) and item.get("extraction_run_id") and item.get("status") in {"COMPLETED", "FAILED"}
-            )
+            for item in batch_results:
+                append_visible(item)
             continue
-        if result.get("extraction_run_id") and result.get("status") in {"COMPLETED", "FAILED"}:
-            extraction_results.append(result)
+        append_visible(result)
     return extraction_results
 
 

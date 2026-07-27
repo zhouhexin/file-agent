@@ -46,6 +46,15 @@ export function AgentRunReceipt({
 }: AgentRunReceiptProps) {
   const [operationPlan, setOperationPlan] = useState<OperationPlanResponse | null>(null);
   const results = taskResult?.document_results ?? [];
+  const attachmentDocumentIds = new Set(
+    attachments.map((attachment) => attachment.document_id).filter(Boolean),
+  );
+  const visibleClassificationResults = (
+    taskResult?.display_mode === 'classification_cards'
+    && attachmentDocumentIds.size > 0
+  )
+    ? results.filter((result) => attachmentDocumentIds.has(result.document_id))
+    : results;
 
   useEffect(() => {
     let cancelled = false;
@@ -127,9 +136,12 @@ export function AgentRunReceipt({
   const managedFileResult = taskResult.managed_file_result;
   const renamePlanResult = taskResult.rename_plan_result;
   const pendingDecisions = taskResult.pending_decisions ?? [];
-  const classificationCards = taskResult.display_mode === 'classification_cards' && results.length > 0 ? (
+  const classificationCards = (
+    taskResult.display_mode === 'classification_cards'
+    && visibleClassificationResults.length > 0
+  ) ? (
     <div className="document-result-list document-result-list--standalone">
-      {results.map((result, index) => (
+      {visibleClassificationResults.map((result, index) => (
         <DocumentResultCard
           attachment={findAttachmentByDocumentId(attachments, result.document_id)}
           index={index + 1}

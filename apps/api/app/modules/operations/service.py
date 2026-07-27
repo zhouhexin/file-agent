@@ -7,7 +7,11 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Conversation, OperationPlan, User
 from app.modules.conversations.repository import ConversationRepository
-from app.modules.file_lifecycle.operations import WORKING_COPY_OPERATION_TYPES, WorkingCopyOperationService
+from app.modules.file_lifecycle.operations import (
+    DEFERRED_UPLOAD_RENAME_OPERATION,
+    WORKING_COPY_OPERATION_TYPES,
+    WorkingCopyOperationService,
+)
 from app.modules.operations.repository import OperationPlanRepository
 from app.modules.operations.schemas import (
     OperationConfirmRequest,
@@ -93,18 +97,28 @@ class OperationPlanService:
             raise HTTPException(status_code=404, detail="OperationPlan not found")
         if plan.status not in {"PLANNED", "WAITING_CONFIRMATION"}:
             raise HTTPException(status_code=409, detail="OperationPlan is not waiting for confirmation")
-        if plan.operation_type not in WORKING_COPY_OPERATION_TYPES:
+        if plan.operation_type not in {
+            *WORKING_COPY_OPERATION_TYPES,
+            DEFERRED_UPLOAD_RENAME_OPERATION,
+        }:
             # 没有白名单执行器时必须保持待确认，不能只改状态来伪造真实文件动作。
             raise HTTPException(
                 status_code=409,
                 detail="Operation type does not have a controlled executor",
+            )
+        operation_service = WorkingCopyOperationService(self.db)
+        if plan.operation_type == DEFERRED_UPLOAD_RENAME_OPERATION:
+            # 先检查后台工作副本是否就绪；失败时不消耗用户确认，原计划可稍后重试。
+            operation_service.prepare_deferred_upload_rename(
+                plan=plan,
+                current_user=current_user,
             )
         self.repository.confirm_plan(
             plan=plan,
             user_id=current_user.id,
             confirmation_text=request.confirmation,
         )
-        result, changeset_id = WorkingCopyOperationService(self.db).execute(
+        result, changeset_id = operation_service.execute(
             plan=plan,
             current_user=current_user,
         )
