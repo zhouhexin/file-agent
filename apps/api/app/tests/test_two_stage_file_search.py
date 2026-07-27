@@ -30,6 +30,8 @@ from app.db.models import (
     WorkingCopy,
 )
 from app.modules.retrieval.scope_resolver import FileSearchScopeResolver
+from app.modules.retrieval.phrase_strategy import FileSearchPhraseStrategyService
+from app.modules.retrieval.query_parser import FileSearchQueryParser
 from app.modules.retrieval.two_stage_search import TwoStageFileSearchService
 
 
@@ -171,6 +173,17 @@ class _FakeScope:
         self.include_workspace = include_workspace
 
 
+class _StableQueryTokenizer:
+    """为年份一致性测试提供不依赖外部分词包的稳定完整词项。"""
+
+    @staticmethod
+    def tokenize(text):
+        """保留规范化后的完整年份或主题短语。"""
+
+        value = str(text or "").strip()
+        return [value] if value else []
+
+
 def test_service_importable():
     """TwoStageFileSearchService 可导入。"""
     from app.modules.retrieval.two_stage_search import TwoStageFileSearchService
@@ -201,6 +214,150 @@ def test_end_to_end_search_returns_results():
         assert result["ok"] is True
         assert len(result["results"]) >= 1
         assert result["results"][0]["filename"] == "国家励志奖学金申请.docx"
+    finally:
+        db.close()
+
+
+def test_year_suffix_and_compound_report_queries_return_consistent_results():
+    """前端年份问法必须等价，年份加主题时同时满足两个条件。"""
+
+    db = _db_session()
+    try:
+        _setup_full_doc(
+            db,
+            suffix="year-report-2020",
+            user_id="import-auditor",
+            workspace_id="shared-workspace",
+            filename="述职报告-张三-20200421.pdf",
+            summary_text="张三个人述职报告",
+            chunk_text="2020年度个人述职报告，现将本年度工作情况报告如下。",
+        )
+        _setup_full_doc(
+            db,
+            suffix="year-report-2021",
+            user_id="import-auditor",
+            workspace_id="shared-workspace",
+            filename="述职报告-李四-20210421.pdf",
+            summary_text="李四个人述职报告",
+            chunk_text="2021年度个人述职报告，现将本年度工作情况报告如下。",
+        )
+        _setup_full_doc(
+            db,
+            suffix="year-notice-2020",
+            user_id="import-auditor",
+            workspace_id="shared-workspace",
+            filename="2020年度考核通知.pdf",
+            summary_text="年度考核工作通知",
+            chunk_text="2020年度考核工作安排及材料提交要求。",
+        )
+        db.commit()
+
+        tokenizer = _StableQueryTokenizer()
+        parser = FileSearchQueryParser(tokenizer=tokenizer)
+        strategy = FileSearchPhraseStrategyService(
+            search_service=TwoStageFileSearchService(
+                db=db,
+                user_id="current-chat-user",
+                workspace_id="shared-workspace",
+                tokenizer=tokenizer,
+            ),
+            tokenizer=tokenizer,
+        )
+
+        def search(question):
+            """复现 Tool 层的解析和完整短语检索组合。"""
+
+            parsed = parser.parse(question)
+            return strategy.search(
+                original_query=question,
+                parsed_query=parsed,
+                scope=_FakeScope(),
+                phrases=[parsed.cleaned],
+                require_body_evidence=parsed.relation_mode == "LITERAL",
+            )
+
+        without_suffix = search("哪些文件中提到了2020")
+        with_suffix = search("哪些文件中提到了2020年")
+        report_with_year = search("2020年的述职报告有哪些")
+        report_without_year = search("2020的述职报告有哪些")
+
+        assert {
+            item["working_copy_id"] for item in without_suffix["results"]
+        } == {
+            item["working_copy_id"] for item in with_suffix["results"]
+        } == {"wc-year-report-2020", "wc-year-notice-2020"}
+        assert {
+            item["working_copy_id"] for item in report_with_year["results"]
+        } == {
+            item["working_copy_id"] for item in report_without_year["results"]
+        } == {"wc-year-report-2020"}
+    finally:
+        db.close()
+
+
+def test_deictic_and_plain_file_selector_queries_return_same_documents():
+    """“这些文件中哪些……”与“哪些文件中……”必须得到同一正文命中集合。"""
+
+    db = _db_session()
+    try:
+        _setup_full_doc(
+            db,
+            suffix="selector-report",
+            user_id="import-auditor",
+            workspace_id="shared-workspace",
+            filename="个人述职报告-测试.docx",
+            summary_text="个人年度工作总结",
+            chunk_text="本文件为个人述职报告，包含年度履职情况。",
+        )
+        _setup_full_doc(
+            db,
+            suffix="selector-noise",
+            user_id="import-auditor",
+            workspace_id="shared-workspace",
+            filename="年度考核工作安排.docx",
+            summary_text="年度考核工作安排",
+            chunk_text="本文件说明年度考核流程，没有目标报告名称。",
+        )
+        db.commit()
+
+        tokenizer = _StableQueryTokenizer()
+        parser = FileSearchQueryParser(tokenizer=tokenizer)
+        resolver = FileSearchScopeResolver(session_file_service=None)
+        strategy = FileSearchPhraseStrategyService(
+            search_service=TwoStageFileSearchService(
+                db=db,
+                user_id="current-chat-user",
+                workspace_id="shared-workspace",
+                tokenizer=tokenizer,
+            ),
+            tokenizer=tokenizer,
+        )
+
+        def search(question):
+            """复现 Tool 层的查询解析、范围解析和正文短语检索。"""
+
+            parsed = parser.parse(question)
+            scope = resolver.resolve(
+                query=question,
+                explicit_attachment_ids=[],
+                conversation_id="conversation-selector",
+            )
+            return strategy.search(
+                original_query=question,
+                parsed_query=parsed,
+                scope=scope,
+                phrases=[parsed.cleaned],
+                require_body_evidence=parsed.relation_mode == "LITERAL",
+            )
+
+        deictic = search("这些文件中哪些提到了述职报告")
+        plain = search("哪些文件中提到了述职报告")
+
+        assert {
+            item["working_copy_id"] for item in deictic["results"]
+        } == {
+            item["working_copy_id"] for item in plain["results"]
+        } == {"wc-selector-report"}
     finally:
         db.close()
 

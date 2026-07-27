@@ -89,6 +89,18 @@ def test_removes_question_selectors_and_content_relation_phrases():
         assert result.terms == [expected]
 
 
+def test_deictic_file_set_selector_matches_plain_file_selector():
+    """“这些文件中哪些……”不得残留指代词并改变检索主题。"""
+
+    parser = _make_parser()
+    deictic = parser.parse("这些文件中哪些提到了述职报告")
+    plain = parser.parse("哪些文件中提到了述职报告")
+
+    assert deictic.cleaned == plain.cleaned == "述职报告"
+    assert deictic.terms == plain.terms == ["述职报告"]
+    assert deictic.relation_mode == plain.relation_mode == "LITERAL"
+
+
 def test_normalizes_person_related_search_to_stable_core_query():
     """“关于/与…有关”必须得到同一个核心主题，关系虚词不能干扰正文召回。"""
 
@@ -148,6 +160,28 @@ def test_extracts_explicit_year():
 
     result = parser.parse("奖学金材料")  # 无年份
     assert result.year is None
+
+
+def test_year_suffix_and_compound_year_queries_share_stable_core_terms():
+    """年份后缀不应改变检索结果，组合查询必须分离年份和文件主题。"""
+
+    parser = _make_parser()
+    pure_year_queries = [
+        "哪些文件中提到了2020",
+        "哪些文件中提到了2020年",
+        "哪些文件中提到了2020年度",
+    ]
+    compound_queries = [
+        "2020年的述职报告有哪些",
+        "2020的述职报告有哪些",
+        "2020年度述职报告有哪些",
+    ]
+
+    pure_year = [parser.parse(query) for query in pure_year_queries]
+    compound = [parser.parse(query) for query in compound_queries]
+
+    assert {(item.cleaned, item.year) for item in pure_year} == {("2020", 2020)}
+    assert {(item.cleaned, item.year) for item in compound} == {("述职报告", 2020)}
 
 
 def test_extracts_relative_year():

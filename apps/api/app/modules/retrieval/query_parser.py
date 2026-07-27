@@ -46,11 +46,18 @@ _FILLER_PHRASES = [
 ]
 
 _YEAR_PATTERN = re.compile(r"(20\d{2})年?")
+_YEAR_SUFFIX_PATTERN = re.compile(r"((?:19|20)\d{2})\s*年(?:度)?")
 _RELATIVE_YEAR_PATTERN = re.compile(r"(去年|前年|今年)")
 _DOC_NUMBER_PATTERN = re.compile(r"[(\[]?\d+\s*号[\])]?")
 _PERSON_HONORIFICS = ("老师", "同志", "先生", "女士")
 _QUESTION_FILE_SELECTOR_PATTERN = re.compile(
     r"^(?:哪个|哪些|哪份|哪一份|哪几个|哪几份|哪篇|哪几篇|哪张|哪几张)"
+    r"\s*(?:文件|文档|文章|材料|证明|表格|报告)?\s*"
+)
+_DEICTIC_FILE_SET_SELECTOR_PATTERN = re.compile(
+    r"^\s*(?:这些|上述|前述)\s*(?:文件|文档|材料)"
+    r"\s*(?:中|里|里面)?\s*"
+    r"(?:哪个|哪些|哪份|哪一份|哪几个|哪几份|哪篇|哪几篇|哪张|哪几张)"
     r"\s*(?:文件|文档|文章|材料|证明|表格|报告)?\s*"
 )
 _CONTENT_RELATION_PATTERN = re.compile(
@@ -124,6 +131,11 @@ class FileSearchQueryParser:
 
         # 4. 提取相对年份
         relative_year = self._extract_relative_year(cleaned)
+
+        # 年份是结构化过滤条件，“2020”“2020年”“2020年度”必须等价。
+        # 组合查询中把年份从主题短语移除，避免搜索不存在的连续短语
+        # “2020年的述职报告”；纯年份查询则保留规范化数字作为正文条件。
+        cleaned = _strip_explicit_year_filter(cleaned, year=year)
 
         # 5. 分词提取主题词
         try:
@@ -210,6 +222,9 @@ def normalize_file_search_query(text: str) -> str:
     """
 
     result = str(text or "").lower()
+    # “这些文件中哪些提到了……”与“哪些文件中提到了……”都是文件集合选择问句。
+    # 必须在全局删除“文件”等 filler 之前整体清理，否则会残留“这些 中哪些”噪声。
+    result = _DEICTIC_FILE_SET_SELECTOR_PATTERN.sub("", result)
     for phrase in _FILLER_PHRASES:
         result = result.replace(phrase, " ")
     result = " ".join(result.split())
@@ -223,7 +238,32 @@ def normalize_file_search_query(text: str) -> str:
     # 用户说“提到了、包含、出现过”等是在限定正文匹配关系，真正主题位于其后。
     result = _CONTENT_RELATION_PATTERN.sub("", result)
     result = re.sub(r"\s*的\s*$", "", result)
+    # “年/年度”在文件检索中是年份语法后缀，不应改变正文检索词。
+    result = _YEAR_SUFFIX_PATTERN.sub(r"\1", result)
     return " ".join(result.split())
+
+
+def is_file_set_selector_question(text: str) -> bool:
+    """判断“这些文件中哪些……”是否只是文件检索问句前缀。"""
+
+    return _DEICTIC_FILE_SET_SELECTOR_PATTERN.search(
+        str(text or "").lower()
+    ) is not None
+
+
+def _strip_explicit_year_filter(text: str, *, year: int | None) -> str:
+    """从组合主题中移除显式年份，并为纯年份查询保留统一数字条件。"""
+
+    if year is None:
+        return str(text or "").strip()
+    year_text = str(year)
+    stripped = re.sub(
+        rf"(?<!\d){re.escape(year_text)}(?!\d)\s*(?:的)?",
+        " ",
+        str(text or ""),
+    )
+    normalized = " ".join(stripped.split()).strip()
+    return normalized or year_text
 
 
 def exact_short_chinese_phrase(text: str) -> str | None:

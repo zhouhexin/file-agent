@@ -122,6 +122,40 @@ def test_explicit_attachment_reference_without_resolved_ids_stays_strict_empty()
     assert scope.include_workspace is False
 
 
+def test_deictic_file_set_selector_without_attachments_matches_global_question():
+    """“这些文件中哪些……”无绑定附件时应与普通“哪些文件中……”同为全局检索。"""
+
+    resolver = FileSearchScopeResolver(session_file_service=None)
+    deictic = resolver.resolve(
+        query="这些文件中哪些提到了述职报告",
+        explicit_attachment_ids=[],
+        conversation_id="conv-1",
+    )
+    plain = resolver.resolve(
+        query="哪些文件中提到了述职报告",
+        explicit_attachment_ids=[],
+        conversation_id="conv-1",
+    )
+
+    assert deictic == plain
+    assert deictic.scope_mode == "global"
+    assert deictic.include_workspace is True
+
+
+def test_deictic_file_set_selector_with_attachments_keeps_strict_scope():
+    """同一句若实际绑定附件，仍只能检索后端确认的附件集合。"""
+
+    scope = FileSearchScopeResolver(session_file_service=None).resolve(
+        query="这些文件中哪些提到了述职报告",
+        explicit_attachment_ids=["doc-1", "doc-2"],
+        conversation_id="conv-1",
+    )
+
+    assert scope.scope_mode == "strict"
+    assert scope.strict_document_ids == ("doc-1", "doc-2")
+    assert scope.include_workspace is False
+
+
 def test_resolve_does_not_call_llm():
     """范围解析器是确定性的。"""
     resolver = FileSearchScopeResolver(session_file_service=None)

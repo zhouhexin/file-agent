@@ -130,7 +130,12 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         response_type=response_type,
         display_mode=(
             "classification_cards"
-            if result.intent in {"CLASSIFY_FILES", "CLASSIFY_MANAGED_FILES"}
+            if result.intent
+            in {
+                "CLASSIFY_FILES",
+                "CLASSIFY_MANAGED_FILES",
+                "CLASSIFY_AND_SUGGEST_RENAME",
+            }
             else "default"
         ),
         final_response=result.final_response,

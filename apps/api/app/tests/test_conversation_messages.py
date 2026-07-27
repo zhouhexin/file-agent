@@ -319,6 +319,45 @@ def test_post_message_starts_agent_run():
     clear_overrides()
 
 
+def test_post_message_rename_and_classify_returns_visible_receipt_while_copy_is_pending():
+    """刚上传文件尚无工作副本时，组合任务仍须返回分类卡和可见的重命名等待说明。"""
+
+    client, session_factory = client_with_database()
+    headers = _auth_header(client, "rename-classify-message-user")
+    document_id = _upload_document(
+        client,
+        headers,
+        filename="2026年奖学金通知.txt",
+        content="2026年奖学金评审工作通知\n请各学院按要求报送材料。".encode("utf-8"),
+    )
+
+    response = client.post(
+        "/api/conversations/rename-classify-conversation/messages",
+        headers=headers,
+        json={
+            "content": "对上传文件进行重命名和分类",
+            "attachments": [{"document_id": document_id}],
+        },
+    )
+
+    assert response.status_code == 200
+    task_result = response.json()["task_result"]
+    assert task_result["response_type"] == "rename_plan"
+    assert task_result["display_mode"] == "classification_cards"
+    assert task_result["document_results"]
+    assert task_result["document_results"][0]["document_id"] == document_id
+    assert "异步归档或导入工作副本" in task_result["final_response"]
+    assert task_result["rename_plan_result"]["suggestions"] == []
+
+    run, tool_names = _latest_agent_audit(session_factory)
+    assert run.intent == "CLASSIFY_AND_SUGGEST_RENAME"
+    assert tool_names == [
+        "extract-document-text",
+        "generate-rename-suggestions",
+    ]
+    clear_overrides()
+
+
 def test_get_conversation_returns_messages_with_task_results_and_attachments():
     """读取会话详情时必须返回附件和安全任务投影，不返回内部 AgentRun。"""
 

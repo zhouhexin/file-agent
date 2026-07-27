@@ -127,8 +127,28 @@ export function AgentRunReceipt({
   const managedFileResult = taskResult.managed_file_result;
   const renamePlanResult = taskResult.rename_plan_result;
   const pendingDecisions = taskResult.pending_decisions ?? [];
+  const classificationCards = taskResult.display_mode === 'classification_cards' && results.length > 0 ? (
+    <div className="document-result-list document-result-list--standalone">
+      {results.map((result, index) => (
+        <DocumentResultCard
+          attachment={findAttachmentByDocumentId(attachments, result.document_id)}
+          index={index + 1}
+          key={`${result.document_id}-${index}`}
+          result={result}
+          token={token}
+          onOpenDocument={onOpenDocument}
+          onOpenFile={onOpenAttachment}
+        />
+      ))}
+    </div>
+  ) : null;
 
   if (taskResult.response_type === 'rename_plan') {
+    const hasVisibleRenameSuggestions = Boolean(
+      renamePlanResult?.suggestions?.some(
+        (item) => !item.proposed_filename || item.status !== 'READY',
+      ),
+    );
     return (
       <>
         {operationPlan && token ? (
@@ -141,11 +161,12 @@ export function AgentRunReceipt({
             }}
           />
         ) : null}
-        {renamePlanResult ? (
+        {renamePlanResult && hasVisibleRenameSuggestions ? (
           <RenameSuggestionReceipt token={token} result={renamePlanResult} onOpenManagedFile={onOpenManagedFile} />
         ) : taskResult.final_response ? (
           <p className="agent-chat-response">{taskResult.final_response}</p>
         ) : null}
+        {classificationCards}
       </>
     );
   }
@@ -210,14 +231,17 @@ export function AgentRunReceipt({
   }
   if (operationPlan && token) {
     return (
-      <OperationPlanCard
-        plan={operationPlan}
-        token={token}
-        onConfirmed={async () => {
-          setOperationPlan(await getOperationPlan(token, operationPlan.id));
-          await onOperationConfirmed?.();
-        }}
-      />
+      <>
+        <OperationPlanCard
+          plan={operationPlan}
+          token={token}
+          onConfirmed={async () => {
+            setOperationPlan(await getOperationPlan(token, operationPlan.id));
+            await onOperationConfirmed?.();
+          }}
+        />
+        {classificationCards}
+      </>
     );
   }
 
@@ -248,21 +272,7 @@ export function AgentRunReceipt({
     && pendingDecisions.length === 0
   ) {
     // 分类任务只展示逐文件卡；完整分类证据继续留在后端审计，不在聊天流重复铺成长文本。
-    return (
-      <div className="document-result-list document-result-list--standalone">
-        {results.map((result, index) => (
-          <DocumentResultCard
-            attachment={findAttachmentByDocumentId(attachments, result.document_id)}
-            index={index + 1}
-            key={`${result.document_id}-${index}`}
-            result={result}
-            token={token}
-            onOpenDocument={onOpenDocument}
-            onOpenFile={onOpenAttachment}
-          />
-        ))}
-      </div>
-    );
+    return classificationCards;
   }
 
   return (

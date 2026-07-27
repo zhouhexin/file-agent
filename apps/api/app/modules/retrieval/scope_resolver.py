@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.modules.conversations.repository import ConversationRepository
+from app.modules.retrieval.query_parser import is_file_set_selector_question
 
 
 # 严格范围关键词：用户明确指代当前附件
@@ -82,7 +83,13 @@ class FileSearchScopeResolver:
             return ResolvedSearchScope()
 
         attachment_ids = explicit_attachment_ids or []
-        is_strict = self._is_strict_scope(query)
+        file_set_selector = is_file_set_selector_question(query)
+        # “这些文件中哪些提到了……”在没有随本条消息绑定附件时是普通文件集合
+        # 选择问句，必须与“哪些文件中提到了……”使用同一全局范围。若本条消息确实
+        # 携带附件，仍以这些确定 document_id 为严格范围，不能擅自扩大。
+        is_strict = self._is_strict_scope(query) and (
+            bool(attachment_ids) or not file_set_selector
+        )
         is_global = self._is_global_scope(query)
 
         if is_strict or (not is_global and attachment_ids):

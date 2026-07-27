@@ -770,6 +770,38 @@ def test_deterministic_planner_routes_attachment_wording_to_uploaded_rename():
     assert plan.steps[0].input == {"document_ids": ["document-upload-attachment"]}
 
 
+def test_deterministic_planner_keeps_both_rename_and_classification_for_attachments():
+    """同一句要求重命名和分类时必须保留两项任务，不能由重命名分支吞掉分类。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conversation-upload-organize",
+        user_id="user-upload-organize",
+        message_id="message-upload-organize",
+        message="对上传文件进行重命名和分类",
+        attachments=[
+            {"document_id": "document-upload-1"},
+            {"document_id": "document-upload-2"},
+        ],
+    )
+
+    assert plan.intent == "CLASSIFY_AND_SUGGEST_RENAME"
+    assert plan.slots["document_ids"] == [
+        "document-upload-1",
+        "document-upload-2",
+    ]
+    assert plan.slots["requested_outputs"] == [
+        "classification",
+        "receipt",
+        "rename_suggestions",
+        "operation_plan",
+    ]
+    assert [step.tool_name for step in plan.steps] == [
+        "extract-document-text",
+        "extract-document-text",
+        "generate-rename-suggestions",
+    ]
+
+
 def test_llm_rename_without_backend_file_scope_does_not_scan_all_managed_files():
     """LLM 只给重命名意图但没有附件或受管过滤条件时，必须请求范围而非全目录扫描。"""
 
@@ -805,6 +837,35 @@ def test_llm_planner_keeps_uploaded_document_scope_for_rename():
     assert plan.intent == "SUGGEST_RENAME"
     assert plan.slots["document_ids"] == ["document-upload-2"]
     assert plan.steps[0].input == {"document_ids": ["document-upload-2"]}
+
+
+def test_llm_planner_keeps_both_rename_and_classification_for_attachments():
+    """即使 LLM 只偏向重命名，后端也应从原始用户文本恢复分类组合任务。"""
+
+    plan = build_plan_from_user_intent(
+        intent_plan=UserIntentPlan(
+            intent="SUGGEST_RENAME",
+            user_goal="对上传文件进行重命名和分类",
+            required_capabilities=["suggest_rename"],
+            tool_plan_hint=["generate-rename-suggestions"],
+        ),
+        message="对上传文件进行重命名和分类",
+        attachments=[
+            {"document_id": "backend-document-1"},
+            {"document_id": "backend-document-2"},
+        ],
+    )
+
+    assert plan.intent == "CLASSIFY_AND_SUGGEST_RENAME"
+    assert plan.slots["document_ids"] == [
+        "backend-document-1",
+        "backend-document-2",
+    ]
+    assert [step.tool_name for step in plan.steps] == [
+        "extract-document-text",
+        "extract-document-text",
+        "generate-rename-suggestions",
+    ]
 
 
 def test_llm_planner_cannot_replace_backend_attachment_scope_for_rename():

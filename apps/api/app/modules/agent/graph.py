@@ -234,7 +234,9 @@ def _deterministic_preflight_plan(
         message=state["message"],
         attachments=attachments,
     )
-    if plan.intent == "SUGGEST_RENAME" and plan.slots.get("document_ids"):
+    if plan.intent in {"SUGGEST_RENAME", "CLASSIFY_AND_SUGGEST_RENAME"} and plan.slots.get(
+        "document_ids"
+    ):
         return plan
     if plan.intent in {
         "LIST_MANAGED_FILES",

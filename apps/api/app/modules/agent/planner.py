@@ -230,6 +230,16 @@ class DeterministicPlanner:
             message=message,
             lowered=lowered,
         )
+        if (
+            attachments
+            and _has_rename_intent(message=message, lowered=lowered)
+            and _has_classification_intent(message=message, lowered=lowered)
+        ):
+            return _uploaded_document_rename_and_classification_plan(
+                user_goal=message,
+                document_ids=_document_ids(attachments),
+                route_source="deterministic_planner",
+            )
         if _has_rename_intent(message=message, lowered=lowered) and attachments:
             return _uploaded_document_rename_plan(
                 user_goal=message,
@@ -615,6 +625,20 @@ def build_plan_from_user_intent(
         message=message,
         lowered=lowered,
     ) or {}
+    if (
+        attachment_document_ids
+        and _has_rename_intent(message=message, lowered=lowered)
+        and _has_classification_intent(message=message, lowered=lowered)
+    ):
+        return _uploaded_document_rename_and_classification_plan(
+            user_goal=intent_plan.user_goal or message,
+            # 组合任务仍只能采用后端解析出的附件范围，禁止 LLM 注入文档 ID。
+            document_ids=attachment_document_ids,
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
+            llm_intent_plan=intent_plan.model_dump(),
+            route_source="capability_router" if capability_route else "llm_planner",
+        )
     if (
         intent_plan.intent == "SUGGEST_RENAME"
         or requested_capabilities.intersection(MANAGED_FILE_RENAME_HINTS)
@@ -1421,6 +1445,71 @@ def _uploaded_document_rename_plan(
                 "expected_outputs": ["rename_suggestions", "operation_plan"],
                 "writes": ["document_pages", "operation_plans"],
             }
+        ],
+        evidence_policy={"require_page_or_cell": True, "allow_no_evidence_answer": True},
+        confirmation_policy={"operation_plan_required": True},
+    )
+
+
+def _uploaded_document_rename_and_classification_plan(
+    *,
+    user_goal: str,
+    document_ids: list[str],
+    response_style: str = "concise",
+    clarification_question: str | None = None,
+    llm_intent_plan: Dict[str, Any] | None = None,
+    route_source: str = "legacy_planner",
+) -> PlannerOutput:
+    """为明确附件同时生成分类结果和待确认的工作副本重命名建议。
+
+    分类读取上传文档的受控正文；重命名仍只针对归档后工作副本并生成 OperationPlan，
+    两项业务结果必须保留在同一个 AgentRun 中，不能因“重命名”优先而丢弃分类请求。
+    """
+
+    extraction_steps = [
+        _extract_document_text_step(
+            document_id=document_id,
+            index=index,
+            force_reprocess=False,
+        )
+        for index, document_id in enumerate(document_ids, start=1)
+    ]
+    return PlannerOutput(
+        intent="CLASSIFY_AND_SUGGEST_RENAME",
+        user_goal=user_goal,
+        slots={
+            "document_ids": document_ids,
+            "requested_outputs": [
+                "classification",
+                "receipt",
+                "rename_suggestions",
+                "operation_plan",
+            ],
+            "response_style": response_style,
+            "clarification_question": clarification_question,
+            "llm_intent_plan": llm_intent_plan or {},
+            "route_source": route_source,
+            "target_storage": "working_copy",
+        },
+        selected_skills=[
+            "document-text-extract",
+            "document-classification",
+            "file-rename",
+            "operation-plan",
+            "change-report",
+        ],
+        steps=[
+            *extraction_steps,
+            {
+                "step_id": "step-uploaded-rename-suggestions",
+                "skill": "file-rename",
+                "tool_name": "generate-rename-suggestions",
+                "input": {"document_ids": document_ids},
+                "requires_confirmation": False,
+                "risk_level": "low",
+                "expected_outputs": ["rename_suggestions", "operation_plan"],
+                "writes": ["document_pages", "operation_plans"],
+            },
         ],
         evidence_policy={"require_page_or_cell": True, "allow_no_evidence_answer": True},
         confirmation_policy={"operation_plan_required": True},
