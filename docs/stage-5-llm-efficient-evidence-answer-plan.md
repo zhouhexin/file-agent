@@ -919,7 +919,8 @@ error_code
 5. 强事实问题强制原文检索。
 6. 实现 EvidencePackageBuilder 和预算截断。
 
-完成标准：摘要缺失时仍可命中原文；跨用户 Evidence 永远不会进入证据包。
+完成标准：摘要缺失时仍可命中原文；共享 `ACTIVE` 工作副本可以按产品规则被其他普通用户检索，
+但跨用户个人会话、附件上下文、上传来源和反馈数据永远不会进入证据包。
 
 ### 任务 5.4：复用并扩展确定性表格计算
 
@@ -1022,7 +1023,8 @@ error_code
 - 模型失败不会生成伪成功 ToolInvocation。
 - 缓存命中时 LLM 调用次数为零。
 - DocumentVersion 或 Prompt 变化后缓存失效。
-- 跨用户缓存和 Evidence 访问被拒绝。
+- 共享 `ACTIVE` 工作副本可以按产品规则被其他普通用户检索和回答；跨用户个人会话、附件上下文、
+  上传来源、反馈详情和缓存身份必须隔离。
 - retrieval trace 和日志不含正文、Prompt 或密钥。
 
 ### 19.2 Agent Runtime 测试
@@ -1037,7 +1039,8 @@ error_code
 
 ### 19.3 API 权限测试
 
-- 用户只能访问自己的对话。
+- 用户只能访问自己的对话、个人附件上下文和反馈；所有用户可以访问唯一共享工作目录中的
+  `ACTIVE` 工作副本。
 - 引用文件打开时再次鉴权。
 - 共享物理工作目录不会绕过逻辑权限。
 - 普通 user 看不到 AgentRun/ToolInvocation 内部载荷。
@@ -1061,6 +1064,10 @@ error_code
 LLM 测试必须全部使用 deterministic fake。真实模型只用于手工烟测，不作为 CI 成功条件。
 
 ## 20. 前端页面手工烟测
+
+本节给出阶段五场景摘要。可逐项执行的前端提问、PostgreSQL 只读核验、Neo4j 是否需要检查、文件系统
+不变性和记录模板，以
+`docs/stage-5-frontend-backend-acceptance-test-cases.md` 为准。
 
 ### 20.1 准备
 
@@ -1152,9 +1159,14 @@ npm run build
 
 ## 23. 阶段六边界
 
+阶段六的核心实施依据为：
+
+`docs/stage-6-natural-language-correction-shared-file-organization-plan.md`
+
 以下工作留到阶段六或以后：
 
 - 用户自然语言接受、拒绝和修正分类。
+- 用户确认分类后，在独立 OperationPlan 中整理共享工作副本目录。
 - 用户习惯和显式记忆参与排序。
 - 更完整的引用预览抽屉和跨文件比较工作台。
 - Neo4j/GraphRAG 作为可选召回增强。

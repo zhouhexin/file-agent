@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import json
+import re
 import time
+import traceback
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -22,6 +24,12 @@ user_id_var: ContextVar[str | None] = ContextVar("user_id", default=None)
 conversation_id_var: ContextVar[str | None] = ContextVar("conversation_id", default=None)
 
 _LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
+_MAX_EXCEPTION_TRACEBACK_CHARS = 50_000
+_SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)\b(password|passwd|pwd|api[_-]?key|access[_-]?token|refresh[_-]?token|"
+    r"authorization|secret)\b(\s*[:=]\s*)([^\s,;]+)"
+)
+_BEARER_TOKEN_PATTERN = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
 
 
 def new_request_id() -> str:
@@ -101,6 +109,34 @@ def log_event(
     }
     record.update({key: value for key, value in extra.items() if value is not None})
     _append_jsonl(record, settings=resolved_settings)
+
+
+def format_exception_traceback(error: BaseException, *, settings: Settings | None = None) -> str:
+    """生成仅供服务器日志使用的脱敏异常堆栈。
+
+    traceback 用于运维定位代码位置，不能写入数据库或普通用户响应。已知配置密钥和
+    常见凭据赋值会被替换；同时限制单条堆栈长度，避免异常对象造成日志无限膨胀。
+    """
+
+    resolved_settings = settings or get_settings()
+    formatted = "".join(
+        traceback.format_exception(type(error), error, error.__traceback__)
+    )
+    for sensitive_value in (
+        resolved_settings.jwt_secret_key,
+        resolved_settings.llm_api_key,
+        resolved_settings.neo4j_password,
+    ):
+        if sensitive_value and len(sensitive_value) >= 4:
+            formatted = formatted.replace(sensitive_value, "<redacted>")
+    formatted = _BEARER_TOKEN_PATTERN.sub("Bearer <redacted>", formatted)
+    formatted = _SENSITIVE_ASSIGNMENT_PATTERN.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}<redacted>",
+        formatted,
+    )
+    if len(formatted) > _MAX_EXCEPTION_TRACEBACK_CHARS:
+        return formatted[:_MAX_EXCEPTION_TRACEBACK_CHARS] + "\n...[traceback truncated]"
+    return formatted
 
 
 def cleanup_old_logs() -> None:

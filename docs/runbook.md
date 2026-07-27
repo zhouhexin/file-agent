@@ -164,7 +164,8 @@ Jieba 在应用层生成中文词项，PostgreSQL 使用 `simple` FTS/GIN 和 `p
 重命名/移动、恢复、摘要完成和分类建议写入会在同一事务更新投影；旧数据可由
 `DocumentSearchProfileService.backfill_profiles()` 或 `reconcile_profiles()` 幂等补齐。生产迁移完成后，
 用以下两类对话烟测确认：上传后搜索文件名或分类主题；再搜索仅出现于原文中的短语，确认系统能返回
-可打开的文件卡和页码/Sheet 位置。检索结果不可出现其他用户、回收站或旧版本文件。
+可打开的文件卡和页码/Sheet 位置。检索可以返回唯一共享工作目录中的 `ACTIVE` 文件，但不可出现其他
+用户的个人会话或上传来源，也不可出现回收站或旧版本文件。
 
 阶段四新增迁移为 `20260724_0001_create_document_search_profiles` 和
 `20260724_0002_finalize_document_search_profiles`。部署前先确认只有一个 head：

@@ -145,8 +145,14 @@ class FilesystemJobQueue:
         self.db.flush()
         return job
 
-    def mark_failed(self, *, job: FilesystemJob, error_message: str) -> FilesystemJob:
-        """标记任务失败。"""
+    def mark_failed(
+        self,
+        *,
+        job: FilesystemJob,
+        error_message: str,
+        event_details: dict | None = None,
+    ) -> FilesystemJob:
+        """标记任务失败，并在事件中保留可关联但不含堆栈的诊断字段。"""
 
         job.status = "FAILED"
         job.error_message = error_message
@@ -154,7 +160,12 @@ class FilesystemJobQueue:
         job.lease_expires_at = None
         job.lease_owner = None
         job.updated_at = job.finished_at
-        self.repository.create_event(job_id=job.id, level="ERROR", message=error_message)
+        self.repository.create_event(
+            job_id=job.id,
+            level="ERROR",
+            message=error_message,
+            details=event_details,
+        )
         self.db.flush()
         return job
 
@@ -169,11 +180,22 @@ class FilesystemJobQueue:
         job.updated_at = now
         self.db.flush()
 
-    def mark_retry(self, *, job: FilesystemJob, error_message: str, retry_after_seconds: int) -> FilesystemJob:
+    def mark_retry(
+        self,
+        *,
+        job: FilesystemJob,
+        error_message: str,
+        retry_after_seconds: int,
+        event_details: dict | None = None,
+    ) -> FilesystemJob:
         """在未超过最大尝试次数时释放租约并延后重试。"""
 
         if job.attempt_count >= job.max_attempts:
-            return self.mark_failed(job=job, error_message=error_message)
+            return self.mark_failed(
+                job=job,
+                error_message=error_message,
+                event_details=event_details,
+            )
         now = utcnow()
         job.status = "PENDING"
         job.error_message = error_message
@@ -186,7 +208,11 @@ class FilesystemJobQueue:
             job_id=job.id,
             level="WARNING",
             message="任务将在稍后重试",
-            details={"attempt_count": job.attempt_count, "max_attempts": job.max_attempts},
+            details={
+                "attempt_count": job.attempt_count,
+                "max_attempts": job.max_attempts,
+                **dict(event_details or {}),
+            },
         )
         self.db.flush()
         return job

@@ -14,7 +14,12 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.core.logging import log_context, log_event, new_request_id
+from app.core.logging import (
+    format_exception_traceback,
+    log_context,
+    log_event,
+    new_request_id,
+)
 from app.db.models import (
     AgentRun,
     FilesystemJob,
@@ -115,7 +120,11 @@ def process_next_filesystem_job(
             return None
 
         job_id = str(job.id)
-        with log_context(request_id=new_request_id()):
+        # 领取租约和尝试次数必须先独立提交。若与实际文件处理共用事务，处理失败后的
+        # rollback 会把 attempt_count 一并撤销，任务将永远停留在第 0 次重试。
+        db.commit()
+        request_id = new_request_id()
+        with log_context(request_id=request_id):
             started_at = time.perf_counter()
             _print_worker_status("任务开始", job=job)
             log_event(
@@ -143,11 +152,30 @@ def process_next_filesystem_job(
                 )
             except Exception as exc:
                 db.rollback()
+                # 先记录服务器专用堆栈，即使后续写回任务状态也发生异常，原始根因仍可
+                # 通过 error_reference 定位；数据库和普通响应只保留脱敏错误摘要。
+                log_event(
+                    "filesystem.worker.failed",
+                    level="ERROR",
+                    agent_run_id=job_id,
+                    job_id=job_id,
+                    status="FAILED",
+                    error_code=exc.__class__.__name__,
+                    error_reference=request_id,
+                    exception_traceback=format_exception_traceback(exc),
+                    message="文件系统任务执行失败，请使用 error_reference 查看服务器日志",
+                )
                 failed_db = session_factory()
                 try:
                     failed_job = failed_db.get(FilesystemJob, job_id)
                     if failed_job is not None:
                         public_error = _public_job_error_message(job=failed_job, error=exc)
+                        failure_details = {
+                            "attempt_count": failed_job.attempt_count,
+                            "max_attempts": failed_job.max_attempts,
+                            "error_code": exc.__class__.__name__,
+                            "error_reference": request_id,
+                        }
                         queue = FilesystemJobQueue(failed_db)
                         if FileLifecycleJobProcessor.supports(failed_job.job_type):
                             retrying = failed_job.attempt_count < failed_job.max_attempts
@@ -161,11 +189,20 @@ def process_next_filesystem_job(
                                     job=failed_job,
                                     error_message=public_error,
                                     retry_after_seconds=get_settings().upload_archive_retry_interval_seconds,
+                                    event_details=failure_details,
                                 )
                             else:
-                                queue.mark_failed(job=failed_job, error_message=public_error)
+                                queue.mark_failed(
+                                    job=failed_job,
+                                    error_message=public_error,
+                                    event_details=failure_details,
+                                )
                         else:
-                            queue.mark_failed(job=failed_job, error_message=public_error)
+                            queue.mark_failed(
+                                job=failed_job,
+                                error_message=public_error,
+                                event_details=failure_details,
+                            )
                         _mark_agent_run_failed_for_job(
                             db=failed_db,
                             job=failed_job,
@@ -176,17 +213,8 @@ def process_next_filesystem_job(
                             "任务失败",
                             job=failed_job,
                             duration_ms=int((time.perf_counter() - started_at) * 1000),
-                            message=public_error,
+                            message=f"{public_error} error_reference={request_id}",
                         )
-                    log_event(
-                        "filesystem.worker.failed",
-                        level="ERROR",
-                        agent_run_id=job_id,
-                        job_id=job_id,
-                        status="FAILED",
-                        error_code=exc.__class__.__name__,
-                        message="文件系统任务执行失败，详细堆栈仅保留在服务端异常日志中",
-                    )
                 finally:
                     failed_db.close()
                 raise

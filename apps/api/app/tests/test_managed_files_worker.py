@@ -1,5 +1,6 @@
 """受管目录 worker 测试。"""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -10,10 +11,12 @@ from app.db.models import (
     ChangeSet,
     DocumentCategorySuggestion,
     FilesystemJob,
+    FilesystemJobEvent,
     ManagedFile,
     ManagedRoot,
     WorkingCopy,
     WorkingCopyRoot,
+    utcnow,
 )
 from app.modules.managed_files.worker import _public_job_error_message, process_next_filesystem_job
 from app.modules.managed_files.scanner import ManagedFileScanner
@@ -435,4 +438,92 @@ def test_worker_hides_internal_error_details_for_user_classification_jobs(monkey
         assert "password" not in failed_job.error_message
     finally:
         db.close()
+        clear_overrides()
+
+
+def test_lifecycle_worker_persists_attempts_stops_retrying_and_logs_traceback(
+    monkeypatch,
+    tmp_path: Path,
+):
+    """生命周期任务失败必须累计真实次数，达到上限后停止并留下可关联堆栈。
+
+    数据库只保存脱敏文案和 error_reference；底层异常堆栈仅进入服务器 JSONL，
+    防止普通任务状态接口泄露路径、密码或内部实现细节。
+    """
+
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    get_settings.cache_clear()
+    _client, session_factory = client_with_database()
+    with session_factory() as db:
+        job = FilesystemJob(
+            job_type="IMPORT_WORKING_COPIES",
+            queue_name="IMPORT",
+            status="PENDING",
+            payload_json={},
+            result_json={},
+            max_attempts=3,
+        )
+        db.add(job)
+        db.commit()
+        job_id = job.id
+
+    def fail_job(*, db, job):
+        raise RuntimeError("内部导入失败 password=unsafe")
+
+    monkeypatch.setattr("app.modules.managed_files.worker._process_job", fail_job)
+
+    try:
+        error_references: list[str] = []
+        for expected_attempt in range(1, 4):
+            with pytest.raises(RuntimeError, match="内部导入失败"):
+                process_next_filesystem_job(
+                    session_factory=session_factory,
+                    worker_id="retry-regression-worker",
+                    queue_names={"IMPORT"},
+                )
+
+            with session_factory() as db:
+                persisted_job = db.get(FilesystemJob, job_id)
+                assert persisted_job is not None
+                assert persisted_job.attempt_count == expected_attempt
+                expected_status = "PENDING" if expected_attempt < 3 else "FAILED"
+                assert persisted_job.status == expected_status
+                latest_event = (
+                    db.query(FilesystemJobEvent)
+                    .filter(FilesystemJobEvent.job_id == job_id)
+                    .order_by(FilesystemJobEvent.created_at.desc())
+                    .first()
+                )
+                assert latest_event is not None
+                assert latest_event.details_json["attempt_count"] == expected_attempt
+                assert latest_event.details_json["max_attempts"] == 3
+                assert latest_event.details_json["error_code"] == "RuntimeError"
+                error_reference = latest_event.details_json["error_reference"]
+                assert error_reference.startswith("req_")
+                error_references.append(error_reference)
+
+                if expected_attempt < 3:
+                    # 测试中立即放开下一次领取，不等待生产环境的退避时间。
+                    persisted_job.available_at = utcnow()
+                    db.commit()
+
+        log_records: list[dict] = []
+        for path in sorted((tmp_path / "logs").glob("file-agent-*.log")):
+            log_records.extend(
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            )
+        failure_logs = [
+            item
+            for item in log_records
+            if item.get("event") == "filesystem.worker.failed"
+            and item.get("job_id") == job_id
+        ]
+        assert len(failure_logs) == 3
+        assert {item["error_reference"] for item in failure_logs} == set(error_references)
+        assert all("fail_job" in item["exception_traceback"] for item in failure_logs)
+        assert all("password=<redacted>" in item["exception_traceback"] for item in failure_logs)
+        assert all("unsafe" not in item["exception_traceback"] for item in failure_logs)
+    finally:
+        get_settings.cache_clear()
         clear_overrides()
