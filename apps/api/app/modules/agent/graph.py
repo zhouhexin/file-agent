@@ -1255,10 +1255,9 @@ def _build_general_chat_response(intent_summary: Dict[str, Any]) -> str:
     if intent_summary.get("intent") == "MISSING_FILE_SCOPE":
         if any(keyword in user_goal.lower() for keyword in ["重命名", "改名", "更名", "rename"]):
             return (
-                "我还不能确定要重命名哪一个文件。请重新附加该文件，"
-                "或者明确回复：把“原文件名.ext”重命名为“新文件名.ext”。"
+                "我还不能确定要重命名哪一个文件。请明确回复：把“原文件名.ext”重命名为“新文件名.ext”。"
             )
-        return "我还不能确定要处理哪一个文件。请重新附加文件或写出完整文件名。"
+        return "我还不能确定要处理哪一个文件。请使用完整文件名。"
     if user_goal in {"你好", "您好", "hello", "hi", "Hello", "Hi"}:
         return "你好，我在。请告诉我你想聊什么。"
     return "我已收到。请继续说明你的需求。"

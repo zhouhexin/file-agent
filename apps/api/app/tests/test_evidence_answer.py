@@ -22,6 +22,7 @@ from app.db.models import (
     EvidenceSpan,
     QAAnswer,
     TrashEntry,
+    UploadArchiveRecord,
     User,
     Workspace,
     WorkingCopy,
@@ -449,6 +450,62 @@ def test_index_pending_is_not_reported_as_no_matching_fact():
     assert result["index_status"] == "INDEX_PENDING"
     assert "索引尚未完成" in result["answer"]
     assert client.calls == 0
+
+
+def test_uploaded_document_id_resolves_to_completed_active_working_copy():
+    """worker 完成导入后，上传附件 ID 必须沿归档血缘解析到活动工作副本。"""
+
+    db = _session()
+    _seed(db)
+    working_document = db.get(Document, "document-1")
+    assert working_document is not None
+    upload_document = Document(
+        id="upload-document-1",
+        user_id="user-1",
+        workspace_id="workspace-shared",
+        original_filename="申报通知.docx",
+        content_type=working_document.content_type,
+        size_bytes=working_document.size_bytes,
+        sha256=working_document.sha256,
+        status="UPLOADED",
+        ingest_status="INGESTED",
+    )
+    upload_version = DocumentVersion(
+        id="upload-version-1",
+        document_id=upload_document.id,
+        version_number=1,
+        storage_tier="UPLOAD",
+        storage_path="quarantine/申报通知.docx",
+        filename=upload_document.original_filename,
+        content_type=upload_document.content_type,
+        size_bytes=upload_document.size_bytes,
+        sha256=upload_document.sha256,
+        source_type="UPLOAD",
+    )
+    archive = UploadArchiveRecord(
+        upload_document_version_id=upload_version.id,
+        managed_file_id="managed-file-1",
+        content_sha256=upload_document.sha256,
+        status="ARCHIVED",
+    )
+    db.add_all([upload_document, upload_version, archive])
+    db.flush()
+    client = FakeEvidenceClient()
+
+    result = EvidenceAnswerService(
+        db=db,
+        user_id="user-1",
+        conversation_id="conversation-1",
+        settings=_settings(),
+        client=client,
+    ).answer(
+        question="这份文件的申报截止时间是什么？",
+        document_ids=[upload_document.id],
+    )
+
+    assert result["status"] == "COMPLETED"
+    assert result["references"][0]["document_id"] == "document-1"
+    assert client.calls == 1
 
 
 def test_full_summary_marks_partial_instead_of_silently_truncating_batches():

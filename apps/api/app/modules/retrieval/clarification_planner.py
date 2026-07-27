@@ -24,6 +24,41 @@ class FileSearchClarificationPlanner:
         """生成受 Tool schema 约束的检索续跑计划。"""
 
         value = self.selection
+        if value.match_mode == "RENAME_DOCUMENT_SELECTION":
+            return PlannerOutput(
+                intent="RESOLVE_RENAME_REVIEW",
+                user_goal=value.display_content,
+                slots={
+                    "document_ids": list(value.document_ids),
+                    "requested_outputs": ["rename_review_resolution"],
+                    "search_clarification_id": value.clarification_id,
+                },
+                selected_skills=[
+                    "file-rename",
+                    "operation-plan",
+                    "confirmed-file-action",
+                ],
+                steps=[
+                    {
+                        "step_id": "step-resolve-selected-rename-review",
+                        "skill": "file-rename",
+                        "tool_name": "resolve-rename-reviews",
+                        "input": {"message": value.display_content},
+                        "requires_confirmation": False,
+                        "risk_level": "medium",
+                        "expected_outputs": [
+                            "rename_results",
+                            "operation_plan",
+                        ],
+                        "writes": ["operation_plans"],
+                    }
+                ],
+                evidence_policy={
+                    "require_page_or_cell": False,
+                    "allow_no_evidence_answer": True,
+                },
+                confirmation_policy={"operation_plan_required": True},
+            )
         if value.document_ids:
             return PlannerOutput(
                 intent="EVIDENCE_ANSWER",

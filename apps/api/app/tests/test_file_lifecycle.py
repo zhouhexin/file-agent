@@ -398,6 +398,227 @@ def test_uploaded_low_confidence_name_can_be_corrected_in_same_conversation(monk
     clear_overrides()
 
 
+def test_missing_rename_source_returns_similar_file_selection_before_plan(
+    monkeypatch,
+    tmp_path,
+):
+    """原文件名未精确命中时必须先让用户选择相似文件，禁止直接改错文件。"""
+
+    _configure(monkeypatch, tmp_path)
+
+    def needs_review_suggestion(self, *, document):
+        """稳定生成一个需要用户确认名称的上传文件。"""
+
+        return (
+            {
+                "document_id": document.id,
+                "filename": document.original_filename,
+                "source_sha256": document.sha256,
+                "status": "NEEDS_REVIEW",
+                "proposed_filename": None,
+                "warnings": ["正文标题缺失或存在歧义，等待用户确认。"],
+                "errors": [],
+            },
+            None,
+        )
+
+    monkeypatch.setattr(
+        UploadedRenameSuggestionService,
+        "_suggest_one",
+        needs_review_suggestion,
+    )
+    client, _ = client_with_database()
+    headers = _auth(client, "uploaded-rename-similar-owner")
+    upload = _upload(
+        client,
+        headers,
+        filename="西安理工大学用印申请单.docx",
+        content=b"rename-similar-selection-content",
+    )
+    url = "/api/conversations/uploaded-rename-similar/messages"
+    initial = client.post(
+        url,
+        headers=headers,
+        json={
+            "content": "对上传文件进行重命名并且分类",
+            "attachments": [{"document_id": upload["document_id"]}],
+        },
+    )
+    assert initial.status_code == 200
+
+    placeholder_source = client.post(
+        url,
+        headers=headers,
+        json={
+            "content": (
+                "文件“原文件名.docx”"
+                "更正为“2026_用印申请单.docx”"
+            ),
+            "attachments": [],
+        },
+    )
+    assert placeholder_source.status_code == 200
+    placeholder_source_result = placeholder_source.json()["task_result"]
+    assert placeholder_source_result["response_type"] == "file_selection"
+    assert placeholder_source_result["operation_plan_id"] is None
+    assert [
+        item["filename"]
+        for item in placeholder_source_result["file_selection_result"]["choices"]
+    ] == ["西安理工大学用印申请单.docx"]
+
+    # 新一轮更具体的近似文件名会替代旧选择卡，并继续要求用户明确选择。
+    selection_response = client.post(
+        url,
+        headers=headers,
+        json={
+            "content": (
+                "把 “西安理工大学用印申请.docx”"
+                " 重命名为 “2026_用印申请单.docx”"
+            ),
+            "attachments": [],
+        },
+    )
+
+    assert selection_response.status_code == 200
+    selection_result = selection_response.json()["task_result"]
+    assert selection_result["response_type"] == "file_selection"
+    assert selection_result["operation_plan_id"] is None
+    choices = selection_result["file_selection_result"]["choices"]
+    assert [item["filename"] for item in choices] == [
+        "西安理工大学用印申请单.docx"
+    ]
+
+    resolved = client.post(
+        (
+            "/api/file-search/clarifications/"
+            f"{selection_result['file_selection_result']['clarification_id']}/resolve"
+        ),
+        headers=headers,
+        json={"option_id": choices[0]["option_id"], "custom_phrase": None},
+    )
+
+    assert resolved.status_code == 200
+    resolved_result = resolved.json()["task_result"]
+    assert resolved_result["response_type"] == "operation_plan"
+    assert resolved_result["operation_plan_id"]
+    plan = client.get(
+        f"/api/operations/plans/{resolved_result['operation_plan_id']}",
+        headers=headers,
+    ).json()
+    assert plan["items"][0]["before"]["filename"] == "西安理工大学用印申请单.docx"
+    assert plan["items"][0]["after"]["filename"] == "2026_用印申请单.docx"
+    clear_overrides()
+
+
+def test_missing_rename_source_without_similar_file_requests_reattachment(
+    monkeypatch,
+    tmp_path,
+):
+    """扩大当前会话候选后仍无相似文件时，必须提示重新附加而不是返回笼统空结果。"""
+
+    _configure(monkeypatch, tmp_path)
+
+    def needs_review_suggestion(self, *, document):
+        """稳定生成一个与用户所报文件名无关的待确认文件。"""
+
+        return (
+            {
+                "document_id": document.id,
+                "filename": document.original_filename,
+                "source_sha256": document.sha256,
+                "status": "NEEDS_REVIEW",
+                "proposed_filename": None,
+                "warnings": ["正文标题缺失或存在歧义，等待用户确认。"],
+                "errors": [],
+            },
+            None,
+        )
+
+    monkeypatch.setattr(
+        UploadedRenameSuggestionService,
+        "_suggest_one",
+        needs_review_suggestion,
+    )
+    client, _ = client_with_database()
+    headers = _auth(client, "uploaded-rename-no-similar-owner")
+    upload = _upload(
+        client,
+        headers,
+        filename="西安理工大学用印申请单.docx",
+        content=b"rename-no-similar-content",
+    )
+    url = "/api/conversations/uploaded-rename-no-similar/messages"
+    client.post(
+        url,
+        headers=headers,
+        json={
+            "content": "对上传文件进行重命名并且分类",
+            "attachments": [{"document_id": upload["document_id"]}],
+        },
+    )
+
+    response = client.post(
+        url,
+        headers=headers,
+        json={
+            "content": (
+                "文件“火星探测器发射记录.pdf”"
+                "更正为“新火星记录.pdf”"
+            ),
+            "attachments": [],
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()["task_result"]
+    assert result["operation_plan_id"] is None
+    assert result["file_selection_result"] is None
+    assert "没有可供确认的相似文件" in result["final_response"]
+    assert "重新附加" in result["final_response"]
+    clear_overrides()
+
+
+def test_rename_similarity_expands_to_user_active_shared_working_copies(
+    monkeypatch,
+    tmp_path,
+):
+    """当前会话无附件时也应从用户可见的活动共享工作副本返回相似候选。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "active-working-copy-rename-owner")
+    _upload(
+        client,
+        headers,
+        filename="2020年度个人述职报告.txt",
+        content=b"active shared working copy rename candidate",
+    )
+    _drain(SessionLocal)
+
+    response = client.post(
+        "/api/conversations/active-working-copy-rename/messages",
+        headers=headers,
+        json={
+            "content": (
+                "文件“2020个人述职报告.txt”"
+                "更正为“2020年度述职报告.txt”"
+            ),
+            "attachments": [],
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()["task_result"]
+    assert result["response_type"] == "file_selection"
+    assert result["operation_plan_id"] is None
+    choices = result["file_selection_result"]["choices"]
+    assert [item["filename"] for item in choices] == [
+        "2020年度个人述职报告.txt"
+    ]
+    assert choices[0]["working_copy_id"]
+    clear_overrides()
+
+
 def test_trashed_upload_source_cannot_read_historical_content(monkeypatch, tmp_path):
     """上传来源 ID 映射到已删除工作副本时，也不能复用历史正文或回收站文件。"""
 

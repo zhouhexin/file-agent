@@ -114,7 +114,7 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         pending_decisions.append(
             {
                 "type": "file_selection",
-                "message": "找到多个同名但内容不同的文件，请先选择一个文件。",
+                "message": "请先选择一个具体文件后继续。",
             }
         )
     for item in document_results:
@@ -530,11 +530,15 @@ def _evidence_answer_result(result: AgentRunResult) -> dict[str, Any] | None:
 
 
 def _file_selection_result(result: AgentRunResult) -> dict[str, Any] | None:
-    """投影同名不同内容文件选择卡，内部哈希不会进入普通接口。"""
+    """投影证据回答或重命名候选选择卡，内部哈希不会进入普通接口。"""
 
     for invocation in result.tool_invocations:
         output = invocation.output_json
-        if invocation.tool_name != "evidence-answer" or output.get("kind") != "file_selection":
+        if (
+            invocation.tool_name
+            not in {"evidence-answer", "resolve-rename-reviews"}
+            or output.get("kind") != "file_selection"
+        ):
             continue
         return {
             "clarification_id": output.get("clarification_id"),

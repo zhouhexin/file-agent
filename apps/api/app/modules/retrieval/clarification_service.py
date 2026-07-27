@@ -151,15 +151,31 @@ class FileSearchClarificationService:
         if option is None:
             raise FileSearchClarificationError("选择项不属于当前检索")
 
-        if record.relation_mode == "DOCUMENT_SELECTION":
+        if record.relation_mode in {
+            "DOCUMENT_SELECTION",
+            "RENAME_DOCUMENT_SELECTION",
+        }:
             document_id = str(option.get("document_id") or "")
             if not document_id:
                 raise FileSearchClarificationError("文件选择项缺少有效文件")
             phrases = ()
             document_ids = (document_id,)
-            match_mode = "AUTO"
-            require_body = True
-            display_content = f"使用“{str(option.get('label') or '所选文件')}”继续回答"
+            if record.relation_mode == "RENAME_DOCUMENT_SELECTION":
+                source_filename = str(option.get("source_filename") or "")
+                target_filename = str(option.get("target_filename") or "")
+                if not source_filename or not target_filename:
+                    raise FileSearchClarificationError("重命名选择项缺少文件名")
+                match_mode = "RENAME_DOCUMENT_SELECTION"
+                require_body = False
+                display_content = (
+                    f"文件“{source_filename}”更正为“{target_filename}”"
+                )
+            else:
+                match_mode = "AUTO"
+                require_body = True
+                display_content = (
+                    f"使用“{str(option.get('label') or '所选文件')}”继续回答"
+                )
         elif option_id == "custom":
             phrase = validate_custom_search_phrase(custom_phrase or "")
             phrases = (phrase,)
@@ -332,13 +348,21 @@ class FileSearchClarificationService:
         return {
             "id": record.id,
             "status": record.status,
-            "prompt": "请选择这次需要查找的范围。",
+            "prompt": (
+                "请选择要重命名的具体文件。"
+                if record.relation_mode == "RENAME_DOCUMENT_SELECTION"
+                else "请选择这次需要查找的范围。"
+            ),
             "core_phrase": record.core_phrase,
             "options": options,
-            "allow_custom_phrase": True,
+            "allow_custom_phrase": record.relation_mode not in {
+                "DOCUMENT_SELECTION",
+                "RENAME_DOCUMENT_SELECTION",
+            },
             "selection_type": (
                 "DOCUMENT_SELECTION"
-                if record.relation_mode == "DOCUMENT_SELECTION"
+                if record.relation_mode
+                in {"DOCUMENT_SELECTION", "RENAME_DOCUMENT_SELECTION"}
                 else "SEARCH_PHRASE"
             ),
             "expires_at": record.expires_at.isoformat(),

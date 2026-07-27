@@ -20,6 +20,7 @@ from app.core.config import Settings, get_settings
 from app.core.logging import log_event
 from app.db.models import (
     AnswerReference,
+    Document,
     DocumentChunk,
     DocumentCategorySuggestion,
     DocumentIndexRun,
@@ -27,6 +28,7 @@ from app.db.models import (
     EvidenceSpan,
     QAAnswer,
     TrashEntry,
+    UploadArchiveRecord,
     WorkingCopy,
 )
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
@@ -434,21 +436,122 @@ class EvidenceAnswerService:
     def _resolve_active_working_copies(
         self, document_ids: list[str]
     ) -> list[tuple[WorkingCopy, DocumentVersion]]:
-        """按共享工作区解析当前活动版本，不接受历史 DocumentVersion。"""
+        """把上传附件或工作副本 Document ID 解析为当前活动版本。
+
+        前端附件长期保存上传 Document ID，而后台导入会为共享工作副本创建新的
+        Document。这里必须通过 UploadArchiveRecord 的受控血缘映射二者；不能仅因
+        ID 不同就把已经完成导入的文件误报为仍在等待 worker。
+        """
 
         if not document_ids:
             return []
-        return (
+        direct_rows = (
             self.db.query(WorkingCopy, DocumentVersion)
             .join(DocumentVersion, DocumentVersion.id == WorkingCopy.current_version_id)
+            .join(Document, Document.id == WorkingCopy.document_id)
             .filter(
                 WorkingCopy.workspace_id == self.workspace_id,
                 WorkingCopy.status == "ACTIVE",
                 WorkingCopy.document_id.in_(document_ids),
+                Document.user_id == self.user_id,
             )
-            .order_by(WorkingCopy.created_at.asc(), WorkingCopy.id.asc())
             .all()
         )
+        direct_by_document_id = {
+            working_copy.document_id: (working_copy, version)
+            for working_copy, version in direct_rows
+        }
+        unresolved_ids = [
+            document_id
+            for document_id in document_ids
+            if document_id not in direct_by_document_id
+        ]
+        mapped_by_upload_document_id: dict[
+            str,
+            tuple[WorkingCopy, DocumentVersion],
+        ] = {}
+        if unresolved_ids:
+            upload_versions = (
+                self.db.query(DocumentVersion)
+                .join(Document, Document.id == DocumentVersion.document_id)
+                .filter(
+                    DocumentVersion.document_id.in_(unresolved_ids),
+                    DocumentVersion.storage_tier == "UPLOAD",
+                    Document.user_id == self.user_id,
+                )
+                .order_by(
+                    DocumentVersion.document_id.asc(),
+                    DocumentVersion.version_number.desc(),
+                )
+                .all()
+            )
+            latest_upload_by_document: dict[str, DocumentVersion] = {}
+            for version in upload_versions:
+                latest_upload_by_document.setdefault(version.document_id, version)
+            archives = (
+                self.db.query(UploadArchiveRecord)
+                .filter(
+                    UploadArchiveRecord.upload_document_version_id.in_(
+                        [version.id for version in latest_upload_by_document.values()]
+                    ),
+                    UploadArchiveRecord.status == "ARCHIVED",
+                    UploadArchiveRecord.managed_file_id.is_not(None),
+                )
+                .all()
+                if latest_upload_by_document
+                else []
+            )
+            archive_by_version_id = {
+                archive.upload_document_version_id: archive
+                for archive in archives
+            }
+            managed_file_ids = {
+                str(archive.managed_file_id)
+                for archive in archives
+                if archive.managed_file_id
+            }
+            mapped_rows = (
+                self.db.query(WorkingCopy, DocumentVersion)
+                .join(
+                    DocumentVersion,
+                    DocumentVersion.id == WorkingCopy.current_version_id,
+                )
+                .join(Document, Document.id == WorkingCopy.document_id)
+                .filter(
+                    WorkingCopy.workspace_id == self.workspace_id,
+                    WorkingCopy.status == "ACTIVE",
+                    WorkingCopy.managed_file_id.in_(managed_file_ids),
+                    Document.user_id == self.user_id,
+                )
+                .all()
+                if managed_file_ids
+                else []
+            )
+            row_by_managed_file_id = {
+                working_copy.managed_file_id: (working_copy, version)
+                for working_copy, version in mapped_rows
+            }
+            for document_id, upload_version in latest_upload_by_document.items():
+                archive = archive_by_version_id.get(upload_version.id)
+                if archive is None or not archive.managed_file_id:
+                    continue
+                row = row_by_managed_file_id.get(archive.managed_file_id)
+                if row is not None:
+                    mapped_by_upload_document_id[document_id] = row
+
+        # 按用户传入顺序返回并去重；同一工作副本不能因上传 ID 和工作副本 ID 同时出现而重复回答。
+        resolved: list[tuple[WorkingCopy, DocumentVersion]] = []
+        seen_working_copy_ids: set[str] = set()
+        for document_id in document_ids:
+            row = (
+                direct_by_document_id.get(document_id)
+                or mapped_by_upload_document_id.get(document_id)
+            )
+            if row is None or row[0].id in seen_working_copy_ids:
+                continue
+            seen_working_copy_ids.add(row[0].id)
+            resolved.append(row)
+        return resolved
 
     def _recall_active_working_copies(
         self, question: str
