@@ -1029,8 +1029,7 @@ Request:
 ```json
 {
   "question": "国家励志奖学金申请流程是什么？",
-  "attachment_document_ids": [],
-  "top_k": 8
+  "attachment_document_ids": []
 }
 ```
 
@@ -1040,45 +1039,78 @@ Behavior:
 create or reuse AgentRun depending on caller
 retrieve relevant chunks
 call chat model using evidence-answer Skill
-save assistant message
 save qa_answers
 save answer_references
-return answer and references
+reuse the AgentRun user-task projection instead of inserting a duplicate assistant message
+return answer and compact file references
 ```
 
 Response:
 
 ```json
 {
-  "answer_id": "answer-uuid",
-  "message_id": "assistant-message-uuid",
-  "agent_run_id": "agent-run-uuid",
-  "answer": "根据当前知识库资料，申请流程包括提交申请表、学院审核和学校复核。",
-  "references": [
-    {
-      "reference_id": "reference-uuid",
-      "document_id": "document-uuid",
-      "document_title": "国家励志奖学金申请表.pdf",
-      "chunk_id": "chunk-uuid",
-      "page_no": 1,
-      "sheet_name": null,
-      "cell_range": null,
-      "quote": "申请人提交申请表后，由学院审核并报学校复核。",
-      "score": 0.87
+  "message": {
+    "id": "user-message-uuid",
+    "role": "user",
+    "content": "国家励志奖学金申请流程是什么？"
+  },
+  "task_result": {
+    "task_id": "agent-run-uuid",
+    "task_status": "completed",
+    "response_type": "evidence_answer",
+    "final_response": "申请流程包括提交申请表、学院审核和学校复核。[1]",
+    "evidence_answer_result": {
+      "answer_id": "answer-uuid",
+      "status": "COMPLETED",
+      "answer": "申请流程包括提交申请表、学院审核和学校复核。[1]",
+      "files": [
+        {
+          "document_id": "document-uuid",
+          "document_version_id": "version-uuid",
+          "working_copy_id": "working-copy-uuid",
+          "filename": "国家励志奖学金申请表.pdf",
+          "category_labels": ["奖助学金 / 国家励志奖学金"],
+          "reference_indexes": [1],
+          "availability": "AVAILABLE",
+          "availability_message": "文件可用",
+          "can_open": true,
+          "can_restore": false
+        }
+      ],
+      "limitations": [],
+      "cached": false
     }
-  ]
+  }
 }
 ```
+
+完整 Evidence quote、Chunk ID、页码和单元格定位保存在数据库引用与文件预览中，不在普通聊天消息
+载荷重复返回。精确文件名命中回收站时返回 `trash_restore_selection`；同名不同内容候选返回
+持久化 `file_selection`，用户提交后端签发的 `option_id` 后才继续回答。加载历史会话时后端重新
+投影引用文件当前状态；已进入回收站的文件返回 `availability=TRASHED`、`can_open=false`，前端不得
+继续打开旧正文。
 
 No evidence response:
 
 ```json
 {
-  "answer_id": "answer-uuid",
-  "message_id": "assistant-message-uuid",
-  "agent_run_id": "agent-run-uuid",
-  "answer": "我没有在当前知识库中找到明确依据。",
-  "references": []
+  "message": {
+    "id": "user-message-uuid",
+    "role": "user"
+  },
+  "task_result": {
+    "task_status": "needs_attention",
+    "response_type": "evidence_answer",
+    "final_response": "没有找到能够支持回答的原文证据。",
+    "evidence_answer_result": {
+      "answer_id": null,
+      "status": "NO_EVIDENCE",
+      "answer": "没有找到能够支持回答的原文证据。",
+      "files": [],
+      "limitations": [],
+      "cached": false
+    }
+  }
 }
 ```
 

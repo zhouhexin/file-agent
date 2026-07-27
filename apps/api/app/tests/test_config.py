@@ -152,6 +152,41 @@ def test_settings_accepts_explicit_llm_summary_providers(monkeypatch, tmp_path):
     assert settings.chat_document_summary_provider == "disabled"
 
 
+def test_settings_loads_accuracy_first_evidence_answer_limits(monkeypatch, tmp_path):
+    """阶段五调用与证据上限必须可配置，未知 Provider 必须关闭式降级。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost/test")
+    monkeypatch.setenv("EVIDENCE_ANSWER_PROVIDER", "unknown-provider")
+    monkeypatch.setenv("EVIDENCE_ANSWER_MAX_DOCUMENTS", "18")
+    monkeypatch.setenv("EVIDENCE_ANSWER_MAX_ITEMS", "96")
+    monkeypatch.setenv("EVIDENCE_ANSWER_MAX_INPUT_CHARS", "240000")
+    monkeypatch.setenv("EVIDENCE_ANSWER_MAX_CALLS", "5")
+    monkeypatch.setenv("EVIDENCE_ANSWER_REPAIR_CALLS", "2")
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.evidence_answer_provider == "disabled"
+    assert settings.evidence_answer_max_documents == 18
+    assert settings.evidence_answer_max_items == 96
+    assert settings.evidence_answer_max_input_chars == 240000
+    assert settings.evidence_answer_max_calls == 5
+    assert settings.evidence_answer_repair_calls == 2
+
+
+def test_settings_rejects_invalid_evidence_answer_budget(monkeypatch, tmp_path):
+    """阶段五安全预算配置错误时必须明确失败，不能静默钳制为另一个值。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost/test")
+    monkeypatch.setenv("EVIDENCE_ANSWER_MAX_CALLS", "0")
+    _reset_settings_cache()
+
+    with pytest.raises(RuntimeError, match="EVIDENCE_ANSWER_MAX_CALLS"):
+        config.get_settings()
+
+
 def test_settings_defaults_paddleocr_model_source_to_baidu_bos(monkeypatch, tmp_path):
     """PaddleOCR 模型下载源默认必须使用百度 BOS，适配国内服务器部署。"""
 

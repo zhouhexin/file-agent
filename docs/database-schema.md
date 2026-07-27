@@ -728,6 +728,14 @@ create table qa_answers (
   question text not null,
   answer_text text not null,
   status varchar(40) not null,
+  answer_mode varchar(40) not null default 'FOCUSED',
+  request_fingerprint varchar(64) not null default '',
+  evidence_fingerprint varchar(64) not null default '',
+  prompt_version varchar(80) not null default '',
+  schema_version varchar(80) not null default '',
+  provider varchar(80) not null default 'disabled',
+  model_name varchar(160) not null default '',
+  usage_json jsonb not null default '{}'::jsonb,
   retrieval_trace_json jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
 );
@@ -742,14 +750,17 @@ create table answer_references (
   evidence_span_id uuid not null references evidence_spans(id) on delete restrict,
   document_id uuid not null references documents(id) on delete restrict,
   document_version_id uuid not null references document_versions(id) on delete restrict,
+  working_copy_id uuid null references working_copies(id) on delete restrict,
   reference_index integer not null,
   label varchar(255) not null default '',
   created_at timestamptz not null default now()
 );
 ```
 
-`qa_answers` 和 `answer_references` 在阶段三只建立持久化边界；必须到阶段五由已校验 Evidence 驱动，
-当前阶段不得生成占位回答或猜测性引用。
+`qa_answers` 和 `answer_references` 已在阶段五由活动工作副本和已校验 Evidence 驱动。历史引用的
+`working_copy_id` 可以为空；阶段五新回答必须写入该字段，缓存复用前必须再次确认工作副本仍为
+`ACTIVE` 且 `current_version_id` 未变化。表格确定性计算允许把单元格计算血缘保存在
+`retrieval_trace_json`，但不得让 LLM 计算或猜测数值。
 
 ### 4.21 operation_plans
 

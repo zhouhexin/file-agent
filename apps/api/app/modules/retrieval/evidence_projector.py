@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db.models import Document, DocumentChunk, DocumentIndexRun, EvidenceSpan, WorkingCopy
+from app.modules.chunks.service import INDEX_VERSION
 
 
 class SearchEvidenceProjector:
@@ -56,6 +57,7 @@ class SearchEvidenceProjector:
                 EvidenceSpan.chunk_id.in_(chunk_ids),
                 WorkingCopy.status == "ACTIVE",
                 DocumentIndexRun.status == "COMPLETED",
+                DocumentIndexRun.index_version == INDEX_VERSION,
             )
         )
         if self.workspace_id is not None:

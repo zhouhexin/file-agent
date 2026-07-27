@@ -38,7 +38,7 @@ MVP Skill 只保留业务编排边界。文件读取、表格读取、chunk、em
 | `managed-file-classification` | 分类编排自研；正文解析使用现有 adapter，图谱增强可使用 Neo4j/neo4j-graphrag-python | 用户要求对受管目录范围内的文件分类或重新分类 | `classify-managed-files`, `job-status-read`, `feedback-record` | 同步逐文件多标签结果或异步 Job、分类建议、证据、ChangeSet |
 | `file-rename` | 参考 tfeldmann/organize 的规则化命名与预览思想；工作副本执行器自研 | 用户要求按年份、文号和正文标题生成工作副本改名建议 | `generate-rename-suggestions`, `confirmed-file-action` | 字段证据、`RENAME_WORKING_COPIES` OperationPlan、工作副本路径记录、确认后的 ChangeSet |
 | `spreadsheet-workbench` | 使用 openpyxl、pandas 和可选 LibreOffice adapter | 用户请求表格 Profile、统计、校验、编辑、重算或格式转换 | `profile-spreadsheet`, `analyze-spreadsheet`, `validate-spreadsheet`, `operation-plan-create`；后续 `edit-spreadsheet`, `recalculate-spreadsheet` | 表结构、只读分析结果、校验报告、待确认编辑计划 |
-| `evidence-answer` | 使用 LangGraph/LangChain 编排和结构化输出；业务证据规则自研 | 用户提出需要回答的问题 | `hybrid-search`, `evidence-answer` | answer、references、无依据说明 |
+| `evidence-answer` | 使用 LangGraph 编排和结构化输出；活动版本、Evidence、引用与支持性校验自研 | 用户提出正文事实、总结、比较或解释请求 | `evidence-answer`；表格聚合继续使用 `analyze-spreadsheet` | 经校验回答、去重文件框、引用、限制、回收站或同名选择结果 |
 | `change-report` | 不直接使用开源 Skill；自研审计输出 | Tool 执行后需要回执 | `change-report` | ChangeSet 摘要、逐文件明细 |
 | `operation-plan` | 不直接使用开源 Skill；自研高风险操作规划 | 用户请求改名、移动、复制、删除、导出、外发 | `operation-plan-create` | PLANNED OperationPlan |
 | `confirmed-file-action` | 不直接使用开源 Skill；底层文件操作通过自研受控 Tool | 用户确认 OperationPlan | `confirmed-file-action`, `change-report` | 执行结果、ChangeSet |

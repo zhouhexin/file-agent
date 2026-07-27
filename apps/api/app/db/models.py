@@ -11,7 +11,7 @@ from typing import List, Optional
 from uuid import uuid4
 
 from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, func, Index, Integer, JSON, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import TSVECTOR
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import UserDefinedType
 
@@ -554,7 +554,11 @@ class EvidenceSpan(Base):
 
 
 class QAAnswer(Base):
-    """阶段五证据回答的持久化边界；阶段三只建表，不生成猜测性回答。"""
+    """阶段五证据回答的持久化边界。
+
+    请求、证据和模型指纹共同决定缓存是否可复用；任何工作副本状态或内容版本变化都必须
+    生成新的证据指纹，不能复用已经删除、替换或过期版本的回答。
+    """
 
     __tablename__ = "qa_answers"
 
@@ -571,7 +575,23 @@ class QAAnswer(Base):
     question: Mapped[str] = mapped_column(Text, nullable=False)
     answer_text: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="COMPLETED", index=True)
-    retrieval_trace_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    answer_mode: Mapped[str] = mapped_column(String(40), nullable=False, default="FOCUSED", index=True)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, default="", index=True)
+    evidence_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, default="", index=True)
+    prompt_version: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    schema_version: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    provider: Mapped[str] = mapped_column(String(80), nullable=False, default="disabled")
+    model_name: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    usage_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+        default=dict,
+    )
+    retrieval_trace_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+        default=dict,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
@@ -595,6 +615,9 @@ class AnswerReference(Base):
     )
     document_version_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("document_versions.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    working_copy_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("working_copies.id", ondelete="RESTRICT"), nullable=True, index=True
     )
     reference_index: Mapped[int] = mapped_column(Integer, nullable=False)
     label: Mapped[str] = mapped_column(String(255), nullable=False, default="")

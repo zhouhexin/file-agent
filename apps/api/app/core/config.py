@@ -66,6 +66,14 @@ DEFAULT_DOCUMENT_INDEX_MAX_CHUNKS = 50_000
 DEFAULT_DOCUMENT_SUMMARY_PROVIDER = "extractive"
 DEFAULT_CLASSIFICATION_SUMMARY_PROVIDER = "extractive"
 DEFAULT_CHAT_DOCUMENT_SUMMARY_PROVIDER = "llm"
+DEFAULT_EVIDENCE_ANSWER_PROVIDER = "llm"
+DEFAULT_EVIDENCE_ANSWER_PROMPT_VERSION = "evidence-answer-v1"
+DEFAULT_EVIDENCE_ANSWER_SCHEMA_VERSION = "evidence-answer-schema-v1"
+DEFAULT_EVIDENCE_ANSWER_MAX_DOCUMENTS = 12
+DEFAULT_EVIDENCE_ANSWER_MAX_ITEMS = 48
+DEFAULT_EVIDENCE_ANSWER_MAX_INPUT_CHARS = 120_000
+DEFAULT_EVIDENCE_ANSWER_MAX_CALLS = 3
+DEFAULT_EVIDENCE_ANSWER_REPAIR_CALLS = 1
 DEFAULT_UPLOAD_ALLOWED_EXTENSIONS = (
     ".pdf",
     ".doc",
@@ -111,6 +119,16 @@ class Settings(BaseModel):
     llm_classification_summary_prompt_version: str = "classification-topic-summary-v1"
     classification_summary_schema_version: str = "classification-topic-summary-schema-v1"
     chat_document_summary_provider: str = DEFAULT_CHAT_DOCUMENT_SUMMARY_PROVIDER
+    evidence_answer_enabled: bool = True
+    evidence_answer_provider: str = DEFAULT_EVIDENCE_ANSWER_PROVIDER
+    evidence_answer_prompt_version: str = DEFAULT_EVIDENCE_ANSWER_PROMPT_VERSION
+    evidence_answer_schema_version: str = DEFAULT_EVIDENCE_ANSWER_SCHEMA_VERSION
+    evidence_answer_max_documents: int = DEFAULT_EVIDENCE_ANSWER_MAX_DOCUMENTS
+    evidence_answer_max_items: int = DEFAULT_EVIDENCE_ANSWER_MAX_ITEMS
+    evidence_answer_max_input_chars: int = DEFAULT_EVIDENCE_ANSWER_MAX_INPUT_CHARS
+    evidence_answer_max_calls: int = DEFAULT_EVIDENCE_ANSWER_MAX_CALLS
+    evidence_answer_repair_calls: int = DEFAULT_EVIDENCE_ANSWER_REPAIR_CALLS
+    evidence_answer_cache_enabled: bool = True
     initial_working_copy_organization_enabled: bool = True
     initial_organization_confidence: float = DEFAULT_INITIAL_ORGANIZATION_CONFIDENCE
     upload_max_file_size_mb: int = DEFAULT_UPLOAD_MAX_FILE_SIZE_MB
@@ -285,6 +303,32 @@ def _normalize_chat_summary_provider(value: str) -> str:
     return normalized if normalized in {"llm", "disabled"} else DEFAULT_CHAT_DOCUMENT_SUMMARY_PROVIDER
 
 
+def _normalize_evidence_answer_provider(value: str) -> str:
+    """规范化阶段五回答 Provider，未知值不得隐式调用外部模型。"""
+
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"llm", "disabled"} else "disabled"
+
+
+def _bounded_int_env(
+    name: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    """读取有界整数配置，非法值必须在启动阶段明确失败，不能静默改写部署意图。"""
+
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} 必须是整数，当前值为 {raw!r}") from exc
+    if not minimum <= value <= maximum:
+        raise RuntimeError(f"{name} 必须在 {minimum} 到 {maximum} 之间，当前值为 {value}")
+    return value
+
+
 @lru_cache
 def get_settings() -> Settings:
     """读取环境变量并返回缓存后的配置对象。"""
@@ -336,6 +380,54 @@ def get_settings() -> Settings:
         chat_document_summary_provider=_normalize_chat_summary_provider(
             os.getenv("CHAT_DOCUMENT_SUMMARY_PROVIDER", DEFAULT_CHAT_DOCUMENT_SUMMARY_PROVIDER)
         ),
+        evidence_answer_enabled=os.getenv("EVIDENCE_ANSWER_ENABLED", "true").lower() == "true",
+        evidence_answer_provider=_normalize_evidence_answer_provider(
+            os.getenv("EVIDENCE_ANSWER_PROVIDER", DEFAULT_EVIDENCE_ANSWER_PROVIDER)
+        ),
+        evidence_answer_prompt_version=os.getenv(
+            "EVIDENCE_ANSWER_PROMPT_VERSION",
+            DEFAULT_EVIDENCE_ANSWER_PROMPT_VERSION,
+        ).strip()
+        or DEFAULT_EVIDENCE_ANSWER_PROMPT_VERSION,
+        evidence_answer_schema_version=os.getenv(
+            "EVIDENCE_ANSWER_SCHEMA_VERSION",
+            DEFAULT_EVIDENCE_ANSWER_SCHEMA_VERSION,
+        ).strip()
+        or DEFAULT_EVIDENCE_ANSWER_SCHEMA_VERSION,
+        evidence_answer_max_documents=_bounded_int_env(
+            "EVIDENCE_ANSWER_MAX_DOCUMENTS",
+            DEFAULT_EVIDENCE_ANSWER_MAX_DOCUMENTS,
+            minimum=1,
+            maximum=50,
+        ),
+        evidence_answer_max_items=_bounded_int_env(
+            "EVIDENCE_ANSWER_MAX_ITEMS",
+            DEFAULT_EVIDENCE_ANSWER_MAX_ITEMS,
+            minimum=1,
+            maximum=500,
+        ),
+        evidence_answer_max_input_chars=_bounded_int_env(
+            "EVIDENCE_ANSWER_MAX_INPUT_CHARS",
+            DEFAULT_EVIDENCE_ANSWER_MAX_INPUT_CHARS,
+            minimum=10_000,
+            maximum=1_000_000,
+        ),
+        evidence_answer_max_calls=_bounded_int_env(
+            "EVIDENCE_ANSWER_MAX_CALLS",
+            DEFAULT_EVIDENCE_ANSWER_MAX_CALLS,
+            minimum=1,
+            maximum=10,
+        ),
+        evidence_answer_repair_calls=_bounded_int_env(
+            "EVIDENCE_ANSWER_REPAIR_CALLS",
+            DEFAULT_EVIDENCE_ANSWER_REPAIR_CALLS,
+            minimum=0,
+            maximum=3,
+        ),
+        evidence_answer_cache_enabled=os.getenv(
+            "EVIDENCE_ANSWER_CACHE_ENABLED", "true"
+        ).lower()
+        == "true",
         initial_working_copy_organization_enabled=os.getenv(
             "INITIAL_WORKING_COPY_ORGANIZATION_ENABLED", "true"
         ).lower() == "true",

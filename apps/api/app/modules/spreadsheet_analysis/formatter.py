@@ -63,26 +63,14 @@ def _format_one_result(result: dict[str, Any]) -> str:
         lines.append("分工作表明细：")
         lines.extend(
             f"- Sheet“{item.get('sheet_name') or '未知'}”："
-            f"{_format_number(item.get('value'))}（匹配 {int(item.get('rows_matched') or 0)} 行）"
+            f"{_format_number(item.get('value'))}"
             for item in sheet_breakdown
         )
-
-    lines.append(
-        "数据范围："
-        f"扫描 {int(result.get('rows_scanned') or 0)} 行，"
-        f"筛选匹配 {int(result.get('rows_matched') or 0)} 行，"
-        f"纳入计算 {int(result.get('rows_included') or 0)} 行，"
-        f"忽略 {int(result.get('rows_ignored') or 0)} 行。"
-    )
-
-    evidence_items = [
-        item for item in result.get("evidence_items", [])
-        if isinstance(item, dict)
-    ]
-    if evidence_items:
-        lines.append("计算依据：" + "；".join(_format_evidence(item) for item in evidence_items[:12]) + "。")
-        if len(evidence_items) > 12:
-            lines.append(f"另有 {len(evidence_items) - 12} 行参与计算，页面仅展示前 12 行定位。")
+        rendered_values = " + ".join(
+            _format_number(item.get("value")) for item in sheet_breakdown
+        )
+        total_value = _format_number(rows[0].get("value")) if rows else "0"
+        lines.append(f"计算方式：{rendered_values} = {total_value}。")
 
     warnings = [str(item) for item in result.get("warnings", []) if str(item).strip()]
     if warnings:

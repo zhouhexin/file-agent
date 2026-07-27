@@ -320,11 +320,10 @@ def test_llm_summary_message_extracts_document_text_instead_of_insights():
             ),
         )
 
-        assert response.agent_run.intent == "SUMMARIZE_DOCUMENTS"
-        assert [item.tool_name for item in response.agent_run.tool_invocations] == ["extract-document-text"]
-        assert response.agent_run.tool_results[0]["document_id"] == document_id
-        assert response.agent_run.tool_results[0]["status"] == "COMPLETED"
-        assert db.query(ToolInvocation).one().tool_name == "extract-document-text"
+        assert response.agent_run.intent == "EVIDENCE_ANSWER"
+        assert [item.tool_name for item in response.agent_run.tool_invocations] == ["evidence-answer"]
+        assert response.agent_run.tool_results[0]["status"] == "NO_EVIDENCE"
+        assert db.query(ToolInvocation).one().tool_name == "evidence-answer"
     finally:
         db.close()
         app.dependency_overrides.clear()

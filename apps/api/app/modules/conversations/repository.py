@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Iterable
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -26,7 +27,7 @@ from app.db.models import (
     WorkingCopyRoot,
 )
 from app.modules.agent.repository import AgentRunRepository
-from app.modules.agent.user_receipt import build_user_task_receipt
+from app.modules.agent.user_receipt import UserTaskReceipt, build_user_task_receipt
 from app.modules.conversations.schemas import (
     ConversationAttachmentSummary,
     ConversationDetailResponse,
@@ -373,13 +374,33 @@ class ConversationRepository:
         # 决策完成后卡片本身也不再属于用户对话内容，但审计行仍保留在数据库。
         messages = self._exclude_resolved_duplicate_notifications(messages=messages)
         document_map = self._load_document_map(messages=messages, user_id=user_id)
-        availability_map = self._load_attachment_availability_map(document_map=document_map)
         agent_run_map = self._load_agent_run_map(messages=messages)
         agent_repository = AgentRunRepository(self.db)
         # 同一 AgentRun 只组装一次完整审计结果，再生成普通用户投影；完整结果不进入会话响应。
         agent_results = {
             message_id: agent_repository.to_result(run)
             for message_id, run in agent_run_map.items()
+        }
+        # 阶段五回答可能引用不在当前消息附件里的共享文件。历史回答恢复时也要重新查询这些
+        # 文件的当前状态，不能继续沿用回答生成时写入 Tool 输出的 AVAILABLE。
+        reference_document_ids = _evidence_reference_document_ids(agent_results.values())
+        missing_reference_ids = reference_document_ids.difference(document_map)
+        if missing_reference_ids:
+            referenced_documents = (
+                self.db.query(Document)
+                .filter(Document.id.in_(missing_reference_ids))
+                .all()
+            )
+            document_map.update(
+                {document.id: document for document in referenced_documents}
+            )
+        availability_map = self._load_attachment_availability_map(document_map=document_map)
+        task_receipts = {
+            message_id: self._refresh_evidence_file_availability(
+                receipt=build_user_task_receipt(agent_result),
+                availability_map=availability_map,
+            )
+            for message_id, agent_result in agent_results.items()
         }
         return ConversationDetailResponse(
             id=conversation.id,
@@ -408,8 +429,8 @@ class ConversationRepository:
                         if isinstance(item, dict) and not item.get("document_id")
                     ],
                     task_result=(
-                        build_user_task_receipt(agent_results[message.id])
-                        if message.id in agent_results
+                        task_receipts[message.id]
+                        if message.id in task_receipts
                         else None
                     ),
                 )
@@ -421,6 +442,42 @@ class ConversationRepository:
                 limit=limit,
             ),
         )
+
+    @staticmethod
+    def _refresh_evidence_file_availability(
+        *,
+        receipt: UserTaskReceipt,
+        availability_map: dict[str, AttachmentAvailabilityProjection],
+    ) -> UserTaskReceipt:
+        """用当前工作副本状态刷新历史证据文件框，回收站文件不得继续打开正文。"""
+
+        result = receipt.evidence_answer_result
+        if not isinstance(result, dict):
+            return receipt
+        for file in result.get("files", []):
+            if not isinstance(file, dict):
+                continue
+            document_id = str(file.get("document_id") or "")
+            availability = availability_map.get(document_id)
+            if availability is None:
+                file.update(
+                    {
+                        "availability": "UNAVAILABLE",
+                        "availability_message": "当前文件状态不可用",
+                        "can_open": False,
+                        "can_restore": False,
+                    }
+                )
+                continue
+            file.update(
+                {
+                    "availability": availability.file_availability,
+                    "availability_message": availability.availability_message,
+                    "can_open": availability.can_open,
+                    "can_restore": availability.can_restore,
+                }
+            )
+        return receipt
 
     def clear_visible_history(self, *, conversation_id: str, user_id: str) -> int:
         """逻辑清空当前用户会话中的可见消息，不删除文件或 Agent 审计。
@@ -745,6 +802,26 @@ class ConversationRepository:
                 for item in _deduplicate_document_attachment_items(message.attachments_json)
             ],
         )
+
+
+def _evidence_reference_document_ids(agent_results: Iterable[object]) -> set[str]:
+    """从阶段五 Tool 审计投影中收集文件 ID，只用于刷新历史文件框当前状态。"""
+
+    document_ids: set[str] = set()
+    for result in agent_results:
+        for invocation in getattr(result, "tool_invocations", []):
+            if getattr(invocation, "tool_name", "") != "evidence-answer":
+                continue
+            output = getattr(invocation, "output_json", {})
+            if not isinstance(output, dict):
+                continue
+            for reference in output.get("references", []):
+                if not isinstance(reference, dict):
+                    continue
+                document_id = str(reference.get("document_id") or "")
+                if document_id:
+                    document_ids.add(document_id)
+    return document_ids
 
 
 def _deduplicate_message_attachments(

@@ -241,6 +241,7 @@ def _deterministic_preflight_plan(
         # “查找与某人/主题有关的文件”是明确的工作副本语义检索。
         # 必须在 LLM 前固定进入 hybrid-search，不能随机退化成仅查文件名的目录列表。
         "SEARCH_FILES",
+        "EVIDENCE_ANSWER",
         "RESOLVE_RENAME_REVIEW",
         "CAPABILITY_HELP",
         "LIST_CLASSIFICATION_TAXONOMY",
@@ -433,6 +434,7 @@ def _aggregate_tool_results(
     insight_documents = _insight_documents_from_results(tool_results)
     classification_documents = _classification_documents_from_results(tool_results)
     return {
+        "evidence_answer": _evidence_answer_from_results(tool_results),
         "spreadsheet_workbench_results": _spreadsheet_workbench_results_from_results(tool_results),
         "spreadsheet_analysis_results": _spreadsheet_analysis_results_from_results(tool_results),
         "document_results": build_document_results_from_extraction_results(
@@ -517,6 +519,21 @@ def _spreadsheet_analysis_results_from_results(
     ]
 
 
+def _evidence_answer_from_results(
+    tool_results: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """提取阶段五回答、文件选择或回收站恢复卡的安全 Tool 结果。"""
+
+    for result in tool_results:
+        if result.get("kind") in {
+            "evidence_answer",
+            "file_selection",
+            "trash_restore_selection",
+        }:
+            return result
+    return {}
+
+
 def _spreadsheet_workbench_results_from_results(
     tool_results: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -533,6 +550,24 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
     """生成面向用户的最终运行摘要。"""
 
     result_summary = state.get("result_summary", {})
+
+    evidence_answer = result_summary.get("evidence_answer", {})
+    if evidence_answer:
+        status = str(evidence_answer.get("status") or "")
+        return {
+            "status": (
+                "NEEDS_REVIEW"
+                if status in {"NEEDS_CLARIFICATION", "NEEDS_CONFIRMATION", "NO_EVIDENCE", "PARTIAL"}
+                else "COMPLETED"
+                if evidence_answer.get("ok")
+                else "FAILED"
+            ),
+            "final_response": str(
+                evidence_answer.get("answer")
+                or evidence_answer.get("message")
+                or "当前没有可用于回答的原文证据。"
+            ),
+        }
 
     workbench_results = result_summary.get("spreadsheet_workbench_results", [])
     if workbench_results:

@@ -262,8 +262,10 @@ def test_person_total_amount_uses_deterministic_multi_sheet_plan_without_llm(tmp
     assert result["rows_matched"] == 3
     assert [item["sheet_name"] for item in result["sheet_breakdown"]] == ["论文", "专利"]
     assert "结果：6,500" in response
-    assert "Sheet“论文” B3, C3" in response
-    assert "Sheet“专利” B2, C2" in response
+    assert "Sheet“论文”：5,000" in response
+    assert "Sheet“专利”：1,500" in response
+    assert "计算方式：5,000 + 1,500 = 6,500" in response
+    assert " B3" not in response
 
     scoped_result = SpreadsheetAnalysisService(
         settings=SimpleNamespace(llm_enabled=False),

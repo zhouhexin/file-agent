@@ -28,7 +28,9 @@ export type TaskResult = {
     | 'async_job'
     | 'file_search_results'
     | 'trash_restore_selection'
-    | 'file_search_clarification';
+    | 'file_search_clarification'
+    | 'evidence_answer'
+    | 'file_selection';
   display_mode: 'default' | 'classification_cards';
   final_response: string | null;
   processed_count: number;
@@ -38,6 +40,8 @@ export type TaskResult = {
   file_search_result: FileSearchResult | null;
   trash_restore_result: TrashRestoreResult | null;
   file_search_clarification_result: FileSearchClarificationResult | null;
+  evidence_answer_result: EvidenceAnswerResult | null;
+  file_selection_result: FileSelectionResult | null;
   pending_job_ids: string[];
   operation_plan_id: string | null;
   pending_decisions: Array<Record<string, unknown>>;
@@ -108,6 +112,44 @@ export type FileSearchClarificationResult = {
   options: FileSearchClarificationOption[];
   allow_custom_phrase: boolean;
   expires_at: string | null;
+};
+
+export type EvidenceAnswerFile = {
+  document_id: string;
+  document_version_id: string;
+  working_copy_id: string;
+  filename: string;
+  category_labels: string[];
+  availability: 'AVAILABLE' | string;
+  availability_message?: string;
+  can_open?: boolean;
+  can_restore?: boolean;
+  reference_indexes: number[];
+};
+
+export type EvidenceAnswerResult = {
+  answer_id: string | null;
+  status: string;
+  answer: string;
+  limitations: string[];
+  files: EvidenceAnswerFile[];
+  cached: boolean;
+};
+
+export type FileSelectionChoice = {
+  option_id: string;
+  document_id: string;
+  document_version_id: string;
+  working_copy_id: string;
+  filename: string;
+  size_bytes: number;
+  created_at: string;
+};
+
+export type FileSelectionResult = {
+  clarification_id: string;
+  message: string;
+  choices: FileSelectionChoice[];
 };
 
 export type OperationPlanItem = {

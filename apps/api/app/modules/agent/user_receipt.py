@@ -34,6 +34,8 @@ class UserTaskReceipt(BaseModel):
         "file_search_results",
         "trash_restore_selection",
         "file_search_clarification",
+        "evidence_answer",
+        "file_selection",
     ] = "text"
     display_mode: Literal["default", "classification_cards"] = "default"
     final_response: str | None = None
@@ -44,6 +46,8 @@ class UserTaskReceipt(BaseModel):
     file_search_result: dict[str, Any] | None = None
     trash_restore_result: dict[str, Any] | None = None
     file_search_clarification_result: dict[str, Any] | None = None
+    evidence_answer_result: dict[str, Any] | None = None
+    file_selection_result: dict[str, Any] | None = None
     pending_job_ids: list[str] = Field(default_factory=list)
     operation_plan_id: str | None = None
     pending_decisions: list[dict[str, Any]] = Field(default_factory=list)
@@ -63,6 +67,8 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
     file_search_result = _file_search_result(result)
     trash_restore_result = _trash_restore_result(result)
     file_search_clarification_result = _file_search_clarification_result(result)
+    evidence_answer_result = _evidence_answer_result(result)
+    file_selection_result = _file_selection_result(result)
     initial_organization_results = _initial_organization_results(result)
     document_results = _merge_document_results(
         initial_organization_results,
@@ -75,6 +81,8 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         file_search_result=file_search_result,
         trash_restore_result=trash_restore_result,
         file_search_clarification_result=file_search_clarification_result,
+        evidence_answer_result=evidence_answer_result,
+        file_selection_result=file_selection_result,
     )
     pending_decisions: list[dict[str, Any]] = []
     if result.operation_plan_id:
@@ -102,6 +110,13 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
                 "message": "请选择本次文件查找范围。",
             }
         )
+    if file_selection_result:
+        pending_decisions.append(
+            {
+                "type": "file_selection",
+                "message": "找到多个同名但内容不同的文件，请先选择一个文件。",
+            }
+        )
     for item in document_results:
         pending = item.get("pending_decision")
         if isinstance(pending, dict) and pending not in pending_decisions:
@@ -126,6 +141,8 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         file_search_result=file_search_result,
         trash_restore_result=trash_restore_result,
         file_search_clarification_result=file_search_clarification_result,
+        evidence_answer_result=evidence_answer_result,
+        file_selection_result=file_selection_result,
         pending_job_ids=list(result.async_job_ids),
         operation_plan_id=result.operation_plan_id,
         pending_decisions=pending_decisions,
@@ -336,6 +353,8 @@ def _response_type(
     file_search_result: dict[str, Any] | None,
     trash_restore_result: dict[str, Any] | None,
     file_search_clarification_result: dict[str, Any] | None,
+    evidence_answer_result: dict[str, Any] | None,
+    file_selection_result: dict[str, Any] | None,
 ) -> str:
     """把内部意图收敛为少量稳定的用户展示类型。"""
 
@@ -347,6 +366,10 @@ def _response_type(
         return "trash_restore_selection"
     if file_search_clarification_result:
         return "file_search_clarification"
+    if file_selection_result:
+        return "file_selection"
+    if evidence_answer_result:
+        return "evidence_answer"
     if file_search_result:
         return "file_search_results"
     if managed_file_result:
@@ -419,7 +442,11 @@ def _trash_restore_result(result: AgentRunResult) -> dict[str, Any] | None:
         output = invocation.output_json
         if not isinstance(output, dict):
             continue
-        selection = output.get("trash_restore_selection")
+        selection = (
+            output
+            if output.get("kind") == "trash_restore_selection"
+            else output.get("trash_restore_selection")
+        )
         if not isinstance(selection, dict):
             continue
         candidates = []
@@ -445,6 +472,84 @@ def _trash_restore_result(result: AgentRunResult) -> dict[str, Any] | None:
             "requires_selection": True,
             "message": str(selection.get("message") or "找到了已删除文件，请选择是否恢复。"),
             "candidates": candidates,
+        }
+    return None
+
+
+def _evidence_answer_result(result: AgentRunResult) -> dict[str, Any] | None:
+    """投影阶段五回答和去重文件框，不暴露证据正文或内部定位。"""
+
+    for invocation in result.tool_invocations:
+        output = invocation.output_json
+        if invocation.tool_name != "evidence-answer" or output.get("kind") != "evidence_answer":
+            continue
+        references = []
+        seen_documents: set[str] = set()
+        for item in output.get("references", []):
+            if not isinstance(item, dict):
+                continue
+            document_id = str(item.get("document_id") or "")
+            if not document_id or document_id in seen_documents:
+                continue
+            seen_documents.add(document_id)
+            references.append(
+                {
+                    key: item.get(key)
+                    for key in (
+                        "document_id",
+                        "document_version_id",
+                        "working_copy_id",
+                        "filename",
+                        "category_labels",
+                        "availability",
+                        "availability_message",
+                        "can_open",
+                        "can_restore",
+                        "reference_indexes",
+                    )
+                    if key in item
+                }
+            )
+        return {
+            "answer_id": output.get("answer_id"),
+            "status": str(output.get("status") or ""),
+            "answer": str(output.get("answer") or ""),
+            "limitations": [
+                str(value) for value in output.get("limitations", []) if str(value)
+            ],
+            "files": references,
+            "cached": bool(output.get("cached", False)),
+        }
+    return None
+
+
+def _file_selection_result(result: AgentRunResult) -> dict[str, Any] | None:
+    """投影同名不同内容文件选择卡，内部哈希不会进入普通接口。"""
+
+    for invocation in result.tool_invocations:
+        output = invocation.output_json
+        if invocation.tool_name != "evidence-answer" or output.get("kind") != "file_selection":
+            continue
+        return {
+            "clarification_id": output.get("clarification_id"),
+            "message": str(output.get("message") or "请选择一个文件。"),
+            "choices": [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "document_id",
+                        "document_version_id",
+                        "working_copy_id",
+                        "filename",
+                        "size_bytes",
+                        "created_at",
+                        "option_id",
+                    )
+                    if key in item
+                }
+                for item in output.get("choices", [])
+                if isinstance(item, dict)
+            ],
         }
     return None
 

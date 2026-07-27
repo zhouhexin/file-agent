@@ -83,7 +83,7 @@ def _setup_full_doc(
     index_run = DocumentIndexRun(
         id=f"idx-{suffix}", document_id=doc.id,
         document_version_id=ver.id, extraction_run_id=ext_run.id,
-        index_version="chunk-index-v1", tokenizer="jieba",
+        index_version="document-chunk-index-v2", tokenizer="jieba",
         tokenizer_version="v1", config_hash=f"hash-{suffix}",
         status=index_status, chunk_count=1, evidence_count=1,
     )

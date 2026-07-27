@@ -1091,9 +1091,9 @@ def test_summary_of_previous_uploaded_files_uses_text_summary_plan():
         attachments=[{"document_id": "doc-1"}, {"document_id": "doc-2"}],
     )
 
-    assert plan.intent == "SUMMARIZE_DOCUMENTS"
-    assert plan.slots["requested_outputs"] == ["text", "summary", "receipt"]
-    assert [step.tool_name for step in plan.steps] == ["extract-document-text", "extract-document-text"]
+    assert plan.intent == "EVIDENCE_ANSWER"
+    assert plan.slots["requested_outputs"] == ["answer", "references", "receipt"]
+    assert [step.tool_name for step in plan.steps] == ["evidence-answer"]
 
 
 def test_llm_classification_hint_is_overridden_for_plain_file_summary():
@@ -1116,9 +1116,9 @@ def test_llm_classification_hint_is_overridden_for_plain_file_summary():
         attachments=[{"document_id": "doc-1"}, {"document_id": "doc-2"}],
     )
 
-    assert plan.intent == "SUMMARIZE_DOCUMENTS"
-    assert plan.slots["requested_outputs"] == ["text", "summary", "receipt"]
-    assert [step.tool_name for step in plan.steps] == ["extract-document-text", "extract-document-text"]
+    assert plan.intent == "EVIDENCE_ANSWER"
+    assert plan.slots["requested_outputs"] == ["answer", "references", "receipt"]
+    assert [step.tool_name for step in plan.steps] == ["evidence-answer"]
 
 
 def test_llm_classification_hint_is_overridden_for_table_column_summary():
@@ -1278,7 +1278,7 @@ def test_planning_falls_back_when_llm_intent_schema_is_invalid():
                 input_json=input_json,
                 output_json={
                     "ok": True,
-                    "document_id": input_json["document_id"],
+                    "document_id": (input_json.get("document_id") or input_json["document_ids"][0]),
                     "extraction_run_id": "run-fallback-summary",
                     "status": "COMPLETED",
                     "extractor": "plain-text",
@@ -1308,8 +1308,8 @@ def test_planning_falls_back_when_llm_intent_schema_is_invalid():
     )
 
     assert result.status == "COMPLETED"
-    assert result.intent == "SUMMARIZE_DOCUMENTS"
-    assert [step["tool_name"] for step in result.tool_plan["steps"]] == ["extract-document-text"]
+    assert result.intent == "EVIDENCE_ANSWER"
+    assert [step["tool_name"] for step in result.tool_plan["steps"]] == ["evidence-answer"]
     assert "内容总结" in (result.final_response or "")
 
 
@@ -1327,7 +1327,7 @@ def test_document_results_include_read_profile_and_quality():
                 input_json=input_json,
                 output_json={
                     "ok": True,
-                    "document_id": input_json["document_id"],
+                    "document_id": (input_json.get("document_id") or input_json["document_ids"][0]),
                     "extraction_run_id": "run-read-profile",
                     "status": "COMPLETED",
                     "extractor": "plain-text",
@@ -1412,7 +1412,7 @@ def test_read_and_classify_keeps_document_categories_in_receipt():
                 input_json=input_json,
                 output_json={
                     "ok": True,
-                    "document_id": input_json["document_id"],
+                    "document_id": (input_json.get("document_id") or input_json["document_ids"][0]),
                     "extraction_run_id": "run-read-classify",
                     "status": "COMPLETED",
                     "extractor": "plain-text",
@@ -1828,7 +1828,7 @@ def test_summary_request_returns_content_summary_not_classification_receipt():
                 input_json=input_json,
                 output_json={
                     "ok": True,
-                    "document_id": input_json["document_id"],
+                    "document_id": (input_json.get("document_id") or input_json["document_ids"][0]),
                     "extraction_run_id": "run-summary",
                     "status": "COMPLETED",
                     "extractor": "plain-text",
@@ -1862,7 +1862,7 @@ def test_summary_request_returns_content_summary_not_classification_receipt():
         attachments=[{"document_id": "doc-summary"}],
     )
 
-    assert result.intent == "SUMMARIZE_DOCUMENTS"
+    assert result.intent == "EVIDENCE_ANSWER"
     assert "内容总结" in (result.final_response or "")
     assert "青年教师岗位锻炼安排" in (result.final_response or "")
     assert "分类建议" not in (result.final_response or "")
@@ -1883,7 +1883,7 @@ def test_table_summary_request_uses_spreadsheet_analysis_plan():
                 output_json={
                     "kind": "spreadsheet_analysis",
                     "ok": True,
-                    "document_id": input_json["document_id"],
+                    "document_id": (input_json.get("document_id") or input_json["document_ids"][0]),
                     "status": "COMPLETED",
                     "analysis": {
                         "title": "表格汇总结果",
@@ -1945,7 +1945,7 @@ def test_llm_summary_with_text_extraction_returns_content_summary():
                 input_json=input_json,
                 output_json={
                     "ok": True,
-                    "document_id": input_json["document_id"],
+                    "document_id": (input_json.get("document_id") or input_json["document_ids"][0]),
                     "extraction_run_id": "run-llm-summary",
                     "status": "COMPLETED",
                     "extractor": "plain-text",
@@ -1993,8 +1993,8 @@ def test_llm_summary_with_text_extraction_returns_content_summary():
         attachments=[{"document_id": "doc-llm-summary"}],
     )
 
-    assert result.intent == "SUMMARIZE_DOCUMENTS"
-    assert result.tool_plan["slots"]["requested_outputs"] == ["text", "summary", "receipt"]
+    assert result.intent == "EVIDENCE_ANSWER"
+    assert result.tool_plan["slots"]["requested_outputs"] == ["answer", "references", "receipt"]
     assert "内容总结" in (result.final_response or "")
     assert "科研成果激励办法" in (result.final_response or "")
     assert "分类建议" not in (result.final_response or "")
@@ -2014,7 +2014,7 @@ def test_summary_request_uses_document_summary_service():
                 input_json=input_json,
                 output_json={
                     "ok": True,
-                    "document_id": input_json["document_id"],
+                    "document_id": (input_json.get("document_id") or input_json["document_ids"][0]),
                     "extraction_run_id": "run-summary-service",
                     "status": "COMPLETED",
                     "extractor": "plain-text",
@@ -2167,7 +2167,7 @@ def test_document_question_uses_text_extraction_and_llm_reader():
                 input_json=input_json,
                 output_json={
                     "ok": True,
-                    "document_id": input_json["document_id"],
+                    "document_id": (input_json.get("document_id") or input_json["document_ids"][0]),
                     "extraction_run_id": "run-answer-service",
                     "status": "COMPLETED",
                     "extractor": "plain-text",
@@ -2204,9 +2204,9 @@ def test_document_question_uses_text_extraction_and_llm_reader():
         attachments=[{"document_id": "doc-answer-service"}],
     )
 
-    assert result.intent == "ANSWER_DOCUMENTS"
-    assert result.tool_plan["slots"]["requested_outputs"] == ["text", "answer", "receipt"]
-    assert [item.tool_name for item in result.tool_invocations] == ["extract-document-text"]
+    assert result.intent == "EVIDENCE_ANSWER"
+    assert result.tool_plan["slots"]["requested_outputs"] == ["answer", "references", "receipt"]
+    assert [item.tool_name for item in result.tool_invocations] == ["evidence-answer"]
     assert result.final_response == "LLM 回答：文件要求申报人按时提交材料。"
 
 
@@ -2297,7 +2297,7 @@ def test_tool_dispatch_records_step_failure_and_continues_batch():
         def invoke(self, tool_name, input_json):
             """按 document_id 模拟单步失败和后续成功。"""
 
-            document_id = input_json["document_id"]
+            document_id = (input_json.get("document_id") or input_json["document_ids"][0])
             if document_id == "doc-bad":
                 raise ValueError("模拟解析失败")
             return ToolInvocationRecord(

@@ -16,6 +16,7 @@ from app.db.models import User
 from app.modules.auth.dependencies import get_current_user
 from app.modules.agent.user_receipt import build_user_task_receipt
 from app.modules.conversations.schemas import SendMessageResponse
+from app.modules.conversations.schemas import MessageAttachment, SendMessageRequest
 from app.modules.conversations.service import ConversationMessageService
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
 from app.modules.retrieval.query_parser import FileSearchQueryParser
@@ -49,6 +50,13 @@ class FileSearchClarificationResolveRequest(BaseModel):
 
     option_id: str = Field(min_length=1, max_length=80)
     custom_phrase: str | None = Field(default=None, max_length=30)
+
+
+class EvidenceAnswerRequest(BaseModel):
+    """专用兼容接口仍复用普通消息链路，不允许客户端提交 Evidence 或模型参数。"""
+
+    question: str = Field(min_length=1, max_length=4000)
+    attachment_document_ids: list[str] = Field(default_factory=list, max_length=50)
 
 
 @router.get("/file-search/clarifications/{clarification_id}")
@@ -108,6 +116,35 @@ def search_files(
         "user_message": str(result.get("user_message") or ""),
         "files": files,
     }
+
+
+@router.post(
+    "/conversations/{conversation_id}/evidence-answer",
+    response_model=SendMessageResponse,
+)
+def answer_from_evidence(
+    conversation_id: str,
+    request: EvidenceAnswerRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> SendMessageResponse:
+    """通过与聊天完全相同的 AgentRun 执行证据回答，避免形成第二套权限和回执逻辑。"""
+
+    execution = ConversationMessageService(db=db).send_user_message(
+        conversation_id=conversation_id,
+        request=SendMessageRequest(
+            content=request.question,
+            attachments=[
+                MessageAttachment(document_id=document_id)
+                for document_id in request.attachment_document_ids
+            ],
+        ),
+        user_id=current_user.id,
+    )
+    return SendMessageResponse(
+        message=execution.message,
+        task_result=build_user_task_receipt(execution.agent_run),
+    )
 
 
 @router.post(

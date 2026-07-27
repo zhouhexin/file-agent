@@ -63,6 +63,7 @@ from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text, extraction_config_hash
 from app.modules.files.readable_source import ReadableDocumentSourceResolver, apply_readable_source_metadata
 from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
+from app.modules.evidence_answer.service import EvidenceAnswerService
 from app.modules.file_lifecycle.conversation_operations import ConversationalWorkingCopyPlanService
 from app.modules.file_lifecycle.trash_lookup import ExactTrashFilenameLookupService
 from app.modules.managed_files.jobs import FilesystemJobQueue
@@ -81,6 +82,7 @@ from app.modules.skills.managed_file_query_feedback import (
     record_managed_file_query_feedback_sample,
 )
 from app.modules.spreadsheet_analysis.service import SpreadsheetAnalysisService
+from app.modules.spreadsheet_analysis.formatter import format_spreadsheet_analysis_response
 from app.modules.spreadsheet_workbench.service import SpreadsheetWorkbenchService
 
 
@@ -794,15 +796,43 @@ def _search_result_ids(payload: Dict[str, Any]) -> set[str]:
     }
 
 
-def _evidence_answer_handler(tool_input: BaseModel) -> Dict[str, Any]:
-    """用稳定 schema 返回无证据回答占位结果。"""
+def _evidence_answer_handler(
+    db: Any,
+    user_id: str | None,
+    conversation_id_getter: Callable[[], str | None] | None,
+    agent_run_id_getter: Callable[[], str | None] | None,
+) -> ToolHandler:
+    """创建阶段五真实证据回答 handler，替换无证据占位实现。"""
 
-    return {
-        "ok": True,
-        "answer": "No evidence has been indexed yet.",
-        "references": [],
-        "question": getattr(tool_input, "question"),
-    }
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """在当前用户、会话和 AgentRun 边界内执行证据回答闭环。"""
+
+        conversation_id = conversation_id_getter() if conversation_id_getter else None
+        agent_run_id = agent_run_id_getter() if agent_run_id_getter else None
+        if db is None or not user_id or not conversation_id:
+            return {
+                "ok": False,
+                "kind": "evidence_answer",
+                "status": "FAILED",
+                "answer": "证据回答缺少数据库、用户或会话上下文。",
+                "references": [],
+                "error": {
+                    "code": "EVIDENCE_CONTEXT_UNAVAILABLE",
+                    "message": "证据回答缺少数据库、用户或会话上下文。",
+                },
+            }
+        return EvidenceAnswerService(
+            db=db,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            agent_run_id=agent_run_id,
+        ).answer(
+            question=str(getattr(tool_input, "question")),
+            document_ids=list(getattr(tool_input, "document_ids")),
+            answer_mode=str(getattr(tool_input, "answer_mode")),
+        )
+
+    return handler
 
 
 def _document_insights_handler(db: Any, user_id: str | None) -> ToolHandler:
@@ -2126,7 +2156,12 @@ def _tool(
         handler=handler,
     )
 
-def _analyze_spreadsheet_handler(db: Any, user_id: str | None) -> ToolHandler:
+def _analyze_spreadsheet_handler(
+    db: Any,
+    user_id: str | None,
+    conversation_id_getter: Callable[[], str | None] | None = None,
+    agent_run_id_getter: Callable[[], str | None] | None = None,
+) -> ToolHandler:
     """通过文件权限仓库定位原件，再调用只读表格分析服务。"""
 
     def handler(tool_input: BaseModel) -> Dict[str, Any]:
@@ -2166,12 +2201,27 @@ def _analyze_spreadsheet_handler(db: Any, user_id: str | None) -> ToolHandler:
             )
 
         document = resolved["document"]
-        return SpreadsheetAnalysisService().analyze(
+        question = str(getattr(tool_input, "question"))
+        result = SpreadsheetAnalysisService().analyze(
             document_id=str(document.id),
             filename=str(document.original_filename),
             file_path=resolved["file_path"],
-            question=str(getattr(tool_input, "question")),
+            question=question,
         )
+        conversation_id = conversation_id_getter() if conversation_id_getter else None
+        if result.get("ok") and result.get("status") == "COMPLETED" and conversation_id and user_id:
+            result["qa_answer_id"] = EvidenceAnswerService(
+                db=db,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                agent_run_id=agent_run_id_getter() if agent_run_id_getter else None,
+            ).persist_deterministic_calculation(
+                question=question,
+                document_id=str(document.id),
+                answer_text=format_spreadsheet_analysis_response([result]),
+                calculation_result=result,
+            )
+        return result
 
     return handler
 
@@ -2258,7 +2308,20 @@ def _build_mvp_tools(
         _tool("read-agent-capabilities", "Read fixed File Agent capability catalog.", AgentCapabilitiesReadInput, False, False, [], _agent_capabilities_handler),
         _tool("read-classification-taxonomy", "Read fixed classification taxonomy catalog.", ClassificationTaxonomyReadInput, False, False, [], _classification_taxonomy_handler),
         _tool("hybrid-search", "Run summary-first workspace retrieval.", SearchToolInput, False, False, [], _search_handler(db, user_id, conversation_id_getter, agent_run_id_getter)),
-        _tool("evidence-answer", "Answer from retrieved evidence.", EvidenceAnswerInput, True, False, ["qa_answers", "answer_references"], _evidence_answer_handler),
+        _tool(
+            "evidence-answer",
+            "Answer from current active working-copy evidence and persist validated references.",
+            EvidenceAnswerInput,
+            True,
+            False,
+            ["qa_answers", "answer_references"],
+            _evidence_answer_handler(
+                db,
+                user_id,
+                conversation_id_getter,
+                agent_run_id_getter,
+            ),
+        ),
         _tool("change-report", "Build per-file receipt from changes.", ChangeReportInput, True, False, ["change_sets"], _change_report_handler),
         _tool("operation-plan-create", "Create high-risk operation plan.", OperationPlanCreateInput, True, False, ["operation_plans"], _operation_plan_handler),
         _tool("confirmed-file-action", "Execute confirmed operation plan.", ConfirmedFileActionInput, True, True, ["change_items"], _confirmed_action_handler(db, user_id)),
@@ -2284,7 +2347,12 @@ def _build_mvp_tools(
             False,
             False,
             [],
-            _analyze_spreadsheet_handler(db, user_id),
+            _analyze_spreadsheet_handler(
+                db,
+                user_id,
+                conversation_id_getter,
+                agent_run_id_getter,
+            ),
         ),
         _tool(
             "profile-spreadsheet",

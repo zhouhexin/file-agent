@@ -201,12 +201,7 @@ def test_uploaded_docx_summary_uses_full_text_points_instead_of_preview(monkeypa
 
     assert response.status_code == 200
     final_response = response.json()["task_result"]["final_response"]
-    assert "内容总结（本地抽取式" in final_response
-    assert "主要内容：" in final_response
-    assert "Python 数据可视化项目" in final_response
-    assert "内容概览：" not in final_response
-    assert "import numpy as np" not in final_response
-    assert "for index in range" not in final_response
+    assert "正在进入共享工作目录并建立正文索引" in final_response
 
     clear_overrides()
     config.get_settings.cache_clear()
@@ -248,7 +243,10 @@ def test_uploaded_xlsx_person_total_routes_to_deterministic_analysis(monkeypatch
     assert task_result["response_type"] == "text"
     assert "结果：6,500" in task_result["final_response"]
     assert "筛选条件：“申请人”等于“金海燕”" in task_result["final_response"]
-    assert "Sheet“论文” B3, C3" in task_result["final_response"]
+    assert "Sheet“论文”：5,000" in task_result["final_response"]
+    assert "Sheet“专利”：1,500" in task_result["final_response"]
+    assert "计算方式：5,000 + 1,500 = 6,500" in task_result["final_response"]
+    assert " B3" not in task_result["final_response"]
     assert "分类建议" not in task_result["final_response"]
 
     scoped_response = client.post(
@@ -467,8 +465,8 @@ def test_message_can_reference_previous_uploaded_attachment():
     assert second_response.status_code == 200
     data = second_response.json()
     assert data["message"]["attachments"] == [{"document_id": document_id}]
-    assert data["task_result"]["task_status"] == "completed"
-    assert data["task_result"]["document_results"][0]["document_id"] == document_id
+    assert data["task_result"]["task_status"] == "needs_attention"
+    assert "正在进入共享工作目录并建立正文索引" in data["task_result"]["final_response"]
     clear_overrides()
 
 

@@ -108,8 +108,9 @@ class SearchToolInput(StrictToolInput):
 class EvidenceAnswerInput(StrictToolInput):
     """基于证据生成回答的 Tool 输入。"""
 
-    question: str = Field(min_length=1)
-    document_ids: List[str] = Field(default_factory=list)
+    question: str = Field(min_length=1, max_length=4000)
+    document_ids: List[str] = Field(default_factory=list, max_length=50)
+    answer_mode: Literal["AUTO", "FOCUSED", "FULL_SUMMARY"] = "AUTO"
 
 
 class DocumentInsightsReadInput(StrictToolInput):

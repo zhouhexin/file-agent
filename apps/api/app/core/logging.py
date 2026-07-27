@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 agent_run_id_var: ContextVar[str | None] = ContextVar("agent_run_id", default=None)
@@ -59,6 +59,7 @@ def log_context(
 def log_event(
     event: str,
     *,
+    settings: Settings | None = None,
     level: str = "INFO",
     request_id: str | None = None,
     agent_run_id: str | None = None,
@@ -72,11 +73,15 @@ def log_event(
     message: str | None = None,
     **extra: Any,
 ) -> None:
-    """写入一条结构化 JSONL 日志。"""
+    """写入一条结构化 JSONL 日志。
+
+    请求级服务可以传入已经完成校验的 Settings，避免日志组件再次读取全局环境，
+    同时保证单元测试和多配置运行场景不会因为日志依赖而改变业务执行结果。
+    """
 
     normalized_level = level.upper()
-    settings = get_settings()
-    if _LEVELS.get(normalized_level, 20) < _LEVELS.get(settings.log_level.upper(), 20):
+    resolved_settings = settings or get_settings()
+    if _LEVELS.get(normalized_level, 20) < _LEVELS.get(resolved_settings.log_level.upper(), 20):
         return
 
     record = {
@@ -95,7 +100,7 @@ def log_event(
         "message": message,
     }
     record.update({key: value for key, value in extra.items() if value is not None})
-    _append_jsonl(record)
+    _append_jsonl(record, settings=resolved_settings)
 
 
 def cleanup_old_logs() -> None:
@@ -111,11 +116,11 @@ def cleanup_old_logs() -> None:
             path.unlink(missing_ok=True)
 
 
-def _append_jsonl(record: dict[str, Any]) -> None:
+def _append_jsonl(record: dict[str, Any], *, settings: Settings | None = None) -> None:
     """把日志记录追加到当天文件。"""
 
-    settings = get_settings()
-    log_dir = Path(settings.log_dir)
+    resolved_settings = settings or get_settings()
+    log_dir = Path(resolved_settings.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"file-agent-{datetime.now().date().isoformat()}.log"
     with log_path.open("a", encoding="utf-8") as file:

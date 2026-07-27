@@ -11,6 +11,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import Document, DocumentChunk, DocumentIndexRun, WorkingCopy
+from app.modules.chunks.service import INDEX_VERSION
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
 from app.modules.retrieval.query_parser import exact_short_chinese_phrase
 
@@ -87,7 +88,10 @@ class DocumentChunkLexicalSearchService:
             self.db.query(DocumentChunk)
             .join(Document, Document.id == DocumentChunk.document_id)
             .join(DocumentIndexRun, DocumentIndexRun.id == DocumentChunk.index_run_id)
-            .filter(DocumentIndexRun.status == "COMPLETED")
+            .filter(
+                DocumentIndexRun.status == "COMPLETED",
+                DocumentIndexRun.index_version == INDEX_VERSION,
+            )
         )
         if self.workspace_id is None:
             return query.filter(Document.user_id == self.user_id)

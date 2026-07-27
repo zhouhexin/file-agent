@@ -32,6 +32,7 @@ class ResolvedSearchSelection:
     match_mode: str
     phrases: tuple[str, ...]
     require_body_evidence: bool
+    document_ids: tuple[str, ...] = ()
     result_message_id: str | None = None
     result_agent_run_id: str | None = None
 
@@ -114,7 +115,10 @@ class FileSearchClarificationService:
             saved_phrases = tuple(
                 str(value) for value in saved.get("phrases", []) if str(value)
             )
-            if not saved_phrases:
+            saved_document_ids = tuple(
+                str(value) for value in saved.get("document_ids", []) if str(value)
+            )
+            if not saved_phrases and not saved_document_ids:
                 raise FileSearchClarificationError("已处理选择缺少执行记录")
             if option_id == "custom" and custom_phrase:
                 requested = validate_custom_search_phrase(custom_phrase)
@@ -129,6 +133,7 @@ class FileSearchClarificationService:
                 match_mode=str(saved.get("match_mode") or "LITERAL"),
                 phrases=saved_phrases,
                 require_body_evidence=bool(saved.get("require_body_evidence", False)),
+                document_ids=saved_document_ids,
                 result_message_id=record.result_message_id,
                 result_agent_run_id=record.result_agent_run_id,
             )
@@ -146,9 +151,19 @@ class FileSearchClarificationService:
         if option is None:
             raise FileSearchClarificationError("选择项不属于当前检索")
 
-        if option_id == "custom":
+        if record.relation_mode == "DOCUMENT_SELECTION":
+            document_id = str(option.get("document_id") or "")
+            if not document_id:
+                raise FileSearchClarificationError("文件选择项缺少有效文件")
+            phrases = ()
+            document_ids = (document_id,)
+            match_mode = "AUTO"
+            require_body = True
+            display_content = f"使用“{str(option.get('label') or '所选文件')}”继续回答"
+        elif option_id == "custom":
             phrase = validate_custom_search_phrase(custom_phrase or "")
             phrases = (phrase,)
+            document_ids = ()
             match_mode = "LITERAL"
             require_body = True
             display_content = f"按原文短语“{phrase}”继续查找"
@@ -162,6 +177,7 @@ class FileSearchClarificationService:
                 raise FileSearchClarificationError("选择项缺少有效查找范围")
             match_mode = str(option.get("match_mode") or "LITERAL")
             require_body = bool(option.get("require_body_evidence", False))
+            document_ids = ()
             display_content = str(option.get("display_content") or option.get("label") or "继续查找")
 
         record.status = "RESOLVED"
@@ -171,6 +187,7 @@ class FileSearchClarificationService:
             "match_mode": match_mode,
             "phrases": list(phrases),
             "require_body_evidence": require_body,
+            "document_ids": list(document_ids),
         }
         record.resolved_at = now
         self.db.flush()
@@ -183,6 +200,7 @@ class FileSearchClarificationService:
             match_mode=match_mode,
             phrases=phrases,
             require_body_evidence=require_body,
+            document_ids=document_ids,
         )
 
     def mark_execution_result(
@@ -318,6 +336,11 @@ class FileSearchClarificationService:
             "core_phrase": record.core_phrase,
             "options": options,
             "allow_custom_phrase": True,
+            "selection_type": (
+                "DOCUMENT_SELECTION"
+                if record.relation_mode == "DOCUMENT_SELECTION"
+                else "SEARCH_PHRASE"
+            ),
             "expires_at": record.expires_at.isoformat(),
         }
 

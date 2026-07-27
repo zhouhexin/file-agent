@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.db.models import Document, DocumentChunk, DocumentIndexRun, DocumentVersion, EvidenceSpan, User
+from app.modules.chunks.service import INDEX_VERSION
 from app.modules.auth.dependencies import get_current_user
 from app.modules.chunks.schemas import DocumentChunkMetadata, DocumentChunksResponse
 
@@ -53,6 +54,7 @@ def list_document_chunks(
         .filter(
             DocumentIndexRun.document_version_id == version.id,
             DocumentIndexRun.status == "COMPLETED",
+            DocumentIndexRun.index_version == INDEX_VERSION,
         )
         .order_by(DocumentIndexRun.updated_at.desc())
         .first()
@@ -103,4 +105,3 @@ def list_document_chunks(
             for chunk in chunks
         ],
     )
-

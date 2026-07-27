@@ -62,7 +62,7 @@ from app.modules.file_lifecycle.risk import inspect_basic_file_risks
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.path_policy import resolve_managed_relative_path
 from app.modules.classification.service import persist_document_results_classifications
-from app.modules.chunks.service import DocumentIndexService
+from app.modules.chunks.service import DocumentIndexService, INDEX_VERSION
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.retrieval.search_profile import DocumentSearchProfileService
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
@@ -110,6 +110,7 @@ def working_copy_search_artifact_status(
         .filter(
             DocumentIndexRun.document_version_id == working_copy.current_version_id,
             DocumentIndexRun.status == "COMPLETED",
+            DocumentIndexRun.index_version == INDEX_VERSION,
         )
         .first()
         is not None
@@ -1316,6 +1317,7 @@ class FileLifecycleJobProcessor:
             .filter(
                 DocumentIndexRun.document_version_id == version.id,
                 DocumentIndexRun.status == "COMPLETED",
+                DocumentIndexRun.index_version == INDEX_VERSION,
             )
             .order_by(DocumentIndexRun.updated_at.desc())
             .first()

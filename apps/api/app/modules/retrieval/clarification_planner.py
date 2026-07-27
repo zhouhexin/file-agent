@@ -24,6 +24,40 @@ class FileSearchClarificationPlanner:
         """生成受 Tool schema 约束的检索续跑计划。"""
 
         value = self.selection
+        if value.document_ids:
+            return PlannerOutput(
+                intent="EVIDENCE_ANSWER",
+                user_goal=value.display_content,
+                slots={
+                    "document_ids": list(value.document_ids),
+                    "question": value.original_query,
+                    "answer_mode": "AUTO",
+                    "requested_outputs": ["answer", "references", "receipt"],
+                    "search_clarification_id": value.clarification_id,
+                },
+                selected_skills=["evidence-answer"],
+                steps=[
+                    {
+                        "step_id": "step-evidence-answer-resolution",
+                        "skill": "evidence-answer",
+                        "tool_name": "evidence-answer",
+                        "input": {
+                            "question": value.original_query,
+                            "document_ids": list(value.document_ids),
+                            "answer_mode": "AUTO",
+                        },
+                        "requires_confirmation": False,
+                        "risk_level": "low",
+                        "expected_outputs": ["qa_answer", "answer_references"],
+                        "writes": ["qa_answers", "answer_references"],
+                    }
+                ],
+                evidence_policy={
+                    "require_page_or_cell": True,
+                    "allow_no_evidence_answer": False,
+                },
+                confirmation_policy={"operation_plan_required": False},
+            )
         tool_input = {
             "query": value.original_query,
             "document_ids": [],

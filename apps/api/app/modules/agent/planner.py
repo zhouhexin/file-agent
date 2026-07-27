@@ -347,6 +347,22 @@ class DeterministicPlanner:
 
         document_ids = _document_ids(attachments)
 
+        if (
+            needs_file_scope
+            and not document_ids
+            and _has_workspace_evidence_intent(message=message, lowered=lowered)
+        ):
+            return _evidence_answer_plan(
+                user_goal=message,
+                question=message,
+                document_ids=[],
+                answer_mode=(
+                    "FULL_SUMMARY"
+                    if _has_plain_document_summary_intent(message=message, lowered=lowered)
+                    else "FOCUSED"
+                ),
+            )
+
         if needs_file_scope and not document_ids:
             return _missing_file_scope_plan(user_goal=message)
 
@@ -407,28 +423,11 @@ class DeterministicPlanner:
             )
 
         if _has_plain_document_summary_intent(message=message, lowered=lowered):
-            return PlannerOutput(
-                intent="SUMMARIZE_DOCUMENTS",
+            return _evidence_answer_plan(
                 user_goal=message,
-                slots={
-                    "document_ids": document_ids,
-                    "requested_outputs": ["text", "summary", "receipt"],
-                },
-                selected_skills=["chat-intake", "document-text-extract", "document-reading"],
-                steps=[
-                    _extract_document_text_step(
-                        document_id=item,
-                        index=index,
-                        force_reprocess=_should_force_reprocess(
-                            message=message,
-                            lowered=lowered,
-                        ),
-                        force_reconvert=_should_force_reconvert(message=message, lowered=lowered),
-                    )
-                    for index, item in enumerate(document_ids, start=1)
-                ],
-                evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
-                confirmation_policy={"operation_plan_required": False},
+                question=message,
+                document_ids=document_ids,
+                answer_mode="FULL_SUMMARY",
             )
 
         if _has_classification_summary_intent(message=message):
@@ -457,29 +456,11 @@ class DeterministicPlanner:
             )
 
         if _has_answer_intent(message=message, lowered=lowered):
-            return PlannerOutput(
-                intent="ANSWER_DOCUMENTS",
+            return _evidence_answer_plan(
                 user_goal=message,
-                slots={
-                    "document_ids": document_ids,
-                    "question": message,
-                    "requested_outputs": ["text", "answer", "receipt"],
-                },
-                selected_skills=["chat-intake", "document-text-extract", "document-reading"],
-                steps=[
-                    _extract_document_text_step(
-                        document_id=item,
-                        index=index,
-                        force_reprocess=_should_force_reprocess(
-                            message=message,
-                            lowered=lowered,
-                        ),
-                        force_reconvert=_should_force_reconvert(message=message, lowered=lowered),
-                    )
-                    for index, item in enumerate(document_ids, start=1)
-                ],
-                evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
-                confirmation_policy={"operation_plan_required": False},
+                question=message,
+                document_ids=document_ids,
+                answer_mode="FOCUSED",
             )
 
         if _should_extract_text(message=message, lowered=lowered):
@@ -908,33 +889,35 @@ def build_plan_from_user_intent(
         )
 
     if _has_plain_document_summary_intent(message=message, lowered=lowered):
-        if not document_ids:
+        if not document_ids and not _has_workspace_evidence_intent(
+            message=message, lowered=lowered
+        ):
             return _missing_file_scope_plan(user_goal=intent_plan.user_goal or message)
-        return PlannerOutput(
-            intent="SUMMARIZE_DOCUMENTS",
+        return _evidence_answer_plan(
             user_goal=intent_plan.user_goal or message,
-            slots={
-                "document_ids": document_ids,
-                "requested_outputs": ["text", "summary", "receipt"],
-                "response_style": intent_plan.response_style,
-                "clarification_question": intent_plan.clarification_question,
-                "llm_intent_plan": intent_plan.model_dump(),
-            },
-            selected_skills=["llm-understanding", "document-text-extract", "document-reading"],
-            steps=[
-                _extract_document_text_step(
-                    document_id=document_id,
-                    index=index,
-                    force_reprocess=_should_force_reprocess(
-                        message=message,
-                        lowered=lowered,
-                    ),
-                    force_reconvert=_should_force_reconvert(message=message, lowered=lowered),
-                )
-                for index, document_id in enumerate(document_ids, start=1)
-            ],
-            evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
-            confirmation_policy={"operation_plan_required": False},
+            question=message,
+            document_ids=document_ids,
+            answer_mode="FULL_SUMMARY",
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
+
+    if _has_answer_intent(
+        message=message, lowered=lowered
+    ) and not _has_classification_summary_intent(message=message):
+        if not document_ids and not _has_workspace_evidence_intent(
+            message=message, lowered=lowered
+        ):
+            return _missing_file_scope_plan(user_goal=intent_plan.user_goal or message)
+        return _evidence_answer_plan(
+            user_goal=intent_plan.user_goal or message,
+            question=message,
+            document_ids=document_ids,
+            answer_mode="FOCUSED",
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
+            llm_intent_plan=intent_plan.model_dump(),
         )
 
     if (
@@ -1152,6 +1135,52 @@ def _file_search_plan(
             }
         ],
         evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+        confirmation_policy={"operation_plan_required": False},
+    )
+
+
+def _evidence_answer_plan(
+    *,
+    user_goal: str,
+    question: str,
+    document_ids: List[str],
+    answer_mode: str,
+    response_style: str = "concise",
+    clarification_question: str | None = None,
+    llm_intent_plan: Dict[str, Any] | None = None,
+) -> PlannerOutput:
+    """构造阶段五证据回答计划，正文只由受控 Tool 按活动版本读取。"""
+
+    return PlannerOutput(
+        intent="EVIDENCE_ANSWER",
+        user_goal=user_goal,
+        slots={
+            "document_ids": document_ids,
+            "question": question,
+            "answer_mode": answer_mode,
+            "requested_outputs": ["answer", "references", "receipt"],
+            "response_style": response_style,
+            "clarification_question": clarification_question,
+            "llm_intent_plan": llm_intent_plan or {},
+        },
+        selected_skills=["evidence-answer"],
+        steps=[
+            {
+                "step_id": "step-evidence-answer",
+                "skill": "evidence-answer",
+                "tool_name": "evidence-answer",
+                "input": {
+                    "question": question,
+                    "document_ids": document_ids,
+                    "answer_mode": answer_mode,
+                },
+                "requires_confirmation": False,
+                "risk_level": "low",
+                "expected_outputs": ["qa_answer", "answer_references"],
+                "writes": ["qa_answers", "answer_references"],
+            }
+        ],
+        evidence_policy={"require_page_or_cell": True, "allow_no_evidence_answer": False},
         confirmation_policy={"operation_plan_required": False},
     )
 
@@ -2662,6 +2691,29 @@ def _has_answer_intent(*, message: str, lowered: str) -> bool:
     english_keywords = ["question", "answer", "what", "why", "how"]
     return any(keyword in message for keyword in question_keywords) or any(
         keyword in lowered for keyword in english_keywords
+    )
+
+
+def _has_workspace_evidence_intent(*, message: str, lowered: str) -> bool:
+    """识别没有附件但明确针对工作区文件正文的问答或总结请求。"""
+
+    file_markers = [
+        "文件",
+        "文档",
+        "材料",
+        "报告",
+        "通知",
+        "表格",
+        "正文",
+        "工作目录",
+    ]
+    english_markers = ["file", "document", "report", "spreadsheet"]
+    has_file_object = any(value in message for value in file_markers) or any(
+        value in lowered for value in english_markers
+    )
+    return has_file_object and (
+        _has_answer_intent(message=message, lowered=lowered)
+        or _has_summary_intent(message=message, lowered=lowered)
     )
 
 

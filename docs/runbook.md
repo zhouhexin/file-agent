@@ -236,6 +236,16 @@ LLM_CLASSIFICATION_ALLOW_FREE_PATHS=false
 DOCUMENT_SUMMARY_PROVIDER=extractive
 CLASSIFICATION_SUMMARY_PROVIDER=extractive
 CHAT_DOCUMENT_SUMMARY_PROVIDER=llm
+EVIDENCE_ANSWER_ENABLED=true
+EVIDENCE_ANSWER_PROVIDER=llm
+EVIDENCE_ANSWER_PROMPT_VERSION=evidence-answer-v1
+EVIDENCE_ANSWER_SCHEMA_VERSION=evidence-answer-schema-v1
+EVIDENCE_ANSWER_MAX_DOCUMENTS=12
+EVIDENCE_ANSWER_MAX_ITEMS=48
+EVIDENCE_ANSWER_MAX_INPUT_CHARS=120000
+EVIDENCE_ANSWER_MAX_CALLS=3
+EVIDENCE_ANSWER_REPAIR_CALLS=1
+EVIDENCE_ANSWER_CACHE_ENABLED=true
 OCR_ENABLED=true
 OCR_PADDLE_MODEL_SOURCE=BOS
 OCR_LLM_ENABLED=false
@@ -249,10 +259,17 @@ DOCLING_OCR_ENABLED=false
 
 上传导入和分类阶段的持久化双摘要默认使用 `extractive` Provider：本地 Jieba 分词后以有候选上限的
 LexRank 选择可定位原文句子，不下载模型、不要求 GPU，也不会因为 `LLM_ENABLED=true` 自动外发正文。
-用户明确提出“总结、讲解”等任务时，`CHAT_DOCUMENT_SUMMARY_PROVIDER=llm` 才允许文档阅读服务调用
-LLM；设置为 `disabled` 可关闭该调用。只有部署已经获得文件正文模型处理授权时，才可以把
+阶段五开始，用户明确提出“总结、讲解、询问正文事实”等任务时，优先通过
+`EVIDENCE_ANSWER_PROVIDER=llm` 调用带引用校验的证据回答服务；设置为 `disabled` 时只返回确定性
+证据摘录。`CHAT_DOCUMENT_SUMMARY_PROVIDER` 只保留旧兼容路径。只有部署已经获得文件正文模型处理
+授权时，才可以把
 `DOCUMENT_SUMMARY_PROVIDER` 或 `CLASSIFICATION_SUMMARY_PROVIDER` 显式改为 `llm`。旧配置值
 `openai_compatible` 会兼容映射为 `llm`，但新配置统一使用 `llm`。
+
+阶段五将 Chunk 索引升级为 `document-chunk-index-v2`，Evidence quote 覆盖完整 Chunk。升级代码和
+数据库迁移后必须同时启动 scheduler、SCAN/RECONCILE worker 与 IMPORT worker；历史 v1 索引会被
+识别为待修复并重建。重建完成前全文总结明确返回 `INDEX_PENDING`，不会把旧 500 字符证据冒充完整
+总结。
 
 OCR 第一阶段使用本地 PaddleOCR 作为默认 Provider。图片文件会直接进入 OCR；PDF 原生文本为空时会先渲染页面，再进入 OCR，并把识别文本写入 `document_pages.text_content`。`OCR_PADDLE_MODEL_SOURCE` 默认是 `BOS`，服务会在加载 PaddleOCR 前设置 `PADDLE_PDX_MODEL_SOURCE=BOS`，让 PaddleOCR 使用百度 BOS 模型下载源。如需启用 LLM OCR 兜底，必须显式设置 `OCR_LLM_ENABLED=true` 且 `LLM_ENABLED=true`；系统会在本地 OCR 质量低于 `OCR_LLM_FALLBACK_QUALITY_THRESHOLD` 时按页调用多模态模型，不默认外发整份文件。
 

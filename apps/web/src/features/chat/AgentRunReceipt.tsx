@@ -15,6 +15,7 @@ import { RenameSuggestionReceipt } from './RenameSuggestionReceipt';
 import { SearchResultsReceipt } from './SearchResultsReceipt';
 import { TrashRestoreSelectionCard } from './TrashRestoreSelectionCard';
 import { FileSearchClarificationCard } from './FileSearchClarificationCard';
+import { EvidenceAnswerReceipt, FileSelectionReceipt } from './EvidenceAnswerReceipt';
 import type { ChatAttachment } from './presentation';
 import { findAttachmentByDocumentId, formatFileSize } from './presentation';
 
@@ -110,6 +111,8 @@ export function AgentRunReceipt({
     && taskResult.document_results.length === 0
     && !taskResult.managed_file_result
     && !taskResult.file_search_result
+    && !taskResult.evidence_answer_result
+    && !taskResult.file_selection_result
   ) {
     // 异步任务刚入队时尚无最终回执；明确反馈等待状态，不能留下一块无内容的消息区域。
     return (
@@ -147,6 +150,31 @@ export function AgentRunReceipt({
     );
   }
 
+  if (
+    taskResult.response_type === 'evidence_answer'
+    && taskResult.evidence_answer_result
+  ) {
+    return (
+      <EvidenceAnswerReceipt
+        result={taskResult.evidence_answer_result}
+        onOpenDocument={onOpenDocument}
+      />
+    );
+  }
+  if (
+    taskResult.response_type === 'file_selection'
+    && taskResult.file_selection_result
+    && token
+  ) {
+    return (
+      <FileSelectionReceipt
+        result={taskResult.file_selection_result}
+        token={token}
+        onOpenDocument={onOpenDocument}
+        onResolved={onFollowupResult}
+      />
+    );
+  }
   if (
     taskResult.response_type === 'file_search_results' &&
     taskResult.file_search_result

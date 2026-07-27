@@ -32,8 +32,10 @@ from app.db.models import (
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
 
 
-INDEX_VERSION = "document-chunk-index-v1"
-EVIDENCE_QUOTE_MAX_CHARS = 500
+# 阶段五完整总结必须让每个 Chunk 的全部正文都能进入可引用 Evidence；索引版本升级会使
+# 旧的 500 字符证据自动失效并在重处理时生成新索引。
+INDEX_VERSION = "document-chunk-index-v2"
+EVIDENCE_QUOTE_MAX_CHARS = 8000
 EMPTY_EXTRACTION_ERROR = "解析结果没有可建立索引的正文"
 INDEX_SOURCE_TOO_LARGE_ERROR = "解析正文超过当前索引字符预算"
 INDEX_CHUNK_LIMIT_ERROR = "解析正文超过当前索引 Chunk 数量预算"

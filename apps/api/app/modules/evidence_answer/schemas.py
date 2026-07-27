@@ -1,0 +1,58 @@
+"""阶段五内部证据包和模型输出 schema。"""
+
+from __future__ import annotations
+
+from typing import Annotated, Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class EvidenceItem(BaseModel):
+    """一条已经过活动工作副本权限校验的原文证据。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str
+    document_id: str
+    document_version_id: str
+    working_copy_id: str
+    filename: str
+    quote: str
+    page_number: int | None = None
+    sheet_name: str | None = None
+    cell_range: str | None = None
+
+
+class EvidencePackage(BaseModel):
+    """一次模型生成只允许消费的已授权证据包。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1, max_length=4000)
+    question_type: str
+    answer_mode: Literal["FOCUSED", "FULL_SUMMARY"]
+    scope: dict[str, Any] = Field(default_factory=dict)
+    evidence_items: list[EvidenceItem] = Field(min_length=1)
+    limitations: list[str] = Field(default_factory=list)
+    evidence_fingerprint: str
+
+
+class AnswerClaim(BaseModel):
+    """模型生成的一条结论及其证据 ID。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=4000)
+    evidence_ids: list[str] = Field(min_length=1, max_length=12)
+
+
+class StructuredAnswer(BaseModel):
+    """模型必须返回的受控回答结构。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    claims: list[AnswerClaim] = Field(default_factory=list, max_length=80)
+    limitations: list[
+        Annotated[str, Field(min_length=1, max_length=500)]
+    ] = Field(default_factory=list, max_length=12)
+    status: Literal["COMPLETED", "PARTIAL", "NO_EVIDENCE"] = "COMPLETED"
