@@ -628,12 +628,45 @@ def build_plan_from_user_intent(
             response_style=intent_plan.response_style,
             llm_intent_plan=intent_plan.model_dump(),
         )
-    if _has_relative_time_file_search(message=message, lowered=lowered) and not attachments:
-        # 不接受 LLM 将“找去年的工作总结”误判为目录浏览；查询解析器会把相对
-        # 时间转换为具体年份并使用已有的年份硬过滤。
+    if (
+        _has_file_search_intent(message=message, lowered=lowered)
+        and not attachments
+        # 相对时间是结构化主题检索条件，必须压过模型误报的目录列表；其他目录
+        # 浏览、分类目录查询有各自的受控 Tool，不能被本分支截走。
+        and (
+            _has_relative_time_file_search(message=message, lowered=lowered)
+            or (
+                intent_plan.intent
+                not in {
+                    "LIST_MANAGED_FILES",
+                    "SEARCH_MANAGED_FILES",
+                    "LIST_CLASSIFICATION_TAXONOMY",
+                    "LIST_MCP_FILESYSTEM",
+                }
+                and not requested_capabilities.intersection(
+                    MANAGED_FILE_LIST_HINTS
+                    | CLASSIFICATION_TAXONOMY_HINTS
+                    | MCP_FILESYSTEM_HINTS
+                )
+                and not _has_classification_taxonomy_intent(message=message, lowered=lowered)
+                and not _has_mcp_filesystem_list_intent(message=message, lowered=lowered)
+                and not _managed_root_key_from_list_request(message)
+            )
+        )
+    ):
+        # “找/查找/搜索”是明确的文件检索动作，优先级高于 LLM 对“工作总结”
+        # 的摘要意图判断。否则“找 2025 年计算机学院的工作总结”可能误走
+        # 单文件总结，读取到会话中无关的申请表或目录候选。
+        # 已被模型正确识别为检索时，保留其受控的精简查询；模型误判为总结时，
+        # 则必须保留原句，避免丢失年份、单位等后端硬过滤条件。
+        query = (
+            intent_plan.managed_query
+            if intent_plan.intent == "SEARCH_FILES" and intent_plan.managed_query
+            else message
+        )
         return _file_search_plan(
             user_goal=intent_plan.user_goal or message,
-            query=message,
+            query=query,
             document_ids=[],
             response_style=intent_plan.response_style,
             clarification_question=intent_plan.clarification_question,
