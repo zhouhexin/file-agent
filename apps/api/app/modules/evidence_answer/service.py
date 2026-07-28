@@ -35,6 +35,7 @@ from app.db.models import (
     WorkingCopy,
 )
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
+from app.modules.classification.summary_service import build_extractive_document_overview
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.modules.file_lifecycle.trash_lookup import ExactTrashFilenameLookupService
 from app.modules.llm.client import LLMResponseError, OpenAICompatibleLLMClient
@@ -76,6 +77,12 @@ _EXPLICIT_FILENAME_SUFFIXES = {
     ".xlsm",
     ".tsv",
 }
+_FULL_SUMMARY_CACHE_KEY = "full-document-summary-contract-v2"
+_FULL_SUMMARY_MODEL_QUESTION = (
+    "请基于该文件全部已提供的原文证据进行完整总结，按原文顺序覆盖标题或主题、"
+    "主要事项或章节、关键要求或结论，以及附件或表格要点（如原文存在）。"
+    "不要逐段照抄，不要编造原文没有的背景、关系或结论。"
+)
 
 
 class EvidenceAnswerService:
@@ -291,7 +298,9 @@ class EvidenceAnswerService:
         )
         try:
             package = EvidencePackage(
-                question=normalized_question,
+                # 全文总结使用规范化任务说明，避免“总结/完整总结/覆盖章节”三种
+                # 同义表达让模型产生三种不同任务理解。用户原问题仍持久化到 QAAnswer。
+                question=_model_question(normalized_question, mode=mode),
                 question_type=policy.question_type,
                 answer_mode=mode,
                 scope={
@@ -318,21 +327,21 @@ class EvidenceAnswerService:
                 error_code=exc.__class__.__name__,
                 message="模型响应未通过阶段五结构校验，已切换确定性降级",
             )
-            structured = StructuredAnswer(
-                claims=[
-                    {"text": item.quote.strip(), "evidence_ids": [item.evidence_id]}
-                    for item in items[: min(8, len(items))]
-                    if item.quote.strip()
-                ],
-                limitations=["模型回答校验失败，已降级为相关原文摘录。"],
-                status="PARTIAL",
+            structured = self._deterministic_fallback(
+                items=items,
+                mode=mode,
+                reason="模型回答校验失败，已切换为原文抽取式摘要。",
             )
             usage = {
                 "llm_calls": 0,
                 "input_chars": 0,
                 "fallback_error": exc.__class__.__name__,
             }
-        validated, validation_warnings = self._validate_claims(structured, items)
+        validated, validation_warnings = self._validate_claims(
+            structured,
+            items,
+            answer_mode=mode,
+        )
         if validation_warnings:
             log_event(
                 "evidence_answer.validation_failed",
@@ -895,16 +904,11 @@ class EvidenceAnswerService:
 
         items = package.evidence_items
         if self.client is None:
-            claims = [
-                {"text": item.quote.strip(), "evidence_ids": [item.evidence_id]}
-                for item in items[: min(8, len(items))]
-                if item.quote.strip()
-            ]
             return (
-                StructuredAnswer(
-                    claims=claims,
-                    limitations=["当前未启用证据回答 LLM，已返回相关原文摘录。"],
-                    status="PARTIAL",
+                self._deterministic_fallback(
+                    items=items,
+                    mode=package.answer_mode,
+                    reason="当前未启用证据回答 LLM，已使用原文抽取式摘要。",
                 ),
                 {"llm_calls": 0, "input_chars": 0},
             )
@@ -932,7 +936,7 @@ class EvidenceAnswerService:
                 message="阶段五模型生成开始",
             )
             raw = self.client.complete_json(
-                system_prompt=self._system_prompt(),
+                system_prompt=self._system_prompt(answer_mode=package.answer_mode),
                 user_payload=payload,
             )
             calls += 1
@@ -999,7 +1003,7 @@ class EvidenceAnswerService:
                 raise LLMResponseError(f"证据回答结构校验失败：{exc}") from exc
             repaired = self.client.complete_json(
                 system_prompt=(
-                    self._system_prompt()
+                    self._system_prompt(answer_mode=str(payload.get("answer_mode") or "FOCUSED"))
                     + "\n上一响应未通过 schema 校验。只返回合法 JSON，不得添加新事实。"
                 ),
                 user_payload={**payload, "validation_error": str(exc)[:1000], "invalid_response": raw},
@@ -1054,17 +1058,29 @@ class EvidenceAnswerService:
         }
 
     @staticmethod
-    def _system_prompt() -> str:
+    def _system_prompt(*, answer_mode: str) -> str:
         """返回准确性优先的阶段五提示词。"""
 
-        return (
+        base = (
             "你是文件证据回答器。只能使用 evidence 中的事实，不得使用常识补全。"
             "每条 claim 必须引用一个或多个真实 evidence_id。数字、日期、姓名必须逐字存在于引用证据；"
             "证据不足时放入 limitations 或返回 NO_EVIDENCE。只输出符合 required_output 的 JSON 对象。"
         )
+        if answer_mode != "FULL_SUMMARY":
+            return base
+        return (
+            base
+            + "当前任务是完整文档总结：请按原文逻辑顺序输出 3 至 8 条凝练要点，"
+            "覆盖可见的主要章节或事项；不要逐句摘录、不要添加 [1] 这类引用编号。"
+            "每条要点仍必须给出支持它的 evidence_id。"
+        )
 
     def _validate_claims(
-        self, answer: StructuredAnswer, items: list[EvidenceItem]
+        self,
+        answer: StructuredAnswer,
+        items: list[EvidenceItem],
+        *,
+        answer_mode: str,
     ) -> tuple[list[dict[str, Any]], list[str]]:
         """验证引用存在且关键数字受到引用文本支持。"""
 
@@ -1100,7 +1116,12 @@ class EvidenceAnswerService:
                 if claim_terms
                 else 1.0
             )
-            required_overlap = 0.8 if len(claim_terms) <= 6 else 0.65
+            # 全文总结允许在不改变数字、否定关系和引用边界的前提下压缩表述；
+            # 仍要求至少一半关键事实词可回到原文，避免把自然语言概括误判为幻觉。
+            if answer_mode == "FULL_SUMMARY":
+                required_overlap = 0.6 if len(claim_terms) <= 6 else 0.5
+            else:
+                required_overlap = 0.8 if len(claim_terms) <= 6 else 0.65
             if overlap_ratio < required_overlap:
                 warnings.append("已移除一条与引用原文缺少事实词项重合的模型结论。")
                 continue
@@ -1115,6 +1136,42 @@ class EvidenceAnswerService:
                 continue
             valid.append({"text": claim.text.strip(), "evidence_ids": [item.evidence_id for item in cited]})
         return valid, warnings
+
+    @staticmethod
+    def _deterministic_fallback(
+        *,
+        items: list[EvidenceItem],
+        mode: str,
+        reason: str,
+    ) -> StructuredAnswer:
+        """在模型不可用时仍为全文总结返回稳定、可审计的抽取式概览。"""
+
+        usable = [item for item in items if item.quote.strip()]
+        if mode == "FULL_SUMMARY":
+            overview = build_extractive_document_overview(
+                filename=usable[0].filename if usable else "文件",
+                full_text="\n".join(item.quote for item in usable),
+            )
+            if overview:
+                # 概览仅由当前证据原句抽取而来，因此保留全部参与证据的审计边界。
+                return StructuredAnswer(
+                    claims=[
+                        {
+                            "text": overview,
+                            "evidence_ids": [item.evidence_id for item in usable],
+                        }
+                    ],
+                    limitations=[reason],
+                    status="PARTIAL",
+                )
+        return StructuredAnswer(
+            claims=[
+                {"text": item.quote.strip(), "evidence_ids": [item.evidence_id]}
+                for item in usable[: min(8, len(usable))]
+            ],
+            limitations=[reason],
+            status="PARTIAL",
+        )
 
     @staticmethod
     def _render_answer(claims: list[dict[str, Any]]) -> tuple[str, list[str]]:
@@ -1312,7 +1369,14 @@ class EvidenceAnswerService:
             "status": record.status,
             "answer_id": record.id,
             # 兼容旧 QAAnswer 已保存的 [1] 引用后缀；引用事实仍由 AnswerReference 保留。
-            "answer": _strip_legacy_inline_reference_indexes(record.answer_text),
+            "answer": _strip_legacy_inline_reference_indexes(
+                record.answer_text,
+                reference_indexes={
+                    index
+                    for indexes in reference_indexes_by_document.values()
+                    for index in indexes
+                },
+            ),
             "limitations": limitations,
             "references": list(cards.values()),
             "cached": cached,
@@ -1328,7 +1392,12 @@ class EvidenceAnswerService:
         """计算包含问题、回答模式和当前内容版本的请求指纹。"""
 
         payload = {
-            "question": " ".join(question.split()).casefold(),
+            # 等价的全文总结用同一个指纹，确保先生成的经校验结果能被后续同义问法复用。
+            "question": (
+                _FULL_SUMMARY_CACHE_KEY
+                if mode == "FULL_SUMMARY"
+                else " ".join(question.split()).casefold()
+            ),
             "mode": mode,
             "versions": sorted(
                 (working_copy.id, version.id, version.sha256)
@@ -1544,7 +1613,21 @@ def _split_filename_identity(value: str) -> tuple[str, str]:
     return stem, f".{extension}"
 
 
-def _strip_legacy_inline_reference_indexes(value: str) -> str:
+def _model_question(question: str, *, mode: str) -> str:
+    """将全文总结归一为稳定任务契约，避免同义措辞改变模型行为。"""
+
+    return _FULL_SUMMARY_MODEL_QUESTION if mode == "FULL_SUMMARY" else question
+
+
+def _strip_legacy_inline_reference_indexes(
+    value: str,
+    *,
+    reference_indexes: set[int],
+) -> str:
     """移除历史回答中的引用编号，避免旧缓存继续污染普通聊天正文。"""
 
-    return re.sub(r"(?<=[\u4e00-\u9fffA-Za-z0-9。！？；，、])(?:\[\d+\])+(?=(?:\s|$|[。！？；，、]))", "", str(value or ""))
+    def replace(match: re.Match[str]) -> str:
+        return "" if int(match.group(1)) in reference_indexes else match.group(0)
+
+    # 只移除确实对应 AnswerReference 的历史编号，避免误删法规年份等普通正文内容。
+    return re.sub(r"\[(\d+)\]", replace, str(value or ""))

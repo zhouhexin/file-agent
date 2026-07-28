@@ -48,6 +48,24 @@ class EvidenceQuestionPolicy:
         "总结这个",
         "总结文档",
         "总结文件",
+        "覆盖每个章节",
+        "覆盖全部章节",
+        "覆盖所有章节",
+        "每个章节",
+        "各个章节",
+        "所有章节",
+        "全文",
+    )
+    # 用户明确说“简要”时才收窄为聚焦回答。没有这个限定时，“总结某文件”
+    # 的合理默认含义是完整阅读后的全文总结，不能因为措辞不同而漏掉章节。
+    _FOCUSED_SUMMARY_MARKERS = (
+        "简要总结",
+        "简单总结",
+        "简短总结",
+        "一句话总结",
+        "只要要点",
+        "几个要点",
+        "摘要",
     )
     _TABLE_MARKERS = (
         "汇总表格",
@@ -90,9 +108,14 @@ class EvidenceQuestionPolicy:
         if requested_mode in {"FOCUSED", "FULL_SUMMARY"}:
             answer_mode = requested_mode
         else:
+            is_summary_request = "总结" in normalized or "概括" in normalized
             answer_mode = (
-                "FULL_SUMMARY"
-                if any(marker in normalized for marker in self._FULL_SUMMARY_MARKERS)
+                "FOCUSED"
+                if is_summary_request
+                and any(marker in normalized for marker in self._FOCUSED_SUMMARY_MARKERS)
+                else "FULL_SUMMARY"
+                if is_summary_request
+                or any(marker in normalized for marker in self._FULL_SUMMARY_MARKERS)
                 else "FOCUSED"
             )
 

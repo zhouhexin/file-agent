@@ -28,7 +28,10 @@ from app.db.models import (
     WorkingCopy,
     utcnow,
 )
-from app.modules.evidence_answer.service import EvidenceAnswerService
+from app.modules.evidence_answer.service import (
+    EvidenceAnswerService,
+    _strip_legacy_inline_reference_indexes,
+)
 from app.modules.evidence_answer.policy import EvidenceQuestionPolicy
 from app.modules.agent.user_receipt import UserTaskReceipt
 from app.modules.conversations.repository import (
@@ -51,11 +54,13 @@ class FakeEvidenceClient:
         """初始化调用计数。"""
 
         self.calls = 0
+        self.payloads: list[dict] = []
 
     def complete_json(self, *, system_prompt, user_payload):
         """引用第一条真实 evidence_id，避免测试依赖外部模型。"""
 
         self.calls += 1
+        self.payloads.append(user_payload)
         evidence = user_payload["evidence"]
         return {
             "claims": [
@@ -633,6 +638,41 @@ def test_full_summary_marks_partial_instead_of_silently_truncating_batches():
     assert client.calls == 1
 
 
+def test_equivalent_full_summary_phrasings_share_one_canonical_answer():
+    """“总结”“完整总结”“覆盖每章节”必须复用同一全文总结任务契约。"""
+
+    db = _session()
+    _seed(db)
+    client = FakeEvidenceClient()
+    service = EvidenceAnswerService(
+        db=db,
+        user_id="user-1",
+        conversation_id="conversation-1",
+        settings=_settings(),
+        client=client,
+    )
+
+    first = service.answer(question="总结申报通知.docx")
+    second = service.answer(question="请完整总结申报通知.docx，覆盖每个章节")
+
+    assert first["status"] == "COMPLETED"
+    assert second["cached"] is True
+    assert second["answer"] == first["answer"]
+    assert client.calls == 1
+    assert "完整总结" in client.payloads[0]["question"]
+
+
+def test_legacy_reference_cleanup_removes_only_persisted_reference_indexes():
+    """历史回答的 [1] 要隐藏，但正文中的年份 [2023] 不能被误删。"""
+
+    text = "依据〔2023〕4号文件执行。[1]"
+
+    assert _strip_legacy_inline_reference_indexes(
+        text,
+        reference_indexes={1},
+    ) == "依据〔2023〕4号文件执行。"
+
+
 def test_same_name_different_content_persists_selection_before_answering():
     """同名不同内容候选必须持久化选择，选择后计划只能读取用户选中的 Document。"""
 
@@ -719,6 +759,9 @@ def test_same_name_different_content_persists_selection_before_answering():
         ("文件文号是什么？", "DOCUMENT_NUMBER", "FOCUSED"),
         ("第六条规定了什么？", "CLAUSE", "FOCUSED"),
         ("完整总结这份文件", "SUMMARY", "FULL_SUMMARY"),
+        ("总结申报通知.docx", "SUMMARY", "FULL_SUMMARY"),
+        ("总结申报通知.docx，覆盖每个章节", "SUMMARY", "FULL_SUMMARY"),
+        ("简要总结申报通知.docx", "SUMMARY", "FOCUSED"),
         ("请总结一下申报通知.docx", "SUMMARY", "FULL_SUMMARY"),
         ("比较这两份方案的差异", "COMPARE", "FOCUSED"),
         ("汇总表格中的总金额", "TABLE_CALCULATION", "FOCUSED"),
