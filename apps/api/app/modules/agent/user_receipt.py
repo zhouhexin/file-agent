@@ -36,6 +36,9 @@ class UserTaskReceipt(BaseModel):
         "file_search_clarification",
         "evidence_answer",
         "file_selection",
+        "classification_clarification",
+        "classification_decision",
+        "filename_conflict",
     ] = "text"
     display_mode: Literal["default", "classification_cards"] = "default"
     final_response: str | None = None
@@ -48,6 +51,9 @@ class UserTaskReceipt(BaseModel):
     file_search_clarification_result: dict[str, Any] | None = None
     evidence_answer_result: dict[str, Any] | None = None
     file_selection_result: dict[str, Any] | None = None
+    classification_clarification_result: dict[str, Any] | None = None
+    classification_decision_result: dict[str, Any] | None = None
+    filename_conflict_result: dict[str, Any] | None = None
     pending_job_ids: list[str] = Field(default_factory=list)
     operation_plan_id: str | None = None
     pending_decisions: list[dict[str, Any]] = Field(default_factory=list)
@@ -69,6 +75,11 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
     file_search_clarification_result = _file_search_clarification_result(result)
     evidence_answer_result = _evidence_answer_result(result)
     file_selection_result = _file_selection_result(result)
+    (
+        classification_clarification_result,
+        classification_decision_result,
+    ) = _classification_decision_results(result)
+    filename_conflict_result = _filename_conflict_result(result)
     initial_organization_results = _initial_organization_results(result)
     document_results = _merge_document_results(
         initial_organization_results,
@@ -83,6 +94,9 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         file_search_clarification_result=file_search_clarification_result,
         evidence_answer_result=evidence_answer_result,
         file_selection_result=file_selection_result,
+        classification_clarification_result=classification_clarification_result,
+        classification_decision_result=classification_decision_result,
+        filename_conflict_result=filename_conflict_result,
     )
     pending_decisions: list[dict[str, Any]] = []
     if result.operation_plan_id:
@@ -117,6 +131,25 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
                 "message": "请先选择一个具体文件后继续。",
             }
         )
+    if classification_clarification_result:
+        pending_decisions.append(
+            {
+                "type": "classification_clarification",
+                "clarification_id": classification_clarification_result.get("id"),
+                "message": "请选择要确认或纠正的具体文件分类。",
+            }
+        )
+    if filename_conflict_result:
+        pending_decisions.append(
+            {
+                "type": "filename_conflict",
+                "filename": filename_conflict_result.get("filename"),
+                "message": filename_conflict_result.get("message"),
+                "allowed_decisions": filename_conflict_result.get(
+                    "allowed_decisions", []
+                ),
+            }
+        )
     for item in document_results:
         pending = item.get("pending_decision")
         if isinstance(pending, dict) and pending not in pending_decisions:
@@ -148,6 +181,9 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         file_search_clarification_result=file_search_clarification_result,
         evidence_answer_result=evidence_answer_result,
         file_selection_result=file_selection_result,
+        classification_clarification_result=classification_clarification_result,
+        classification_decision_result=classification_decision_result,
+        filename_conflict_result=filename_conflict_result,
         pending_job_ids=list(result.async_job_ids),
         operation_plan_id=result.operation_plan_id,
         pending_decisions=pending_decisions,
@@ -361,11 +397,20 @@ def _response_type(
     file_search_clarification_result: dict[str, Any] | None,
     evidence_answer_result: dict[str, Any] | None,
     file_selection_result: dict[str, Any] | None,
+    classification_clarification_result: dict[str, Any] | None,
+    classification_decision_result: dict[str, Any] | None,
+    filename_conflict_result: dict[str, Any] | None,
 ) -> str:
     """把内部意图收敛为少量稳定的用户展示类型。"""
 
     if result.operation_plan_id:
         return "operation_plan"
+    if classification_clarification_result:
+        return "classification_clarification"
+    if classification_decision_result:
+        return "classification_decision"
+    if filename_conflict_result:
+        return "filename_conflict"
     if rename_plan_result:
         return "rename_plan"
     if trash_restore_result:
@@ -434,6 +479,88 @@ def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
             "user_message": str(output.get("user_message") or ""),
             "files": files,
         }
+    return None
+
+
+def _classification_decision_results(
+    result: AgentRunResult,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """投影分类决定和选择卡，隐藏正式关系、工作副本与建议内部 ID。"""
+
+    for invocation in result.tool_invocations:
+        output = invocation.output_json
+        if invocation.tool_name != "classification-decision" or not isinstance(
+            output, dict
+        ):
+            continue
+        clarification = output.get("classification_clarification")
+        if output.get("kind") == "classification_clarification" and isinstance(
+            clarification, dict
+        ):
+            options = [
+                {
+                    "id": str(item.get("id") or ""),
+                    "filename": str(item.get("filename") or ""),
+                    "category_label": str(item.get("category_label") or ""),
+                }
+                for item in clarification.get("options", [])
+                if isinstance(item, dict) and item.get("id")
+            ]
+            return (
+                {
+                    "id": str(clarification.get("id") or ""),
+                    "status": str(
+                        clarification.get("status") or "WAITING_SELECTION"
+                    ),
+                    "prompt": str(
+                        clarification.get("prompt")
+                        or "请选择要确认或纠正的具体文件分类。"
+                    ),
+                    "action": str(clarification.get("action") or ""),
+                    "options": options,
+                    "expires_at": clarification.get("expires_at"),
+                },
+                None,
+            )
+        if output.get("kind") == "classification_decision" and output.get("ok"):
+            return (
+                None,
+                {
+                    "action": str(output.get("action") or ""),
+                    "message": str(
+                        output.get("message")
+                        or "分类决定已保存，文件位置未改变。"
+                    ),
+                    "file_position_changed": False,
+                },
+            )
+    return None, None
+
+
+def _filename_conflict_result(
+    result: AgentRunResult,
+) -> dict[str, Any] | None:
+    """投影共享目标同名冲突，只保留文件名和用户可选动作。"""
+
+    for invocation in result.tool_invocations:
+        output = invocation.output_json
+        if (
+            invocation.tool_name == "working-copy-action-plan-create"
+            and isinstance(output, dict)
+            and output.get("kind") == "filename_conflict"
+        ):
+            return {
+                "filename": str(output.get("filename") or ""),
+                "message": str(
+                    output.get("message")
+                    or "目标目录存在同名文件，请选择处理方式。"
+                ),
+                "allowed_decisions": [
+                    str(item)
+                    for item in output.get("allowed_decisions", [])
+                    if str(item)
+                ],
+            }
     return None
 
 

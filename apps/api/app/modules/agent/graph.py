@@ -319,6 +319,7 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
                 "generate-rename-suggestions",
                 "resolve-rename-reviews",
                 "working-copy-action-plan-create",
+                "classification-decision",
                 "classify-managed-files",
             }:
                 # 运行标识来自受信任 State，不能由 LLM 直接提供。
@@ -329,6 +330,9 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
                 tool_input["message"] = state["message"]
             if step["tool_name"] == "working-copy-action-plan-create":
                 # 文件动作文本和会话标识只能来自受信任 State，不能采用 LLM 改写或自报 ID。
+                tool_input["message"] = state["message"]
+            if step["tool_name"] == "classification-decision":
+                # 分类决定原话和运行标识必须来自受信任 State，不能采用 LLM 自报 ID。
                 tool_input["message"] = state["message"]
             # 调用工具注册表执行工具
             invocation = registry.invoke(step["tool_name"], tool_input)
@@ -345,7 +349,13 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
         tool_invocations.append(invocation_json)
         tool_results.append(invocation.output_json)
         changeset_id = invocation.changeset_id or changeset_id
-        operation_plan_id = invocation.operation_plan_id or operation_plan_id
+        # 同名冲突卡中的明确“覆盖”回复本身就是用户确认。该链路仍会创建并执行
+        # OperationPlan 供审计，但已执行计划不能再投影成第二张待确认卡。
+        if not (
+            invocation.output_json.get("kind") == "working_copy_operation_result"
+            and invocation.output_json.get("status") == "EXECUTED"
+        ):
+            operation_plan_id = invocation.operation_plan_id or operation_plan_id
 
     return {
         "tool_results": tool_results,
@@ -459,6 +469,8 @@ def _aggregate_tool_results(
         "classification_documents": classification_documents,
         "capability_catalog": _capability_catalog_from_results(tool_results),
         "classification_taxonomy": _classification_taxonomy_from_results(tool_results),
+        "classification_decision": _classification_decision_from_results(tool_results),
+        "working_copy_operation": _working_copy_operation_from_results(tool_results),
         "managed_file_list": _managed_file_list_from_results(tool_results),
         "workspace_file_search": _workspace_file_search_from_results(tool_results),
         "mcp_filesystem_result": _mcp_filesystem_result_from_results(tool_results),
@@ -561,6 +573,40 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
     """生成面向用户的最终运行摘要。"""
 
     result_summary = state.get("result_summary", {})
+
+    classification_decision = result_summary.get("classification_decision", {})
+    if classification_decision:
+        waiting = (
+            classification_decision.get("kind") == "classification_clarification"
+            or classification_decision.get("status") == "WAITING_SELECTION"
+        )
+        return {
+            "status": "NEEDS_REVIEW" if waiting else (
+                "COMPLETED" if classification_decision.get("ok") else "FAILED"
+            ),
+            "final_response": str(
+                classification_decision.get("message")
+                or (
+                    "请选择要确认或纠正的具体文件分类。"
+                    if waiting
+                    else "分类决定已保存，文件位置未改变。"
+                )
+            ),
+        }
+
+    working_copy_operation = result_summary.get("working_copy_operation", {})
+    if working_copy_operation:
+        return {
+            "status": (
+                "COMPLETED"
+                if working_copy_operation.get("status") == "EXECUTED"
+                else "NEEDS_REVIEW"
+            ),
+            "final_response": str(
+                working_copy_operation.get("message")
+                or "共享工作副本操作已完成。"
+            ),
+        }
 
     evidence_answer = result_summary.get("evidence_answer", {})
     if evidence_answer:
@@ -894,6 +940,34 @@ def _classification_taxonomy_from_results(tool_results: List[Dict[str, Any]]) ->
     for result in tool_results:
         if result.get("ok") and isinstance(result.get("taxonomy"), dict):
             return result["taxonomy"]
+    return {}
+
+
+def _classification_decision_from_results(
+    tool_results: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """提取正式分类决定或分类选择卡结果。"""
+
+    for result in tool_results:
+        if result.get("kind") in {
+            "classification_decision",
+            "classification_clarification",
+        }:
+            return result
+    return {}
+
+
+def _working_copy_operation_from_results(
+    tool_results: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """提取已经由当前用户回复直接确认并执行的工作副本结果。"""
+
+    for result in tool_results:
+        if result.get("kind") in {
+            "working_copy_operation_result",
+            "working_copy_conflict_cancelled",
+        }:
+            return result
     return {}
 
 

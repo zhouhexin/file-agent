@@ -61,6 +61,15 @@ class GraphRepository(Protocol):
     def delete_confirmed_classifications_by_source(self, *, source_type: str) -> None:
         """清理可重建来源关系，避免撤销反馈或 Profile 变化后残留。"""
 
+    def delete_confirmed_classification(
+        self,
+        *,
+        document_version_id: str,
+        category_graph_key: str,
+        source_id: str,
+    ) -> None:
+        """按正式关系身份删除单条可信分类投影。"""
+
     def replace_suggested_classifications(
         self,
         *,

@@ -1903,8 +1903,7 @@ class WorkingCopyQueryService:
         entries = (
             self.db.query(TrashEntry)
             .join(WorkingCopy, WorkingCopy.id == TrashEntry.working_copy_id)
-            .join(Document, Document.id == WorkingCopy.document_id)
-            .filter(TrashEntry.workspace_id == shared_workspace_id, Document.user_id == current_user.id)
+            .filter(TrashEntry.workspace_id == shared_workspace_id)
             .order_by(TrashEntry.deleted_at.desc())
             .all()
         )
@@ -1924,9 +1923,11 @@ class WorkingCopyQueryService:
         ]
 
     def download_path(self, *, working_copy_id: str, current_user: User) -> tuple[Path, str, str]:
-        """解析工作副本下载路径；只使用版本中由后端生成的相对路径。"""
+        """解析活动工作副本下载路径；回收站文件必须先恢复。"""
 
         copy = self._owned(working_copy_id=working_copy_id, current_user=current_user)
+        if copy.status != "ACTIVE":
+            raise HTTPException(status_code=410, detail="文件已删除，请先恢复。")
         version = self.db.get(DocumentVersion, copy.current_version_id) if copy.current_version_id else None
         document = self.db.get(Document, copy.document_id)
         if version is None or document is None:

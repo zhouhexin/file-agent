@@ -210,6 +210,29 @@ def test_empty_graph_cleanup_queries_do_not_reference_missing_relationship_token
     assert "type(relation) = 'PATH_SUGGESTS'" in driver.calls[1]["query"]
 
 
+def test_delete_formal_classification_is_scoped_to_exact_source_id():
+    """撤销一条正式关系不能删除同文件、同分类下的其他确认来源。"""
+
+    driver = RecordingDriver()
+    repository = Neo4jGraphRepository(driver=driver)
+
+    repository.delete_confirmed_classification(
+        document_version_id="version-1",
+        category_graph_key="taxonomy:v1:category-a",
+        source_id="formal-relation-1",
+    )
+
+    call = driver.calls[0]
+    assert "relation.source_type = 'formal_classification'" in call["query"]
+    assert "relation.source_id = $source_id" in call["query"]
+    assert " OR " not in call["query"]
+    assert call["parameters"] == {
+        "document_version_id": "version-1",
+        "category_graph_key": "taxonomy:v1:category-a",
+        "source_id": "formal-relation-1",
+    }
+
+
 def test_upsert_managed_hierarchy_rebuilds_folder_category_mappings():
     """当前 Profile 投影前必须清理旧目录分类映射。"""
 

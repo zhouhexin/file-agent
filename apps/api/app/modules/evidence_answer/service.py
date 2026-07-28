@@ -448,12 +448,10 @@ class EvidenceAnswerService:
         direct_rows = (
             self.db.query(WorkingCopy, DocumentVersion)
             .join(DocumentVersion, DocumentVersion.id == WorkingCopy.current_version_id)
-            .join(Document, Document.id == WorkingCopy.document_id)
             .filter(
                 WorkingCopy.workspace_id == self.workspace_id,
                 WorkingCopy.status == "ACTIVE",
                 WorkingCopy.document_id.in_(document_ids),
-                Document.user_id == self.user_id,
             )
             .all()
         )
@@ -516,12 +514,10 @@ class EvidenceAnswerService:
                     DocumentVersion,
                     DocumentVersion.id == WorkingCopy.current_version_id,
                 )
-                .join(Document, Document.id == WorkingCopy.document_id)
                 .filter(
                     WorkingCopy.workspace_id == self.workspace_id,
                     WorkingCopy.status == "ACTIVE",
                     WorkingCopy.managed_file_id.in_(managed_file_ids),
-                    Document.user_id == self.user_id,
                 )
                 .all()
                 if managed_file_ids

@@ -30,7 +30,10 @@ export type TaskResult = {
     | 'trash_restore_selection'
     | 'file_search_clarification'
     | 'evidence_answer'
-    | 'file_selection';
+    | 'file_selection'
+    | 'classification_clarification'
+    | 'classification_decision'
+    | 'filename_conflict';
   display_mode: 'default' | 'classification_cards';
   final_response: string | null;
   processed_count: number;
@@ -42,6 +45,9 @@ export type TaskResult = {
   file_search_clarification_result: FileSearchClarificationResult | null;
   evidence_answer_result: EvidenceAnswerResult | null;
   file_selection_result: FileSelectionResult | null;
+  classification_clarification_result: ClassificationClarificationResult | null;
+  classification_decision_result: ClassificationDecisionResult | null;
+  filename_conflict_result: FilenameConflictResult | null;
   pending_job_ids: string[];
   operation_plan_id: string | null;
   pending_decisions: Array<Record<string, unknown>>;
@@ -112,6 +118,31 @@ export type FileSearchClarificationResult = {
   options: FileSearchClarificationOption[];
   allow_custom_phrase: boolean;
   expires_at: string | null;
+};
+
+export type ClassificationClarificationResult = {
+  id: string;
+  status: 'WAITING_SELECTION' | 'RESOLVED' | 'SUPERSEDED' | 'EXPIRED' | string;
+  prompt: string;
+  action: 'ACCEPT' | 'REJECT' | 'CORRECT' | string;
+  options: Array<{
+    id: string;
+    filename: string;
+    category_label: string;
+  }>;
+  expires_at: string | null;
+};
+
+export type ClassificationDecisionResult = {
+  action: string;
+  message: string;
+  file_position_changed: false;
+};
+
+export type FilenameConflictResult = {
+  filename: string;
+  message: string;
+  allowed_decisions: string[];
 };
 
 export type EvidenceAnswerFile = {
@@ -370,12 +401,29 @@ export type ClassificationFeedbackResponse = {
   id: string;
   suggestion_id: string;
   document_id: string;
+  document_version_id?: string | null;
+  working_copy_id?: string | null;
   action: 'ACCEPTED' | 'REJECTED' | 'CORRECTED' | string;
   corrected_category_id?: string | null;
   corrected_category_path: string[];
   positive_category_ids: string[];
   negative_category_ids: string[];
+  changeset_id?: string | null;
+  file_position_changed?: boolean;
+  user_message?: string;
   created_at: string;
+};
+
+export type ClassificationTaxonomyOption = {
+  category_id: string;
+  label: string;
+  path: string[];
+};
+
+export type ClassificationTaxonomyOptionsResponse = {
+  taxonomy_key: string;
+  taxonomy_version: string;
+  options: ClassificationTaxonomyOption[];
 };
 
 export type DocumentResult = {

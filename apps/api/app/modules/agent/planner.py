@@ -13,6 +13,10 @@ from typing import Any, Dict, List
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.modules.agent.capability_router import route_user_intent
+from app.modules.classification.conversation_decision import (
+    classification_decision_action,
+    has_organize_by_classification_intent,
+)
 from app.modules.file_lifecycle.conversation_intents import (
     has_file_removal_action,
     has_trash_working_copy_intent,
@@ -197,6 +201,19 @@ class DeterministicPlanner:
                 user_goal=message,
                 action=conflict_action,
                 document_ids=[],
+            )
+        if has_organize_by_classification_intent(message):
+            return _working_copy_action_plan(
+                user_goal=message,
+                action="MOVE_BY_CONFIRMED_CATEGORY",
+                document_ids=_document_ids(attachments),
+            )
+        classification_action = classification_decision_action(message)
+        if classification_action:
+            return _classification_decision_plan(
+                user_goal=message,
+                action=classification_action,
+                document_ids=_document_ids(attachments),
             )
         if is_target_only_rename_request(message) and not attachments:
             # 目标名称不能充当源文件选择条件；缺少附件或源文件名时只请求澄清。
@@ -563,6 +580,23 @@ def build_plan_from_user_intent(
             user_goal=intent_plan.user_goal or message,
             action=conflict_action,
             document_ids=[],
+            response_style=intent_plan.response_style,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
+    if has_organize_by_classification_intent(message):
+        return _working_copy_action_plan(
+            user_goal=intent_plan.user_goal or message,
+            action="MOVE_BY_CONFIRMED_CATEGORY",
+            document_ids=attachment_document_ids,
+            response_style=intent_plan.response_style,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
+    classification_action = classification_decision_action(message)
+    if classification_action:
+        return _classification_decision_plan(
+            user_goal=intent_plan.user_goal or message,
+            action=classification_action,
+            document_ids=attachment_document_ids,
             response_style=intent_plan.response_style,
             llm_intent_plan=intent_plan.model_dump(),
         )
@@ -1604,6 +1638,69 @@ def _working_copy_action_plan(
     )
 
 
+def _classification_decision_plan(
+    *,
+    user_goal: str,
+    action: str,
+    document_ids: list[str],
+    response_style: str = "concise",
+    llm_intent_plan: Dict[str, Any] | None = None,
+) -> PlannerOutput:
+    """生成分类接受、拒绝或纠正的声明式计划。
+
+    Planner 不解析 suggestion/category ID，真实对象和 taxonomy 节点由 Tool 后端校验。
+    """
+
+    return PlannerOutput(
+        intent=f"{action}_CLASSIFICATION",
+        user_goal=user_goal,
+        slots={
+            "document_ids": document_ids,
+            "requested_outputs": ["classification_decision"],
+            "response_style": response_style,
+            "llm_intent_plan": llm_intent_plan or {},
+            "route_source": "controlled_classification_decision",
+        },
+        selected_skills=[
+            "chat-intake",
+            "document-classification",
+            "feedback-and-memory",
+            "change-report",
+        ],
+        steps=[
+            {
+                "step_id": "step-classification-decision",
+                "skill": "document-classification",
+                "tool_name": "classification-decision",
+                "input": {
+                    "action": action,
+                    "message": user_goal,
+                    "document_ids": document_ids,
+                },
+                "requires_confirmation": False,
+                "risk_level": "low",
+                "expected_outputs": [
+                    "classification_decision",
+                    "classification_clarification",
+                ],
+                "writes": [
+                    "document_category_feedback",
+                    "document_categories",
+                    "document_category_confirmation_sources",
+                    "change_sets",
+                    "change_items",
+                    "classification_graph_outbox",
+                ],
+            }
+        ],
+        evidence_policy={
+            "require_page_or_cell": True,
+            "allow_no_evidence_answer": False,
+        },
+        confirmation_policy={"operation_plan_required": False},
+    )
+
+
 def _has_resolved_trash_intent(
     *,
     message: str,
@@ -1645,6 +1742,12 @@ def _filename_conflict_action(message: str) -> str | None:
     """识别同名冲突卡允许的明确选择，不把模糊聊天当作执行授权。"""
 
     compact = re.sub(r"\s+", "", message)
+    if compact in {"覆盖", "确认覆盖", "覆盖已有文件", "覆盖原文件"}:
+        # “是/是的”必须先由会话服务确认存在唯一待决冲突后改写为明确动作，
+        # 不能在无上下文 Planner 中把所有肯定回复都解释成覆盖。
+        return "CONFLICT_REPLACE_EXISTING"
+    if compact in {"取消同名处理", "取消文件名冲突", "取消同名冲突"}:
+        return "CONFLICT_CANCEL"
     if any(value in compact for value in ["同时保留", "两个都保留", "都保留"]):
         return "CONFLICT_KEEP_BOTH"
     if any(value in compact for value in ["保留已有", "保留原来的", "不要新文件"]):

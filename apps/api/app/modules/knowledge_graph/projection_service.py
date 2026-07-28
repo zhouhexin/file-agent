@@ -11,11 +11,14 @@ from sqlalchemy.orm import Session
 from app.core.logging import log_event
 from app.db.models import (
     Document,
+    DocumentCategory,
     DocumentCategoryFeedback,
     DocumentCategorySuggestion,
+    DocumentVersion,
     ManagedFile,
     ManagedFileSnapshot,
     ManagedRoot,
+    WorkingCopy,
 )
 from app.modules.classification.loader import load_default_taxonomy
 from app.modules.classification.managed_catalog import (
@@ -376,6 +379,39 @@ class GraphProjectionService:
             .filter(DocumentCategoryFeedback.is_active.is_(True))
             .all()
         )
+        formal_rows = (
+            db.query(DocumentCategory, DocumentVersion, WorkingCopy)
+            .join(
+                DocumentVersion,
+                DocumentVersion.id == DocumentCategory.document_version_id,
+            )
+            .join(WorkingCopy, WorkingCopy.id == DocumentCategory.working_copy_id)
+            .filter(DocumentCategory.status == "CONFIRMED")
+            .filter(WorkingCopy.status == "ACTIVE")
+            .all()
+        )
+        formal_version_ids: set[str] = set()
+        for relation, version, working_copy in formal_rows:
+            graph_key = taxonomy_id_keys.get(relation.category_id)
+            if graph_key is None:
+                continue
+            projection = DocumentVersionProjection(
+                document_version_id=version.id,
+                document_id=working_copy.document_id,
+                sha256=version.sha256,
+                filename=working_copy.filename,
+                is_active=True,
+            )
+            versions[projection.document_version_id] = projection
+            formal_version_ids.add(version.id)
+            confirmed[(version.id, graph_key)] = ConfirmedClassificationProjection(
+                document_version_id=version.id,
+                category_graph_key=graph_key,
+                source_type="formal_classification",
+                source_id=relation.id,
+                confidence=1.0,
+            )
+
         for feedback, suggestion, document in feedback_rows:
             action = str(feedback.action or "").upper()
             if action not in CONFIRMED_FEEDBACK_ACTIONS | {"CORRECT", "CORRECTED"}:
@@ -406,6 +442,9 @@ class GraphProjectionService:
             if graph_key is None:
                 continue
             version = _document_projection(document)
+            # 阶段六正式关系是权威来源；旧反馈兼容投影不能覆盖同一当前版本。
+            if version.document_version_id in formal_version_ids:
+                continue
             versions[version.document_version_id] = version
             confirmed[(version.document_version_id, graph_key)] = ConfirmedClassificationProjection(
                 document_version_id=version.document_version_id,
@@ -460,6 +499,9 @@ class GraphProjectionService:
             )
 
         self.repository.delete_confirmed_classifications_by_source(source_type="user_feedback")
+        self.repository.delete_confirmed_classifications_by_source(
+            source_type="formal_classification"
+        )
         # 清理旧版本曾经由目录位置错误生成的确认关系。
         self.repository.delete_confirmed_classifications_by_source(source_type="managed_path")
         self.repository.upsert_confirmed_classifications(

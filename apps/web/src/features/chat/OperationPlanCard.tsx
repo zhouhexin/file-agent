@@ -1,5 +1,5 @@
 // OperationPlan 卡片只负责展示和确认受控计划，不在浏览器直接修改文件。
-import { CheckCircle2, Files, FilePenLine, RotateCcw, Trash2 } from 'lucide-react';
+import { CheckCircle2, Files, FilePenLine, FolderInput, RotateCcw, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 
 import { confirmOperationPlan, getRenameBatchItems } from '../../api/client';
@@ -180,6 +180,14 @@ function operationPresentation(operationType: string) {
       confirmLabel: '确认处理',
       completedLabel: '同名文件处理已完成',
       icon: <Files size={18} />,
+    };
+  }
+  if (operationType === 'MOVE_WORKING_COPIES') {
+    return {
+      title: '共享文件整理计划',
+      confirmLabel: '确认移动',
+      completedLabel: '文件已移动到确认分类对应目录',
+      icon: <FolderInput size={18} />,
     };
   }
   return {

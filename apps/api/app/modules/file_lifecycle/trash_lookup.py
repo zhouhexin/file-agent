@@ -13,7 +13,7 @@ from typing import Any
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import Document, DocumentVersion, TrashEntry, WorkingCopy
+from app.db.models import DocumentVersion, TrashEntry, WorkingCopy
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
 
@@ -53,13 +53,11 @@ class ExactTrashFilenameLookupService:
         rows = (
             self.db.query(TrashEntry, WorkingCopy, DocumentVersion)
             .join(WorkingCopy, WorkingCopy.id == TrashEntry.working_copy_id)
-            .join(Document, Document.id == WorkingCopy.document_id)
             .join(DocumentVersion, DocumentVersion.id == TrashEntry.document_version_id)
             .filter(
                 TrashEntry.workspace_id == self.workspace_id,
                 TrashEntry.status == "ACTIVE",
                 WorkingCopy.status == "TRASHED",
-                Document.user_id == self.user_id,
             )
             .order_by(TrashEntry.deleted_at.desc(), TrashEntry.id.asc())
             .all()

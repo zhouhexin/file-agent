@@ -13,9 +13,10 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import Document, User
+from app.db.models import Document, User, WorkingCopy
 from app.modules.file_lifecycle.service import UploadLifecycleService
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
+from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.modules.files.artifact_repository import DocumentArtifactRepository
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.repository import FileRepository
@@ -124,9 +125,16 @@ class FileUploadService:
         )
 
     def delete(self, document_id: str, current_user: User) -> FileDeleteResponse:
-        """删除尚未进入对话的上传文件。"""
+        """只允许上传所有者取消尚未进入对话的私有暂存文件。
 
-        document = self.repository.get_document_for_user(document_id=document_id, user_id=current_user.id)
+        共享 ``ACTIVE`` 工作副本虽然可以被所有登录用户读取，但绝不能经过上传
+        暂存删除接口处理；共享文件删除必须走确认后的 OperationPlan。
+        """
+
+        document = self.repository.get_document_for_user(
+            document_id=document_id,
+            user_id=current_user.id,
+        )
         if document is None:
             raise HTTPException(status_code=404, detail="Document not found")
         if document.status == "USED_IN_MESSAGE":
@@ -154,12 +162,15 @@ class FileUploadService:
         return candidate
 
     def get_content_response(self, document_id: str, current_user: User) -> FileResponse:
-        """按 document_id 返回原始文件内容。
+        """按 document_id 返回私有上传附件或共享活动工作副本内容。
 
-        当前用于对话附件点击查看，必须校验 Document.user_id，避免跨用户读取附件。
+        其他用户的上传暂存 Document 仍不可读；共享权限只来自活动工作副本关系。
         """
 
-        document = self.repository.get_document_for_user(document_id=document_id, user_id=current_user.id)
+        document = self._get_readable_document(
+            document_id=document_id,
+            current_user=current_user,
+        )
         if document is None:
             raise HTTPException(status_code=404, detail="Document not found")
         lifecycle = FileExtractionRepository(
@@ -203,15 +214,15 @@ class FileUploadService:
         current_user: User,
         max_chars: int = 100_000,
     ) -> FilePreviewResponse:
-        """返回当前用户文件的受控正文预览。
+        """返回私有上传附件或共享活动工作副本的受控正文预览。
 
         Office 文件不能依赖浏览器原生渲染，因此只返回已经持久化的 ``document_pages`` 文本。
-        预览不能触发临时解析、不能读取其他用户文件，也不能返回存储路径或解析器内部信息。
+        预览不能触发临时解析、不能读取其他用户上传暂存文件，也不能返回存储路径或解析器内部信息。
         """
 
-        document = self.repository.get_document_for_user(
+        document = self._get_readable_document(
             document_id=document_id,
-            user_id=current_user.id,
+            current_user=current_user,
         )
         if document is None:
             raise HTTPException(status_code=404, detail="Document not found")
@@ -256,6 +267,37 @@ class FileUploadService:
             content_type=document.content_type,
             sections=sections,
             truncated=truncated,
+        )
+
+    def _get_readable_document(
+        self,
+        *,
+        document_id: str,
+        current_user: User,
+    ) -> Document | None:
+        """读取私有上传附件或共享活动工作副本文档。
+
+        共享权限只由 ``WorkingCopy.workspace_id + ACTIVE`` 授予；仅知道其他用户
+        上传暂存 Document 的 ID 不能读取隔离区原件。
+        """
+
+        shared_copies = (
+            self.db.query(WorkingCopy)
+            .filter(
+                WorkingCopy.document_id == document_id,
+                WorkingCopy.workspace_id == get_shared_workspace_id(self.db),
+            )
+            .all()
+        )
+        if shared_copies:
+            # 文件一旦形成共享工作副本，读取状态就必须以共享事实为准。
+            # 即使当前用户最初上传了文件，也不能绕过 TRASHED 状态读取历史原件。
+            if not any(copy.status == "ACTIVE" for copy in shared_copies):
+                return None
+            return self.db.get(Document, document_id)
+        return self.repository.get_document_for_user(
+            document_id=document_id,
+            user_id=current_user.id,
         )
 
     async def _stream_upload_to_quarantine(self, *, file: UploadFile) -> tuple[Path, int, str]:

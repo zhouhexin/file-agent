@@ -36,6 +36,9 @@ from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.changesets.service import persist_changeset_from_document_results
 from app.modules.classification.classifier_service import DocumentClassificationService
+from app.modules.classification.graph_outbox import (
+    ClassificationGraphOutboxService,
+)
 from app.modules.classification.result_builder import (
     build_document_results_from_extraction_results,
     format_document_results_response,
@@ -246,7 +249,45 @@ def run_filesystem_worker(
             time.sleep(poll_seconds)
             continue
         if processed is None:
+            graph_processed = process_next_classification_graph_outbox(
+                session_factory=session_factory
+            )
+            if graph_processed is not None:
+                continue
             time.sleep(poll_seconds)
+
+
+def process_next_classification_graph_outbox(
+    *,
+    session_factory: Callable[[], Session] = SessionLocal,
+) -> str | None:
+    """在文件队列空闲时消费一个正式分类图谱待办。
+
+    图谱关闭时立即返回；Neo4j 暂时不可用时服务会提交 RETRY 状态，不能让
+    文件扫描、导入和聊天主链路随之失败。
+    """
+
+    db = session_factory()
+    try:
+        outbox_id = ClassificationGraphOutboxService(
+            db,
+            settings=get_settings(),
+        ).process_next()
+        db.commit()
+        return outbox_id
+    except Exception as exc:
+        db.rollback()
+        log_event(
+            "classification.graph_outbox.worker_failed",
+            level="ERROR",
+            status="FAILED",
+            error_code=exc.__class__.__name__,
+            exception_traceback=format_exception_traceback(exc),
+            message="正式分类图谱待办消费器异常，文件 worker 将继续运行",
+        )
+        return None
+    finally:
+        db.close()
 
 
 def _process_job(*, db: Session, job: FilesystemJob) -> None:

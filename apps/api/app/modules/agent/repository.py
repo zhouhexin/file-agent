@@ -137,7 +137,17 @@ class AgentRunRepository:
             document_results=graph_state.get("document_results", []),
             async_job_ids=graph_state.get("async_job_ids", []),
             changeset_id=_first_valid_uuid([run.changeset_id, *[item.changeset_id for item in invocation_models]]),
-            operation_plan_id=_last_non_empty([item.operation_plan_id for item in invocation_models]),
+            operation_plan_id=_last_non_empty(
+                [
+                    item.operation_plan_id
+                    for item in invocation_models
+                    if not (
+                        item.output_json.get("kind")
+                        == "working_copy_operation_result"
+                        and item.output_json.get("status") == "EXECUTED"
+                    )
+                ]
+            ),
             final_response=run.final_response,
             errors=[run.error_message] if run.error_message else [],
         )

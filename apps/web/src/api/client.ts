@@ -2,6 +2,8 @@
 import type {
   AgentCapabilityCatalog,
   ClassificationFeedbackResponse,
+  ClassificationClarificationResult,
+  ClassificationTaxonomyOptionsResponse,
   ConversationDetailResponse,
   DuplicateDecisionResponse,
   DuplicateReview,
@@ -333,12 +335,40 @@ export async function submitClassificationFeedback(
   suggestionId: string,
   payload: {
     action: 'ACCEPT' | 'REJECT' | 'CORRECT';
-    corrected_category_path?: string[];
+    corrected_category_id?: string;
+    relation_role?: 'PRIMARY' | 'SECONDARY' | 'RELATED' | 'DOCUMENT_TYPE';
+    agent_run_id?: string;
   },
 ): Promise<ClassificationFeedbackResponse> {
   // 只有用户明确操作才写入反馈，未点击不推断为正样本。
   return request(`/classification/suggestions/${suggestionId}/feedback`, {
     token,
     body: payload,
+  });
+}
+
+export async function getClassificationTaxonomyOptions(
+  token: string,
+): Promise<ClassificationTaxonomyOptionsResponse> {
+  // 更正分类只能从后端当前启用的 taxonomy 选择，不能提交自由文本路径。
+  return request('/classification/taxonomy/options', { token });
+}
+
+export async function getClassificationClarification(
+  token: string,
+  clarificationId: string,
+): Promise<ClassificationClarificationResult> {
+  return request(`/classification/clarifications/${clarificationId}`, { token });
+}
+
+export async function resolveClassificationClarification(
+  token: string,
+  clarificationId: string,
+  optionId: string,
+): Promise<ClassificationFeedbackResponse> {
+  // 选择卡只回传后端签发的 option_id，禁止浏览器拼接文件或分类内部身份。
+  return request(`/classification/clarifications/${clarificationId}/resolve`, {
+    token,
+    body: { option_id: optionId },
   });
 }

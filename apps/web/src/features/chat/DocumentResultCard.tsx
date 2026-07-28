@@ -7,6 +7,7 @@ import { formatFileSize, getFailureMessage } from './presentation';
 
 type DocumentResultCardProps = {
   token?: string;
+  agentRunId?: string;
   result: DocumentResult;
   index: number;
   attachment?: ChatAttachment;
@@ -22,6 +23,7 @@ export function DocumentResultCard({
   onOpenFile,
   onOpenDocument,
   token,
+  agentRunId,
 }: DocumentResultCardProps) {
   // 每个文件单独成卡，避免把批量结果挤成一整段文本。
   const failed = result.extraction_status === 'FAILED';
@@ -86,11 +88,17 @@ export function DocumentResultCard({
             </div>
             {primaryCategory ? (
               <div className="document-result-inline-category">
-                <CategoryChip category={primaryCategory} compact token={token} />
+                <CategoryChip
+                  category={primaryCategory}
+                  compact
+                  token={token}
+                  agentRunId={agentRunId}
+                  relationRole="PRIMARY"
+                />
               </div>
             ) : null}
             <span className="document-result-confidence">
-              {primaryCategory ? `置信度 ${primaryCategory.confidence.toFixed(2)}` : '未分类'}
+              {primaryCategory ? `置信度 ${primaryCategory.confidence.toFixed(2)}` : '暂无可靠分类'}
             </span>
             {result.search_status ? (
               <span
@@ -111,6 +119,8 @@ export function DocumentResultCard({
                     key={`${category.name}-${category.confidence}`}
                     compact
                     token={token}
+                    agentRunId={agentRunId}
+                    relationRole="RELATED"
                   />
                 ))}
               </div>

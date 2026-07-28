@@ -8,6 +8,7 @@ from app.db.models import (
     ChangeItem,
     Document,
     DocumentClassificationSummary,
+    DocumentCategory,
     DocumentChunk,
     DocumentExtractionRun,
     DocumentIndexRun,
@@ -18,6 +19,8 @@ from app.db.models import (
     FileRenameReviewItem,
     ManagedFile,
     Message,
+    OperationConfirmation,
+    OperationPlan,
     TrashEntry,
     ToolInvocation,
     UploadArchiveRecord,
@@ -27,6 +30,7 @@ from app.db.models import (
     WorkingCopyPathRecord,
     Workspace,
 )
+from app.modules.classification.loader import load_default_taxonomy
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
 from app.modules.file_lifecycle.risk import inspect_basic_file_risks
@@ -1441,15 +1445,14 @@ def test_initial_filename_conflict_waits_for_dialog_without_version_suffix(monke
     replace_response = client.post(
         "/api/conversations/filename-conflict-conv/messages",
         headers=headers,
-        json={"content": "用新文件替换已有文件", "attachments": []},
+        # 只有当前会话存在唯一待决冲突时，短回复“是”才可被解释为覆盖。
+        json={"content": "是", "attachments": []},
     )
-    replace_plan_id = replace_response.json()["task_result"]["operation_plan_id"]
-    replace_confirmation = client.post(
-        f"/api/operations/plans/{replace_plan_id}/confirm",
-        headers=headers,
-        json={"confirmation": "确认替换"},
-    )
-    assert replace_confirmation.json()["status"] == "EXECUTED"
+    assert replace_response.status_code == 200
+    replace_receipt = replace_response.json()["task_result"]
+    assert replace_receipt["task_status"] == "completed"
+    assert replace_receipt["operation_plan_id"] is None
+    assert "旧文件已移入可恢复回收站" in replace_receipt["final_response"]
     final_copies = client.get("/api/working-copies", headers=headers).json()
     assert sorted(item["filename"] for item in final_copies if item["status"] == "ACTIVE") == [
         "同名材料.txt",
@@ -1466,6 +1469,33 @@ def test_initial_filename_conflict_waits_for_dialog_without_version_suffix(monke
         ]
         assert len(reviews) == 2
         assert all(review.status == "EXECUTED" for review in reviews)
+        replacement_plan = (
+            db.query(OperationPlan)
+            .filter(
+                OperationPlan.operation_type == "RESOLVE_FILENAME_CONFLICT",
+                OperationPlan.status == "EXECUTED",
+            )
+            .order_by(OperationPlan.created_at.desc())
+            .first()
+        )
+        assert replacement_plan is not None
+        assert (
+            db.query(OperationConfirmation)
+            .filter(
+                OperationConfirmation.operation_plan_id == replacement_plan.id
+            )
+            .count()
+            == 1
+        )
+        assert (
+            db.query(WorkingCopyPathRecord)
+            .filter(
+                WorkingCopyPathRecord.operation_plan_id == replacement_plan.id,
+                WorkingCopyPathRecord.status == "COMPLETED",
+            )
+            .count()
+            == 1
+        )
     finally:
         db.close()
         clear_overrides()
@@ -1510,6 +1540,12 @@ def test_chat_creates_and_confirms_trash_then_restore_plans(monkeypatch, tmp_pat
     )
     assert trash_confirmation.json()["status"] == "EXECUTED"
     assert client.get(f"/api/working-copies/{working_copy['id']}", headers=headers).json()["status"] == "TRASHED"
+    trashed_download = client.get(
+        f"/api/working-copies/{working_copy['id']}/download",
+        headers=headers,
+    )
+    assert trashed_download.status_code == 410
+    assert trashed_download.json()["detail"] == "文件已删除，请先恢复。"
     with SessionLocal() as db:
         operation_messages = db.query(Message).filter(
             Message.content.like("工作副本操作完成：%")
@@ -1884,3 +1920,95 @@ def test_confirmed_file_action_tool_executes_persisted_working_copy_plan(monkeyp
     renamed = client.get(f"/api/working-copies/{working_copy['id']}", headers=headers).json()
     assert renamed["filename"] == "已整理通知.txt"
     clear_overrides()
+
+
+def test_confirmed_primary_category_creates_plan_before_shared_file_move(
+    monkeypatch,
+    tmp_path,
+):
+    """按分类整理必须先建计划，确认后才移动共享工作副本且版本不变。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "category-move-owner")
+    _upload(client, headers, "教师考核材料.txt", b"teacher assessment")
+    _drain(SessionLocal)
+    working_copy = client.get("/api/working-copies", headers=headers).json()[0]
+    original_path = working_copy["relative_path"]
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.username == "category-move-owner").one()
+        taxonomy = load_default_taxonomy()
+        run = AgentRun(
+            id="33333333-3333-4333-8333-333333333333",
+            conversation_id="category-move-conversation",
+            message_id="category-move-message",
+            user_id=user.id,
+        )
+        db.add_all(
+            [
+                run,
+                DocumentCategory(
+                    working_copy_id=working_copy["id"],
+                    document_id=working_copy["document_id"],
+                    document_version_id=working_copy["current_version_id"],
+                    category_id="school.hr.appointment-assessment",
+                    category_path_json=["学校", "人事师资", "考核聘任"],
+                    relation_role="PRIMARY",
+                    status="CONFIRMED",
+                    taxonomy_key=taxonomy.key,
+                    taxonomy_version=taxonomy.version,
+                    classifier_version="test",
+                ),
+            ]
+        )
+        db.commit()
+        before_version_count = (
+            db.query(DocumentVersion)
+            .filter(DocumentVersion.document_id == working_copy["document_id"])
+            .count()
+        )
+        planned = ToolRegistry(db=db, user_id=user.id).invoke(
+            "working-copy-action-plan-create",
+            {
+                "action": "MOVE_BY_CONFIRMED_CATEGORY",
+                "message": "按确认分类整理这个文件",
+                "document_ids": [working_copy["document_id"]],
+                "conversation_id": run.conversation_id,
+                "agent_run_id": run.id,
+            },
+        )
+        assert planned.output_json["status"] == "WAITING_CONFIRMATION"
+        db.refresh(db.get(WorkingCopy, working_copy["id"]))
+        assert db.get(WorkingCopy, working_copy["id"]).relative_path == original_path
+
+        executed = ToolRegistry(db=db, user_id=user.id).invoke(
+            "confirmed-file-action",
+            {
+                "operation_plan_id": planned.output_json["operation_plan_id"],
+                "confirmation_text": "确认按分类整理共享文件",
+            },
+        )
+        moved = db.get(WorkingCopy, working_copy["id"])
+        assert executed.output_json["status"] == "EXECUTED"
+        assert moved.relative_path == "学校/人事师资/考核聘任/教师考核材料.txt"
+        assert (
+            db.query(DocumentVersion)
+            .filter(DocumentVersion.document_id == working_copy["document_id"])
+            .count()
+            == before_version_count
+        )
+        assert (
+            db.query(WorkingCopyPathRecord)
+            .filter(
+                WorkingCopyPathRecord.working_copy_id == working_copy["id"],
+                WorkingCopyPathRecord.operation_type == "MOVE",
+                WorkingCopyPathRecord.status == "COMPLETED",
+            )
+            .count()
+            == 1
+        )
+    finally:
+        db.close()
+        clear_overrides()

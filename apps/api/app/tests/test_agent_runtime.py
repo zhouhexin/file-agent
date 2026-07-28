@@ -45,6 +45,24 @@ def test_chat_summary_provider_can_disable_llm_even_when_global_llm_is_enabled()
     assert service.client is None
 
 
+def test_bare_confirmation_is_not_globally_interpreted_as_filename_overwrite():
+    """没有数据库唯一冲突上下文时，“是”不能被 Planner 当成覆盖授权。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conversation-no-conflict",
+        user_id="user-no-conflict",
+        message_id="message-no-conflict",
+        message="是",
+        attachments=[],
+    )
+
+    assert plan.intent == "GENERAL_CHAT"
+    assert all(
+        step.tool_name != "working-copy-action-plan-create"
+        for step in plan.steps
+    )
+
+
 def test_tool_registry_contains_mvp_catalog_and_endpoint_requires_authentication():
     """内部白名单必须完整，同时匿名请求不能读取 Tool 目录。"""
 
@@ -54,7 +72,10 @@ def test_tool_registry_contains_mvp_catalog_and_endpoint_requires_authentication
     assert response.status_code == 401
     tool_names = {tool["name"] for tool in ToolRegistry().list_tools()}
     assert "document-convert" in tool_names
-    assert "operation-plan-create" in tool_names
+    assert "working-copy-action-plan-create" in tool_names
+    # 未接真实持久化服务的旧占位入口不得继续出现在可调用白名单中。
+    assert "operation-plan-create" not in tool_names
+    assert "change-report" not in tool_names
     assert "confirmed-file-action" in tool_names
     assert "profile-spreadsheet" in tool_names
     assert "validate-spreadsheet" in tool_names
@@ -1044,6 +1065,50 @@ def test_planner_routes_explicit_filename_lookup_through_controlled_search(messa
     assert plan.steps[0].tool_name == "hybrid-search"
     assert plan.steps[0].input["query"] == message
     assert plan.confirmation_policy["operation_plan_required"] is False
+
+
+def test_planner_routes_natural_language_classification_decisions():
+    """接受、拒绝和纠正分类必须进入统一分类决定 Tool。"""
+
+    cases = [
+        ("这个分类是对的", "ACCEPT"),
+        ("这个不是科研材料", "REJECT"),
+        ("这个不是科研材料，是干部考察材料", "CORRECT"),
+    ]
+    for message, action in cases:
+        plan = DeterministicPlanner().plan(
+            conversation_id="conv-stage6-classification",
+            user_id="user-1",
+            message_id=f"msg-{action.lower()}",
+            message=message,
+            attachments=[{"document_id": "document-stage6"}],
+        )
+        assert plan.steps[0].tool_name == "classification-decision"
+        assert plan.steps[0].input["action"] == action
+        assert plan.steps[0].input["document_ids"] == ["document-stage6"]
+
+
+def test_planner_only_moves_after_explicit_organization_request():
+    """确认分类本身不能移动，只有明确整理请求才创建移动计划。"""
+
+    accepted = DeterministicPlanner().plan(
+        conversation_id="conv-stage6-move",
+        user_id="user-1",
+        message_id="msg-stage6-accept",
+        message="确认这个分类",
+        attachments=[{"document_id": "document-stage6"}],
+    )
+    organized = DeterministicPlanner().plan(
+        conversation_id="conv-stage6-move",
+        user_id="user-1",
+        message_id="msg-stage6-organize",
+        message="按刚才确认的分类整理这个文件",
+        attachments=[{"document_id": "document-stage6"}],
+    )
+
+    assert accepted.steps[0].tool_name == "classification-decision"
+    assert organized.steps[0].tool_name == "working-copy-action-plan-create"
+    assert organized.steps[0].input["action"] == "MOVE_BY_CONFIRMED_CATEGORY"
 
 
 @pytest.mark.parametrize(

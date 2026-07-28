@@ -368,6 +368,8 @@ class WorkingCopyActionPlanInput(StrictToolInput):
         "CONFLICT_KEEP_EXISTING",
         "CONFLICT_REPLACE_EXISTING",
         "CONFLICT_DELETE_EXISTING",
+        "CONFLICT_CANCEL",
+        "MOVE_BY_CONFIRMED_CATEGORY",
     ]
     message: str = Field(min_length=1, max_length=4000)
     document_ids: List[str] = Field(default_factory=list, max_length=50)
@@ -378,6 +380,26 @@ class WorkingCopyActionPlanInput(StrictToolInput):
     @classmethod
     def validate_document_ids(cls, value: List[str]) -> List[str]:
         """拒绝空 ID 并保持后端附件顺序，不能扩大用户选择范围。"""
+
+        normalized = [str(item).strip() for item in value]
+        if any(not item for item in normalized):
+            raise ValueError("document_ids must not contain empty values")
+        return list(dict.fromkeys(normalized))
+
+
+class ClassificationDecisionInput(StrictToolInput):
+    """自然语言分类决定只能携带原话和后端解析的附件范围。"""
+
+    action: Literal["ACCEPT", "REJECT", "CORRECT"]
+    message: str = Field(min_length=1, max_length=4000)
+    document_ids: List[str] = Field(default_factory=list, max_length=50)
+    conversation_id: str = Field(min_length=1, max_length=36)
+    agent_run_id: str = Field(min_length=1, max_length=36)
+
+    @field_validator("document_ids")
+    @classmethod
+    def validate_document_ids(cls, value: List[str]) -> List[str]:
+        """保持后端附件顺序并拒绝空 ID。"""
 
         normalized = [str(item).strip() for item in value]
         if any(not item for item in normalized):

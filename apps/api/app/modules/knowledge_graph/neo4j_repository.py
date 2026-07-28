@@ -248,7 +248,11 @@ class Neo4jGraphRepository:
     def delete_confirmed_classifications_by_source(self, *, source_type: str) -> None:
         """按受控来源清理可重建可信关系。"""
 
-        if source_type not in {"user_feedback", "managed_path"}:
+        if source_type not in {
+            "user_feedback",
+            "managed_path",
+            "formal_classification",
+        }:
             raise ValueError("不支持清理该图谱关系来源。")
         self._execute(
             """
@@ -258,6 +262,31 @@ class Neo4jGraphRepository:
             DELETE relation
             """,
             {"source_type": source_type},
+        )
+
+    def delete_confirmed_classification(
+        self,
+        *,
+        document_version_id: str,
+        category_graph_key: str,
+        source_id: str,
+    ) -> None:
+        """删除一条已结束的正式分类投影，不影响其他文件或分类。"""
+
+        self._execute(
+            """
+            MATCH (version:DocumentVersion {document_version_id: $document_version_id})
+                  -[relation:CONFIRMED_AS]->
+                  (category:Category {graph_key: $category_graph_key})
+            WHERE relation.source_type = 'formal_classification'
+              AND relation.source_id = $source_id
+            DELETE relation
+            """,
+            {
+                "document_version_id": document_version_id,
+                "category_graph_key": category_graph_key,
+                "source_id": source_id,
+            },
         )
 
     def replace_suggested_classifications(

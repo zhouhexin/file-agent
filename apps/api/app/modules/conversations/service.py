@@ -6,10 +6,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from sqlalchemy.orm import Session
 
-from app.db.models import AgentRun, Message
+from app.db.models import AgentRun, FileRenameReviewItem, Message
 from app.modules.agent.repository import AgentRunRepository
 from app.modules.agent.service import AgentRuntimeService
 from app.modules.agent.state import AgentRunResult
@@ -143,11 +144,17 @@ class ConversationMessageService:
             conversation_id=conversation_id,
             message_id=message.id,
         )
+        agent_message = self._normalize_unique_filename_conflict_reply(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            content=request.content,
+            has_explicit_attachments=bool(request.attachments),
+        )
         agent_run = self.agent_service.run_message(
             conversation_id=conversation_id,
             user_id=user_id,
             message_id=message.id,
-            message=request.content,
+            message=agent_message,
             attachments=[
                 {
                     **attachment.model_dump(),
@@ -175,6 +182,51 @@ class ConversationMessageService:
             message=self.repository.to_schema(message),
             agent_run=agent_run,
         )
+
+    def _normalize_unique_filename_conflict_reply(
+        self,
+        *,
+        conversation_id: str,
+        user_id: str,
+        content: str,
+        has_explicit_attachments: bool,
+    ) -> str:
+        """只在唯一待决同名冲突中解释“是/取消”等短回复。
+
+        用户消息仍按原文持久化；这里只为 Planner 生成明确动作。没有冲突、
+        存在多个冲突或本轮重新附加文件时绝不扩展短回复，避免误触覆盖。
+        """
+
+        if has_explicit_attachments:
+            return content
+        compact = re.sub(r"\s+", "", content).strip("。！!")
+        normalized_action = {
+            "是": "覆盖已有文件",
+            "是的": "覆盖已有文件",
+            "确认": "覆盖已有文件",
+            "取消": "取消同名处理",
+            "算了": "取消同名处理",
+            "不处理": "取消同名处理",
+        }.get(compact)
+        if normalized_action is None:
+            return content
+        reviews = (
+            self.db.query(FileRenameReviewItem)
+            .filter(
+                FileRenameReviewItem.user_id == user_id,
+                FileRenameReviewItem.conversation_id == conversation_id,
+                FileRenameReviewItem.status == "NEEDS_REVIEW",
+            )
+            .order_by(FileRenameReviewItem.created_at.desc())
+            .all()
+        )
+        conflicts = [
+            item
+            for item in reviews
+            if dict(item.review_context_json or {}).get("reason")
+            == "FILENAME_CONFLICT"
+        ]
+        return normalized_action if len(conflicts) == 1 else content
 
     def _existing_clarification_execution(
         self,

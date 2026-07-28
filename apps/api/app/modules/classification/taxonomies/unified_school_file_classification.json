@@ -15,6 +15,7 @@
             {
               "id": "school.admin.development-planning",
               "name": "发展规划",
+              "organization_path": ["学校", "行政综合管理类", "发展规划"],
               "description": "与学校中长期发展、专项规划、战略部署、改革方案相关的通知、方案、报告和支撑材料。",
               "aliases": [
                 "规划",
@@ -48,6 +49,7 @@
             {
               "id": "school.admin.annual-plan-summary",
               "name": "年度计划、总结",
+              "organization_path": ["学校", "行政综合管理类", "年度计划总结"],
               "description": "与学校年度工作计划、年度总结、重点任务台账、阶段性总结相关的文件。",
               "aliases": [
                 "年度计划",
@@ -77,6 +79,7 @@
             {
               "id": "school.admin.rules",
               "name": "规章制度",
+              "organization_path": ["学校", "行政综合管理类", "规章制度"],
               "description": "与学校层面制度、办法、规定、细则、管理办法修订和发布相关的正式文件。",
               "aliases": [
                 "制度",
@@ -107,6 +110,7 @@
             {
               "id": "school.admin.meeting-minutes",
               "name": "会议纪要",
+              "organization_path": ["学校", "行政综合管理类", "会议纪要"],
               "description": "与学校党委会、校长办公会、专题会等会议纪要、会议记录和议定事项相关的文件。",
               "aliases": [
                 "纪要",
@@ -168,6 +172,7 @@
             {
               "id": "school.hr.title-review",
               "name": "职称",
+              "organization_path": ["学校", "人事师资", "职称"],
               "description": "与教师和专业技术人员职称评审、职称申报、岗位等级、评审材料和结果公示相关的文件。",
               "aliases": [
                 "职称评审",
@@ -208,6 +213,7 @@
             {
               "id": "school.hr.appointment-assessment",
               "name": "考核聘任",
+              "organization_path": ["学校", "人事师资", "考核聘任"],
               "description": "与教师岗位聘任、续聘、聘期考核、岗位考核、年度履职考核相关的通知、表格、材料和结果文件。",
               "aliases": [
                 "岗位聘任",
@@ -241,6 +247,7 @@
             {
               "id": "school.hr.talent-work",
               "name": "人才工作",
+              "organization_path": ["学校", "人事师资", "人才工作"],
               "description": "与高层次人才、人才计划、人才引进、人才项目申报和人才服务保障相关的文件。",
               "aliases": [
                 "人才计划",
@@ -275,6 +282,7 @@
             {
               "id": "school.hr.faculty-recruitment",
               "name": "师资招聘",
+              "organization_path": ["学校", "人事师资", "师资招聘"],
               "description": "与教师招聘、岗位需求、招聘公告、面试考核、拟聘人员公示相关的文件。",
               "aliases": [
                 "教师招聘",
@@ -303,6 +311,7 @@
             {
               "id": "school.hr.faculty-development",
               "name": "教师发展",
+              "organization_path": ["学校", "人事师资", "教师发展"],
               "description": "与教师培训、教师能力提升、教学发展、进修访学和教师成长支持相关的文件。",
               "aliases": [
                 "教师培训",
@@ -336,6 +345,7 @@
             {
               "id": "school.hr.salary-social-security",
               "name": "劳资社保",
+              "organization_path": ["学校", "人事师资", "劳资社保"],
               "description": "与工资、绩效、社保、公积金、薪酬调整和劳动关系相关的学校人事文件。",
               "aliases": [
                 "工资",
@@ -370,6 +380,7 @@
             {
               "id": "school.hr.postdoc",
               "name": "博士后",
+              "organization_path": ["学校", "人事师资", "博士后"],
               "description": "与博士后进站、出站、考核、资助、合作导师和博士后管理相关的文件。",
               "aliases": [
                 "博士后进站",
@@ -402,6 +413,7 @@
         {
           "id": "school.finance",
           "name": "财务",
+          "organization_path": ["学校", "财务"],
           "description": "与学校预算、决算、经费、收入分配、报销、财务管理和会计核算相关的文件。",
           "aliases": [
             "预算",
@@ -502,6 +514,7 @@
         {
           "id": "school.research",
           "name": "科研",
+          "organization_path": ["学校", "科研"],
           "description": "与科研项目、科研成果、科研平台、论文专利、科研奖励和科研经费管理相关的学校文件。",
           "aliases": [
             "科研项目",
@@ -539,6 +552,7 @@
             {
               "id": "school.party.cadre-work",
               "name": "干部工作",
+              "organization_path": ["学校", "党委相关", "干部工作"],
               "description": "与干部选拔任用、干部考核、干部培训、任前公示和干部管理相关的党委文件。",
               "aliases": [
                 "干部任用",
@@ -567,6 +581,7 @@
             {
               "id": "school.party.organization",
               "name": "组织",
+              "organization_path": ["学校", "党委相关", "组织"],
               "description": "与基层党组织建设、党员发展、组织生活、党费和党内统计相关的文件。",
               "aliases": [
                 "组织工作",
@@ -736,6 +751,7 @@
             {
               "id": "college.admin.development-planning",
               "name": "发展规划",
+              "organization_path": ["学院", "行政综合管理", "发展规划"],
               "description": "与学院发展规划、建设目标、改革方案、学科专业布局相关的学院文件。",
               "aliases": [
                 "学院规划",
@@ -764,6 +780,7 @@
             {
               "id": "college.admin.annual-plan-summary",
               "name": "年度计划、总结",
+              "organization_path": ["学院", "行政综合管理", "年度计划总结"],
               "description": "与学院年度工作计划、年度总结、重点工作、阶段总结和目标责任相关的文件。",
               "aliases": [
                 "学院年度计划",
@@ -792,6 +809,7 @@
             {
               "id": "college.admin.rules",
               "name": "规章制度",
+              "organization_path": ["学院", "行政综合管理", "规章制度"],
               "description": "与学院内部管理办法、实施细则、规章制度制定和修订相关的文件。",
               "aliases": [
                 "学院制度",
@@ -820,6 +838,7 @@
             {
               "id": "college.admin.meeting-minutes",
               "name": "会议纪要",
+              "organization_path": ["学院", "行政综合管理", "会议纪要"],
               "description": "与学院党政联席会、院务会、专题会等会议纪要和议定事项相关的文件。",
               "aliases": [
                 "学院会议纪要",
@@ -854,6 +873,7 @@
             {
               "id": "college.hr.title-review",
               "name": "职称",
+              "organization_path": ["学院", "人事师资", "职称"],
               "description": "与学院教师职称申报、材料审核、推荐排序和评审结果相关的文件。",
               "aliases": [
                 "学院职称",
@@ -884,6 +904,7 @@
             {
               "id": "college.hr.appointment-assessment",
               "name": "考核聘任",
+              "organization_path": ["学院", "人事师资", "考核聘任"],
               "description": "与学院教师考核、岗位聘任、续聘、聘期材料审核和学院推荐相关的文件。",
               "aliases": [
                 "学院考核",
@@ -968,6 +989,7 @@
         {
           "id": "college.research",
           "name": "科研",
+          "organization_path": ["学院", "科研"],
           "description": "与学院科研项目、科研成果、科研平台、成果资助和科研统计相关的文件。",
           "aliases": [
             "学院科研",

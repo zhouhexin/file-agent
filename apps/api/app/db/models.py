@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, func, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, func, Index, Integer, JSON, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import UserDefinedType
@@ -726,6 +726,18 @@ class DocumentCategoryFeedback(Base):
         nullable=False,
         index=True,
     )
+    working_copy_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("working_copies.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    document_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("document_versions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     user_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("users.id", ondelete="CASCADE"),
@@ -742,8 +754,248 @@ class DocumentCategoryFeedback(Base):
         index=True,
     )
     is_active: Mapped[bool] = mapped_column(nullable=False, default=True, index=True)
+    idempotency_key: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, unique=True, index=True
+    )
     comment: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class DocumentCategory(Base):
+    """用户明确确认后的共享工作副本正式分类关系。
+
+    建议和正式关系必须分表保存；该表只绑定规范工作副本的当前内容版本，
+    不能绑定上传暂存 Document，也不能由分类器直接写入。
+    """
+
+    __tablename__ = "document_categories"
+    __table_args__ = (
+        Index(
+            "uq_document_categories_active_relation",
+            "working_copy_id",
+            "document_version_id",
+            "category_id",
+            "relation_role",
+            unique=True,
+            postgresql_where=text("status = 'CONFIRMED'"),
+            sqlite_where=text("status = 'CONFIRMED'"),
+        ),
+        Index(
+            "uq_document_categories_active_primary",
+            "working_copy_id",
+            "document_version_id",
+            unique=True,
+            postgresql_where=text(
+                "status = 'CONFIRMED' AND relation_role = 'PRIMARY'"
+            ),
+            sqlite_where=text(
+                "status = 'CONFIRMED' AND relation_role = 'PRIMARY'"
+            ),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    working_copy_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("working_copies.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    document_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("documents.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    document_version_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("document_versions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    category_id: Mapped[str] = mapped_column(
+        String(255), nullable=False, index=True
+    )
+    category_path_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    relation_role: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="RELATED", index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="CONFIRMED", index=True
+    )
+    taxonomy_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    taxonomy_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    classifier_version: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="user_confirmed")
+    source_suggestion_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("document_category_suggestions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    evidence_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+    ended_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class DocumentCategoryConfirmationSource(Base):
+    """正式分类的逐用户确认来源。
+
+    多个用户可以共同支撑一条共享分类关系；撤销一个来源不能静默删除其他
+    用户仍然有效的确认事实。
+    """
+
+    __tablename__ = "document_category_confirmation_sources"
+    __table_args__ = (
+        Index(
+            "uq_document_category_sources_active_user",
+            "document_category_id",
+            "user_id",
+            unique=True,
+            postgresql_where=text("status = 'ACTIVE'"),
+            sqlite_where=text("status = 'ACTIVE'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    document_category_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("document_categories.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    feedback_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("document_category_feedback.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    suggestion_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("document_category_suggestions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="ACTIVE", index=True
+    )
+    supersedes_source_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("document_category_confirmation_sources.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    ended_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class ClassificationClarification(Base):
+    """分类纠正的会话级持久化选择状态。
+
+    浏览器只能回传后端签发的 option_id，不能直接提交工作副本、建议或分类 ID。
+    """
+
+    __tablename__ = "classification_clarifications"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    conversation_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    agent_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("agent_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    options_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="WAITING_SELECTION", index=True
+    )
+    selected_option_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    resolution_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+class ClassificationGraphOutbox(Base):
+    """PostgreSQL 正式分类到 Neo4j 的事务 Outbox。"""
+
+    __tablename__ = "classification_graph_outbox"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    document_category_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("document_categories.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    working_copy_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("working_copies.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    document_version_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("document_versions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    expected_status: Mapped[str] = mapped_column(String(40), nullable=False)
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    deduplication_key: Mapped[str] = mapped_column(
+        String(255), nullable=False, unique=True, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="PENDING", index=True
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
+    error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class GraphProjectionRun(Base):

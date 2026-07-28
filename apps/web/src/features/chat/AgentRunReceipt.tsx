@@ -16,6 +16,8 @@ import { SearchResultsReceipt } from './SearchResultsReceipt';
 import { TrashRestoreSelectionCard } from './TrashRestoreSelectionCard';
 import { FileSearchClarificationCard } from './FileSearchClarificationCard';
 import { EvidenceAnswerReceipt, FileSelectionReceipt } from './EvidenceAnswerReceipt';
+import { ClassificationClarificationCard } from './ClassificationClarificationCard';
+import { FilenameConflictCard } from './FilenameConflictCard';
 import type { ChatAttachment } from './presentation';
 import { findAttachmentByDocumentId, formatFileSize } from './presentation';
 
@@ -148,6 +150,7 @@ export function AgentRunReceipt({
           key={`${result.document_id}-${index}`}
           result={result}
           token={token}
+          agentRunId={taskResult.task_id}
           onOpenDocument={onOpenDocument}
           onOpenFile={onOpenAttachment}
         />
@@ -183,6 +186,34 @@ export function AgentRunReceipt({
     );
   }
 
+  if (
+    taskResult.response_type === 'filename_conflict'
+    && taskResult.filename_conflict_result
+  ) {
+    return <FilenameConflictCard result={taskResult.filename_conflict_result} />;
+  }
+  if (
+    taskResult.response_type === 'classification_clarification'
+    && taskResult.classification_clarification_result
+    && token
+  ) {
+    return (
+      <ClassificationClarificationCard
+        result={taskResult.classification_clarification_result}
+        token={token}
+      />
+    );
+  }
+  if (
+    taskResult.response_type === 'classification_decision'
+    && taskResult.classification_decision_result
+  ) {
+    return (
+      <p className="agent-chat-response">
+        {taskResult.classification_decision_result.message}
+      </p>
+    );
+  }
   if (
     taskResult.response_type === 'evidence_answer'
     && taskResult.evidence_answer_result
@@ -315,6 +346,7 @@ export function AgentRunReceipt({
               key={`${result.document_id}-${index}`}
               result={result}
               token={token}
+              agentRunId={taskResult.task_id}
               onOpenDocument={onOpenDocument}
               onOpenFile={onOpenAttachment}
             />

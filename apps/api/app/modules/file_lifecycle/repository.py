@@ -346,17 +346,17 @@ class FileLifecycleRepository:
         )
 
     def list_user_working_copies(self, *, workspace_id: str, user_id: str) -> list[tuple[WorkingCopy, WorkingCopyRoot]]:
-        """列出用户逻辑可见的共享工作副本。
+        """列出共享工作区中活动及回收站工作副本。
 
-        物理目录是共享的，但上传来源和普通用户的数据可见范围仍由 Document.user_id
-        约束；不能因为去重复制就意外放宽跨用户访问。
+        ``user_id`` 仅保留兼容旧调用签名；共享文件读取由工作区和活动状态授权，
+        上传来源、会话和反馈仍在各自服务中按用户隔离。这个状态列表还承担
+        回收站页面与恢复结果展示，因此不能在仓储层提前丢弃 ``TRASHED``。
         """
 
         return (
             self.db.query(WorkingCopy, WorkingCopyRoot)
             .join(WorkingCopyRoot, WorkingCopy.working_copy_root_id == WorkingCopyRoot.id)
-            .join(Document, WorkingCopy.document_id == Document.id)
-            .filter(WorkingCopy.workspace_id == workspace_id, Document.user_id == user_id)
+            .filter(WorkingCopy.workspace_id == workspace_id)
             .order_by(WorkingCopy.relative_path.asc())
             .all()
         )
@@ -371,15 +371,17 @@ class FileLifecycleRepository:
         )
 
     def get_user_working_copy(self, *, working_copy_id: str, workspace_id: str, user_id: str) -> WorkingCopy | None:
-        """读取用户逻辑可见的共享工作副本，不把物理共享误当作跨用户授权。"""
+        """读取共享工作副本。
+
+        ``user_id`` 不再决定共享文件归属；高风险操作的发起人和确认人仍由
+        OperationPlan 服务独立校验，不能据此读取其他用户私有审计。
+        """
 
         return (
             self.db.query(WorkingCopy)
-            .join(Document, Document.id == WorkingCopy.document_id)
             .filter(
                 WorkingCopy.id == working_copy_id,
                 WorkingCopy.workspace_id == workspace_id,
-                Document.user_id == user_id,
             )
             .one_or_none()
         )

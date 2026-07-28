@@ -15,18 +15,34 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     AgentRun,
     Document,
-    DocumentVersion,
+    DocumentCategory,
     FileRenameReviewItem,
     TrashEntry,
-    UploadArchiveRecord,
     User,
     WorkingCopy,
     WorkingCopyRoot,
+    utcnow,
+)
+from app.modules.classification.organization_path import (
+    CategoryOrganizationPathError,
+    CategoryOrganizationPathResolver,
 )
 from app.modules.file_lifecycle.operations import WorkingCopyOperationService
+from app.modules.file_lifecycle.shared_access import (
+    CanonicalWorkingFileError,
+    CanonicalWorkingFileResolver,
+)
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.operations.schemas import OperationPlanCreateRequest, OperationPlanItem
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
+
+
+class WorkingCopyConflictPending(ValueError):
+    """目标同名冲突已经持久化，等待用户选择处理方式。"""
+
+    def __init__(self, *, filename: str) -> None:
+        super().__init__(f"目标目录已存在同名文件“{filename}”。")
+        self.filename = filename
 
 
 class ConversationalWorkingCopyPlanService:
@@ -72,6 +88,26 @@ class ConversationalWorkingCopyPlanService:
                     conversation_id=conversation_id,
                     agent_run_id=agent_run_id,
                 )
+            elif action == "MOVE_BY_CONFIRMED_CATEGORY":
+                plan = self._create_category_move_plan(
+                    user=user,
+                    document_ids=document_ids,
+                    conversation_id=conversation_id,
+                    agent_run_id=agent_run_id,
+                )
+            elif action == "CONFLICT_CANCEL":
+                message_text = self._cancel_conflict(
+                    user=user,
+                    message=message,
+                    conversation_id=conversation_id,
+                )
+                self.db.commit()
+                return {
+                    "ok": True,
+                    "kind": "working_copy_conflict_cancelled",
+                    "status": "COMPLETED",
+                    "message": message_text,
+                }
             else:
                 plan = self._create_conflict_plan(
                     user=user,
@@ -80,10 +116,51 @@ class ConversationalWorkingCopyPlanService:
                     conversation_id=conversation_id,
                     agent_run_id=agent_run_id,
                 )
+        except WorkingCopyConflictPending as exc:
+            self.db.commit()
+            return {
+                "ok": True,
+                "kind": "filename_conflict",
+                "status": "NEEDS_REVIEW",
+                "filename": exc.filename,
+                "allowed_decisions": [
+                    "REPLACE_EXISTING_WORKING_COPY",
+                    "KEEP_BOTH",
+                    "CANCEL",
+                ],
+                "message": (
+                    f"目标目录已存在同名文件“{exc.filename}”。"
+                    "请选择“覆盖已有文件”“同时保留”或“取消”。"
+                ),
+            }
         except HTTPException as exc:
             return _error(f"WORKING_COPY_PLAN_{exc.status_code}", str(exc.detail))
         except ValueError as exc:
             return _error("WORKING_COPY_SCOPE_INVALID", str(exc))
+        if action == "CONFLICT_REPLACE_EXISTING":
+            # 用户当前回复已经构成唯一冲突的明确覆盖确认；仍然创建、确认并执行
+            # OperationPlan，只是不再插入第二次重复确认。
+            self.operations.plan_repository.confirm_plan(
+                plan=plan,
+                user_id=user.id,
+                confirmation_text=message,
+            )
+            result, changeset_id = self.operations.execute(
+                plan=plan,
+                current_user=user,
+            )
+            self.db.commit()
+            self.db.refresh(plan)
+            return {
+                "ok": True,
+                "kind": "working_copy_operation_result",
+                "status": plan.status,
+                "operation_plan_id": plan.id,
+                "operation_type": plan.operation_type,
+                "changeset_id": changeset_id,
+                "item_count": len(result.get("items") or []),
+                "message": "已按你的选择覆盖同名工作副本，旧文件已移入可恢复回收站。",
+            }
         self.db.commit()
         self.db.refresh(plan)
         return {
@@ -95,6 +172,49 @@ class ConversationalWorkingCopyPlanService:
             "item_count": len([item for item in plan.plan_json.get("items", []) if isinstance(item, dict)]),
             "message": plan.reason,
         }
+
+    def _cancel_conflict(
+        self,
+        *,
+        user: User,
+        message: str,
+        conversation_id: str,
+    ) -> str:
+        """取消当前唯一同名冲突，不创建计划也不改变文件。"""
+
+        reviews = (
+            self.db.query(FileRenameReviewItem)
+            .filter(
+                FileRenameReviewItem.user_id == user.id,
+                FileRenameReviewItem.conversation_id == conversation_id,
+                FileRenameReviewItem.status == "NEEDS_REVIEW",
+            )
+            .order_by(FileRenameReviewItem.created_at.desc())
+            .with_for_update()
+            .all()
+        )
+        reviews = [
+            item
+            for item in reviews
+            if item.review_context_json.get("reason") == "FILENAME_CONFLICT"
+        ]
+        matched = [
+            item
+            for item in reviews
+            if item.original_filename in message
+            or str(item.review_context_json.get("target_filename") or "") in message
+        ]
+        if len(matched) == 1:
+            review = matched[0]
+        elif len(reviews) == 1:
+            review = reviews[0]
+        else:
+            raise ValueError("当前没有唯一可取消的同名冲突，请写出具体文件名。")
+        review.status = "CANCELLED"
+        review.decision_json = {"action": "CANCEL"}
+        review.updated_at = utcnow()
+        self.db.flush()
+        return "已取消本次同名文件处理，现有文件均未改变。"
 
     def _create_trash_plan(
         self,
@@ -135,6 +255,169 @@ class ConversationalWorkingCopyPlanService:
                 risk_level="high",
                 reason="把所选工作副本移入可恢复回收站",
                 items=[OperationPlanItem(working_copy_id=item.id) for item in copies],
+            ),
+        )
+        plan.agent_run_id = agent_run_id
+        return plan
+
+    def _create_category_move_plan(
+        self,
+        *,
+        user: User,
+        document_ids: list[str],
+        conversation_id: str,
+        agent_run_id: str,
+    ):
+        """按正式分类的受控 organization_path 创建共享移动计划。"""
+
+        shared_workspace_id = get_shared_workspace_id(self.db)
+        copies = self._resolve_working_copies(
+            document_ids=document_ids,
+            workspace_id=shared_workspace_id,
+        )
+        if not copies:
+            raise ValueError("请明确选择要按分类整理的共享文件。")
+        path_resolver = CategoryOrganizationPathResolver(self.storage)
+        items: list[OperationPlanItem] = []
+        for working_copy in copies:
+            if working_copy.status != "ACTIVE" or not working_copy.current_version_id:
+                raise ValueError(
+                    f"文件“{working_copy.filename}”仍在处理或已经删除，不能整理。"
+                )
+            relations = (
+                self.db.query(DocumentCategory)
+                .filter(
+                    DocumentCategory.working_copy_id == working_copy.id,
+                    DocumentCategory.document_version_id
+                    == working_copy.current_version_id,
+                    DocumentCategory.status == "CONFIRMED",
+                    DocumentCategory.relation_role != "DOCUMENT_TYPE",
+                )
+                .order_by(
+                    DocumentCategory.relation_role.asc(),
+                    DocumentCategory.created_at.asc(),
+                )
+                .all()
+            )
+            primary = [
+                relation
+                for relation in relations
+                if relation.relation_role == "PRIMARY"
+            ]
+            if len(primary) != 1:
+                if not primary:
+                    raise ValueError(
+                        f"文件“{working_copy.filename}”尚未确认唯一主分类，"
+                        "请先在分类卡中确认一个主分类。"
+                    )
+                raise ValueError(
+                    f"文件“{working_copy.filename}”存在多个主分类，请先选择一个整理目标。"
+                )
+            working_root = self.db.get(
+                WorkingCopyRoot, working_copy.working_copy_root_id
+            )
+            if working_root is None:
+                raise ValueError(
+                    f"文件“{working_copy.filename}”缺少共享工作目录配置。"
+                )
+            candidates: list[tuple[DocumentCategory, Any]] = []
+            for relation in primary:
+                try:
+                    candidates.append(
+                        (
+                            relation,
+                            path_resolver.resolve(
+                                relation=relation,
+                                working_copy=working_copy,
+                                working_root=working_root,
+                            ),
+                        )
+                    )
+                except CategoryOrganizationPathError:
+                    continue
+            if len(candidates) != 1:
+                if not candidates:
+                    raise ValueError(
+                        f"文件“{working_copy.filename}”没有可用于整理的已确认分类。"
+                    )
+                raise ValueError(
+                    f"文件“{working_copy.filename}”有多个可整理分类，请先选择主分类。"
+                )
+            relation, target = candidates[0]
+            if target.target_relative_path == working_copy.relative_path:
+                raise ValueError(
+                    f"文件“{working_copy.filename}”已经位于确认分类对应目录。"
+                )
+            occupied = (
+                self.db.query(WorkingCopy)
+                .filter(
+                    WorkingCopy.working_copy_root_id
+                    == working_copy.working_copy_root_id,
+                    WorkingCopy.relative_path == target.target_relative_path,
+                    WorkingCopy.status == "ACTIVE",
+                    WorkingCopy.id != working_copy.id,
+                )
+                .all()
+            )
+            if occupied:
+                existing = occupied[0]
+                review = (
+                    self.db.query(FileRenameReviewItem)
+                    .filter(
+                        FileRenameReviewItem.agent_run_id == agent_run_id,
+                        FileRenameReviewItem.managed_file_id
+                        == working_copy.managed_file_id,
+                    )
+                    .one_or_none()
+                )
+                if review is None:
+                    review = FileRenameReviewItem(
+                        conversation_id=conversation_id,
+                        agent_run_id=agent_run_id,
+                        user_id=user.id,
+                        managed_file_id=working_copy.managed_file_id,
+                        document_id=working_copy.document_id,
+                        root_key=working_root.root_key,
+                        original_relative_path=working_copy.relative_path,
+                        original_filename=working_copy.filename,
+                        source_sha256=working_copy.content_sha256,
+                        status="NEEDS_REVIEW",
+                        review_context_json={
+                            "reason": "FILENAME_CONFLICT",
+                            "working_copy_id": working_copy.id,
+                            "existing_working_copy_ids": [existing.id],
+                            "filename": working_copy.filename,
+                            "target_filename": working_copy.filename,
+                            "target_relative_path": target.target_relative_path,
+                            "source": "MOVE_BY_CONFIRMED_CATEGORY",
+                        },
+                    )
+                    self.db.add(review)
+                    self.db.flush()
+                raise WorkingCopyConflictPending(filename=working_copy.filename)
+            items.append(
+                OperationPlanItem(
+                    working_copy_id=working_copy.id,
+                    after={"relative_path": target.target_relative_path},
+                    rename_metadata={
+                        "document_category_id": relation.id,
+                        "category_id": relation.category_id,
+                        "taxonomy_key": relation.taxonomy_key,
+                        "taxonomy_version": relation.taxonomy_version,
+                        "organization_path": list(target.organization_path),
+                        "working_copy_root_id": working_copy.working_copy_root_id,
+                        "shared_impact": True,
+                    },
+                )
+            )
+        plan = self.operations.create_plan(
+            current_user=user,
+            request=OperationPlanCreateRequest(
+                conversation_id=conversation_id,
+                operation_type="MOVE_WORKING_COPIES",
+                risk_level="high",
+                reason="按已确认分类整理共享工作副本；确认后将影响所有用户看到的文件位置",
+                items=items,
             ),
         )
         plan.agent_run_id = agent_run_id
@@ -201,6 +484,7 @@ class ConversationalWorkingCopyPlanService:
                 FileRenameReviewItem.status == "NEEDS_REVIEW",
             )
             .order_by(FileRenameReviewItem.created_at.desc())
+            .with_for_update()
             .all()
         )
         reviews = [item for item in reviews if item.review_context_json.get("reason") == "FILENAME_CONFLICT"]
@@ -218,11 +502,29 @@ class ConversationalWorkingCopyPlanService:
         else:
             raise ValueError("当前对话有多个同名冲突，请在消息中写出要处理的文件名。")
         context = dict(review.review_context_json or {})
-        pending_copy = self.db.get(WorkingCopy, context.get("working_copy_id"))
         existing_ids = [str(value) for value in context.get("existing_working_copy_ids", []) if value]
-        existing_copy = self.db.get(WorkingCopy, existing_ids[0]) if len(existing_ids) == 1 else None
+        pending_id = str(context.get("working_copy_id") or "")
+        locked_ids = sorted({pending_id, *(existing_ids if len(existing_ids) == 1 else [])})
+        locked_copies = (
+            self.db.query(WorkingCopy)
+            .filter(WorkingCopy.id.in_(locked_ids))
+            .order_by(WorkingCopy.id.asc())
+            .with_for_update()
+            .all()
+            if pending_id and len(existing_ids) == 1
+            else []
+        )
+        copies_by_id = {item.id: item for item in locked_copies}
+        pending_copy = copies_by_id.get(pending_id)
+        existing_copy = copies_by_id.get(existing_ids[0]) if len(existing_ids) == 1 else None
         if pending_copy is None or existing_copy is None:
             raise ValueError("同名冲突记录已失效，请重新整理文件。")
+        if (
+            pending_copy.id == existing_copy.id
+            or pending_copy.working_copy_root_id != existing_copy.working_copy_root_id
+            or pending_copy.content_sha256 != review.source_sha256
+        ):
+            raise ValueError("同名冲突文件状态已经变化，请重新整理文件。")
         target_filename = Path(str(context.get("target_filename") or "")).name
         if not target_filename or target_filename in {".", ".."}:
             raise ValueError("同名冲突缺少有效目标文件名。")
@@ -254,53 +556,31 @@ class ConversationalWorkingCopyPlanService:
 
         if not document_ids:
             return []
-        documents = (
-            self.db.query(Document)
-            .filter(Document.id.in_(document_ids), Document.user_id == self.user_id)
-            .all()
-        )
-        by_id = {item.id: item for item in documents}
-        if any(document_id not in by_id for document_id in document_ids):
-            raise ValueError("部分文件不存在或不属于当前用户。")
+        resolver = CanonicalWorkingFileResolver(self.db)
         resolved: list[WorkingCopy] = []
         for document_id in document_ids:
-            document = by_id[document_id]
+            # 共享工作副本 Document 对全部用户可用；如果传入的是上传暂存 Document，
+            # 仍必须属于当前用户，避免借规范映射读取其他用户的私有上传来源。
             direct = (
                 self.db.query(WorkingCopy)
-                .filter(WorkingCopy.document_id == document.id, WorkingCopy.workspace_id == workspace_id)
-                .one_or_none()
-            )
-            if direct is not None:
-                resolved.append(direct)
-                continue
-            upload_version = (
-                self.db.query(DocumentVersion)
-                .filter(DocumentVersion.document_id == document.id, DocumentVersion.storage_tier == "UPLOAD")
-                .order_by(DocumentVersion.version_number.desc())
-                .first()
-            )
-            archive = (
-                self.db.query(UploadArchiveRecord)
-                .filter(UploadArchiveRecord.upload_document_version_id == upload_version.id)
-                .one_or_none()
-                if upload_version is not None
-                else None
-            )
-            working_copy = (
-                self.db.query(WorkingCopy)
-                .join(Document, Document.id == WorkingCopy.document_id)
                 .filter(
-                    WorkingCopy.managed_file_id == archive.managed_file_id,
+                    WorkingCopy.document_id == document_id,
                     WorkingCopy.workspace_id == workspace_id,
-                    Document.user_id == self.user_id,
                 )
                 .one_or_none()
-                if archive is not None and archive.managed_file_id
-                else None
             )
-            if working_copy is None:
-                raise ValueError("文件尚未形成可操作的工作副本。")
-            resolved.append(working_copy)
+            if direct is None:
+                source_document = self.db.get(Document, document_id)
+                if source_document is None or source_document.user_id != self.user_id:
+                    raise ValueError("部分文件不存在或不属于当前用户。")
+            try:
+                canonical = resolver.resolve_document(
+                    document_id=document_id,
+                    allow_trashed=True,
+                )
+            except CanonicalWorkingFileError as exc:
+                raise ValueError(str(exc)) from exc
+            resolved.append(canonical.working_copy)
         # dict 保持插入顺序，确保批量计划顺序与用户附件顺序一致。
         return list({item.id: item for item in resolved}.values())
 

@@ -281,6 +281,147 @@ def test_delete_unsent_upload_cancels_lifecycle_and_cleans_asynchronously(monkey
         clear_overrides()
 
 
+def test_shared_active_working_copy_preview_is_readable_by_other_user(
+    monkeypatch, tmp_path
+):
+    """归档后的共享活动工作副本可由任意登录用户预览，上传暂存仍保持私有。"""
+
+    _configure_storage(monkeypatch, tmp_path)
+    client, _SessionLocal = client_with_database()
+    owner = _auth_header(client, "shared-preview-owner")
+    viewer = _auth_header(client, "shared-preview-viewer")
+    upload = client.post(
+        "/api/files/upload",
+        headers=owner,
+        files={"file": ("共享通知.txt", "共享正文内容".encode(), "text/plain")},
+    )
+    assert upload.status_code == 202
+    _drain_jobs(_SessionLocal)
+    copies = client.get("/api/working-copies", headers=viewer).json()
+    shared = next(item for item in copies if item["filename"] == "共享通知.txt")
+
+    preview = client.get(
+        f"/api/files/{shared['document_id']}/preview",
+        headers=viewer,
+    )
+    content = client.get(
+        f"/api/files/{shared['document_id']}/content",
+        headers=viewer,
+    )
+
+    assert preview.status_code == 200
+    assert "共享正文内容" in "".join(
+        section["text"] for section in preview.json()["sections"]
+    )
+    assert content.status_code == 200
+    assert content.content == "共享正文内容".encode()
+    clear_overrides()
+
+
+def test_shared_active_working_copy_cannot_use_private_upload_delete_api(
+    monkeypatch, tmp_path
+):
+    """共享文件可读不代表可绕过 OperationPlan 使用暂存删除接口。"""
+
+    _configure_storage(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    owner = _auth_header(client, "shared-delete-owner")
+    viewer = _auth_header(client, "shared-delete-viewer")
+    upload = client.post(
+        "/api/files/upload",
+        headers=owner,
+        files={"file": ("共享删除边界.txt", "受保护正文".encode(), "text/plain")},
+    )
+    assert upload.status_code == 202
+    _drain_jobs(SessionLocal)
+    copies = client.get("/api/working-copies", headers=viewer).json()
+    shared = next(item for item in copies if item["filename"] == "共享删除边界.txt")
+
+    cross_delete = client.delete(
+        f"/api/files/{shared['document_id']}",
+        headers=viewer,
+    )
+    owner_direct_delete = client.delete(
+        f"/api/files/{shared['document_id']}",
+        headers=owner,
+    )
+    content = client.get(
+        f"/api/files/{shared['document_id']}/content",
+        headers=viewer,
+    )
+
+    assert cross_delete.status_code == 404
+    # 工作副本 Document 仍记录最初创建人，但状态已经不是上传草稿；
+    # 所有者也只能得到冲突响应，不能借暂存删除接口改变共享文件。
+    assert owner_direct_delete.status_code == 409
+    assert content.status_code == 200
+    assert content.content == "受保护正文".encode()
+    clear_overrides()
+
+
+def test_trashed_shared_working_copy_content_is_not_readable_by_owner_or_viewer(
+    monkeypatch, tmp_path
+):
+    """共享文件移入回收站后，创建者也不能绕过状态读取原件或正文预览。"""
+
+    _configure_storage(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    owner = _auth_header(client, "trashed-content-owner")
+    viewer = _auth_header(client, "trashed-content-viewer")
+    upload = client.post(
+        "/api/files/upload",
+        headers=owner,
+        files={"file": ("已删除共享通知.txt", "不可继续读取".encode(), "text/plain")},
+    )
+    assert upload.status_code == 202
+    _drain_jobs(SessionLocal)
+    shared = next(
+        item
+        for item in client.get("/api/working-copies", headers=viewer).json()
+        if item["filename"] == "已删除共享通知.txt"
+    )
+    context = client.post(
+        "/api/conversations/trashed-content-conv/messages",
+        headers=owner,
+        json={
+            "content": "读取这个文件",
+            "attachments": [{"document_id": shared["document_id"]}],
+        },
+    )
+    assert context.status_code == 200
+    delete_request = client.post(
+        "/api/conversations/trashed-content-conv/messages",
+        headers=owner,
+        json={"content": "删除已删除共享通知", "attachments": []},
+    )
+    assert delete_request.status_code == 200
+    plan_id = delete_request.json()["task_result"]["operation_plan_id"]
+    confirmation = client.post(
+        f"/api/operations/plans/{plan_id}/confirm",
+        headers=owner,
+        json={"confirmation": "确认移入回收站"},
+    )
+    assert confirmation.status_code == 200
+    assert confirmation.json()["status"] == "EXECUTED"
+
+    for headers in (owner, viewer):
+        assert (
+            client.get(
+                f"/api/files/{shared['document_id']}/content",
+                headers=headers,
+            ).status_code
+            == 404
+        )
+        assert (
+            client.get(
+                f"/api/files/{shared['document_id']}/preview",
+                headers=headers,
+            ).status_code
+            == 404
+        )
+    clear_overrides()
+
+
 def test_delete_file_after_message_is_rejected(monkeypatch, tmp_path):
     """附件真正进入消息后必须保留引用，不能再作为未发送暂存删除。"""
 

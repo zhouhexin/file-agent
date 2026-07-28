@@ -28,7 +28,7 @@ from app.modules.agent.mcp_filesystem_bridge import MCPFilesystemError, get_mcp_
 from app.modules.agent.state import ToolInvocationRecord
 from app.modules.agent.tool_schemas import (
     AgentCapabilitiesReadInput,
-    ChangeReportInput,
+    ClassificationDecisionInput,
     ClassificationTaxonomyReadInput,
     ConfirmedFileActionInput,
     DocumentClassificationsReadInput,
@@ -49,7 +49,6 @@ from app.modules.agent.tool_schemas import (
     MCPFilesystemInfoInput,
     MCPFilesystemListInput,
     MCPFilesystemSearchInput,
-    OperationPlanCreateInput,
     ResolveRenameReviewsInput,
     SearchToolInput,
     SpreadsheetAnalysisInput,
@@ -58,6 +57,9 @@ from app.modules.agent.tool_schemas import (
     WorkingCopyActionPlanInput,
 )
 from app.modules.classification.taxonomy_service import read_default_taxonomy_catalog
+from app.modules.classification.conversation_decision import (
+    ConversationalClassificationDecisionService,
+)
 from app.modules.chunks.service import DocumentIndexService
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text, extraction_config_hash
@@ -1016,29 +1018,6 @@ def _classification_taxonomy_handler(tool_input: BaseModel) -> Dict[str, Any]:
     )
 
 
-def _change_report_handler(tool_input: BaseModel) -> Dict[str, Any]:
-    """返回 ChangeSet 回执的占位结构。"""
-
-    return {
-        "ok": True,
-        "changeset_id": None,
-        "document_id": getattr(tool_input, "document_id"),
-        "items": [],
-        "receipt_status": "NOT_PERSISTED",
-    }
-
-
-def _operation_plan_handler(tool_input: BaseModel) -> Dict[str, Any]:
-    """创建 PLANNED 状态的 OperationPlan 占位结果，不执行动作。"""
-
-    return {
-        "ok": True,
-        "operation_plan_id": "operation-plan-memory",
-        "status": "PLANNED",
-        "operation_type": getattr(tool_input, "operation_type"),
-    }
-
-
 def _confirmed_action_handler(db: Any, user_id: str | None) -> ToolHandler:
     """创建确认后真实执行工作副本 OperationPlan 的请求级 handler。
 
@@ -1391,6 +1370,41 @@ def _working_copy_action_plan_handler(db: Any, user_id: str | None) -> ToolHandl
         if user_id is None:
             return {"ok": False, "status": "FAILED", "error": {"code": "AUTH_REQUIRED", "message": "创建文件操作计划需要当前用户。"}}
         return ConversationalWorkingCopyPlanService(db, user_id).prepare(
+            action=str(getattr(tool_input, "action")),
+            message=str(getattr(tool_input, "message")),
+            document_ids=list(getattr(tool_input, "document_ids", []) or []),
+            conversation_id=str(getattr(tool_input, "conversation_id")),
+            agent_run_id=str(getattr(tool_input, "agent_run_id")),
+        )
+
+    return handler
+
+
+def _classification_decision_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """创建自然语言分类决定的请求级 Tool handler。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """把原话和后端附件范围交给统一正式分类服务。"""
+
+        if db is None:
+            return {
+                "ok": False,
+                "status": "FAILED",
+                "error": {
+                    "code": "DB_REQUIRED",
+                    "message": "确认分类需要数据库会话。",
+                },
+            }
+        if user_id is None:
+            return {
+                "ok": False,
+                "status": "FAILED",
+                "error": {
+                    "code": "AUTH_REQUIRED",
+                    "message": "确认分类需要当前用户。",
+                },
+            }
+        return ConversationalClassificationDecisionService(db, user_id).execute(
             action=str(getattr(tool_input, "action")),
             message=str(getattr(tool_input, "message")),
             document_ids=list(getattr(tool_input, "document_ids", []) or []),
@@ -2321,8 +2335,6 @@ def _build_mvp_tools(
                 agent_run_id_getter,
             ),
         ),
-        _tool("change-report", "Build per-file receipt from changes.", ChangeReportInput, True, False, ["change_sets"], _change_report_handler),
-        _tool("operation-plan-create", "Create high-risk operation plan.", OperationPlanCreateInput, True, False, ["operation_plans"], _operation_plan_handler),
         _tool("confirmed-file-action", "Execute confirmed operation plan.", ConfirmedFileActionInput, True, True, ["change_items"], _confirmed_action_handler(db, user_id)),
         _tool("feedback-record", "Record user feedback.", FeedbackRecordInput, True, False, ["feedback", "skill_feedback_samples"], _feedback_handler(user_id)),
         _tool("job-status-read", "Read processing job status.", JobStatusReadInput, False, False, [], _job_status_handler),
@@ -2334,6 +2346,7 @@ def _build_mvp_tools(
         _tool("classify-managed-files", "Snapshot, extract and classify files selected from a server managed directory.", ManagedFileClassificationInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages", "document_classification_runs", "document_category_suggestions", "change_sets", "change_items"], _managed_file_classification_handler(db, user_id)),
         _tool("generate-rename-suggestions", "Resolve uploaded attachments or managed-original scope to working copies, then persist controlled rename suggestions without changing original files.", GenerateRenameSuggestionsInput, True, False, ["document_pages", "operation_plans"], _generate_rename_suggestions_handler(db, user_id)),
         _tool("resolve-rename-reviews", "Resolve pending rename reviews from explicit user corrections and immediately execute a confirmed OperationPlan.", ResolveRenameReviewsInput, True, False, ["operation_plans", "operation_confirmations", "change_sets", "change_items"], _resolve_rename_reviews_handler(db, user_id)),
+        _tool("classification-decision", "Accept, reject, or correct one backend-resolved classification suggestion and persist the formal shared-file relation.", ClassificationDecisionInput, True, False, ["document_category_feedback", "document_categories", "document_category_confirmation_sources", "change_sets", "change_items", "classification_graph_outbox"], _classification_decision_handler(db, user_id)),
         _tool("working-copy-action-plan-create", "Create a controlled working-copy OperationPlan from conversation context without executing it.", WorkingCopyActionPlanInput, True, False, ["operation_plans", "working_copy_path_records"], _working_copy_action_plan_handler(db, user_id)),
         _tool("managed-root-scan", "Create an async scan job for a managed logical root.", ManagedRootScanInput, True, False, ["filesystem_jobs", "filesystem_job_events"], _managed_root_scan_handler(db, user_id)),
         _tool("mcp-filesystem-list", "List files and directories in the server managed filesystem root without database scan.", MCPFilesystemListInput, False, False, [], _mcp_filesystem_list_handler()),

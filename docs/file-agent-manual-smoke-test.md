@@ -29,9 +29,9 @@
 - 精确命中回收站文件时只显示恢复选择卡；同名不同内容文件必须先由用户单选。
 - 表格金额、计数和汇总由确定性分析器计算，聊天页不展示内部行号或单元格定位。
 
-以下能力当前不作为阶段五通过条件：
+以下能力不作为阶段五通过条件，但完成阶段六后必须按本文 `SMOKE-012` 验收：
 
-- 分类卡已有基础反馈按钮，但自然语言接受、拒绝、纠正、正式共享分类和确认后目录整理属于阶段六。
+- 自然语言接受、拒绝、纠正分类，正式共享分类以及确认后的共享目录整理。
 - 尚未提供的 `/admin/documents`、`/admin/feedback`、`/admin/settings/llm` 前端页面。
 - 病毒扫描引擎。系统当前只能说明已完成基础格式、MIME、宏和加密风险检查。
 
@@ -674,10 +674,15 @@ curl -sS http://127.0.0.1:8000/api/working-copies/<working_copy_id>/path-records
 
 步骤：
 
-1. 在分类卡上接受一条建议。
-2. 拒绝另一条建议。
-3. 把第三条建议更正为完整分类路径。
-4. 刷新页面并查询反馈汇总。
+1. 在 `/chat` 上传并完成一份有多个分类建议的文件，记录当前文件名和工作目录位置。
+2. 在分类卡上接受一条建议，再用自然语言输入 `这个分类是对的`。
+3. 对另一条建议输入 `这个不是科研材料`。
+4. 输入 `这个不是科研材料，是干部考察材料`，目标分类必须从当前分类目录选择。
+5. 当同一表达可以指向多个文件或多个建议时，在页面选择包含“文件名 + 分类标签”的单选卡。
+6. 输入 `按刚才确认的分类整理这个文件`，核对页面只出现共享文件移动计划。
+7. 确认计划前检查工作目录路径不变；在页面点击确认移动后再检查目标目录和文件卡。
+8. 使用第二个普通用户打开同一活动共享文件，确认正式分类和移动后的文件位置一致。
+9. 刷新页面并查询反馈汇总。
 
 ```bash
 curl -sS http://127.0.0.1:8000/api/classification/feedback/summary \
@@ -686,9 +691,71 @@ curl -sS http://127.0.0.1:8000/api/classification/feedback/summary \
 
 通过标准：
 
-- 接受、拒绝和更正都形成追加式反馈记录。
+- 接受、拒绝和更正都形成追加式反馈记录，并通过同一个正式分类事务写入。
 - 更正同时表达原分类负样本和目标分类正样本。
-- 反馈不会直接修改 ACTIVE taxonomy 或正式 `document_categories`。
+- 接受或更正只绑定当前共享工作副本和当前 DocumentVersion，不能绑定上传暂存 Document。
+- 分类决定不会直接移动文件；只有用户明确要求整理时才创建 `MOVE_WORKING_COPIES` OperationPlan。
+- 确认前工作副本路径、哈希和版本不变；确认后只移动共享工作副本，受管原件与上传归档原件不变。
+- 页面不显示 Tool、taxonomy ID、Neo4j、工作副本 ID 或服务器路径。
+
+只读核验 PostgreSQL。把 `<working_copy_id>`、`<operation_plan_id>` 替换为本次页面回执对应记录：
+
+```sql
+SELECT id, working_copy_id, document_version_id, category_id,
+       relation_role, status, source
+FROM document_categories
+WHERE working_copy_id = '<working_copy_id>'
+ORDER BY created_at;
+
+SELECT document_category_id, user_id, feedback_id, status
+FROM document_category_confirmation_sources
+WHERE document_category_id IN (
+  SELECT id FROM document_categories
+  WHERE working_copy_id = '<working_copy_id>'
+)
+ORDER BY created_at;
+
+SELECT id, document_category_id, expected_status, state_version,
+       status, attempt_count, error_code
+FROM classification_graph_outbox
+WHERE working_copy_id = '<working_copy_id>'
+ORDER BY created_at;
+
+SELECT operation_type, status, confirmed_at, executed_at
+FROM operation_plans
+WHERE id = '<operation_plan_id>';
+
+SELECT operation_type, before_relative_path, after_relative_path,
+       document_version_id, content_sha256, status
+FROM working_copy_path_records
+WHERE operation_plan_id = '<operation_plan_id>';
+```
+
+数据库通过标准：
+
+- 当前版本同一 `PRIMARY` 只有一条 `CONFIRMED` 正式关系。
+- 每个确认用户有独立 `ACTIVE` 来源；一个用户撤回不能删除其他用户来源。
+- 分类事务同步产生 ChangeSet/ChangeItem 和 Outbox；重复提交不产生重复有效关系。
+- 移动记录为 `MOVE`，before/after 可追溯，`document_version_id` 和 `content_sha256` 未变化。
+
+启用 `NEO4J_SYNC_ENABLED=true` 和 `GRAPH_PROJECTION_WORKER_ENABLED=true` 时，再在 Neo4j Browser
+只读检查：
+
+```cypher
+MATCH (version:DocumentVersion)-[relation:CONFIRMED_AS]->(category:Category)
+WHERE version.document_version_id = '<document_version_id>'
+RETURN version.filename,
+       category.category_id,
+       category.path,
+       relation.source_type,
+       relation.source_id;
+```
+
+Neo4j 通过标准：
+
+- `source_type` 为 `formal_classification`，`source_id` 对应 PostgreSQL 正式关系。
+- 重启或重复消费 Outbox 不产生重复有效关系。
+- Neo4j 不可用时 PostgreSQL 分类仍成功，Outbox 保持 `RETRY`/`PENDING`；Neo4j 恢复后由 worker 补投影。
 
 ### SMOKE-013 共享活动文件、个人数据隔离和内部审计权限
 

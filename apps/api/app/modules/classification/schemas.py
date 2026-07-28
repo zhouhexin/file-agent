@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, Field, model_validator
+
+
+_WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 
 class CategoryNode(BaseModel):
@@ -15,7 +27,31 @@ class CategoryNode(BaseModel):
     positive_signals: list[str] = Field(default_factory=list)
     negative_signals: list[str] = Field(default_factory=list)
     examples: list[str] = Field(default_factory=list)
+    organization_path: list[str] = Field(default_factory=list, max_length=20)
     children: list["CategoryNode"] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_organization_path(self) -> "CategoryNode":
+        """校验物理整理目录，禁止 taxonomy 配置越过共享工作根。"""
+
+        total_length = 0
+        for raw_segment in self.organization_path:
+            segment = str(raw_segment)
+            total_length += len(segment)
+            basename = segment.split(".", 1)[0].upper()
+            if (
+                not segment
+                or segment in {".", ".."}
+                or segment != segment.strip()
+                or segment.endswith((".", " "))
+                or len(segment) > 80
+                or basename in _WINDOWS_RESERVED_NAMES
+                or re.search(r'[\x00-\x1f<>:"/\\\\|?*]', segment)
+            ):
+                raise ValueError(f"非法分类整理目录段：{segment!r}")
+        if total_length + max(0, len(self.organization_path) - 1) > 180:
+            raise ValueError("分类整理目录路径过长")
+        return self
 
 
 class Taxonomy(BaseModel):

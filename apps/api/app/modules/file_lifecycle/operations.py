@@ -21,6 +21,7 @@ from app.core.config import get_settings
 from app.db.models import (
     ChangeItem,
     Document,
+    DocumentCategory,
     DocumentVersion,
     FileObject,
     FileRenameReviewItem,
@@ -34,6 +35,10 @@ from app.db.models import (
     WorkingCopyPathRecord,
     WorkingCopyRoot,
     utcnow,
+)
+from app.modules.classification.organization_path import (
+    CategoryOrganizationPathError,
+    CategoryOrganizationPathResolver,
 )
 from app.modules.file_lifecycle.repository import FileLifecycleRepository
 from app.modules.file_lifecycle.service import create_lifecycle_audit
@@ -475,12 +480,10 @@ class WorkingCopyOperationService:
         entry = (
             self.db.query(TrashEntry)
             .join(WorkingCopy, WorkingCopy.id == TrashEntry.working_copy_id)
-            .join(Document, Document.id == WorkingCopy.document_id)
             .filter(
                 TrashEntry.id == trash_entry_id,
                 TrashEntry.workspace_id == shared_workspace_id,
                 TrashEntry.status == "ACTIVE",
-                Document.user_id == current_user.id,
             )
             .one_or_none()
         )
@@ -624,6 +627,12 @@ class WorkingCopyOperationService:
         root = self.db.get(WorkingCopyRoot, working_copy.working_copy_root_id)
         if version is None or root is None:
             raise RuntimeError("工作副本关系不完整")
+        if operation_type == "MOVE_WORKING_COPIES":
+            self._validate_category_move_snapshot(
+                item=item,
+                working_copy=working_copy,
+                root=root,
+            )
         before_storage_path = version.storage_path
         source = (
             self.storage.trash_path(before_storage_path)
@@ -698,6 +707,59 @@ class WorkingCopyOperationService:
             "managed_original_unchanged": True,
             "operation_type": operation_type,
         }
+
+    def _validate_category_move_snapshot(
+        self,
+        *,
+        item: dict[str, Any],
+        working_copy: WorkingCopy,
+        root: WorkingCopyRoot,
+    ) -> None:
+        """执行前重新校验正式分类和 taxonomy 目录映射快照。
+
+        普通手工移动计划没有 ``document_category_id``，继续沿用既有路径快照校验；
+        只有按分类整理计划需要额外验证，避免确认前分类、版本或目录规则变化后
+        仍按旧目标移动共享文件。
+        """
+
+        metadata = dict(item.get("rename_metadata") or {})
+        relation_id = str(metadata.get("document_category_id") or "")
+        if not relation_id:
+            return
+        relation = (
+            self.db.query(DocumentCategory)
+            .filter(DocumentCategory.id == relation_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if (
+            relation is None
+            or relation.status != "CONFIRMED"
+            or relation.working_copy_id != working_copy.id
+            or relation.document_version_id != working_copy.current_version_id
+            or relation.category_id != metadata.get("category_id")
+            or relation.taxonomy_key != metadata.get("taxonomy_key")
+            or relation.taxonomy_version != metadata.get("taxonomy_version")
+        ):
+            self._mark_path_record_stale(item=item)
+            raise RuntimeError("正式分类已经变化，请重新生成整理计划")
+        try:
+            target = CategoryOrganizationPathResolver(self.storage).resolve(
+                relation=relation,
+                working_copy=working_copy,
+                working_root=root,
+            )
+        except CategoryOrganizationPathError as exc:
+            self._mark_path_record_stale(item=item)
+            raise RuntimeError("分类目录规则已经变化，请重新生成整理计划") from exc
+        expected_path = str((item.get("after") or {}).get("relative_path") or "")
+        if (
+            target.target_relative_path != expected_path
+            or list(target.organization_path)
+            != list(metadata.get("organization_path") or [])
+        ):
+            self._mark_path_record_stale(item=item)
+            raise RuntimeError("分类目录规则已经变化，请重新生成整理计划")
 
     def _trash(
         self,

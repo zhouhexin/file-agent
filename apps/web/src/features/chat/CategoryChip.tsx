@@ -1,30 +1,56 @@
 import { Check, Pencil, Tag, X } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
-import { submitClassificationFeedback } from '../../api/client';
-import type { DocumentCategory } from '../../types';
+import { getClassificationTaxonomyOptions, submitClassificationFeedback } from '../../api/client';
+import type { ClassificationTaxonomyOption, DocumentCategory } from '../../types';
 import { formatConfidence } from './presentation';
 
 type CategoryChipProps = {
   category: DocumentCategory;
   compact?: boolean;
   token?: string;
+  agentRunId?: string;
+  relationRole?: 'PRIMARY' | 'RELATED';
 };
 
-export function CategoryChip({ category, compact = false, token }: CategoryChipProps) {
+export function CategoryChip({
+  category,
+  compact = false,
+  token,
+  agentRunId,
+  relationRole = 'RELATED',
+}: CategoryChipProps) {
   // 分类展开区同时承载证据和明确反馈，沉默不会被后端当作正样本。
   const [expanded, setExpanded] = useState(false);
   const [feedbackState, setFeedbackState] = useState<'idle' | 'accepted' | 'rejected' | 'corrected'>('idle');
   const [submitting, setSubmitting] = useState(false);
   const [correctionVisible, setCorrectionVisible] = useState(false);
-  const [correctionPath, setCorrectionPath] = useState('');
+  const [correctionCategoryId, setCorrectionCategoryId] = useState('');
+  const [taxonomyOptions, setTaxonomyOptions] = useState<ClassificationTaxonomyOption[]>([]);
   const [feedbackError, setFeedbackError] = useState('');
   const evidenceText = category.evidence.length > 0 ? category.evidence.join('、') : '暂无明确关键词依据';
   const feedbackEnabled = Boolean(token && category.suggestion_id);
 
+  useEffect(() => {
+    if (!token || !correctionVisible || taxonomyOptions.length > 0) return;
+    let cancelled = false;
+    getClassificationTaxonomyOptions(token)
+      .then((result) => {
+        if (!cancelled) setTaxonomyOptions(result.options);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setFeedbackError(error instanceof Error ? error.message : '分类目录加载失败');
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [correctionVisible, taxonomyOptions.length, token]);
+
   const submitFeedback = async (
     action: 'ACCEPT' | 'REJECT' | 'CORRECT',
-    correctedCategoryPath?: string[],
+    correctedCategoryId?: string,
   ) => {
     if (!token || !category.suggestion_id || submitting) return;
     setSubmitting(true);
@@ -32,7 +58,9 @@ export function CategoryChip({ category, compact = false, token }: CategoryChipP
     try {
       await submitClassificationFeedback(token, category.suggestion_id, {
         action,
-        ...(correctedCategoryPath ? { corrected_category_path: correctedCategoryPath } : {}),
+        relation_role: relationRole,
+        ...(agentRunId ? { agent_run_id: agentRunId } : {}),
+        ...(correctedCategoryId ? { corrected_category_id: correctedCategoryId } : {}),
       });
       setFeedbackState(action === 'ACCEPT' ? 'accepted' : action === 'REJECT' ? 'rejected' : 'corrected');
       setCorrectionVisible(false);
@@ -44,13 +72,11 @@ export function CategoryChip({ category, compact = false, token }: CategoryChipP
   };
 
   const submitCorrection = () => {
-    // 路径使用“/”分隔，由后端校验是否属于当前 taxonomy。
-    const path = correctionPath.split('/').map((item) => item.trim()).filter(Boolean);
-    if (path.length === 0) {
-      setFeedbackError('请输入完整分类路径');
+    if (!correctionCategoryId) {
+      setFeedbackError('请选择更正后的分类');
       return;
     }
-    void submitFeedback('CORRECT', path);
+    void submitFeedback('CORRECT', correctionCategoryId);
   };
 
   return (
@@ -85,16 +111,26 @@ export function CategoryChip({ category, compact = false, token }: CategoryChipP
               </div>
               {correctionVisible ? (
                 <div className="category-feedback__correction">
-                  <input
+                  <select
                     aria-label="更正后的分类路径"
-                    placeholder="学校/人事师资/考核聘任"
-                    value={correctionPath}
-                    onChange={(event) => setCorrectionPath(event.target.value)}
-                  />
+                    value={correctionCategoryId}
+                    onChange={(event) => setCorrectionCategoryId(event.target.value)}
+                  >
+                    <option value="">请选择分类</option>
+                    {taxonomyOptions.map((option) => (
+                      <option key={option.category_id} value={option.category_id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
                   <button type="button" disabled={submitting} onClick={submitCorrection}>提交</button>
                 </div>
               ) : null}
-              {feedbackState !== 'idle' ? <p className="category-feedback__saved">反馈已记录</p> : null}
+              {feedbackState !== 'idle' ? (
+                <p className="category-feedback__saved">
+                  {feedbackState === 'rejected' ? '分类已拒绝，文件位置未变' : '分类已确认，文件位置未变'}
+                </p>
+              ) : null}
               {feedbackError ? <p className="category-feedback__error">{feedbackError}</p> : null}
             </div>
           ) : null}
