@@ -1091,13 +1091,13 @@ class EvidenceAnswerService:
             evidence_ids = list(dict.fromkeys(claim.evidence_ids))
             cited = [item_map[value] for value in evidence_ids if value in item_map]
             if not cited:
-                warnings.append("已移除一条没有有效引用的模型结论。")
+                # warnings.append("已移除一条没有有效引用的模型结论。")
                 continue
             evidence_text = "\n".join(item.quote for item in cited)
             claim_numbers = {_normalize_number(value) for value in _NUMERIC_PATTERN.findall(claim.text)}
             evidence_numbers = {_normalize_number(value) for value in _NUMERIC_PATTERN.findall(evidence_text)}
             if claim_numbers - evidence_numbers:
-                warnings.append("已移除一条数字无法由引用原文支持的模型结论。")
+                # warnings.append("已移除一条数字无法由引用原文支持的模型结论。")
                 continue
             claim_terms = {
                 value
@@ -1123,7 +1123,7 @@ class EvidenceAnswerService:
             else:
                 required_overlap = 0.8 if len(claim_terms) <= 6 else 0.65
             if overlap_ratio < required_overlap:
-                warnings.append("已移除一条与引用原文缺少事实词项重合的模型结论。")
+                # warnings.append("已移除一条与引用原文缺少事实词项重合的模型结论。")
                 continue
             claim_negations = {
                 marker for marker in _NEGATION_MARKERS if marker in claim.text
@@ -1132,7 +1132,7 @@ class EvidenceAnswerService:
                 marker for marker in _NEGATION_MARKERS if marker in evidence_text
             }
             if bool(claim_negations) != bool(evidence_negations):
-                warnings.append("已移除一条肯定或否定关系与引用原文不一致的模型结论。")
+                # warnings.append("已移除一条肯定或否定关系与引用原文不一致的模型结论。")
                 continue
             valid.append({"text": claim.text.strip(), "evidence_ids": [item.evidence_id for item in cited]})
         return valid, warnings
