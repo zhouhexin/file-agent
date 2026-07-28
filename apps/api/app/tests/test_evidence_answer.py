@@ -241,7 +241,8 @@ def test_evidence_answer_persists_validated_references_and_reuses_cache():
     )
 
     assert first["status"] == "COMPLETED"
-    assert first["answer"] == "申报截止时间是2026年7月31日。[1]"
+    # 普通回执不显示内部 [1] 索引，但数据库仍保留 AnswerReference 审计关系。
+    assert first["answer"] == "申报截止时间是2026年7月31日。"
     assert first["references"] == [
         {
             "document_id": "document-1",
@@ -508,6 +509,65 @@ def test_uploaded_document_id_resolves_to_completed_active_working_copy():
     assert client.calls == 1
 
 
+def test_explicit_filename_locks_single_active_working_copy_without_workspace_recall():
+    """用户写出完整文件名时只能读取该活动副本，不能扩大到共享目录候选。"""
+
+    db = _session()
+    _seed(db)
+    service = EvidenceAnswerService(
+        db=db,
+        user_id="user-1",
+        conversation_id="conversation-1",
+        settings=_settings(),
+        client=FakeEvidenceClient(),
+    )
+
+    # 若实现误退回语义召回，这个断言会直接暴露单文件范围被扩大。
+    service._recall_active_working_copies = lambda _question: pytest.fail("不应执行共享目录召回")
+    result = service.answer(question="请完整总结申报通知.docx")
+
+    assert result["status"] == "COMPLETED"
+    assert result["answer"] == "申报截止时间是2026年7月31日。"
+    assert [item["filename"] for item in result["references"]] == ["申报通知.docx"]
+
+
+def test_unmatched_explicit_filename_returns_similar_selection_without_answering():
+    """完整文件名未命中只能展示相似文件单选，不能拿候选正文直接回答。"""
+
+    db = _session()
+    _seed(db)
+    result = EvidenceAnswerService(
+        db=db,
+        user_id="user-1",
+        conversation_id="conversation-1",
+        settings=_settings(),
+        client=FakeEvidenceClient(),
+    ).answer(question="总结申报通告.docx")
+
+    assert result["kind"] == "file_selection"
+    assert result["status"] == "NEEDS_CLARIFICATION"
+    assert result["answer"] == ""
+    assert result["choices"][0]["filename"] == "申报通知.docx"
+
+
+def test_unmatched_explicit_filename_without_similar_file_requests_reupload():
+    """没有相似活动副本时要求重新附加，禁止回退全库检索并混入其他文件。"""
+
+    db = _session()
+    _seed(db)
+    result = EvidenceAnswerService(
+        db=db,
+        user_id="user-1",
+        conversation_id="conversation-1",
+        settings=_settings(),
+        client=FakeEvidenceClient(),
+    ).answer(question="总结完全不存在的材料.pdf")
+
+    assert result["status"] == "NO_EVIDENCE"
+    assert result["references"] == []
+    assert "重新附加文件" in result["answer"]
+
+
 def test_full_summary_marks_partial_instead_of_silently_truncating_batches():
     """全文超过调用安全上限时只能返回 PARTIAL，不能声称已经完整总结。"""
 
@@ -627,6 +687,11 @@ def test_same_name_different_content_persists_selection_before_answering():
         client=FakeEvidenceClient(),
     )
 
+    # 即使用户给的是完整文件名，也不能将两个同名副本合并总结。
+    exact_selection = service.answer(question="完整总结申报通知.docx")
+    assert exact_selection["kind"] == "file_selection"
+    assert len(exact_selection["choices"]) == 2
+
     selection = service._same_name_ambiguity(
         [(first_copy, db.get(DocumentVersion, "version-1")), (second_copy, second_version)],
         [],
@@ -654,6 +719,7 @@ def test_same_name_different_content_persists_selection_before_answering():
         ("文件文号是什么？", "DOCUMENT_NUMBER", "FOCUSED"),
         ("第六条规定了什么？", "CLAUSE", "FOCUSED"),
         ("完整总结这份文件", "SUMMARY", "FULL_SUMMARY"),
+        ("请总结一下申报通知.docx", "SUMMARY", "FULL_SUMMARY"),
         ("比较这两份方案的差异", "COMPARE", "FOCUSED"),
         ("汇总表格中的总金额", "TABLE_CALCULATION", "FOCUSED"),
         ("联网搜索实时天气", "UNSUPPORTED", "FOCUSED"),

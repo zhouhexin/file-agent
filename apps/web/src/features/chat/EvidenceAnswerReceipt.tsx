@@ -20,37 +20,10 @@ export function EvidenceAnswerReceipt({
   result,
   onOpenDocument,
 }: EvidenceAnswerReceiptProps) {
-  const fileByReference = new Map(
-    result.files.flatMap((file) =>
-      file.reference_indexes.map((index) => [index, file] as const)
-    ),
-  );
-  const answerParts = result.answer.split(/(\[\d+\])/g);
-
   return (
     <section className="evidence-answer-receipt">
-      <div className="evidence-answer-text">
-        {answerParts.map((part, index) => {
-          const match = /^\[(\d+)\]$/.exec(part);
-          const referenceIndex = match ? Number(match[1]) : null;
-          const file =
-            referenceIndex === null ? undefined : fileByReference.get(referenceIndex);
-          if (!file || !onOpenDocument || file.can_open === false) {
-            return <span key={`${part}-${index}`}>{part}</span>;
-          }
-          return (
-            <button
-              type="button"
-              className="evidence-reference-link"
-              key={`${part}-${index}`}
-              onClick={() => onOpenDocument(file.document_id, file.filename)}
-              title={`查看引用文件：${file.filename}`}
-            >
-              {part}
-            </button>
-          );
-        })}
-      </div>
+      {/* 回答正文不显示 [1] 等内部引用索引；可追溯文件统一由下方文件卡承载。 */}
+      <div className="evidence-answer-text">{result.answer}</div>
       {result.limitations.length > 0 ? (
         <div className="evidence-answer-limitations">
           {result.limitations.map((value) => (

@@ -99,7 +99,7 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         filename_conflict_result=filename_conflict_result,
     )
     pending_decisions: list[dict[str, Any]] = []
-    if result.operation_plan_id:
+    if result.operation_plan_id and not _has_executed_working_copy_result(result):
         pending_decisions.append(
             {
                 "type": "operation_plan",
@@ -403,7 +403,7 @@ def _response_type(
 ) -> str:
     """把内部意图收敛为少量稳定的用户展示类型。"""
 
-    if result.operation_plan_id:
+    if result.operation_plan_id and not _has_executed_working_copy_result(result):
         return "operation_plan"
     if classification_clarification_result:
         return "classification_clarification"
@@ -545,8 +545,7 @@ def _filename_conflict_result(
     for invocation in result.tool_invocations:
         output = invocation.output_json
         if (
-            invocation.tool_name == "working-copy-action-plan-create"
-            and isinstance(output, dict)
+            isinstance(output, dict)
             and output.get("kind") == "filename_conflict"
         ):
             return {
@@ -562,6 +561,17 @@ def _filename_conflict_result(
                 ],
             }
     return None
+
+
+def _has_executed_working_copy_result(result: AgentRunResult) -> bool:
+    """识别已在本轮完成的冲突覆盖，避免把审计计划再次展示成待确认卡。"""
+
+    return any(
+        isinstance(invocation.output_json, dict)
+        and invocation.output_json.get("kind") == "working_copy_operation_result"
+        and invocation.output_json.get("status") == "EXECUTED"
+        for invocation in result.tool_invocations
+    )
 
 
 def _trash_restore_result(result: AgentRunResult) -> dict[str, Any] | None:

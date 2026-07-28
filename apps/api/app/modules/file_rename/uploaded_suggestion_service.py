@@ -128,6 +128,25 @@ class UploadedRenameSuggestionService:
             if extraction_result is not None:
                 extraction_results.append(extraction_result)
 
+        operation_service = WorkingCopyOperationService(self.db)
+        shared_workspace_id = get_shared_workspace_id(self.db)
+        for item in suggestions:
+            if item.get("status") != "READY" or not item.get("working_copy_id"):
+                continue
+            conflicts = operation_service.find_active_filename_conflicts(
+                workspace_id=shared_workspace_id,
+                target_filename=str(item.get("proposed_filename") or ""),
+                exclude_working_copy_ids={str(item["working_copy_id"])},
+            )
+            if conflicts:
+                # 自动建议不能越过同名冲突直接形成可确认计划；用户明确回复目标名称后，
+                # 对话更正服务会生成正式冲突选择卡。
+                item["status"] = "NEEDS_REVIEW"
+                item.setdefault("warnings", []).append(
+                    "共享工作目录已存在建议名称的同名文件，请通过对话选择覆盖、同时保留或取消。"
+                )
+                item["filename_conflict"] = True
+
         ready = [item for item in suggestions if item.get("status") == "READY"]
         skipped = [item for item in suggestions if item.get("status") != "READY"]
         plan = None

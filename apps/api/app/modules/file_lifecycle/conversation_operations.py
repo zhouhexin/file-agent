@@ -521,14 +521,22 @@ class ConversationalWorkingCopyPlanService:
             raise ValueError("同名冲突记录已失效，请重新整理文件。")
         if (
             pending_copy.id == existing_copy.id
-            or pending_copy.working_copy_root_id != existing_copy.working_copy_root_id
             or pending_copy.content_sha256 != review.source_sha256
         ):
             raise ValueError("同名冲突文件状态已经变化，请重新整理文件。")
         target_filename = Path(str(context.get("target_filename") or "")).name
         if not target_filename or target_filename in {".", ".."}:
             raise ValueError("同名冲突缺少有效目标文件名。")
-        target_parent = PurePosixPath(existing_copy.relative_path).parent
+        recorded_target = str(context.get("target_relative_path") or "")
+        target_parent = (
+            PurePosixPath(existing_copy.relative_path).parent
+            if pending_copy.working_copy_root_id == existing_copy.working_copy_root_id
+            else (
+                PurePosixPath(recorded_target).parent
+                if recorded_target
+                else PurePosixPath(pending_copy.relative_path).parent
+            )
+        )
         target_relative_path = (target_parent / target_filename).as_posix()
         if decision == "KEEP_BOTH":
             target_relative_path = self._next_version_path(
@@ -602,17 +610,13 @@ class ConversationalWorkingCopyPlanService:
             label = _version_label(version)
             filename = f"{stem}_第{label}版{suffix}"
             relative_path = (target_parent / filename).as_posix()
-            indexed = (
-                self.db.query(WorkingCopy.id)
-                .filter(
-                    WorkingCopy.working_copy_root_id == pending_copy.working_copy_root_id,
-                    WorkingCopy.relative_path == relative_path,
-                    WorkingCopy.status == "ACTIVE",
-                )
-                .first()
+            indexed = self.operations.find_active_filename_conflicts(
+                workspace_id=pending_copy.workspace_id,
+                target_filename=filename,
+                exclude_working_copy_ids={pending_copy.id},
             )
             physical = self.storage.working_copy_path(f"{root.relative_storage_path}/{relative_path}")
-            if indexed is None and not physical.exists():
+            if not indexed and not physical.exists():
                 return relative_path
         raise ValueError("无法分配可用的版本后缀，请先整理同名文件。")
 

@@ -109,10 +109,17 @@ class OperationPlanService:
         operation_service = WorkingCopyOperationService(self.db)
         if plan.operation_type == DEFERRED_UPLOAD_RENAME_OPERATION:
             # 先检查后台工作副本是否就绪；失败时不消耗用户确认，原计划可稍后重试。
-            operation_service.prepare_deferred_upload_rename(
-                plan=plan,
-                current_user=current_user,
-            )
+            try:
+                operation_service.prepare_deferred_upload_rename(
+                    plan=plan,
+                    current_user=current_user,
+                )
+            except HTTPException:
+                if plan.status == "INVALIDATED":
+                    # 同名冲突已经转换成可由后续对话消费的持久化复核项；
+                    # 必须提交该事实，同时保持本次确认未执行任何物理改名。
+                    self.db.commit()
+                raise
         self.repository.confirm_plan(
             plan=plan,
             user_id=current_user.id,

@@ -10,10 +10,13 @@ import hashlib
 import json
 import re
 import time
+import unicodedata
 from collections import defaultdict
+from difflib import SequenceMatcher
 from typing import Any, Iterable
 
 from pydantic import ValidationError
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
@@ -60,6 +63,18 @@ _CLAIM_STOP_TERMS = {
     "这个",
     "这份",
     "相关",
+}
+_EXPLICIT_FILENAME_SUFFIXES = {
+    ".csv",
+    ".doc",
+    ".docx",
+    ".md",
+    ".pdf",
+    ".txt",
+    ".xls",
+    ".xlsx",
+    ".xlsm",
+    ".tsv",
 }
 
 
@@ -159,6 +174,31 @@ class EvidenceAnswerService:
                 index_status="INDEX_PENDING",
                 message="文件正在进入共享工作目录并建立正文索引，请等待 worker 完成后重试。",
             )
+
+        exact_filename = _explicit_filename_from_question(normalized_question)
+        if not active_rows and exact_filename:
+            # 用户明确写出完整文件名时，单文件请求绝不能退回到共享目录语义召回。
+            # 先锁定 ACTIVE 工作副本；多条同名记录或近似候选都必须由用户单选。
+            active_rows = self._resolve_exact_filename_working_copies(exact_filename)
+            exact_selection = self._exact_filename_selection(
+                active_rows,
+                question=normalized_question,
+            )
+            if exact_selection is not None:
+                return exact_selection
+            if not active_rows:
+                similar_selection = self._similar_filename_selection(
+                    requested_filename=exact_filename,
+                    question=normalized_question,
+                )
+                if similar_selection is not None:
+                    return similar_selection
+                return self._no_evidence(
+                    question=normalized_question,
+                    mode=mode,
+                    index_status="NO_EVIDENCE",
+                    message="未找到该文件。请重新附加文件，或提供更准确的完整文件名。",
+                )
 
         if not active_rows:
             active_rows = self._recall_active_working_copies(normalized_question)
@@ -596,6 +636,136 @@ class EvidenceAnswerService:
         rows.sort(key=lambda item: order.get(item[1].id, len(order)))
         return rows
 
+    def _resolve_exact_filename_working_copies(
+        self, filename: str
+    ) -> list[tuple[WorkingCopy, DocumentVersion]]:
+        """按完整文件名锁定共享活动副本，避免正文问答退回全库召回。"""
+
+        identity = _normalize_filename_identity(filename)
+        rows = (
+            self.db.query(WorkingCopy, DocumentVersion)
+            .join(DocumentVersion, DocumentVersion.id == WorkingCopy.current_version_id)
+            .filter(
+                WorkingCopy.workspace_id == self.workspace_id,
+                WorkingCopy.status == "ACTIVE",
+                func.lower(WorkingCopy.filename) == filename.lower(),
+            )
+            .all()
+        )
+        return [
+            (working_copy, version)
+            for working_copy, version in rows
+            if _normalize_filename_identity(working_copy.filename) == identity
+        ]
+
+    def _exact_filename_selection(
+        self,
+        rows: list[tuple[WorkingCopy, DocumentVersion]],
+        *,
+        question: str,
+    ) -> dict[str, Any] | None:
+        """多个完整同名活动副本必须进入单选，不能把内容合并为一次回答。"""
+
+        if len(rows) <= 1:
+            return None
+        return self._create_file_selection(
+            rows=rows,
+            question=question,
+            message="找到多个同名文件，请先选择要读取的一份文件。",
+        )
+
+    def _similar_filename_selection(
+        self,
+        *,
+        requested_filename: str,
+        question: str,
+    ) -> dict[str, Any] | None:
+        """精确名称未命中时仅给出有限相似候选，仍需用户确认。"""
+
+        requested = _normalize_filename_identity(requested_filename)
+        requested_stem, requested_extension = _split_filename_identity(requested)
+        candidates: list[tuple[float, WorkingCopy, DocumentVersion]] = []
+        rows = (
+            self.db.query(WorkingCopy, DocumentVersion)
+            .join(DocumentVersion, DocumentVersion.id == WorkingCopy.current_version_id)
+            .filter(
+                WorkingCopy.workspace_id == self.workspace_id,
+                WorkingCopy.status == "ACTIVE",
+            )
+            .all()
+        )
+        for working_copy, version in rows:
+            candidate = _normalize_filename_identity(working_copy.filename)
+            candidate_stem, candidate_extension = _split_filename_identity(candidate)
+            score = SequenceMatcher(None, requested_stem, candidate_stem).ratio()
+            if requested_extension and requested_extension == candidate_extension:
+                score += 0.08
+            # 不以“文件”等泛词扩张候选；仅返回名称具备明显相似性的少量项目。
+            if score >= 0.56:
+                candidates.append((score, working_copy, version))
+        candidates.sort(key=lambda item: (-item[0], item[1].filename.casefold(), item[1].id))
+        selected = [(working_copy, version) for _, working_copy, version in candidates[:5]]
+        if not selected:
+            return None
+        return self._create_file_selection(
+            rows=selected,
+            question=question,
+            message="未找到完全同名的文件。请从相似文件中选择要读取的一份；如果都不是，请重新附加文件。",
+        )
+
+    def _create_file_selection(
+        self,
+        *,
+        rows: list[tuple[WorkingCopy, DocumentVersion]],
+        question: str,
+        message: str,
+    ) -> dict[str, Any]:
+        """持久化文件选择上下文，续跑时只能使用用户选择的 document_id。"""
+
+        choices = [
+            {
+                "option_id": f"document-{position}",
+                "document_id": working_copy.document_id,
+                "document_version_id": version.id,
+                "working_copy_id": working_copy.id,
+                "filename": working_copy.filename,
+                "size_bytes": working_copy.size_bytes,
+                "created_at": working_copy.created_at.isoformat(),
+            }
+            for position, (working_copy, version) in enumerate(rows, start=1)
+        ]
+        record = FileSearchClarificationService(self.db).create(
+            conversation_id=self.conversation_id,
+            user_id=self.user_id,
+            agent_run_id=self.agent_run_id,
+            original_query=question,
+            core_phrase=choices[0]["filename"],
+            relation_mode="DOCUMENT_SELECTION",
+            options=[
+                {
+                    "id": item["option_id"],
+                    "label": item["filename"],
+                    "description": (
+                        f"大小 {item['size_bytes']} 字节，创建于 {item['created_at']}"
+                    ),
+                    "document_id": item["document_id"],
+                    "examples": [],
+                    "estimated_count": None,
+                }
+                for item in choices
+            ],
+        )
+        return {
+            "ok": True,
+            "kind": "file_selection",
+            "status": "NEEDS_CLARIFICATION",
+            "message": message,
+            "clarification_id": record.id,
+            "choices": choices,
+            "answer": "",
+            "references": [],
+        }
+
     def _expand_same_name_rows(
         self,
         rows: list[tuple[WorkingCopy, DocumentVersion]],
@@ -948,18 +1118,16 @@ class EvidenceAnswerService:
 
     @staticmethod
     def _render_answer(claims: list[dict[str, Any]]) -> tuple[str, list[str]]:
-        """由后端分配连续引用编号，模型不能控制最终编号。"""
+        """保存稳定引用顺序，但不把内部编号拼入普通用户回答。"""
 
         ordered_ids: list[str] = []
         parts: list[str] = []
         for claim in claims:
-            refs: list[int] = []
             for evidence_id in claim["evidence_ids"]:
                 if evidence_id not in ordered_ids:
                     ordered_ids.append(evidence_id)
-                refs.append(ordered_ids.index(evidence_id) + 1)
-            suffix = "".join(f"[{index}]" for index in refs)
-            parts.append(f"{claim['text']}{suffix}")
+            # AnswerReference 持久化审计引用；界面仅展示自然语言结论和文件卡。
+            parts.append(str(claim["text"]))
         return "\n\n".join(parts), ordered_ids
 
     def _persist(
@@ -1143,7 +1311,8 @@ class EvidenceAnswerService:
             "kind": "evidence_answer",
             "status": record.status,
             "answer_id": record.id,
-            "answer": record.answer_text,
+            # 兼容旧 QAAnswer 已保存的 [1] 引用后缀；引用事实仍由 AnswerReference 保留。
+            "answer": _strip_legacy_inline_reference_indexes(record.answer_text),
             "limitations": limitations,
             "references": list(cards.values()),
             "cached": cached,
@@ -1254,52 +1423,11 @@ class EvidenceAnswerService:
         ]
         if not ambiguous:
             return None
-        choices = [
-            {
-                "option_id": f"document-{position}",
-                "document_id": working_copy.document_id,
-                "document_version_id": version.id,
-                "working_copy_id": working_copy.id,
-                "filename": working_copy.filename,
-                "size_bytes": working_copy.size_bytes,
-                "created_at": working_copy.created_at.isoformat(),
-            }
-            for position, (working_copy, version) in enumerate(
-                [item for group in ambiguous for item in group],
-                start=1,
-            )
-        ]
-        record = FileSearchClarificationService(self.db).create(
-            conversation_id=self.conversation_id,
-            user_id=self.user_id,
-            agent_run_id=self.agent_run_id,
-            original_query=question,
-            core_phrase=choices[0]["filename"],
-            relation_mode="DOCUMENT_SELECTION",
-            options=[
-                {
-                    "id": item["option_id"],
-                    "label": item["filename"],
-                    "description": (
-                        f"大小 {item['size_bytes']} 字节，创建于 {item['created_at']}"
-                    ),
-                    "document_id": item["document_id"],
-                    "examples": [],
-                    "estimated_count": None,
-                }
-                for item in choices
-            ],
+        return self._create_file_selection(
+            rows=[item for group in ambiguous for item in group],
+            question=question,
+            message="找到多个同名但内容不同的文件，请先选择一个文件。",
         )
-        return {
-            "ok": True,
-            "kind": "file_selection",
-            "status": "NEEDS_CLARIFICATION",
-            "message": "找到多个同名但内容不同的文件，请先选择一个文件。",
-            "clarification_id": record.id,
-            "choices": choices,
-            "answer": "",
-            "references": [],
-        }
 
     def _no_evidence(
         self, *, question: str, mode: str, index_status: str, message: str
@@ -1368,3 +1496,55 @@ def _normalize_number(value: str) -> str:
     """统一数字中的千分位，便于验证模型没有生成证据外数值。"""
 
     return str(value).replace(",", "")
+
+
+def _explicit_filename_from_question(question: str) -> str | None:
+    """从自然语言中提取完整文件名，作为单文件读取的后端范围约束。"""
+
+    normalized = unicodedata.normalize("NFKC", str(question or ""))
+    suffix_pattern = "|".join(
+        re.escape(value.lstrip("."))
+        for value in sorted(_EXPLICIT_FILENAME_SUFFIXES, key=len, reverse=True)
+    )
+    match = re.search(
+        rf"(?P<filename>[^/\\，。！？\r\n]+?\.(?:{suffix_pattern}))",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    candidate = match.group("filename").strip().strip("“”\"'《》【】")
+    candidate = re.sub(
+        r"^(?:请|麻烦)?(?:帮我)?(?:对|把|将)?\s*"
+        r"(?:(?:完整|全面|详细|全文)?(?:总结|概括|讲解|说明|读取|解析)(?:一下)?)\s*",
+        "",
+        candidate,
+    ).strip()
+    if not candidate or "/" in candidate or "\\" in candidate:
+        return None
+    suffix = next(
+        (value for value in _EXPLICIT_FILENAME_SUFFIXES if candidate.casefold().endswith(value)),
+        None,
+    )
+    return candidate if suffix else None
+
+
+def _normalize_filename_identity(value: str) -> str:
+    """统一文件名身份的 Unicode 与大小写，保留业务字符以避免误合并。"""
+
+    return unicodedata.normalize("NFKC", str(value or "")).casefold()
+
+
+def _split_filename_identity(value: str) -> tuple[str, str]:
+    """拆分规范化名称的主体和扩展名，仅用于近似候选排序。"""
+
+    stem, separator, extension = value.rpartition(".")
+    if not separator:
+        return value, ""
+    return stem, f".{extension}"
+
+
+def _strip_legacy_inline_reference_indexes(value: str) -> str:
+    """移除历史回答中的引用编号，避免旧缓存继续污染普通聊天正文。"""
+
+    return re.sub(r"(?<=[\u4e00-\u9fffA-Za-z0-9。！？；，、])(?:\[\d+\])+(?=(?:\s|$|[。！？；，、]))", "", str(value or ""))

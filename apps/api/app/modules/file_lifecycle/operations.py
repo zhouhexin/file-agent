@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import os
+import unicodedata
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -70,6 +71,132 @@ class WorkingCopyOperationService:
         self.plan_repository = OperationPlanRepository(db)
         self.storage = FileLifecycleStorageService()
 
+    def find_active_filename_conflicts(
+        self,
+        *,
+        workspace_id: str,
+        target_filename: str,
+        exclude_working_copy_ids: set[str] | None = None,
+        lock: bool = False,
+    ) -> list[WorkingCopy]:
+        """查找共享工作区内便携语义同名的活动工作副本。
+
+        工作副本物理上可能位于不同 UUID 子目录，因此不能用目标路径是否存在
+        代替文件名冲突判断。这里统一使用 Unicode NFC + casefold，使 Linux
+        开发环境也能提前发现 Windows 大小写不敏感的同名风险。
+        """
+
+        excluded = set(exclude_working_copy_ids or set())
+        query = self.db.query(WorkingCopy).filter(
+            WorkingCopy.workspace_id == workspace_id,
+            WorkingCopy.status == "ACTIVE",
+        )
+        if excluded:
+            query = query.filter(~WorkingCopy.id.in_(sorted(excluded)))
+        if lock:
+            self._lock_filename_key(
+                workspace_id=workspace_id,
+                target_filename=target_filename,
+            )
+        query = query.order_by(WorkingCopy.created_at.asc(), WorkingCopy.id.asc())
+        target_key = _portable_filename_key(target_filename)
+        return [
+            item
+            for item in query.all()
+            if _portable_filename_key(item.filename) == target_key
+        ]
+
+    def _lock_filename_key(
+        self,
+        *,
+        workspace_id: str,
+        target_filename: str,
+    ) -> None:
+        """在 PostgreSQL 中串行化同一共享文件名的确认执行。
+
+        不能在已经锁住源工作副本后再锁全工作区所有行，否则两个不同源文件
+        同时改成同一名称时可能互相等待。事务级 advisory lock 只竞争同一个
+        ``workspace + filename`` 键，SQLite 测试环境则保持单事务行为。
+        """
+
+        bind = self.db.get_bind()
+        if bind.dialect.name != "postgresql":
+            return
+        self.db.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtext(:workspace_key), hashtext(:filename_key)"
+                ")"
+            ),
+            {
+                "workspace_key": workspace_id,
+                "filename_key": _portable_filename_key(target_filename),
+            },
+        )
+
+    def create_filename_conflict_review(
+        self,
+        *,
+        source_copy: WorkingCopy,
+        existing_copies: list[WorkingCopy],
+        target_filename: str,
+        conversation_id: str,
+        agent_run_id: str,
+        current_user: User,
+        source: str,
+    ) -> FileRenameReviewItem:
+        """持久化显式重命名同名冲突，后续选择只能消费这条受控事实。"""
+
+        if not existing_copies:
+            raise ValueError("Filename conflict review requires an existing copy")
+        root = self.db.get(WorkingCopyRoot, source_copy.working_copy_root_id)
+        if root is None:
+            raise HTTPException(status_code=409, detail="Working copy root is missing")
+        target_relative_path = (
+            PurePosixPath(source_copy.relative_path).parent / target_filename
+        ).as_posix()
+        review = (
+            self.db.query(FileRenameReviewItem)
+            .filter(
+                FileRenameReviewItem.agent_run_id == agent_run_id,
+                FileRenameReviewItem.managed_file_id == source_copy.managed_file_id,
+            )
+            .one_or_none()
+        )
+        context = {
+            "reason": "FILENAME_CONFLICT",
+            "working_copy_id": source_copy.id,
+            "existing_working_copy_ids": [item.id for item in existing_copies],
+            "filename": target_filename,
+            "target_filename": target_filename,
+            "target_relative_path": target_relative_path,
+            "source": source,
+        }
+        if review is None:
+            review = FileRenameReviewItem(
+                conversation_id=conversation_id,
+                agent_run_id=agent_run_id,
+                user_id=current_user.id,
+                managed_file_id=source_copy.managed_file_id,
+                document_id=source_copy.document_id,
+                root_key=root.root_key,
+                original_relative_path=source_copy.relative_path,
+                original_filename=source_copy.filename,
+                source_sha256=source_copy.content_sha256,
+                status="NEEDS_REVIEW",
+                review_context_json=context,
+            )
+            self.db.add(review)
+        else:
+            review.status = "NEEDS_REVIEW"
+            review.review_context_json = context
+            review.decision_json = {}
+            review.updated_at = utcnow()
+            flag_modified(review, "review_context_json")
+            flag_modified(review, "decision_json")
+        self.db.flush()
+        return review
+
     def create_plan(self, *, request: OperationPlanCreateRequest, current_user: User) -> OperationPlan:
         """根据数据库当前版本生成不可伪造的工作副本计划。"""
 
@@ -82,6 +209,7 @@ class WorkingCopyOperationService:
         shared_workspace_id = get_shared_workspace_id(self.db)
         normalized_items: list[dict[str, Any]] = []
         prepared_records: list[WorkingCopyPathRecord] = []
+        requested_target_names: set[str] = set()
         for requested in request.items:
             if not requested.working_copy_id:
                 raise HTTPException(status_code=400, detail="working_copy_id is required")
@@ -100,6 +228,28 @@ class WorkingCopyOperationService:
                 working_copy=working_copy,
                 requested_after=dict(requested.after or {}),
             )
+            if request.operation_type == "RENAME_WORKING_COPIES":
+                target_filename = PurePosixPath(str(after_relative_path)).name
+                target_key = _portable_filename_key(target_filename)
+                if target_key in requested_target_names:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"同一计划中有多个文件要重命名为“{target_filename}”，请逐个确认。",
+                    )
+                requested_target_names.add(target_key)
+                conflicts = self.find_active_filename_conflicts(
+                    workspace_id=shared_workspace_id,
+                    target_filename=target_filename,
+                    exclude_working_copy_ids={working_copy.id},
+                )
+                if conflicts:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"共享工作目录已存在同名文件“{target_filename}”。"
+                            "请选择覆盖已有文件、同时保留或取消。"
+                        ),
+                    )
             item = {
                 "document_id": working_copy.document_id,
                 "working_copy_id": working_copy.id,
@@ -183,6 +333,7 @@ class WorkingCopyOperationService:
         shared_workspace_id = get_shared_workspace_id(self.db)
         normalized_items: list[dict[str, Any]] = []
         seen_working_copy_ids: set[str] = set()
+        seen_target_names: set[str] = set()
         for requested in [
             item for item in plan.plan_json.get("items", []) if isinstance(item, dict)
         ]:
@@ -221,6 +372,43 @@ class WorkingCopyOperationService:
                 working_copy=working_copy,
                 requested_after=dict(requested.get("after") or {}),
             )
+            target_filename = PurePosixPath(after_relative_path).name
+            target_key = _portable_filename_key(target_filename)
+            if target_key in seen_target_names:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"同一计划中有多个文件要重命名为“{target_filename}”，请逐个确认。",
+                )
+            seen_target_names.add(target_key)
+            conflicts = self.find_active_filename_conflicts(
+                workspace_id=shared_workspace_id,
+                target_filename=target_filename,
+                exclude_working_copy_ids={working_copy.id},
+            )
+            if conflicts:
+                if not plan.agent_run_id:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"共享工作目录已存在同名文件“{target_filename}”。",
+                    )
+                self.create_filename_conflict_review(
+                    source_copy=working_copy,
+                    existing_copies=conflicts,
+                    target_filename=target_filename,
+                    conversation_id=plan.conversation_id,
+                    agent_run_id=plan.agent_run_id,
+                    current_user=current_user,
+                    source="DEFERRED_UPLOAD_RENAME",
+                )
+                plan.status = "INVALIDATED"
+                plan.updated_at = utcnow()
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"共享工作目录已存在同名文件“{target_filename}”。"
+                        "原重命名计划已停止，请在对话中选择覆盖已有文件、同时保留或取消。"
+                    ),
+                )
             sequence = int(
                 self.db.query(func.max(WorkingCopyPathRecord.sequence_number))
                 .filter(WorkingCopyPathRecord.working_copy_id == working_copy.id)
@@ -663,6 +851,17 @@ class WorkingCopyOperationService:
             )
             return {**result, "operation_type": operation_type}
         after_relative_path = str(after.get("relative_path") or "")
+        target_filename = PurePosixPath(after_relative_path).name
+        conflicts = self.find_active_filename_conflicts(
+            workspace_id=plan.workspace_id,
+            target_filename=target_filename,
+            exclude_working_copy_ids={working_copy.id},
+            lock=True,
+        )
+        if conflicts:
+            raise FileExistsError(
+                f"共享工作目录已存在同名文件“{target_filename}”，请重新选择冲突处理方式"
+            )
         after_storage_path = f"{root.relative_storage_path}/{after_relative_path}"
         target = self.storage.working_copy_path(after_storage_path)
         if target.exists():
@@ -991,3 +1190,9 @@ class WorkingCopyOperationService:
             record.error_code = "OPERATION_PLAN_STALE"
             record.error_message = "工作副本路径、版本或内容已经变化"
             record.updated_at = utcnow()
+
+
+def _portable_filename_key(filename: str) -> str:
+    """生成跨 Windows、macOS 和 Linux 一致的文件名冲突键。"""
+
+    return unicodedata.normalize("NFC", str(filename or "")).casefold()

@@ -402,6 +402,172 @@ def test_uploaded_low_confidence_name_can_be_corrected_in_same_conversation(monk
     clear_overrides()
 
 
+def test_explicit_working_copy_rename_detects_shared_filename_conflict(
+    monkeypatch,
+    tmp_path,
+):
+    """显式改名命中共享同名文件时必须先进入选择闭环，不能直接生成重复名称。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "explicit-shared-rename-conflict-owner")
+    _upload(
+        client,
+        headers,
+        filename="述职报告-赵明华-计算机学院.docx",
+        content=b"existing-target-content",
+    )
+    _upload(
+        client,
+        headers,
+        filename="述职报告-赵明华-计算机学院new.docx",
+        content=b"pending-rename-content",
+    )
+    _drain(SessionLocal)
+
+    response = client.post(
+        "/api/conversations/explicit-shared-rename-conflict/messages",
+        headers=headers,
+        json={
+            "content": (
+                "把“述职报告-赵明华-计算机学院new.docx”"
+                "重命名为“述职报告-赵明华-计算机学院.docx”"
+            ),
+            "attachments": [],
+        },
+    )
+
+    assert response.status_code == 200
+    task_result = response.json()["task_result"]
+    assert task_result["response_type"] == "filename_conflict"
+    assert task_result["operation_plan_id"] is None
+    assert task_result["filename_conflict_result"]["filename"] == (
+        "述职报告-赵明华-计算机学院.docx"
+    )
+    assert task_result["filename_conflict_result"]["allowed_decisions"] == [
+        "REPLACE_EXISTING_WORKING_COPY",
+        "KEEP_BOTH",
+        "CANCEL",
+    ]
+    with SessionLocal() as db:
+        active_names = [
+            item.filename
+            for item in db.query(WorkingCopy)
+            .filter(WorkingCopy.status == "ACTIVE")
+            .all()
+        ]
+        assert active_names.count("述职报告-赵明华-计算机学院.docx") == 1
+        review = (
+            db.query(FileRenameReviewItem)
+            .filter(FileRenameReviewItem.status == "NEEDS_REVIEW")
+            .all()
+        )
+        review = next(
+            item
+            for item in review
+            if item.review_context_json.get("reason") == "FILENAME_CONFLICT"
+        )
+        assert review.original_filename == "述职报告-赵明华-计算机学院new.docx"
+        assert review.review_context_json["target_filename"] == (
+            "述职报告-赵明华-计算机学院.docx"
+        )
+    keep_both = client.post(
+        "/api/conversations/explicit-shared-rename-conflict/messages",
+        headers=headers,
+        json={"content": "两个文件同时保留", "attachments": []},
+    )
+    assert keep_both.status_code == 200
+    keep_both_receipt = keep_both.json()["task_result"]
+    assert keep_both_receipt["response_type"] == "operation_plan"
+    confirmation = client.post(
+        f"/api/operations/plans/{keep_both_receipt['operation_plan_id']}/confirm",
+        headers=headers,
+        json={"confirmation": "确认同时保留"},
+    )
+    assert confirmation.status_code == 200
+    assert confirmation.json()["status"] == "EXECUTED"
+    with SessionLocal() as db:
+        active_names = sorted(
+            item.filename
+            for item in db.query(WorkingCopy)
+            .filter(WorkingCopy.status == "ACTIVE")
+            .all()
+        )
+        assert active_names == [
+            "述职报告-赵明华-计算机学院.docx",
+            "述职报告-赵明华-计算机学院_第二版.docx",
+        ]
+    clear_overrides()
+
+
+def test_confirmed_rename_rechecks_shared_filename_conflict_before_execution(
+    monkeypatch,
+    tmp_path,
+):
+    """确认执行前新增同名文件时必须令计划失败，防止并发窗口产生重复名称。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "rename-execution-conflict-owner")
+    _upload(
+        client,
+        headers,
+        filename="待改名文件.docx",
+        content=b"rename-source-content",
+    )
+    _drain(SessionLocal)
+    source_copy = next(
+        item
+        for item in client.get("/api/working-copies", headers=headers).json()
+        if item["filename"] == "待改名文件.docx"
+    )
+    plan_response = client.post(
+        "/api/operations/plans",
+        headers=headers,
+        json={
+            "conversation_id": "rename-execution-conflict",
+            "operation_type": "RENAME_WORKING_COPIES",
+            "reason": "并发冲突回归测试",
+            "items": [
+                {
+                    "working_copy_id": source_copy["id"],
+                    "after": {"filename": "并发目标.docx"},
+                }
+            ],
+        },
+    )
+    assert plan_response.status_code == 200
+
+    _upload(
+        client,
+        headers,
+        filename="并发目标.docx",
+        content=b"concurrent-target-content",
+    )
+    _drain(SessionLocal)
+    confirmation = client.post(
+        f"/api/operations/plans/{plan_response.json()['id']}/confirm",
+        headers=headers,
+        json={"confirmation": "确认重命名"},
+    )
+
+    assert confirmation.status_code == 200
+    assert confirmation.json()["status"] == "FAILED"
+    assert confirmation.json()["result"]["failed_count"] == 1
+    assert "共享工作目录已存在同名文件" in (
+        confirmation.json()["result"]["items"][0]["error_message"]
+    )
+    with SessionLocal() as db:
+        active = (
+            db.query(WorkingCopy)
+            .filter(WorkingCopy.status == "ACTIVE")
+            .all()
+        )
+        assert [item.filename for item in active].count("并发目标.docx") == 1
+        assert db.get(WorkingCopy, source_copy["id"]).filename == "待改名文件.docx"
+    clear_overrides()
+
+
 def test_missing_rename_source_returns_similar_file_selection_before_plan(
     monkeypatch,
     tmp_path,

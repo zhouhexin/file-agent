@@ -123,8 +123,8 @@ def _latest_agent_audit(session_factory) -> tuple[AgentRun, list[str]]:
         return run, tool_names
 
 
-def test_message_summarizes_shared_managed_file_by_explicit_filename(monkeypatch, tmp_path):
-    """用户从搜索结果抄写完整文件名后，消息入口必须读取共享正文并返回总结。"""
+def test_message_does_not_expand_explicit_filename_before_working_copy_is_active(monkeypatch, tmp_path):
+    """原始受管文件尚未导入共享工作副本时，不得为了回答而扩大为其他文件。"""
 
     managed_root = tmp_path / "school-files"
     managed_root.mkdir()
@@ -159,9 +159,9 @@ def test_message_summarizes_shared_managed_file_by_explicit_filename(monkeypatch
 
         assert response.status_code == 200
         task_result = response.json()["task_result"]
-        assert task_result["response_type"] == "file_results"
-        assert "本次任务已执行完成，但暂未生成可展示的业务结果" not in task_result["final_response"]
-        assert "鲁晓锋同志" in task_result["final_response"]
+        assert task_result["response_type"] == "evidence_answer"
+        assert "未找到该文件" in task_result["final_response"]
+        assert task_result["evidence_answer_result"]["files"] == []
 
     clear_overrides()
     config.get_settings.cache_clear()

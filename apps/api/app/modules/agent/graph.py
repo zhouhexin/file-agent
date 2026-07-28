@@ -476,6 +476,7 @@ def _aggregate_tool_results(
         "mcp_filesystem_result": _mcp_filesystem_result_from_results(tool_results),
         "rename_plan": _rename_plan_from_results(tool_results),
         "rename_review_resolution": _rename_review_resolution_from_results(tool_results),
+        "filename_conflict": _filename_conflict_from_results(tool_results),
         "intent_summary": _intent_summary_from_results(tool_results),
         "filesystem_job": _filesystem_job_from_results(tool_results),
         "tool_errors": _tool_errors_from_invocations(state.get("tool_invocations", [])),
@@ -656,6 +657,16 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                 else "NEEDS_REVIEW"
             ),
             "final_response": _build_rename_review_resolution_response(rename_review_resolution),
+        }
+
+    filename_conflict = result_summary.get("filename_conflict", {})
+    if filename_conflict:
+        return {
+            "status": "NEEDS_REVIEW",
+            "final_response": str(
+                filename_conflict.get("message")
+                or "共享工作目录中已存在同名文件，请选择处理方式。"
+            ),
         }
 
     filesystem_job = result_summary.get("filesystem_job", {})
@@ -1042,6 +1053,17 @@ def _rename_review_resolution_from_results(tool_results: List[Dict[str, Any]]) -
 
     for result in tool_results:
         if result.get("kind") == "rename_review_resolution":
+            return result
+    return {}
+
+
+def _filename_conflict_from_results(
+    tool_results: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """提取工作副本全局文件名冲突，供响应节点和普通回执共同使用。"""
+
+    for result in tool_results:
+        if result.get("kind") == "filename_conflict":
             return result
     return {}
 

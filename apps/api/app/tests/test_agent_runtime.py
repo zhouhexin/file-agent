@@ -306,8 +306,8 @@ def test_deterministic_planner_routes_managed_file_summary_to_read_document():
         "述职报告-鲁晓锋-20200421.pdf 总结一下这个文档",
     ],
 )
-def test_deterministic_planner_uses_explicit_filename_for_managed_summary(message):
-    """按完整文件名总结时必须优先使用该名称，不能把年份、“一下”或“这个”误当查询范围。"""
+def test_deterministic_planner_locks_explicit_filename_for_evidence_summary(message):
+    """按完整文件名总结必须进入受控单文件证据范围，不能退回模糊受管目录读取。"""
 
     plan = DeterministicPlanner().plan(
         conversation_id="conv-managed-filename-summary",
@@ -317,14 +317,14 @@ def test_deterministic_planner_uses_explicit_filename_for_managed_summary(messag
         attachments=[],
     )
 
-    assert plan.intent == "SUMMARIZE_MANAGED_FILE"
-    assert [step.tool_name for step in plan.steps] == ["managed-file-read-document"]
+    assert plan.intent == "EVIDENCE_ANSWER"
+    assert [step.tool_name for step in plan.steps] == ["evidence-answer"]
     assert plan.steps[0].input == {
-        "extension": "pdf",
-        "filename_contains": "述职报告-鲁晓锋-20200421.pdf",
+        "question": message,
+        "document_ids": [],
+        "answer_mode": "FULL_SUMMARY",
     }
-    assert plan.slots["path_prefix"] is None
-    assert plan.slots["requested_outputs"] == ["text", "summary", "receipt"]
+    assert plan.slots["document_ids"] == []
 
 
 def test_deterministic_planner_routes_managed_directory_classification():

@@ -22,9 +22,13 @@ from app.db.models import (
     OperationPlan,
     ToolInvocation,
     UploadArchiveRecord,
+    User,
     WorkingCopy,
 )
-from app.modules.file_lifecycle.operations import DEFERRED_UPLOAD_RENAME_OPERATION
+from app.modules.file_lifecycle.operations import (
+    DEFERRED_UPLOAD_RENAME_OPERATION,
+    WorkingCopyOperationService,
+)
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.modules.operations.repository import OperationPlanRepository
 from app.modules.retrieval.clarification_service import FileSearchClarificationService
@@ -57,6 +61,9 @@ class UploadedRenameReviewResolutionService:
     ) -> dict[str, Any]:
         """解析用户给出的实际名称；不在本步骤直接执行物理重命名。"""
 
+        current_user = self.db.get(User, self.user_id)
+        if current_user is None:
+            return _error("USER_NOT_FOUND", "当前用户不存在，无法处理重命名。")
         pending = self._latest_pending_suggestions(conversation_id=conversation_id)
         candidates = self._conversation_candidates(
             conversation_id=conversation_id,
@@ -137,6 +144,58 @@ class UploadedRenameReviewResolutionService:
                 )
             except ValueError as exc:
                 return _error("INVALID_TARGET_FILENAME", str(exc))
+            source_copy = self._resolve_active_working_copy(document=document)
+            if source_copy is not None:
+                operation_service = WorkingCopyOperationService(self.db)
+                conflicts = operation_service.find_active_filename_conflicts(
+                    workspace_id=get_shared_workspace_id(self.db),
+                    target_filename=validated_target,
+                    exclude_working_copy_ids={source_copy.id},
+                )
+                if conflicts:
+                    source_run_id = str(
+                        suggestion.get("_source_agent_run_id") or ""
+                    )
+                    if source_run_id:
+                        self._invalidate_previous_plan(
+                            conversation_id=conversation_id,
+                            source_agent_run_id=source_run_id,
+                        )
+                    operation_service.create_filename_conflict_review(
+                        source_copy=source_copy,
+                        existing_copies=conflicts,
+                        target_filename=validated_target,
+                        conversation_id=conversation_id,
+                        agent_run_id=agent_run_id,
+                        current_user=current_user,
+                        source="EXPLICIT_RENAME",
+                    )
+                    multiple = len(conflicts) > 1
+                    return {
+                        "ok": True,
+                        "kind": "filename_conflict",
+                        "status": "NEEDS_REVIEW",
+                        "filename": validated_target,
+                        "conflict_count": len(conflicts),
+                        "allowed_decisions": (
+                            ["CANCEL"]
+                            if multiple
+                            else [
+                                "REPLACE_EXISTING_WORKING_COPY",
+                                "KEEP_BOTH",
+                                "CANCEL",
+                            ]
+                        ),
+                        "message": (
+                            f"共享工作目录中已有 {len(conflicts)} 个同名文件"
+                            f"“{validated_target}”。请先选择要处理的已有文件。"
+                            if multiple
+                            else (
+                                f"共享工作目录已存在同名文件“{validated_target}”。"
+                                "请选择“覆盖已有文件”“同时保留”或“取消”。"
+                            )
+                        ),
+                    }
             used_source_ids.add(source_document_id)
             items.append(
                 {

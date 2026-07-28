@@ -218,6 +218,10 @@ class DeterministicPlanner:
         if is_target_only_rename_request(message) and not attachments:
             # 目标名称不能充当源文件选择条件；缺少附件或源文件名时只请求澄清。
             return _missing_file_scope_plan(user_goal=message)
+        if _has_rename_review_resolution_intent(message):
+            # “把 A 重命名为 B”已经同时给出源文件和目标文件，必须优先进入
+            # 受控重命名解析；不能先被“A 文件名检索”规则截走而只返回搜索卡。
+            return _rename_review_resolution_plan(user_goal=message)
         if _has_explicit_filename_lookup_intent(message) and not attachments:
             return _file_search_plan(user_goal=message, query=message, document_ids=[])
         if _has_restore_working_copy_intent(message):
@@ -232,9 +236,6 @@ class DeterministicPlanner:
                 action="TRASH",
                 document_ids=_document_ids(attachments),
             )
-        if _has_rename_review_resolution_intent(message):
-            return _rename_review_resolution_plan(user_goal=message)
-
         if _has_capability_help_intent(message=message, lowered=lowered):
             return _capability_help_plan(user_goal=message)
 
@@ -324,6 +325,20 @@ class DeterministicPlanner:
 
         managed_read_filters = _managed_file_read_filters_from_request(message=message, lowered=lowered)
         if managed_read_filters and not attachments:
+            explicit_filename = _managed_filename_from_read_request(message)
+            if explicit_filename and _has_explicit_filename_content_intent(message=message, lowered=lowered):
+                # 完整文件名的读取、提问和总结都应由 evidence-answer 在共享 ACTIVE
+                # 工作副本中精确锁定，而非用 filename_contains 作为模糊批量范围。
+                return _evidence_answer_plan(
+                    user_goal=message,
+                    question=message,
+                    document_ids=[],
+                    answer_mode=(
+                        "FULL_SUMMARY"
+                        if _has_plain_document_summary_intent(message=message, lowered=lowered)
+                        else "FOCUSED"
+                    ),
+                )
             return _managed_file_read_document_plan(
                 user_goal=message,
                 root_key=managed_read_filters.get("root_key"),
@@ -603,6 +618,13 @@ def build_plan_from_user_intent(
     if is_target_only_rename_request(message) and not attachments:
         # 即使 LLM 给出重命名意图，也不能用目标文件名或模型自报 ID 猜测源文件。
         return _missing_file_scope_plan(user_goal=intent_plan.user_goal or message)
+    if _has_rename_review_resolution_intent(message) or intent_plan.intent == "RESOLVE_RENAME_REVIEW":
+        # 显式源文件 + 目标文件是确定性的重命名请求，优先级必须高于文件名检索。
+        return _rename_review_resolution_plan(
+            user_goal=intent_plan.user_goal or message,
+            response_style=intent_plan.response_style,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
     if _has_explicit_filename_lookup_intent(message) and not attachments:
         return _file_search_plan(
             user_goal=intent_plan.user_goal or message,
@@ -627,13 +649,6 @@ def build_plan_from_user_intent(
             response_style=intent_plan.response_style,
             llm_intent_plan=intent_plan.model_dump(),
         )
-    if _has_rename_review_resolution_intent(message) or intent_plan.intent == "RESOLVE_RENAME_REVIEW":
-        return _rename_review_resolution_plan(
-            user_goal=intent_plan.user_goal or message,
-            response_style=intent_plan.response_style,
-            llm_intent_plan=intent_plan.model_dump(),
-        )
-
     if (
         _has_capability_help_intent(message=message, lowered=lowered)
         or intent_plan.intent == "CAPABILITY_HELP"
@@ -783,6 +798,27 @@ def build_plan_from_user_intent(
         message=message,
         lowered=lowered,
     ) or {}
+    explicit_filename = _managed_filename_from_read_request(message)
+    if (
+        explicit_filename
+        and not attachment_document_ids
+        and _has_explicit_filename_content_intent(message=message, lowered=lowered)
+    ):
+        # 不信任 LLM 自报的 document_id：完整文件名必须交由 evidence-answer 以当前
+        # 共享工作副本精确匹配、同名单选和近似候选规则处理。
+        return _evidence_answer_plan(
+            user_goal=intent_plan.user_goal or message,
+            question=message,
+            document_ids=[],
+            answer_mode=(
+                "FULL_SUMMARY"
+                if _has_plain_document_summary_intent(message=message, lowered=lowered)
+                else "FOCUSED"
+            ),
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
     if (
         intent_plan.intent in {"READ_MANAGED_FILE", "SUMMARIZE_MANAGED_FILE", "ANSWER_MANAGED_FILE"}
         or requested_capabilities.intersection(MANAGED_FILE_READ_HINTS)
@@ -2642,7 +2678,7 @@ def _managed_filename_from_read_request(message: str) -> str | None:
     candidate = match.group("filename").strip().strip("“”\"'")
     candidate = re.sub(
         r"^(?:请|麻烦)?(?:帮我)?(?:对|把|将)?\s*"
-        r"(?:总结一下|总结|概括一下|概括|讲解一下|讲解|说明一下|读取|解析)\s*",
+        r"(?:(?:完整|全面|详细|全文)?(?:总结|概括|讲解|说明|读取|解析)(?:一下)?)\s*",
         "",
         candidate,
     ).strip()
@@ -2879,6 +2915,16 @@ def _has_plain_document_summary_intent(*, message: str, lowered: str) -> bool:
         message=message,
         lowered=lowered,
     ) and not _has_classification_summary_intent(message=message)
+
+
+def _has_explicit_filename_content_intent(*, message: str, lowered: str) -> bool:
+    """判断完整文件名后是否要求读取、总结或基于正文提问。"""
+
+    return (
+        _has_plain_document_summary_intent(message=message, lowered=lowered)
+        or _has_answer_intent(message=message, lowered=lowered)
+        or _should_extract_text(message=message, lowered=lowered)
+    )
 
 
 def _has_summary_intent(*, message: str, lowered: str) -> bool:
