@@ -3,7 +3,7 @@
 解析器职责：
 - 去除低信息量请求词
 - 使用 Jieba 与业务词典提取主题词
-- 用服务器时区确定性解析"今年、去年、前年"和显式年份
+- 用服务器时区确定性解析"今年、去年、前年、昨天、前天"和显式年份
 - 提取已存在 taxonomy 别名、单位、人名、文号和文档类型候选
 - 生成绑定参数，不允许将用户文本拼接为 SQL 或原生 tsquery
 
@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 
 _FILLER_PHRASES = [
@@ -47,7 +48,7 @@ _FILLER_PHRASES = [
 
 _YEAR_PATTERN = re.compile(r"(20\d{2})年?")
 _YEAR_SUFFIX_PATTERN = re.compile(r"((?:19|20)\d{2})\s*年(?:度)?")
-_RELATIVE_YEAR_PATTERN = re.compile(r"(去年|前年|今年)")
+_RELATIVE_TIME_PATTERN = re.compile(r"(前年|去年|今年|前天|昨天|今天)")
 _DOC_NUMBER_PATTERN = re.compile(r"[(\[]?\d+\s*号[\])]?")
 _PERSON_HONORIFICS = ("老师", "同志", "先生", "女士")
 _QUESTION_FILE_SELECTOR_PATTERN = re.compile(
@@ -107,10 +108,12 @@ class FileSearchQueryParser:
         tokenizer: Any,
         taxonomy: Any | None = None,
         server_tz: str = "Asia/Shanghai",
+        reference_time: datetime | date | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.taxonomy = taxonomy
         self.server_tz = server_tz
+        self.reference_time = reference_time
 
     def parse(self, query: str) -> ParsedQuery:
         """将自然语言查询解析为结构化参数。
@@ -129,8 +132,15 @@ class FileSearchQueryParser:
         # 3. 提取显式年份
         year = self._extract_year(cleaned)
 
-        # 4. 提取相对年份
-        relative_year = self._extract_relative_year(cleaned)
+        # 4. 相对时间先按服务器当前日期换算为实际年份，供后续硬过滤使用。
+        resolved_relative_time = self._resolve_relative_time(cleaned)
+        relative_year = resolved_relative_time[1] if resolved_relative_time else None
+        if year is None and resolved_relative_time is not None:
+            year = resolved_relative_time[0]
+            cleaned = _RELATIVE_TIME_PATTERN.sub(str(year), cleaned, count=1)
+        elif resolved_relative_time is not None:
+            # 显式年份优先，但相对时间不能遗留为正文查询词。
+            cleaned = _RELATIVE_TIME_PATTERN.sub(" ", cleaned, count=1)
 
         # 年份是结构化过滤条件，“2020”“2020年”“2020年度”必须等价。
         # 组合查询中把年份从主题短语移除，避免搜索不存在的连续短语
@@ -187,14 +197,36 @@ class FileSearchQueryParser:
                     return year
         return None
 
-    def _extract_relative_year(self, text: str) -> int | None:
-        """提取相对年份（去年=-1、前年=-2、今年=0）。"""
-        match = _RELATIVE_YEAR_PATTERN.search(text)
-        if match:
-            keyword = match.group(1)
-            mapping = {"今年": 0, "去年": -1, "前年": -2}
-            return mapping.get(keyword)
-        return None
+    def _resolve_relative_time(self, text: str) -> tuple[int, int] | None:
+        """将相对日期解析为目标年份与相对年份差。"""
+
+        match = _RELATIVE_TIME_PATTERN.search(text)
+        if match is None:
+            return None
+        today = self._current_date()
+        keyword = match.group(1)
+        if keyword == "前年":
+            target = _shift_calendar_year(today, years=-2)
+        elif keyword == "去年":
+            target = _shift_calendar_year(today, years=-1)
+        elif keyword == "前天":
+            target = today - timedelta(days=2)
+        elif keyword == "昨天":
+            target = today - timedelta(days=1)
+        else:
+            target = today
+        return target.year, target.year - today.year
+
+    def _current_date(self) -> date:
+        """按服务器时区读取当前日期；测试可传入固定时间。"""
+
+        if isinstance(self.reference_time, datetime):
+            if self.reference_time.tzinfo is None:
+                return self.reference_time.date()
+            return self.reference_time.astimezone(ZoneInfo(self.server_tz)).date()
+        if isinstance(self.reference_time, date):
+            return self.reference_time
+        return datetime.now(ZoneInfo(self.server_tz)).date()
 
     def _extract_doc_number(self, text: str) -> str | None:
         """提取文号。"""
@@ -249,6 +281,16 @@ def is_file_set_selector_question(text: str) -> bool:
     return _DEICTIC_FILE_SET_SELECTOR_PATTERN.search(
         str(text or "").lower()
     ) is not None
+
+
+def _shift_calendar_year(value: date, *, years: int) -> date:
+    """按日历年平移日期；闰日落到非闰年时安全降为 2 月 28 日。"""
+
+    target_year = value.year + years
+    try:
+        return value.replace(year=target_year)
+    except ValueError:
+        return date(target_year, 2, 28)
 
 
 def _strip_explicit_year_filter(text: str, *, year: int | None) -> str:

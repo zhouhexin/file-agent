@@ -8,7 +8,7 @@
 5. 解析失败时保留原始关键词
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 from app.modules.retrieval.query_parser import (
@@ -25,11 +25,15 @@ class _FakeTokenizer:
         return text.split()
 
 
-def _make_parser(server_tz: str = "Asia/Shanghai") -> FileSearchQueryParser:
+def _make_parser(
+    server_tz: str = "Asia/Shanghai",
+    reference_time: datetime | date | None = None,
+) -> FileSearchQueryParser:
     return FileSearchQueryParser(
         tokenizer=_FakeTokenizer(),
         taxonomy=None,
         server_tz=server_tz,
+        reference_time=reference_time,
     )
 
 
@@ -185,16 +189,33 @@ def test_year_suffix_and_compound_year_queries_share_stable_core_terms():
 
 
 def test_extracts_relative_year():
-    """解析相对年份（去年/前年）。"""
+    """相对时间必须换算为年份硬过滤条件，而不是遗留为普通检索词。"""
 
-    # 使用固定时区，当前时间为 2026-07-22
-    parser = _make_parser()
+    parser = _make_parser(reference_time=date(2026, 7, 22))
 
     result = parser.parse("找我去年的奖学金材料")
     assert result.relative_year == -1
+    assert result.year == 2025
+    assert result.cleaned == "奖学金"
 
     result = parser.parse("前年的资助通知")
     assert result.relative_year == -2
+    assert result.year == 2024
+    assert result.cleaned == "资助通知"
+
+    result = parser.parse("昨天的工作总结")
+    assert result.relative_year == 0
+    assert result.year == 2026
+    assert result.cleaned == "工作总结"
+
+    new_year_parser = _make_parser(reference_time=date(2026, 1, 1))
+    result = new_year_parser.parse("前天的工作总结")
+    assert result.relative_year == -1
+    assert result.year == 2025
+    assert result.cleaned == "工作总结"
+
+    leap_day_parser = _make_parser(reference_time=date(2024, 2, 29))
+    assert leap_day_parser.parse("去年的工作总结").year == 2023
 
     result = parser.parse("奖学金材料")  # 无相对年份
     assert result.relative_year is None

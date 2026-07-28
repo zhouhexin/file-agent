@@ -31,6 +31,21 @@ def test_deterministic_planner_routes_natural_language_file_search():
     }
 
 
+def test_relative_time_work_summary_routes_to_hybrid_search_not_directory_list():
+    """“找去年的工作总结”必须交给可应用年份硬过滤的正文检索。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conversation-relative-time",
+        user_id="user-relative-time",
+        message_id="message-relative-time",
+        message="帮我找去年的工作总结",
+        attachments=[],
+    )
+
+    assert plan.intent == "SEARCH_FILES"
+    assert plan.steps[0].tool_name == "hybrid-search"
+
+
 def test_deterministic_planner_routes_list_and_article_search_phrases():
     """“列出…文档”和“文章有哪些”都属于文件检索，不能回复普通闲聊占位语。"""
 
@@ -161,3 +176,22 @@ def test_llm_search_intent_is_converted_to_controlled_search_plan():
     assert plan.intent == "SEARCH_FILES"
     assert plan.steps[0].tool_name == "hybrid-search"
     assert plan.steps[0].input["query"] == "干部考察结果报告"
+
+
+def test_relative_time_search_overrides_llm_directory_list_misclassification():
+    """相对时间检索不能因模型误判而退化为展示整个受管目录。"""
+
+    plan = build_plan_from_user_intent(
+        intent_plan=UserIntentPlan(
+            intent="SEARCH_MANAGED_FILES",
+            user_goal="找去年的工作总结",
+            required_capabilities=["managed_file_list"],
+            tool_plan_hint=["managed-file-list"],
+            managed_root_key="wprk_files",
+        ),
+        message="帮我找去年的工作总结",
+        attachments=[],
+    )
+
+    assert plan.intent == "SEARCH_FILES"
+    assert plan.steps[0].tool_name == "hybrid-search"

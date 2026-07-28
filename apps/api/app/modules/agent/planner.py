@@ -222,6 +222,9 @@ class DeterministicPlanner:
             # “把 A 重命名为 B”已经同时给出源文件和目标文件，必须优先进入
             # 受控重命名解析；不能先被“A 文件名检索”规则截走而只返回搜索卡。
             return _rename_review_resolution_plan(user_goal=message)
+        if _has_relative_time_file_search(message=message, lowered=lowered) and not attachments:
+            # 相对时间主题检索必须进入能执行年份硬过滤的 hybrid-search，不能列目录。
+            return _file_search_plan(user_goal=message, query=message, document_ids=[])
         if _has_explicit_filename_lookup_intent(message) and not attachments:
             return _file_search_plan(user_goal=message, query=message, document_ids=[])
         if _has_restore_working_copy_intent(message):
@@ -623,6 +626,17 @@ def build_plan_from_user_intent(
         return _rename_review_resolution_plan(
             user_goal=intent_plan.user_goal or message,
             response_style=intent_plan.response_style,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
+    if _has_relative_time_file_search(message=message, lowered=lowered) and not attachments:
+        # 不接受 LLM 将“找去年的工作总结”误判为目录浏览；查询解析器会把相对
+        # 时间转换为具体年份并使用已有的年份硬过滤。
+        return _file_search_plan(
+            user_goal=intent_plan.user_goal or message,
+            query=message,
+            document_ids=[],
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
             llm_intent_plan=intent_plan.model_dump(),
         )
     if _has_explicit_filename_lookup_intent(message) and not attachments:
@@ -2225,7 +2239,7 @@ def _has_file_search_intent(*, message: str, lowered: str) -> bool:
         return False
     # “文章”也是学校业务中常见的文件称呼；“列出”属于检索展示动作，
     # 不能因为没有“找”字而退回普通闲聊回复。
-    object_keywords = ["文件", "文档", "文章", "材料", "证明", "通知", "表格", "报告"]
+    object_keywords = ["文件", "文档", "文章", "材料", "证明", "通知", "表格", "报告", "总结"]
     explicit_actions = ["找", "查找", "搜索", "检索", "寻找", "列出", "展示", "显示"]
     existence_objects = ["文件", "文档", "文章", "材料", "证明", "通知", "表格", "报告"]
     question_selectors = [
@@ -2280,6 +2294,15 @@ def _has_file_search_intent(*, message: str, lowered: str) -> bool:
         object_selector_pattern.search(message)
     ) or bool(existence_pattern.search(message)) or has_related_noun_phrase or any(
         keyword in lowered for keyword in english_actions
+    )
+
+
+def _has_relative_time_file_search(*, message: str, lowered: str) -> bool:
+    """识别带相对时间条件的自然语言文件检索。"""
+
+    return (
+        any(marker in message for marker in ("今年", "去年", "前年", "今天", "昨天", "前天"))
+        and _has_file_search_intent(message=message, lowered=lowered)
     )
 
 
