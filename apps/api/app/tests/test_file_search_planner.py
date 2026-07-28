@@ -4,7 +4,10 @@
 意图波动或虚词误提取而退化成受管目录文件名列表。
 """
 
-from app.modules.agent.planner import _managed_filename_contains_from_list_request
+from app.modules.agent.planner import (
+    _has_plain_document_summary_intent,
+    _managed_filename_contains_from_list_request,
+)
 from app.modules.agent.planner import DeterministicPlanner, build_plan_from_user_intent
 from app.modules.agent.service import AgentRuntimeService
 from app.modules.agent.state import ToolInvocationRecord
@@ -213,3 +216,14 @@ def test_explicit_year_file_search_overrides_llm_summary_misclassification():
 
     assert plan.intent == "SEARCH_FILES"
     assert plan.steps[0].tool_name == "hybrid-search"
+
+
+def test_work_summary_search_is_not_treated_as_document_summary():
+    """“找……工作总结”中的“总结”是文件主题，不能触发正文总结。"""
+
+    message = "找2025年计算机学院的工作总结"
+
+    assert not _has_plain_document_summary_intent(
+        message=message,
+        lowered=message.lower(),
+    )

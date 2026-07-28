@@ -2966,11 +2966,17 @@ def _normalize_managed_filename_keyword(value: str | None) -> str | None:
 
 
 def _has_plain_document_summary_intent(*, message: str, lowered: str) -> bool:
-    """判断用户要总结文件正文，而不是查看已有分类建议。"""
-    return _has_summary_intent(
-        message=message,
-        lowered=lowered,
-    ) and not _has_classification_summary_intent(message=message)
+    """判断用户要总结文件正文，而不是查看已有分类建议或检索文件。
+
+    “找 2025 年计算机学院的工作总结”中的“工作总结”是文件主题，前面的
+    “找”明确要求检索；不能因包含“总结”而读取并概括其他文件正文。
+    """
+
+    return (
+        _has_summary_intent(message=message, lowered=lowered)
+        and not _has_classification_summary_intent(message=message)
+        and not _has_file_search_intent(message=message, lowered=lowered)
+    )
 
 
 def _has_explicit_filename_content_intent(*, message: str, lowered: str) -> bool:
