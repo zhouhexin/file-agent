@@ -536,6 +536,32 @@ def test_explicit_filename_locks_single_active_working_copy_without_workspace_re
     assert [item["filename"] for item in result["references"]] == ["申报通知.docx"]
 
 
+def test_explicit_filename_overrides_inferred_context_attachment_scope():
+    """完整文件名必须覆盖会话模糊推断出的附件，不能把候选正文混入总结。"""
+
+    db = _session()
+    _seed(db)
+    service = EvidenceAnswerService(
+        db=db,
+        user_id="user-1",
+        conversation_id="conversation-1",
+        settings=_settings(),
+        client=FakeEvidenceClient(),
+    )
+
+    # 模拟会话上下文曾把“申报通知”作为一个历史附件传入，但用户本轮写的是
+    # 不同的完整文件名。旧逻辑会直接读取该附件；新逻辑只能先显示相似文件选择卡。
+    result = service.answer(
+        question="完整总结申报通告.docx，覆盖每个章节",
+        document_ids=["document-1"],
+    )
+
+    assert result["kind"] == "file_selection"
+    assert result["status"] == "NEEDS_CLARIFICATION"
+    assert result["answer"] == ""
+    assert result["choices"][0]["filename"] == "申报通知.docx"
+
+
 def test_unmatched_explicit_filename_returns_similar_selection_without_answering():
     """完整文件名未命中只能展示相似文件单选，不能拿候选正文直接回答。"""
 

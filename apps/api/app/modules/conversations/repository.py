@@ -6,6 +6,7 @@ Service 通过仓库写入 message，避免 HTTP 路由或 AgentRuntimeService �
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Iterable
 from uuid import uuid4
@@ -228,10 +229,19 @@ class ConversationRepository:
         )
         documents_by_id = {document.id: document for document in documents}
         normalized_content = _normalize_filename_match_text(content)
+        explicit_filename = _explicit_filename_from_content(content)
         matched_ids: list[str] = []
         for document_id in document_ids:
             document = documents_by_id.get(document_id)
             if document is None:
+                continue
+            if explicit_filename is not None:
+                # 用户明确给出扩展名完整文件名时，附件上下文不能再以分词相似度
+                # 扩大范围。未命中会交由证据服务展示选择卡，而不是偷读候选正文。
+                if _normalize_filename_identity(document.original_filename) == _normalize_filename_identity(
+                    explicit_filename
+                ):
+                    matched_ids.append(document_id)
                 continue
             if _filename_matches_content(
                 filename=document.original_filename,
@@ -1052,6 +1062,35 @@ def _filename_matches_content(*, filename: str, content: str, normalized_content
     matched_tokens = [token for token in tokens if token in normalized_content]
     required_matches = 2 if len(tokens) <= 4 else 3
     return len(matched_tokens) >= required_matches
+
+
+def _explicit_filename_from_content(content: str) -> str | None:
+    """提取用户明确写出的完整文件名，阻止历史附件模糊扩张。"""
+
+    normalized = unicodedata.normalize("NFKC", str(content or ""))
+    match = re.search(
+        r"(?P<filename>[^/\\，。！？\r\n]+?\.(?:docx?|xlsx?|xlsm|xls|csv|tsv|pdf|txt|md))",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    candidate = match.group("filename").strip().strip("“”\"'《》【】")
+    candidate = re.sub(
+        r"^(?:请|麻烦)?(?:帮我)?(?:对|把|将)?\s*"
+        r"(?:(?:完整|全面|详细|全文)?(?:总结|概括|讲解|说明|读取|解析)(?:一下)?)\s*",
+        "",
+        candidate,
+    ).strip()
+    if not candidate or "/" in candidate or "\\" in candidate:
+        return None
+    return candidate
+
+
+def _normalize_filename_identity(value: str) -> str:
+    """以 Unicode 规范化和大小写折叠比较逻辑文件名。"""
+
+    return unicodedata.normalize("NFKC", str(value or "")).casefold()
 
 
 def _normalize_filename_match_text(value: str) -> str:

@@ -170,30 +170,33 @@ class EvidenceAnswerService:
                 index_status="NO_EVIDENCE",
                 message="当前回答只使用已同步文件中的证据，不能查询外部实时信息。",
             )
-        active_rows = self._resolve_active_working_copies(explicit_ids)
-        if explicit_ids and len(active_rows) != len(explicit_ids):
-            deleted = self._deleted_selection(explicit_ids)
-            if deleted:
-                return deleted
-            return self._no_evidence(
-                question=normalized_question,
-                mode=mode,
-                index_status="INDEX_PENDING",
-                message="文件正在进入共享工作目录并建立正文索引，请等待 worker 完成后重试。",
-            )
-
         exact_filename = _explicit_filename_from_question(normalized_question)
-        if not active_rows and exact_filename:
-            # 用户明确写出完整文件名时，单文件请求绝不能退回到共享目录语义召回。
-            # 先锁定 ACTIVE 工作副本；多条同名记录或近似候选都必须由用户单选。
-            active_rows = self._resolve_exact_filename_working_copies(exact_filename)
+        active_rows = self._resolve_active_working_copies(explicit_ids)
+        if exact_filename:
+            # 完整文件名是最高优先级范围约束。会话上下文即使因历史附件模糊匹配
+            # 传入多个 document_id，也不能把它们当作本次总结的依据。
+            exact_rows = self._resolve_exact_filename_working_copies(exact_filename)
             exact_selection = self._exact_filename_selection(
-                active_rows,
+                exact_rows,
                 question=normalized_question,
             )
             if exact_selection is not None:
                 return exact_selection
-            if not active_rows:
+            if exact_rows:
+                active_rows = exact_rows
+            else:
+                # 未命中完整名称时，先保留“刚上传、尚未导入”的明确状态；其余场景
+                # 只能展示相似文件单选，绝不能退回已推断附件或全库正文回答。
+                if explicit_ids and len(active_rows) != len(explicit_ids):
+                    deleted = self._deleted_selection(explicit_ids)
+                    if deleted:
+                        return deleted
+                    return self._no_evidence(
+                        question=normalized_question,
+                        mode=mode,
+                        index_status="INDEX_PENDING",
+                        message="文件正在进入共享工作目录并建立正文索引，请等待 worker 完成后重试。",
+                    )
                 similar_selection = self._similar_filename_selection(
                     requested_filename=exact_filename,
                     question=normalized_question,
@@ -206,6 +209,17 @@ class EvidenceAnswerService:
                     index_status="NO_EVIDENCE",
                     message="未找到该文件。请重新附加文件，或提供更准确的完整文件名。",
                 )
+
+        if explicit_ids and len(active_rows) != len(explicit_ids):
+            deleted = self._deleted_selection(explicit_ids)
+            if deleted:
+                return deleted
+            return self._no_evidence(
+                question=normalized_question,
+                mode=mode,
+                index_status="INDEX_PENDING",
+                message="文件正在进入共享工作目录并建立正文索引，请等待 worker 完成后重试。",
+            )
 
         if not active_rows:
             active_rows = self._recall_active_working_copies(normalized_question)

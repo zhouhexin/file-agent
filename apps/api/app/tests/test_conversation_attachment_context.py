@@ -7,6 +7,7 @@
 import pytest
 
 from app.modules.conversations.context import ConversationAttachmentContextService
+from app.modules.conversations.repository import _explicit_filename_from_content
 from app.modules.conversations.schemas import MessageAttachment
 
 
@@ -231,6 +232,14 @@ def test_context_resolver_uses_filename_reference_before_recent_scope():
     assert repository.calls == ["filename"]
     assert context.scope == "filename_reference"
     assert [attachment.document_id for attachment in context.attachments] == ["named-doc"]
+
+
+def test_explicit_filename_parser_preserves_full_name_for_exact_context_scope():
+    """完整文件名不能被拆成“西安理工大学”等短词后参与历史附件模糊匹配。"""
+
+    assert _explicit_filename_from_content(
+        "请完整总结西安理工大学用印申请单.docx，覆盖每个章节"
+    ) == "西安理工大学用印申请单.docx"
 
 
 def test_target_rename_filename_is_not_used_as_historical_source_reference():
