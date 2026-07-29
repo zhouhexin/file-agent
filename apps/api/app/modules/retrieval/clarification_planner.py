@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.modules.agent.planner import PlannerOutput
+from app.modules.agent.planner import DeterministicPlanner, PlannerOutput
 from app.modules.retrieval.clarification_service import ResolvedSearchSelection
 
 
@@ -60,38 +60,21 @@ class FileSearchClarificationPlanner:
                 confirmation_policy={"operation_plan_required": True},
             )
         if value.document_ids:
-            return PlannerOutput(
-                intent="EVIDENCE_ANSWER",
-                user_goal=value.display_content,
-                slots={
-                    "document_ids": list(value.document_ids),
-                    "question": value.original_query,
-                    "answer_mode": "AUTO",
-                    "requested_outputs": ["answer", "references", "receipt"],
-                    "search_clarification_id": value.clarification_id,
-                },
-                selected_skills=["evidence-answer"],
-                steps=[
+            # 文件选择只负责确定范围，不能把“表格汇总、分类、总结”等原始任务
+            # 全部改写成证据问答。重新交给确定性 Planner 后，所选一份或多份文件
+            # 会沿原问题继续进入对应的受控 Tool 链路。
+            return DeterministicPlanner().plan(
+                conversation_id=value.conversation_id,
+                user_id=value.user_id,
+                message_id="clarification-selection",
+                message=value.original_query,
+                attachments=[
                     {
-                        "step_id": "step-evidence-answer-resolution",
-                        "skill": "evidence-answer",
-                        "tool_name": "evidence-answer",
-                        "input": {
-                            "question": value.original_query,
-                            "document_ids": list(value.document_ids),
-                            "answer_mode": "AUTO",
-                        },
-                        "requires_confirmation": False,
-                        "risk_level": "low",
-                        "expected_outputs": ["qa_answer", "answer_references"],
-                        "writes": ["qa_answers", "answer_references"],
+                        "document_id": document_id,
+                        "context_scope": "clarification_selection",
                     }
+                    for document_id in value.document_ids
                 ],
-                evidence_policy={
-                    "require_page_or_cell": True,
-                    "allow_no_evidence_answer": False,
-                },
-                confirmation_policy={"operation_plan_required": False},
             )
         tool_input = {
             "query": value.original_query,

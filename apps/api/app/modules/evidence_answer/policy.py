@@ -41,13 +41,6 @@ class EvidenceQuestionPolicy:
         "全面总结",
         "详细总结",
         "概括全文",
-        "总结一下",
-        "帮我总结",
-        "请总结",
-        "总结这份",
-        "总结这个",
-        "总结文档",
-        "总结文件",
         "覆盖每个章节",
         "覆盖全部章节",
         "覆盖所有章节",
@@ -110,12 +103,11 @@ class EvidenceQuestionPolicy:
         else:
             is_summary_request = "总结" in normalized or "概括" in normalized
             answer_mode = (
-                "FOCUSED"
+                "FULL_SUMMARY"
+                if any(marker in normalized for marker in self._FULL_SUMMARY_MARKERS)
+                else "FOCUSED"
                 if is_summary_request
-                and any(marker in normalized for marker in self._FOCUSED_SUMMARY_MARKERS)
-                else "FULL_SUMMARY"
-                if is_summary_request
-                or any(marker in normalized for marker in self._FULL_SUMMARY_MARKERS)
+                or any(marker in normalized for marker in self._FOCUSED_SUMMARY_MARKERS)
                 else "FOCUSED"
             )
 

@@ -97,7 +97,7 @@ def test_context_resolver_uses_all_conversation_scope_for_history_all_request():
         explicit_attachments=[],
     )
 
-    assert repository.calls == ["filename", "all"]
+    assert repository.calls == ["all"]
     assert context.scope == "all_conversation"
     assert [attachment.document_id for attachment in context.attachments] == ["old-doc", "latest-doc"]
 
@@ -113,7 +113,7 @@ def test_context_resolver_uses_all_conversation_scope_for_uploaded_all_request()
         explicit_attachments=[],
     )
 
-    assert repository.calls == ["filename", "all"]
+    assert repository.calls == ["all"]
     assert context.scope == "all_conversation"
     assert [attachment.document_id for attachment in context.attachments] == ["old-doc", "latest-doc"]
 
@@ -129,7 +129,7 @@ def test_context_resolver_uses_latest_batch_for_just_uploaded_request():
         explicit_attachments=[],
     )
 
-    assert repository.calls == ["filename", "latest"]
+    assert repository.calls == ["latest"]
     assert context.scope == "latest_upload_batch"
     assert [attachment.document_id for attachment in context.attachments] == ["latest-doc"]
 
@@ -213,25 +213,49 @@ def test_context_resolver_uses_recent_first_for_previous_single_file_request():
         explicit_attachments=[],
     )
 
-    assert repository.calls == ["filename", "recent"]
+    assert repository.calls == ["recent"]
     assert context.scope == "all_recent_context"
     assert [attachment.document_id for attachment in context.attachments] == ["latest-doc"]
 
 
-def test_context_resolver_uses_filename_reference_before_recent_scope():
-    """用户按文件名片段提问时，应优先解析为对应历史附件。"""
+def test_context_resolver_only_directly_binds_complete_filename_reference():
+    """只有完整文件名可以直接绑定历史附件，文件名片段必须先进入候选选择。"""
 
     repository = FakeConversationRepository()
     context = ConversationAttachmentContextService(repository).resolve(
         conversation_id="chat-1",
         user_id="user-1",
-        content="汇总2019年学院科研成果资助表中的金额",
+        content="汇总2019年学院科研成果资助表.xlsx中的金额",
         explicit_attachments=[],
     )
 
     assert repository.calls == ["filename"]
     assert context.scope == "filename_reference"
     assert [attachment.document_id for attachment in context.attachments] == ["named-doc"]
+
+
+def test_context_resolver_does_not_bind_fuzzy_filename_or_global_search():
+    """模糊名称和全局找文件请求不能被历史附件静默抢占。"""
+
+    repository = FakeConversationRepository()
+    fuzzy = ConversationAttachmentContextService(repository).resolve(
+        conversation_id="chat-1",
+        user_id="user-1",
+        content="总结2019年学院科研成果资助表",
+        explicit_attachments=[],
+    )
+    global_search = ConversationAttachmentContextService(repository).resolve(
+        conversation_id="chat-1",
+        user_id="user-1",
+        content="找2025年计算机学院的工作总结",
+        explicit_attachments=[],
+    )
+
+    assert repository.calls == []
+    assert fuzzy.attachments == []
+    assert global_search.attachments == []
+    assert fuzzy.scope == "none"
+    assert global_search.scope == "none"
 
 
 def test_explicit_filename_parser_preserves_full_name_for_exact_context_scope():

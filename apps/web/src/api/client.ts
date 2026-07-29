@@ -88,9 +88,13 @@ export async function sendAgentMessage(
 export async function resolveFileSearchClarification(
   token: string,
   clarificationId: string,
-  payload: { option_id: string; custom_phrase?: string | null },
+  payload: {
+    option_id?: string | null;
+    option_ids?: string[];
+    custom_phrase?: string | null;
+  },
 ): Promise<SendMessageResponse> {
-  // 选择卡只提交后端签发的 option_id；浏览器不能自行构造同义短语数组或检索模式。
+  // 选择卡只提交后端签发的选项 ID；文件卡可多选，但浏览器不能构造检索参数。
   return request<SendMessageResponse>(
     `/file-search/clarifications/${clarificationId}/resolve`,
     {

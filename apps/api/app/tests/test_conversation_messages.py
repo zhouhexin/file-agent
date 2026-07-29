@@ -617,7 +617,7 @@ def test_message_can_reference_previous_attachment_by_filename_fragment():
         "/api/conversations/filename-reference-chat/messages",
         headers=headers,
         json={
-            "content": "汇总2019年学院科研成果资助表中的金额",
+            "content": "汇总“2019年学院科研成果资助表.xlsx”中的金额",
             "attachments": [],
         },
     )
@@ -633,7 +633,7 @@ def test_message_can_reference_previous_attachment_by_filename_fragment():
 
 
 def test_message_can_reference_previous_attachment_by_fuzzy_filename_tokens():
-    """用户只说文件名中的核心词时，应通过年份和关键词匹配到历史附件。"""
+    """用户只说文件名核心词时不能静默绑定历史附件，必须先确定活动文件范围。"""
 
     client, session_factory = client_with_database()
     headers = _auth_header(client, "fuzzy-filename-reference-user")
@@ -671,10 +671,10 @@ def test_message_can_reference_previous_attachment_by_fuzzy_filename_tokens():
 
     assert second_response.status_code == 200
     data = second_response.json()
-    assert data["message"]["attachments"] == [{"document_id": target_document_id}]
+    assert data["message"]["attachments"] == []
     run, tool_names = _latest_agent_audit(session_factory)
-    assert run.intent == "ANALYZE_SPREADSHEET"
-    assert tool_names == ["analyze-spreadsheet"]
+    assert run.intent == "EVIDENCE_ANSWER"
+    assert tool_names == ["evidence-answer"]
     assert "AgentRun completed" not in (data["task_result"]["final_response"] or "")
     clear_overrides()
 

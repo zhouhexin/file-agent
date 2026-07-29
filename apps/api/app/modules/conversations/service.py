@@ -84,16 +84,18 @@ class ConversationMessageService:
         self,
         *,
         clarification_id: str,
-        option_id: str,
+        option_id: str | None,
+        option_ids: list[str] | None,
         custom_phrase: str | None,
         user_id: str,
     ) -> ConversationExecutionResult:
-        """根据选择卡提交结果创建一条可见对话消息并续跑文件检索。"""
+        """根据单选或文件多选结果创建可见消息，并续跑原始文件任务。"""
 
         selection = FileSearchClarificationService(self.db).resolve(
             clarification_id=clarification_id,
             user_id=user_id,
             option_id=option_id,
+            option_ids=option_ids,
             custom_phrase=custom_phrase,
         )
         return self._execute_message(

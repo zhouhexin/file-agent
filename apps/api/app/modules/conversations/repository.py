@@ -1078,10 +1078,10 @@ def _explicit_filename_from_content(content: str) -> str | None:
     candidate = match.group("filename").strip().strip("“”\"'《》【】")
     candidate = re.sub(
         r"^(?:请|麻烦)?(?:帮我)?(?:对|把|将)?\s*"
-        r"(?:(?:完整|全面|详细|全文)?(?:总结|概括|讲解|说明|读取|解析)(?:一下)?)\s*",
+        r"(?:(?:完整|全面|详细|全文)?(?:总结|汇总|概括|讲解|说明|读取|解析)(?:一下)?)\s*",
         "",
         candidate,
-    ).strip()
+    ).strip().strip("“”\"'《》【】")
     if not candidate or "/" in candidate or "\\" in candidate:
         return None
     return candidate

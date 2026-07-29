@@ -227,3 +227,20 @@ def test_work_summary_search_is_not_treated_as_document_summary():
         message=message,
         lowered=message.lower(),
     )
+
+
+def test_fuzzy_work_summary_request_enters_candidate_resolution():
+    """未写完整文件名的总结请求应先召回候选，不能直接要求用户重新附加文件。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conversation-summary-candidates",
+        user_id="user-summary-candidates",
+        message_id="message-summary-candidates",
+        message="总结2025年计算机学院的工作总结",
+        attachments=[],
+    )
+
+    assert plan.intent == "EVIDENCE_ANSWER"
+    assert plan.steps[0].tool_name == "evidence-answer"
+    assert plan.steps[0].input["document_ids"] == []
+    assert plan.steps[0].input["answer_mode"] == "AUTO"

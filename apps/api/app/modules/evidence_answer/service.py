@@ -27,6 +27,7 @@ from app.db.models import (
     DocumentChunk,
     DocumentCategorySuggestion,
     DocumentIndexRun,
+    DocumentSummary,
     DocumentVersion,
     EvidenceSpan,
     QAAnswer,
@@ -224,6 +225,14 @@ class EvidenceAnswerService:
         if not active_rows:
             active_rows = self._recall_active_working_copies(normalized_question)
             active_rows = self._expand_same_name_rows(active_rows)
+            if active_rows:
+                # 没有完整文件名或显式附件时，召回结果只能作为候选。即使只有
+                # 一份候选也必须先由用户确认；多份候选允许用户选择一份或多份。
+                return self._create_file_selection(
+                    rows=active_rows,
+                    question=normalized_question,
+                    message="找到以下相似文件，请选择一份或多份后继续原任务。",
+                )
         ambiguity = self._same_name_ambiguity(
             active_rows,
             explicit_ids,
@@ -239,11 +248,31 @@ class EvidenceAnswerService:
                 message="没有找到可用于回答的活动文件。",
             )
 
-        items, index_status = self._load_evidence(
-            question=normalized_question,
-            working_copy_rows=active_rows,
-            full_summary=mode == "FULL_SUMMARY",
+        use_persisted_summary = (
+            policy.question_type == "SUMMARY"
+            and mode != "FULL_SUMMARY"
         )
+        evidence_source = "document_chunks"
+        if use_persisted_summary:
+            # 普通概览先复用上传或同步阶段生成的当前版本摘要。只有摘要缺失、
+            # 已过期或无法回到真实 EvidenceSpan 时，才读取完整正文证据。
+            items, index_status = self._load_persisted_summary_evidence(
+                working_copy_rows=active_rows,
+            )
+            evidence_source = "document_summary"
+            if not items:
+                items, index_status = self._load_evidence(
+                    question=normalized_question,
+                    working_copy_rows=active_rows,
+                    full_summary=True,
+                )
+                evidence_source = "document_chunks"
+        else:
+            items, index_status = self._load_evidence(
+                question=normalized_question,
+                working_copy_rows=active_rows,
+                full_summary=mode == "FULL_SUMMARY",
+            )
         log_event(
             "evidence_answer.retrieval_completed",
             settings=self.settings,
@@ -254,7 +283,8 @@ class EvidenceAnswerService:
             document_count=len(active_rows),
             evidence_count=len(items),
             question_type=policy.question_type,
-            message="阶段五原文证据检索完成",
+            evidence_source=evidence_source,
+            message="阶段五回答证据检索完成",
         )
         if not items:
             if index_status in {"INDEX_PENDING", "PARTIAL_INDEX"}:
@@ -687,14 +717,14 @@ class EvidenceAnswerService:
         *,
         question: str,
     ) -> dict[str, Any] | None:
-        """多个完整同名活动副本必须进入单选，不能把内容合并为一次回答。"""
+        """多个完整同名活动副本必须先选择，不能在用户确认前合并内容。"""
 
         if len(rows) <= 1:
             return None
         return self._create_file_selection(
             rows=rows,
             question=question,
-            message="找到多个同名文件，请先选择要读取的一份文件。",
+            message="找到多个同名文件，请选择要读取的一份或多份文件。",
         )
 
     def _similar_filename_selection(
@@ -733,7 +763,7 @@ class EvidenceAnswerService:
         return self._create_file_selection(
             rows=selected,
             question=question,
-            message="未找到完全同名的文件。请从相似文件中选择要读取的一份；如果都不是，请重新附加文件。",
+            message="未找到完全同名的文件。请从相似文件中选择一份或多份；如果都不是，请重新附加文件。",
         )
 
     def _create_file_selection(
@@ -812,6 +842,84 @@ class EvidenceAnswerService:
         for working_copy, version in expanded:
             by_id.setdefault(working_copy.id, (working_copy, version))
         return list(by_id.values())
+
+    def _load_persisted_summary_evidence(
+        self,
+        *,
+        working_copy_rows: list[tuple[WorkingCopy, DocumentVersion]],
+    ) -> tuple[list[EvidenceItem], str]:
+        """复用当前活动版本摘要中的原文引用，不重新读取整份正文生成逐文件摘要。"""
+
+        version_ids = [version.id for _, version in working_copy_rows]
+        summary_rows = (
+            self.db.query(DocumentSummary)
+            .filter(
+                DocumentSummary.document_version_id.in_(version_ids),
+                DocumentSummary.status == "COMPLETED",
+            )
+            .order_by(DocumentSummary.updated_at.desc())
+            .all()
+        )
+        latest_by_version: dict[str, DocumentSummary] = {}
+        for summary in summary_rows:
+            latest_by_version.setdefault(summary.document_version_id, summary)
+        if len(latest_by_version) != len(version_ids):
+            return [], "SUMMARY_MISSING"
+
+        spans = (
+            self.db.query(EvidenceSpan)
+            .filter(EvidenceSpan.document_version_id.in_(version_ids))
+            .order_by(
+                EvidenceSpan.document_version_id.asc(),
+                EvidenceSpan.page_number.asc(),
+                EvidenceSpan.sheet_name.asc(),
+                EvidenceSpan.span_index.asc(),
+            )
+            .all()
+        )
+        spans_by_version: dict[str, list[EvidenceSpan]] = defaultdict(list)
+        for span in spans:
+            spans_by_version[span.document_version_id].append(span)
+        row_by_version = {
+            version.id: (working_copy, version)
+            for working_copy, version in working_copy_rows
+        }
+
+        result: list[EvidenceItem] = []
+        seen_span_ids: set[str] = set()
+        for version_id in version_ids:
+            summary = latest_by_version[version_id]
+            quotes = _document_summary_evidence_quotes(summary)
+            matched_for_version = 0
+            for quote in quotes:
+                span = _match_summary_quote_to_span(
+                    quote=quote,
+                    spans=spans_by_version.get(version_id, []),
+                )
+                if span is None or span.id in seen_span_ids:
+                    continue
+                working_copy, _version = row_by_version[version_id]
+                seen_span_ids.add(span.id)
+                matched_for_version += 1
+                result.append(
+                    EvidenceItem(
+                        evidence_id=span.id,
+                        document_id=span.document_id,
+                        document_version_id=span.document_version_id,
+                        working_copy_id=working_copy.id,
+                        filename=working_copy.filename,
+                        quote=span.quote,
+                        page_number=span.page_number,
+                        sheet_name=span.sheet_name,
+                        cell_range=span.cell_range,
+                    )
+                )
+                if matched_for_version >= 8:
+                    break
+            if matched_for_version == 0:
+                # 摘要没有任何可验证原文引用时不能直接用于回答，统一回退正文证据。
+                return [], "SUMMARY_INSUFFICIENT"
+        return result, "SUMMARY_READY"
 
     def _load_evidence(
         self,
@@ -1509,7 +1617,7 @@ class EvidenceAnswerService:
         return self._create_file_selection(
             rows=[item for group in ambiguous for item in group],
             question=question,
-            message="找到多个同名但内容不同的文件，请先选择一个文件。",
+            message="找到多个同名但内容不同的文件，请选择一份或多份后继续。",
         )
 
     def _no_evidence(
@@ -1579,6 +1687,40 @@ def _normalize_number(value: str) -> str:
     """统一数字中的千分位，便于验证模型没有生成证据外数值。"""
 
     return str(value).replace(",", "")
+
+
+def _document_summary_evidence_quotes(summary: DocumentSummary) -> list[str]:
+    """从持久化摘要契约中提取原文引用，摘要结论本身不能伪装成原文证据。"""
+
+    payload = summary.summary_json if isinstance(summary.summary_json, dict) else {}
+    quotes: list[str] = []
+    for key_point in payload.get("key_points", []):
+        if not isinstance(key_point, dict):
+            continue
+        for reference in key_point.get("evidence_refs", []):
+            if not isinstance(reference, dict):
+                continue
+            quote = str(reference.get("quote") or "").strip()
+            if quote and quote not in quotes:
+                quotes.append(quote)
+    return quotes
+
+
+def _match_summary_quote_to_span(
+    *,
+    quote: str,
+    spans: list[EvidenceSpan],
+) -> EvidenceSpan | None:
+    """把摘要保存的逐字引用映射回当前版本 EvidenceSpan。"""
+
+    normalized_quote = re.sub(r"\s+", "", quote)
+    if len(normalized_quote) < 4:
+        return None
+    for span in spans:
+        normalized_span = re.sub(r"\s+", "", str(span.quote or ""))
+        if normalized_quote in normalized_span or normalized_span in normalized_quote:
+            return span
+    return None
 
 
 def _explicit_filename_from_question(question: str) -> str | None:

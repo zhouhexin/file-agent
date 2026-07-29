@@ -23,7 +23,7 @@ export function FileSearchClarificationCard({
   result,
   onResolved,
 }: FileSearchClarificationCardProps) {
-  const [selectedOptionId, setSelectedOptionId] = useState('');
+  const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
   const [customPhrase, setCustomPhrase] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [resolvedLabel, setResolvedLabel] = useState('');
@@ -47,11 +47,16 @@ export function FileSearchClarificationCard({
   }, [result.id, token]);
 
   async function submitSelection() {
-    const option = result.options.find((item) => item.id === selectedOptionId);
-    if (!option) {
-      setError('请先选择本次查找范围。');
+    const options = result.options.filter((item) => selectedOptionIds.includes(item.id));
+    if (options.length === 0) {
+      setError(
+        result.selection_type === 'DOCUMENT_SELECTION'
+          ? '请至少选择一份文件。'
+          : '请先选择本次查找范围。',
+      );
       return;
     }
+    const option = options[0];
     if (option.id === 'custom' && customPhrase.trim().length < 2) {
       setError('请至少输入 2 个字符的查找短语。');
       return;
@@ -63,11 +68,16 @@ export function FileSearchClarificationCard({
         token,
         result.id,
         {
-          option_id: option.id,
+          option_id: result.allow_multiple ? null : option.id,
+          option_ids: result.allow_multiple ? options.map((item) => item.id) : [],
           custom_phrase: option.id === 'custom' ? customPhrase.trim() : null,
         },
       );
-      setResolvedLabel(option.id === 'custom' ? customPhrase.trim() : option.label);
+      setResolvedLabel(
+        option.id === 'custom'
+          ? customPhrase.trim()
+          : options.map((item) => item.label).join('、'),
+      );
       setCurrentStatus('RESOLVED');
       onResolved?.(response);
     } catch (err) {
@@ -106,13 +116,15 @@ export function FileSearchClarificationCard({
       <header>
         <Search size={18} aria-hidden />
         <div>
-          <strong>请选择查找范围</strong>
+          <strong>
+            {result.selection_type === 'DOCUMENT_SELECTION' ? '请选择文件' : '请选择查找范围'}
+          </strong>
           <span>{result.prompt}</span>
         </div>
       </header>
       <div className="file-search-clarification-options">
         {result.options.map((option) => {
-          const checked = selectedOptionId === option.id;
+          const checked = selectedOptionIds.includes(option.id);
           return (
             <label
               className={checked ? 'file-search-clarification-option is-selected' : 'file-search-clarification-option'}
@@ -122,8 +134,18 @@ export function FileSearchClarificationCard({
                 checked={checked}
                 disabled={submitting}
                 name={`file-search-clarification-${result.id}`}
-                onChange={() => setSelectedOptionId(option.id)}
-                type="radio"
+                onChange={() => {
+                  if (result.allow_multiple) {
+                    setSelectedOptionIds((current) => (
+                      current.includes(option.id)
+                        ? current.filter((item) => item !== option.id)
+                        : [...current, option.id]
+                    ));
+                  } else {
+                    setSelectedOptionIds([option.id]);
+                  }
+                }}
+                type={result.allow_multiple ? 'checkbox' : 'radio'}
               />
               <div>
                 <strong>{option.label}</strong>
@@ -153,11 +175,15 @@ export function FileSearchClarificationCard({
       </div>
       <footer>
         <button
-          disabled={submitting || !selectedOptionId}
+          disabled={submitting || selectedOptionIds.length === 0}
           onClick={() => void submitSelection()}
           type="button"
         >
-          {submitting ? '正在查找…' : '继续查找'}
+          {submitting
+            ? '正在继续…'
+            : result.selection_type === 'DOCUMENT_SELECTION'
+            ? '使用所选文件继续'
+            : '继续查找'}
         </button>
       </footer>
       {error ? <p className="duplicate-review-error">{error}</p> : null}

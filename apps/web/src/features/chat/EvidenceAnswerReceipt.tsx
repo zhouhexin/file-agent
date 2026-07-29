@@ -92,13 +92,13 @@ export function FileSelectionReceipt({
   onOpenDocument?: (documentId: string, filename: string) => void;
   onResolved?: (response: SendMessageResponse) => void;
 }) {
-  const [selectedOptionId, setSelectedOptionId] = useState('');
+  const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
   async function submitSelection() {
-    if (!selectedOptionId) {
-      setError('请先选择一个文件。');
+    if (selectedOptionIds.length === 0) {
+      setError('请至少选择一份文件。');
       return;
     }
     setSubmitting(true);
@@ -107,7 +107,7 @@ export function FileSelectionReceipt({
       const response = await resolveFileSearchClarification(
         token,
         result.clarification_id,
-        { option_id: selectedOptionId, custom_phrase: null },
+        { option_ids: selectedOptionIds, custom_phrase: null },
       );
       onResolved?.(response);
     } catch (err) {
@@ -124,18 +124,22 @@ export function FileSelectionReceipt({
         {result.choices.map((file, index) => (
           <article
             className={
-              selectedOptionId === file.option_id
+              selectedOptionIds.includes(file.option_id)
                 ? 'search-result-card is-selected'
                 : 'search-result-card'
             }
             key={`${file.working_copy_id}-${index}`}
           >
             <input
-              checked={selectedOptionId === file.option_id}
+              checked={selectedOptionIds.includes(file.option_id)}
               disabled={submitting}
               name={`file-selection-${result.clarification_id}`}
-              onChange={() => setSelectedOptionId(file.option_id)}
-              type="radio"
+              onChange={() => setSelectedOptionIds((current) => (
+                current.includes(file.option_id)
+                  ? current.filter((item) => item !== file.option_id)
+                  : [...current, file.option_id]
+              ))}
+              type="checkbox"
             />
             <span className="search-result-icon">
               <FileText size={18} aria-hidden />
@@ -165,7 +169,7 @@ export function FileSelectionReceipt({
       <button
         type="button"
         className="search-results-more"
-        disabled={submitting}
+        disabled={submitting || selectedOptionIds.length === 0}
         onClick={() => void submitSelection()}
       >
         {submitting ? '正在继续…' : '使用所选文件继续'}

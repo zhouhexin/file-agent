@@ -18,6 +18,7 @@ from app.db.models import (
     DocumentChunk,
     DocumentExtractionRun,
     DocumentIndexRun,
+    DocumentSummary,
     DocumentVersion,
     EvidenceSpan,
     QAAnswer,
@@ -536,6 +537,105 @@ def test_explicit_filename_locks_single_active_working_copy_without_workspace_re
     assert [item["filename"] for item in result["references"]] == ["申报通知.docx"]
 
 
+def test_plain_summary_reuses_current_version_persisted_summary_evidence():
+    """普通总结优先复用当前版本已有摘要引用，不能默认重新读取整份正文。"""
+
+    db = _session()
+    _seed(db)
+    db.add(
+        DocumentSummary(
+            document_id="document-1",
+            document_version_id="version-1",
+            extraction_run_id="extraction-1",
+            input_sha256="f" * 64,
+            summary_text="申报截止时间是2026年7月31日。",
+            summary_json={
+                "overview": "申报截止时间是2026年7月31日。",
+                "key_points": [
+                    {
+                        "text": "申报截止时间是2026年7月31日。",
+                        "evidence_refs": [
+                            {
+                                "page_number": 1,
+                                "sheet_name": None,
+                                "quote": "申报截止时间是2026年7月31日。",
+                            }
+                        ],
+                    }
+                ],
+                "section_summaries": [],
+                "summary_confidence": 0.8,
+            },
+            coverage_json={},
+            model_provider="deterministic",
+            model_name="jieba-lexrank",
+            prompt_version="summary-v1",
+            schema_version="summary-v1",
+            status="COMPLETED",
+        )
+    )
+    db.flush()
+    service = EvidenceAnswerService(
+        db=db,
+        user_id="user-1",
+        conversation_id="conversation-1",
+        settings=_settings(),
+        client=FakeEvidenceClient(),
+    )
+    service._load_evidence = lambda **_kwargs: pytest.fail("普通总结不应读取完整正文证据")
+
+    result = service.answer(question="总结申报通知.docx")
+
+    assert result["status"] == "COMPLETED"
+    assert db.query(QAAnswer).one().answer_mode == "FOCUSED"
+    assert result["references"][0]["document_id"] == "document-1"
+
+
+def test_detailed_summary_bypasses_persisted_overview_and_reads_full_evidence():
+    """用户要求完整、详细或章节覆盖时必须读取正文，不能只复述后台概览摘要。"""
+
+    db = _session()
+    _seed(db)
+    service = EvidenceAnswerService(
+        db=db,
+        user_id="user-1",
+        conversation_id="conversation-1",
+        settings=_settings(),
+        client=FakeEvidenceClient(),
+    )
+    service._load_persisted_summary_evidence = lambda **_kwargs: pytest.fail(
+        "完整总结不能只读取持久化概览"
+    )
+
+    result = service.answer(question="完整总结申报通知.docx，覆盖每个章节")
+
+    assert result["status"] == "COMPLETED"
+    assert db.query(QAAnswer).one().answer_mode == "FULL_SUMMARY"
+
+
+def test_fuzzy_summary_scope_requires_selection_even_for_one_candidate():
+    """没有完整文件名时召回结果只是候选，即使唯一也要先让用户确认。"""
+
+    db = _session()
+    working_copy, version = _seed(db)
+    client = FakeEvidenceClient()
+    service = EvidenceAnswerService(
+        db=db,
+        user_id="user-1",
+        conversation_id="conversation-1",
+        settings=_settings(),
+        client=client,
+    )
+    service._recall_active_working_copies = lambda _question: [(working_copy, version)]
+
+    result = service.answer(question="总结申报材料")
+
+    assert result["kind"] == "file_selection"
+    assert result["status"] == "NEEDS_CLARIFICATION"
+    assert result["choices"][0]["document_id"] == "document-1"
+    assert client.calls == 0
+
+
 def test_explicit_filename_overrides_inferred_context_attachment_scope():
     """完整文件名必须覆盖会话模糊推断出的附件，不能把候选正文混入总结。"""
 
@@ -664,8 +764,8 @@ def test_full_summary_marks_partial_instead_of_silently_truncating_batches():
     assert client.calls == 1
 
 
-def test_equivalent_full_summary_phrasings_share_one_canonical_answer():
-    """“总结”“完整总结”“覆盖每章节”必须复用同一全文总结任务契约。"""
+def test_plain_and_full_summary_use_different_reading_depths():
+    """普通概览与明确全文总结必须使用不同深度，不能错误复用同一缓存。"""
 
     db = _session()
     _seed(db)
@@ -682,10 +782,10 @@ def test_equivalent_full_summary_phrasings_share_one_canonical_answer():
     second = service.answer(question="请完整总结申报通知.docx，覆盖每个章节")
 
     assert first["status"] == "COMPLETED"
-    assert second["cached"] is True
+    assert second["cached"] is False
     assert second["answer"] == first["answer"]
-    assert client.calls == 1
-    assert "完整总结" in client.payloads[0]["question"]
+    assert client.calls == 2
+    assert "完整总结" in client.payloads[1]["question"]
 
 
 def test_legacy_reference_cleanup_removes_only_persisted_reference_indexes():
@@ -778,6 +878,46 @@ def test_same_name_different_content_persists_selection_before_answering():
     assert plan.steps[0].input["document_ids"] == ["document-2"]
 
 
+def test_document_selection_can_resume_original_summary_with_multiple_files():
+    """用户可以选择多份候选，续跑时必须保留原总结意图和全部稳定文件 ID。"""
+
+    db = _session()
+    _seed(db)
+    record = FileSearchClarificationService(db).create(
+        conversation_id="conversation-1",
+        user_id="user-1",
+        agent_run_id=None,
+        original_query="总结这些工作总结",
+        core_phrase="工作总结",
+        relation_mode="DOCUMENT_SELECTION",
+        options=[
+            {
+                "id": "document-1",
+                "label": "第一份工作总结.docx",
+                "document_id": "document-1",
+            },
+            {
+                "id": "document-2",
+                "label": "第二份工作总结.docx",
+                "document_id": "document-2",
+            },
+        ],
+    )
+
+    selection = FileSearchClarificationService(db).resolve(
+        clarification_id=record.id,
+        user_id="user-1",
+        option_ids=["document-1", "document-2"],
+    )
+    plan = FileSearchClarificationPlanner(selection).plan()
+
+    assert selection.document_ids == ("document-1", "document-2")
+    assert plan.intent == "EVIDENCE_ANSWER"
+    assert plan.steps[0].input["document_ids"] == ["document-1", "document-2"]
+    assert plan.steps[0].input["question"] == "总结这些工作总结"
+    assert plan.steps[0].input["answer_mode"] == "AUTO"
+
+
 @pytest.mark.parametrize(
     ("question", "question_type", "answer_mode"),
     [
@@ -785,10 +925,10 @@ def test_same_name_different_content_persists_selection_before_answering():
         ("文件文号是什么？", "DOCUMENT_NUMBER", "FOCUSED"),
         ("第六条规定了什么？", "CLAUSE", "FOCUSED"),
         ("完整总结这份文件", "SUMMARY", "FULL_SUMMARY"),
-        ("总结申报通知.docx", "SUMMARY", "FULL_SUMMARY"),
+        ("总结申报通知.docx", "SUMMARY", "FOCUSED"),
         ("总结申报通知.docx，覆盖每个章节", "SUMMARY", "FULL_SUMMARY"),
         ("简要总结申报通知.docx", "SUMMARY", "FOCUSED"),
-        ("请总结一下申报通知.docx", "SUMMARY", "FULL_SUMMARY"),
+        ("请总结一下申报通知.docx", "SUMMARY", "FOCUSED"),
         ("比较这两份方案的差异", "COMPARE", "FOCUSED"),
         ("汇总表格中的总金额", "TABLE_CALCULATION", "FOCUSED"),
         ("联网搜索实时天气", "UNSUPPORTED", "FOCUSED"),

@@ -12,10 +12,14 @@ import re
 
 from app.modules.file_lifecycle.conversation_intents import (
     has_contextual_file_removal_reference,
+    has_file_removal_action,
     has_trash_working_copy_intent,
     is_target_only_rename_request,
 )
-from app.modules.conversations.repository import ConversationRepository
+from app.modules.conversations.repository import (
+    ConversationRepository,
+    _explicit_filename_from_content,
+)
 from app.modules.conversations.schemas import MessageAttachment
 
 
@@ -66,7 +70,17 @@ class ConversationAttachmentContextService:
             # 目标文件名不是源文件引用。这里必须保持空范围，让 Planner 要求用户
             # 重新附加文件或同时写出源文件名，不能在会话历史中碰巧命中同名文件。
             return ResolvedAttachmentContext(attachments=[], source="uploaded", scope="none")
-        if _has_file_task_intent(content):
+        if (
+            _has_file_task_intent(content)
+            and (
+                _explicit_filename_from_content(content) is not None
+                or has_file_removal_action(content)
+            )
+            and not _has_global_file_search_intent(content)
+        ):
+            # 只有用户写出完整文件名时才能直接绑定历史附件。文件名片段或相似词
+            # 只能作为候选召回，必须先让用户选择，不能静默变成本轮正文范围。
+            # 删除请求仍可解析唯一历史对象，但后续必须展示 OperationPlan 再确认。
             named_attachments = self.repository.get_filename_matched_attachment_references(
                 conversation_id=conversation_id,
                 user_id=user_id,
@@ -225,6 +239,16 @@ def _has_file_task_intent(content: str) -> bool:
     lowered = content.lower()
     return any(keyword in content for keyword in file_task_keywords) or any(
         keyword in lowered for keyword in ["csv", "excel", "xlsx", "sheet"]
+    )
+
+
+def _has_global_file_search_intent(content: str) -> bool:
+    """识别明确的全局找文件表达，避免历史附件抢占共享目录检索范围。"""
+
+    actions = ("找", "查找", "搜索", "检索", "有哪些", "哪些文件", "哪些文档")
+    objects = ("文件", "文档", "材料", "报告", "通知", "总结", "表格")
+    return any(action in content for action in actions) and any(
+        object_name in content for object_name in objects
     )
 
 

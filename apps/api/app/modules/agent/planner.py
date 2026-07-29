@@ -196,12 +196,14 @@ class DeterministicPlanner:
         lowered = message.lower()
 
         conflict_action = _filename_conflict_action(message)
+        # 识别“覆盖、同时保留、取消”等文件名冲突回复，命中后生成工作副本操作计划。
         if conflict_action:
             return _working_copy_action_plan(
                 user_goal=message,
                 action=conflict_action,
                 document_ids=[],
             )
+        # 识别“按已确认分类整理/移动文件”，命中后生成按正式分类移动工作副本的计划。
         if has_organize_by_classification_intent(message):
             return _working_copy_action_plan(
                 user_goal=message,
@@ -209,42 +211,52 @@ class DeterministicPlanner:
                 document_ids=_document_ids(attachments),
             )
         classification_action = classification_decision_action(message)
+        # 识别接受、拒绝或更正分类的回复，命中后生成分类决策计划。
         if classification_action:
             return _classification_decision_plan(
                 user_goal=message,
                 action=classification_action,
                 document_ids=_document_ids(attachments),
             )
+        # 识别只给出目标名称、但没有源文件或附件的改名请求，命中后要求补充文件范围。
         if is_target_only_rename_request(message) and not attachments:
             # 目标名称不能充当源文件选择条件；缺少附件或源文件名时只请求澄清。
             return _missing_file_scope_plan(user_goal=message)
+        # 识别“把 A 重命名为 B”这类同时包含源名称和目标名称的回复，命中后解析待复核改名。
         if _has_rename_review_resolution_intent(message):
             # “把 A 重命名为 B”已经同时给出源文件和目标文件，必须优先进入
             # 受控重命名解析；不能先被“A 文件名检索”规则截走而只返回搜索卡。
             return _rename_review_resolution_plan(user_goal=message)
+        # 识别“找去年/前年/昨天的文件”等相对时间检索，命中后生成带时间条件的文件检索计划。
         if _has_relative_time_file_search(message=message, lowered=lowered) and not attachments:
             # 相对时间主题检索必须进入能执行年份硬过滤的 hybrid-search，不能列目录。
             return _file_search_plan(user_goal=message, query=message, document_ids=[])
+        # 识别无附件情况下按完整文件名查找文件，命中后生成精确文件检索计划。
         if _has_explicit_filename_lookup_intent(message) and not attachments:
             return _file_search_plan(user_goal=message, query=message, document_ids=[])
+        # 识别“恢复刚才删除的文件”等恢复请求，命中后生成工作副本恢复计划。
         if _has_restore_working_copy_intent(message):
             return _working_copy_action_plan(
                 user_goal=message,
                 action="RESTORE",
                 document_ids=_document_ids(attachments),
             )
+        # 识别已解析到明确文件范围的删除请求，命中后生成移入回收站计划。
         if _has_resolved_trash_intent(message=message, attachments=attachments):
             return _working_copy_action_plan(
                 user_goal=message,
                 action="TRASH",
                 document_ids=_document_ids(attachments),
             )
+        # 识别“你能做什么”等能力说明请求，命中后生成普通用户能力说明计划。
         if _has_capability_help_intent(message=message, lowered=lowered):
             return _capability_help_plan(user_goal=message)
 
+        # 识别“系统有哪些分类”等分类目录查询，命中后读取固定 taxonomy 目录。
         if _has_classification_taxonomy_intent(message=message, lowered=lowered):
             return _classification_taxonomy_plan(user_goal=message)
 
+        # 识别明确要求浏览 MCP 文件系统目录的请求，命中后生成受控目录列表计划。
         if _has_mcp_filesystem_list_intent(message=message, lowered=lowered):
             return _mcp_filesystem_list_plan(
                 user_goal=message,
@@ -255,6 +267,7 @@ class DeterministicPlanner:
             message=message,
             lowered=lowered,
         )
+        # 识别“对上传附件重命名并分类”的组合任务，命中后生成附件批次组合计划。
         if (
             attachments
             and _has_rename_intent(message=message, lowered=lowered)
@@ -265,12 +278,14 @@ class DeterministicPlanner:
                 document_ids=_document_ids(attachments),
                 route_source="deterministic_planner",
             )
+        # 识别仅对上传附件生成重命名建议的请求，命中后生成附件重命名计划。
         if _has_rename_intent(message=message, lowered=lowered) and attachments:
             return _uploaded_document_rename_plan(
                 user_goal=message,
                 document_ids=_document_ids(attachments),
                 route_source="deterministic_planner",
             )
+        # 识别无附件但明确给出受管目录、路径或文件名条件的改名请求，命中后生成受管文件改名计划。
         if managed_rename_filters and not attachments:
             return _managed_file_rename_plan(
                 user_goal=message,
@@ -286,6 +301,7 @@ class DeterministicPlanner:
             message=message,
             lowered=lowered,
         )
+        # 识别无附件但明确限定受管目录或文件条件的分类请求，命中后生成受管文件分类计划。
         if managed_classification_filters and not attachments:
             return _managed_file_classification_plan(
                 user_goal=message,
@@ -304,6 +320,7 @@ class DeterministicPlanner:
             message=message,
             root_key=managed_root_key,
         )
+        # 识别明确指定受管根目录的列表请求，命中后生成该根目录下的文件列表计划。
         if managed_root_key:
             return _managed_file_list_plan(
                 user_goal=message,
@@ -312,6 +329,7 @@ class DeterministicPlanner:
                 extension=managed_extension,
                 filename_contains=managed_filename_contains,
             )
+        # 识别只给出路径、扩展名或文件名过滤条件的列表请求，命中后生成受管文件筛选计划。
         if _has_managed_file_list_filter_intent(
             message=message,
             path_prefix=managed_path_prefix,
@@ -327,8 +345,10 @@ class DeterministicPlanner:
             )
 
         managed_read_filters = _managed_file_read_filters_from_request(message=message, lowered=lowered)
+        # 识别无附件但明确限定受管目录或文件的读取、解析、总结请求。
         if managed_read_filters and not attachments:
             explicit_filename = _managed_filename_from_read_request(message)
+            # 如果请求包含完整文件名，则交给 evidence-answer 精确锁定唯一 ACTIVE 工作副本。
             if explicit_filename and _has_explicit_filename_content_intent(message=message, lowered=lowered):
                 # 完整文件名的读取、提问和总结都应由 evidence-answer 在共享 ACTIVE
                 # 工作副本中精确锁定，而非用 filename_contains 作为模糊批量范围。
@@ -337,7 +357,7 @@ class DeterministicPlanner:
                     question=message,
                     document_ids=[],
                     answer_mode=(
-                        "FULL_SUMMARY"
+                        "AUTO"
                         if _has_plain_document_summary_intent(message=message, lowered=lowered)
                         else "FOCUSED"
                     ),
@@ -367,6 +387,7 @@ class DeterministicPlanner:
                 ),
             ]
         )
+        # 识别普通主题文件检索；存在明确附件正文任务时，附件任务优先，避免扩大到全局文件范围。
         if (
             _has_file_search_intent(message=message, lowered=lowered)
             and not has_attached_content_task
@@ -391,11 +412,13 @@ class DeterministicPlanner:
             )
         )
 
+        # 没有附件且没有任何文件正文需求时，按普通对话处理。
         if not attachments and not needs_file_scope:
             return _general_chat_plan(intent="GENERAL_CHAT", user_goal=message)
 
         document_ids = _document_ids(attachments)
 
+        # 没有明确附件但问题指向共享工作区文件正文时，生成工作区证据回答或完整总结计划。
         if (
             needs_file_scope
             and not document_ids
@@ -406,17 +429,19 @@ class DeterministicPlanner:
                 question=message,
                 document_ids=[],
                 answer_mode=(
-                    "FULL_SUMMARY"
+                    "AUTO"
                     if _has_plain_document_summary_intent(message=message, lowered=lowered)
                     else "FOCUSED"
                 ),
             )
 
+        # 需要文件正文、但既没有附件也不能解析为工作区问题时，要求用户补充具体文件。
         if needs_file_scope and not document_ids:
             return _missing_file_scope_plan(user_goal=message)
 
         document_id = document_ids[0] if document_ids else ""
 
+        # 仅供安全回归测试：强制生成非法直接写路径，验证 Tool schema 和确认边界会拒绝它。
         if self.force_unsafe_step:
             return PlannerOutput(
                 intent="UNSAFE_DIRECT_WRITE",
@@ -439,6 +464,7 @@ class DeterministicPlanner:
                 confirmation_policy={"operation_plan_required": True},
             )
 
+        # 识别电子表格校验请求，命中后生成公式、结构或数据异常校验计划。
         if _has_spreadsheet_validation_intent(message=message, lowered=lowered):
             return _spreadsheet_workbench_plan(
                 intent="VALIDATE_SPREADSHEET",
@@ -449,6 +475,7 @@ class DeterministicPlanner:
                 selected_skills=["chat-intake", "spreadsheet-workbench"],
             )
 
+        # 识别电子表格概览请求，命中后生成工作表、表头和数据规模分析计划。
         if _has_spreadsheet_profile_intent(message=message, lowered=lowered):
             return _spreadsheet_workbench_plan(
                 intent="PROFILE_SPREADSHEET",
@@ -459,6 +486,7 @@ class DeterministicPlanner:
                 selected_skills=["chat-intake", "spreadsheet-workbench"],
             )
 
+        # 识别电子表格统计、汇总、筛选或计算请求，命中后生成确定性表格分析计划。
         if _has_spreadsheet_analysis_intent(
             message=message,
             lowered=lowered,
@@ -471,14 +499,16 @@ class DeterministicPlanner:
                 selected_skills=["chat-intake", "spreadsheet-analysis"],
             )
 
+        # 识别对已确定附件的总结请求；实际读取摘要还是正文由证据策略按用户深度要求决定。
         if _has_plain_document_summary_intent(message=message, lowered=lowered):
             return _evidence_answer_plan(
                 user_goal=message,
                 question=message,
                 document_ids=document_ids,
-                answer_mode="FULL_SUMMARY",
+                answer_mode="AUTO",
             )
 
+        # 识别“查看/汇总分类结果”，命中后读取已有分类建议，不重新执行正文分类。
         if _has_classification_summary_intent(message=message):
             return PlannerOutput(
                 intent="SUMMARIZE_CLASSIFICATIONS",
@@ -504,6 +534,7 @@ class DeterministicPlanner:
                 confirmation_policy={"operation_plan_required": False},
             )
 
+        # 识别针对已确定附件正文的普通问题，命中后生成聚焦式证据回答计划。
         if _has_answer_intent(message=message, lowered=lowered):
             return _evidence_answer_plan(
                 user_goal=message,
@@ -512,6 +543,7 @@ class DeterministicPlanner:
                 answer_mode="FOCUSED",
             )
 
+        # 识别读取、解析或抽取附件正文的请求，命中后为每个附件生成文本提取步骤。
         if _should_extract_text(message=message, lowered=lowered):
             requested_outputs = _requested_outputs_for_message(
                 message=message,
@@ -546,6 +578,7 @@ class DeterministicPlanner:
                 confirmation_policy={"operation_plan_required": False},
             )
 
+        # 识别对已确定附件进行分类的请求，命中后生成完整正文抽取与分类计划。
         if _has_classification_intent(message=message, lowered=lowered):
             return _classify_files_plan(
                 user_goal=message,
@@ -858,7 +891,7 @@ def build_plan_from_user_intent(
             question=message,
             document_ids=[],
             answer_mode=(
-                "FULL_SUMMARY"
+                "AUTO"
                 if _has_plain_document_summary_intent(message=message, lowered=lowered)
                 else "FOCUSED"
             ),
@@ -1045,7 +1078,7 @@ def build_plan_from_user_intent(
             user_goal=intent_plan.user_goal or message,
             question=message,
             document_ids=document_ids,
-            answer_mode="FULL_SUMMARY",
+            answer_mode="AUTO",
             response_style=intent_plan.response_style,
             clarification_question=intent_plan.clarification_question,
             llm_intent_plan=intent_plan.model_dump(),
@@ -3016,7 +3049,12 @@ def _has_workspace_evidence_intent(*, message: str, lowered: str) -> bool:
         "材料",
         "报告",
         "通知",
+        "工作总结",
         "表格",
+        "汇总表",
+        "工作表",
+        "表中",
+        "表内",
         "正文",
         "工作目录",
     ]
@@ -3027,6 +3065,7 @@ def _has_workspace_evidence_intent(*, message: str, lowered: str) -> bool:
     return has_file_object and (
         _has_answer_intent(message=message, lowered=lowered)
         or _has_summary_intent(message=message, lowered=lowered)
+        or any(value in message for value in ["汇总", "统计", "合计", "求和"])
     )
 
 

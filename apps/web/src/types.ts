@@ -117,6 +117,8 @@ export type FileSearchClarificationResult = {
   core_phrase: string;
   options: FileSearchClarificationOption[];
   allow_custom_phrase: boolean;
+  selection_type: 'DOCUMENT_SELECTION' | 'SEARCH_PHRASE' | string;
+  allow_multiple: boolean;
   expires_at: string | null;
 };
 

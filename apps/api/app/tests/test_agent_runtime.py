@@ -322,7 +322,7 @@ def test_deterministic_planner_locks_explicit_filename_for_evidence_summary(mess
     assert plan.steps[0].input == {
         "question": message,
         "document_ids": [],
-        "answer_mode": "FULL_SUMMARY",
+        "answer_mode": "AUTO",
     }
     assert plan.slots["document_ids"] == []
 

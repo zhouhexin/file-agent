@@ -46,9 +46,10 @@ class FileSearchRequest(BaseModel):
 
 
 class FileSearchClarificationResolveRequest(BaseModel):
-    """选择卡只提交服务端 option_id；自定义短语由后端再次校验。"""
+    """选择卡只提交服务端选项 ID；文件卡允许提交一个或多个 ID。"""
 
-    option_id: str = Field(min_length=1, max_length=80)
+    option_id: str | None = Field(default=None, min_length=1, max_length=80)
+    option_ids: list[str] = Field(default_factory=list, max_length=50)
     custom_phrase: str | None = Field(default=None, max_length=30)
 
 
@@ -165,6 +166,7 @@ def resolve_file_search_clarification(
         ).resolve_file_search_clarification(
             clarification_id=clarification_id,
             option_id=request.option_id,
+            option_ids=request.option_ids,
             custom_phrase=request.custom_phrase,
             user_id=current_user.id,
         )
