@@ -42,6 +42,7 @@ from app.modules.file_lifecycle.trash_lookup import ExactTrashFilenameLookupServ
 from app.modules.llm.client import LLMResponseError, OpenAICompatibleLLMClient
 from app.modules.retrieval.chunk_lexical_search import DocumentChunkLexicalSearchService
 from app.modules.retrieval.query_parser import FileSearchQueryParser
+from app.modules.retrieval.readiness import WorkingCopySearchReadinessService
 from app.modules.retrieval.clarification_service import FileSearchClarificationService
 from app.modules.retrieval.scope_resolver import (
     ConversationFileSearchContextService,
@@ -121,7 +122,21 @@ class EvidenceAnswerService:
 
         normalized_question = str(question or "").strip()
         started_at = time.perf_counter()
-        explicit_ids = list(dict.fromkeys(str(item) for item in (document_ids or []) if str(item)))
+        requested_ids = list(
+            dict.fromkeys(
+                str(item) for item in (document_ids or []) if str(item)
+            )
+        )
+        readiness = WorkingCopySearchReadinessService(
+            db=self.db,
+            user_id=self.user_id,
+            workspace_id=self.workspace_id,
+        )
+        canonical_scope = readiness.canonicalize_document_ids(requested_ids)
+        explicit_ids = list(canonical_scope.document_ids)
+        parsed_question = FileSearchQueryParser(
+            tokenizer=self.tokenizer
+        ).parse(normalized_question)
         log_event(
             "evidence_answer.scope_resolved",
             settings=self.settings,
@@ -188,16 +203,36 @@ class EvidenceAnswerService:
             else:
                 # 未命中完整名称时，先保留“刚上传、尚未导入”的明确状态；其余场景
                 # 只能展示相似文件单选，绝不能退回已推断附件或全库正文回答。
-                if explicit_ids and len(active_rows) != len(explicit_ids):
-                    deleted = self._deleted_selection(explicit_ids)
+                if canonical_scope.unresolved_document_ids or (
+                    explicit_ids and len(active_rows) != len(explicit_ids)
+                ):
+                    deleted = self._deleted_selection(requested_ids)
                     if deleted:
                         return deleted
+                    prepared = readiness.prepare_on_miss(
+                        query=normalized_question,
+                        parsed=parsed_question,
+                        unresolved_upload_document_ids=(
+                            canonical_scope.unresolved_document_ids
+                        ),
+                    )
+                    if prepared is not None:
+                        return prepared
                     return self._no_evidence(
                         question=normalized_question,
                         mode=mode,
-                        index_status="INDEX_PENDING",
-                        message="文件正在进入共享工作目录并建立正文索引，请等待 worker 完成后重试。",
+                        index_status="NO_EVIDENCE",
+                        message="当前没有可用于回答的活动文件。",
                     )
+                prepared = readiness.prepare_on_miss(
+                    query=normalized_question,
+                    parsed=parsed_question,
+                    unresolved_upload_document_ids=(
+                        canonical_scope.unresolved_document_ids
+                    ),
+                )
+                if prepared is not None:
+                    return prepared
                 similar_selection = self._similar_filename_selection(
                     requested_filename=exact_filename,
                     question=normalized_question,
@@ -211,15 +246,26 @@ class EvidenceAnswerService:
                     message="未找到该文件。请重新附加文件，或提供更准确的完整文件名。",
                 )
 
-        if explicit_ids and len(active_rows) != len(explicit_ids):
-            deleted = self._deleted_selection(explicit_ids)
+        if canonical_scope.unresolved_document_ids or (
+            explicit_ids and len(active_rows) != len(explicit_ids)
+        ):
+            deleted = self._deleted_selection(requested_ids)
             if deleted:
                 return deleted
+            prepared = readiness.prepare_on_miss(
+                query=normalized_question,
+                parsed=parsed_question,
+                unresolved_upload_document_ids=(
+                    canonical_scope.unresolved_document_ids
+                ),
+            )
+            if prepared is not None:
+                return prepared
             return self._no_evidence(
                 question=normalized_question,
                 mode=mode,
-                index_status="INDEX_PENDING",
-                message="文件正在进入共享工作目录并建立正文索引，请等待 worker 完成后重试。",
+                index_status="NO_EVIDENCE",
+                message="当前没有可用于回答的活动文件。",
             )
 
         if not active_rows:
@@ -233,6 +279,12 @@ class EvidenceAnswerService:
                     question=normalized_question,
                     message="找到以下相似文件，请选择一份或多份后继续原任务。",
                 )
+            prepared = readiness.prepare_on_miss(
+                query=normalized_question,
+                parsed=parsed_question,
+            )
+            if prepared is not None:
+                return prepared
         ambiguity = self._same_name_ambiguity(
             active_rows,
             explicit_ids,
@@ -288,7 +340,13 @@ class EvidenceAnswerService:
         )
         if not items:
             if index_status in {"INDEX_PENDING", "PARTIAL_INDEX"}:
-                message = "相关文件的正文索引尚未完成，请等待 worker 建立索引后重试。"
+                prepared = readiness.prepare_on_miss(
+                    query=normalized_question,
+                    parsed=parsed_question,
+                )
+                if prepared is not None:
+                    return prepared
+                message = "相关文件暂时无法读取，请稍后重试。"
             elif index_status == "INDEX_FAILED":
                 message = "相关文件的正文索引建立失败，请重新处理文件后再试。"
             else:

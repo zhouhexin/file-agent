@@ -30,6 +30,37 @@ def test_filesystem_job_queue_claims_pending_job():
         clear_overrides()
 
 
+def test_promote_pending_job_does_not_reset_attempts_or_revive_failure():
+    """检索提升优先级不能绕过三次重试上限或复活失败任务。"""
+
+    _client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        queue = FilesystemJobQueue(db)
+        pending = queue.create_job(
+            job_type="IMPORT_WORKING_COPIES",
+            root_id=None,
+            created_by=None,
+            payload={},
+            priority=100,
+        )
+        pending.attempt_count = 2
+        queue.promote_pending_job(job=pending, priority=10)
+        assert pending.priority == 10
+        assert pending.attempt_count == 2
+        assert pending.max_attempts == 3
+
+        pending.status = "FAILED"
+        pending.attempt_count = 3
+        queue.promote_pending_job(job=pending, priority=1)
+        assert pending.status == "FAILED"
+        assert pending.attempt_count == 3
+        assert pending.priority == 10
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def test_admin_scan_api_creates_pending_job(monkeypatch):
     """管理员触发扫描时只创建异步任务，不同步遍历文件系统。"""
 

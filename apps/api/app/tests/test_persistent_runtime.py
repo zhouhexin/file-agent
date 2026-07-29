@@ -322,7 +322,11 @@ def test_llm_summary_message_extracts_document_text_instead_of_insights():
 
         assert response.agent_run.intent == "EVIDENCE_ANSWER"
         assert [item.tool_name for item in response.agent_run.tool_invocations] == ["evidence-answer"]
-        assert response.agent_run.tool_results[0]["status"] == "NO_EVIDENCE"
+        # 上传生命周期尚未完成时只进入通用 processing，不把内部“待导入/待索引”
+        # 状态或 worker 提示暴露到普通对话。
+        assert response.agent_run.tool_results[0]["status"] == "PROCESSING"
+        assert response.agent_run.status == "WAITING_FOR_ASYNC_JOB"
+        assert response.agent_run.final_response is None
         assert db.query(ToolInvocation).one().tool_name == "evidence-answer"
     finally:
         db.close()

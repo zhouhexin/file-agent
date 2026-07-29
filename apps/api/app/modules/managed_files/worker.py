@@ -139,6 +139,9 @@ def process_next_filesystem_job(
             )
             try:
                 _process_job(db=db, job=job)
+                # 检索未命中后静默提升的导入/分析任务完成时，继续原 hybrid-search。
+                # 这一步只更新原 AgentRun，不生成新的用户消息或暴露队列细节。
+                _advance_waiting_search_runs(db=db, completed_job=job)
                 db.commit()
                 _print_worker_status(
                     "任务完成",
@@ -531,6 +534,11 @@ def _mark_agent_run_failed_for_job(
     """异步分类任务整体失败时同步结束原 AgentRun，避免前端永久等待。"""
 
     if job.job_type != "CLASSIFY_MANAGED_FILES":
+        _fail_waiting_search_runs(
+            db=db,
+            failed_job=job,
+            error_message="部分文件暂时无法处理，请稍后重试或联系管理员。",
+        )
         return
     agent_run_id = str((job.payload_json or {}).get("agent_run_id") or "")
     run = db.get(AgentRun, agent_run_id) if agent_run_id else None
@@ -565,6 +573,314 @@ def _mark_agent_run_failed_for_job(
             "error": {"code": "ASYNC_CLASSIFICATION_FAILED", "message": error_message},
         }
         invocation.finished_at = utcnow()
+
+
+def _advance_waiting_search_runs(
+    *,
+    db: Session,
+    completed_job: FilesystemJob,
+) -> None:
+    """任务完成后推进等待中的文件检索，并在依赖清空时自动续跑。
+
+    filesystem_jobs 是内部调度事实。普通用户只会看到原消息从 processing 更新为
+    最终文件卡或普通未命中结果，不会看到 managed_files 候选和任务链。
+    """
+
+    if completed_job.status != "COMPLETED":
+        return
+    candidates = (
+        db.query(AgentRun)
+        .filter(AgentRun.status == "WAITING_FOR_ASYNC_JOB")
+        .all()
+    )
+    child_job_ids = _child_job_ids(completed_job)
+    for candidate in candidates:
+        graph_state = dict(candidate.graph_state_json or {})
+        waiting_ids = [
+            str(value)
+            for value in graph_state.get("async_job_ids", [])
+            if str(value)
+        ]
+        if str(completed_job.id) not in waiting_ids:
+            continue
+        run = _lock_waiting_agent_run(db=db, agent_run_id=str(candidate.id))
+        if run is None or not _is_search_readiness_run(db=db, run=run):
+            continue
+        # 多个导入 worker 可能同时完成同一检索的不同依赖。取得行锁后必须重新读取
+        # 等待集合，避免后提交的事务覆盖先完成依赖的更新而造成永久 processing。
+        graph_state = dict(run.graph_state_json or {})
+        waiting_ids = [
+            str(value)
+            for value in graph_state.get("async_job_ids", [])
+            if str(value)
+        ]
+        if str(completed_job.id) not in waiting_ids:
+            continue
+        next_ids = [
+            value for value in waiting_ids if value != str(completed_job.id)
+        ]
+        for child_id in child_job_ids:
+            child = db.get(FilesystemJob, child_id)
+            if (
+                child is not None
+                and child.status in {"PENDING", "RUNNING"}
+                and child.attempt_count < child.max_attempts
+                and child_id not in next_ids
+            ):
+                next_ids.append(child_id)
+        if next_ids:
+            graph_state["async_job_ids"] = next_ids
+            run.graph_state_json = graph_state
+            run.updated_at = utcnow()
+            continue
+        _resume_waiting_hybrid_search(db=db, run=run, graph_state=graph_state)
+
+
+def _lock_waiting_agent_run(*, db: Session, agent_run_id: str) -> AgentRun | None:
+    """锁定一条仍在等待的 AgentRun，串行合并多个 worker 的完成事件。"""
+
+    query = db.query(AgentRun).filter(
+        AgentRun.id == agent_run_id,
+        AgentRun.status == "WAITING_FOR_ASYNC_JOB",
+    )
+    bind = db.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        query = query.with_for_update()
+    # candidate 扫描可能已把旧对象放进 identity map；加锁后强制刷新，才能看到
+    # 另一个 worker 刚提交的 async_job_ids，避免用缓存状态覆盖数据库新值。
+    return query.populate_existing().one_or_none()
+
+
+def _is_search_readiness_run(*, db: Session, run: AgentRun) -> bool:
+    """确认当前等待状态确由静默检索准备产生，避免误接管其他异步任务。"""
+
+    invocation = (
+        db.query(ToolInvocation)
+        .filter(
+            ToolInvocation.agent_run_id == run.id,
+            ToolInvocation.tool_name.in_(["hybrid-search", "evidence-answer"]),
+        )
+        .order_by(ToolInvocation.created_at.desc())
+        .first()
+    )
+    output = dict(invocation.output_json or {}) if invocation is not None else {}
+    if output.get("source") == "search-readiness":
+        return True
+    graph_state = dict(run.graph_state_json or {})
+    result_summary = (
+        graph_state.get("result_summary")
+        if isinstance(graph_state.get("result_summary"), dict)
+        else {}
+    )
+    filesystem_job = (
+        result_summary.get("filesystem_job")
+        if isinstance(result_summary.get("filesystem_job"), dict)
+        else {}
+    )
+    return filesystem_job.get("source") == "search-readiness"
+
+
+def _child_job_ids(job: FilesystemJob) -> list[str]:
+    """从生命周期任务结果中提取下一阶段任务 ID。"""
+
+    result = dict(job.result_json or {})
+    values: list[str] = []
+    for key in ("archive_job_id", "import_job_id", "analysis_job_id"):
+        value = str(result.get(key) or "")
+        if value and value not in values:
+            values.append(value)
+    for value in result.get("job_ids", []) or []:
+        text = str(value or "")
+        if text and text not in values:
+            values.append(text)
+    return values
+
+
+def _resume_waiting_hybrid_search(
+    *,
+    db: Session,
+    run: AgentRun,
+    graph_state: dict,
+) -> None:
+    """复用原 ToolInvocation 输入续跑文件检索或证据回答。"""
+
+    invocation = (
+        db.query(ToolInvocation)
+        .filter(
+            ToolInvocation.agent_run_id == run.id,
+            ToolInvocation.tool_name.in_(["hybrid-search", "evidence-answer"]),
+        )
+        .order_by(ToolInvocation.created_at.desc())
+        .first()
+    )
+    if invocation is None:
+        _finish_waiting_search_as_failed(
+            run=run,
+            graph_state=graph_state,
+            message="文件检索暂时无法继续，请稍后重试。",
+        )
+        return
+
+    registry = ToolRegistry(db=db, user_id=run.user_id)
+    registry.set_run_context(
+        conversation_id=run.conversation_id,
+        agent_run_id=run.id,
+    )
+    record = registry.invoke(
+        invocation.tool_name,
+        dict(invocation.input_json or {}),
+    )
+    output = dict(record.output_json or {})
+    invocation.output_json = output
+    invocation.status = record.status
+    invocation.finished_at = utcnow()
+
+    if output.get("kind") == "filesystem_job":
+        job_ids = [
+            str(value)
+            for value in (
+                output.get("job_ids")
+                or ([output.get("job_id")] if output.get("job_id") else [])
+            )
+            if value
+        ]
+        if job_ids:
+            graph_state.update(
+                {
+                    "status": "WAITING_FOR_ASYNC_JOB",
+                    "async_job_ids": job_ids,
+                    "tool_results": [output],
+                    "result_summary": {"filesystem_job": output},
+                    "final_response": None,
+                }
+            )
+            run.status = "WAITING_FOR_ASYNC_JOB"
+            run.final_response = None
+            run.graph_state_json = graph_state
+            run.updated_at = utcnow()
+            return
+
+    if invocation.tool_name == "evidence-answer":
+        answer_status = str(output.get("status") or "")
+        succeeded = bool(output.get("ok"))
+        needs_review = answer_status in {
+            "NEEDS_CLARIFICATION",
+            "NEEDS_CONFIRMATION",
+            "NO_EVIDENCE",
+            "PARTIAL",
+        }
+        status = "NEEDS_REVIEW" if needs_review else (
+            "COMPLETED" if succeeded else "FAILED"
+        )
+        final_response = str(
+            output.get("answer")
+            or output.get("message")
+            or "当前没有可用于回答的原文证据。"
+        )
+        graph_state.update(
+            {
+                "status": status,
+                "async_job_ids": [],
+                "tool_results": [output],
+                "result_summary": {"evidence_answer": output},
+                "final_response": final_response,
+                "errors": [] if succeeded else [final_response],
+            }
+        )
+        run.status = status
+        run.final_response = final_response
+        run.error_message = None if succeeded else final_response
+        run.graph_state_json = graph_state
+        run.updated_at = utcnow()
+        return
+
+    from app.modules.agent.graph import _build_workspace_file_search_response
+
+    clarification = (
+        output.get("search_clarification")
+        if isinstance(output.get("search_clarification"), dict)
+        else {}
+    )
+    succeeded = bool(output.get("ok"))
+    status = "NEEDS_REVIEW" if clarification else (
+        "COMPLETED" if succeeded else "FAILED"
+    )
+    final_response = _build_workspace_file_search_response(output)
+    graph_state.update(
+        {
+            "status": status,
+            "async_job_ids": [],
+            "tool_results": [output],
+            "result_summary": {"workspace_file_search": output},
+            "final_response": final_response,
+            "errors": [] if succeeded else [final_response],
+        }
+    )
+    run.status = status
+    run.final_response = final_response
+    run.error_message = None if succeeded else final_response
+    run.graph_state_json = graph_state
+    run.updated_at = utcnow()
+
+
+def _fail_waiting_search_runs(
+    *,
+    db: Session,
+    failed_job: FilesystemJob,
+    error_message: str,
+) -> None:
+    """终态失败时结束引用该任务的检索，避免前端永久轮询。"""
+
+    if failed_job.status != "FAILED":
+        return
+    for candidate in (
+        db.query(AgentRun)
+        .filter(AgentRun.status == "WAITING_FOR_ASYNC_JOB")
+        .all()
+    ):
+        graph_state = dict(candidate.graph_state_json or {})
+        waiting_ids = {
+            str(value) for value in graph_state.get("async_job_ids", [])
+        }
+        if str(failed_job.id) not in waiting_ids:
+            continue
+        run = _lock_waiting_agent_run(db=db, agent_run_id=str(candidate.id))
+        if run is None or not _is_search_readiness_run(db=db, run=run):
+            continue
+        graph_state = dict(run.graph_state_json or {})
+        waiting_ids = {
+            str(value) for value in graph_state.get("async_job_ids", [])
+        }
+        if str(failed_job.id) not in waiting_ids:
+            continue
+        _finish_waiting_search_as_failed(
+            run=run,
+            graph_state=graph_state,
+            message=error_message,
+        )
+
+
+def _finish_waiting_search_as_failed(
+    *,
+    run: AgentRun,
+    graph_state: dict,
+    message: str,
+) -> None:
+    """写入不含文件路径、任务 ID 和内部状态的检索失败回执。"""
+
+    graph_state.update(
+        {
+            "status": "FAILED",
+            "async_job_ids": [],
+            "final_response": message,
+            "errors": [message],
+        }
+    )
+    run.status = "FAILED"
+    run.final_response = message
+    run.error_message = message
+    run.graph_state_json = graph_state
+    run.updated_at = utcnow()
 
 
 def _process_managed_file_classification_job(*, db: Session, job: FilesystemJob) -> None:

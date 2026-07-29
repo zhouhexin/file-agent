@@ -125,11 +125,11 @@ export function AgentRunReceipt({
     && !taskResult.evidence_answer_result
     && !taskResult.file_selection_result
   ) {
-    // 异步任务刚入队时尚无最终回执；明确反馈等待状态，不能留下一块无内容的消息区域。
+    // 异步任务刚入队时尚无最终回执；只展示通用处理状态，不暴露导入、索引或队列细节。
     return (
       <section className="agent-run-receipt" aria-live="polite">
         <div className="agent-run-summary">
-          <strong>文件正在后台处理，完成后会自动更新这里。</strong>
+          <strong>正在处理，完成后会自动更新这里。</strong>
         </div>
       </section>
     );

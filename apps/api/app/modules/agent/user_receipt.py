@@ -184,7 +184,13 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         classification_clarification_result=classification_clarification_result,
         classification_decision_result=classification_decision_result,
         filename_conflict_result=filename_conflict_result,
-        pending_job_ids=list(result.async_job_ids),
+        # 检索就绪任务属于内部依赖链，前端按同一 AgentRun 状态轮询即可；
+        # 普通消息接口不能暴露其任务 ID、队列或“待准备”阶段。
+        pending_job_ids=(
+            []
+            if _has_internal_search_readiness_job(result)
+            else list(result.async_job_ids)
+        ),
         operation_plan_id=result.operation_plan_id,
         pending_decisions=pending_decisions,
         suggested_next_actions=_suggested_next_actions(result=result, response_type=response_type),
@@ -203,6 +209,17 @@ def _task_status(status: str) -> str:
     if status == "NEEDS_REVIEW":
         return "needs_attention"
     return "processing"
+
+
+def _has_internal_search_readiness_job(result: AgentRunResult) -> bool:
+    """判断本次等待是否仅由检索就绪协调产生。"""
+
+    return any(
+        isinstance(invocation.output_json, dict)
+        and invocation.output_json.get("kind") == "filesystem_job"
+        and invocation.output_json.get("source") == "search-readiness"
+        for invocation in result.tool_invocations
+    )
 
 
 def _safe_document_result(value: dict[str, Any]) -> dict[str, Any]:

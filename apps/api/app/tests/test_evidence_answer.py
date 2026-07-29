@@ -455,7 +455,9 @@ def test_index_pending_is_not_reported_as_no_matching_fact():
 
     assert result["status"] == "NO_EVIDENCE"
     assert result["index_status"] == "INDEX_PENDING"
-    assert "索引尚未完成" in result["answer"]
+    # 普通用户只看到统一的暂时不可读提示，索引阶段保留在内部审计字段中。
+    assert "暂时无法读取" in result["answer"]
+    assert "索引" not in result["answer"]
     assert client.calls == 0
 
 

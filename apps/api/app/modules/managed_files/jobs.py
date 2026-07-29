@@ -96,6 +96,41 @@ class FilesystemJobQueue:
         self.repository.create_event(job_id=job.id, level="INFO", message="任务已创建")
         return job
 
+    def promote_pending_job(
+        self,
+        *,
+        job: FilesystemJob,
+        priority: int,
+    ) -> FilesystemJob:
+        """提升用户当前需要的待执行任务，但绝不重置失败次数。
+
+        RUNNING 任务保持原租约；FAILED/COMPLETED 终态不会被该方法重新激活。
+        因此用户重复检索不能绕过最多三次尝试的队列约束。
+        """
+
+        if job.status != "PENDING" or job.attempt_count >= job.max_attempts:
+            return job
+        target_priority = min(int(job.priority), int(priority))
+        now = utcnow()
+        available_at = job.available_at
+        if available_at.tzinfo is None:
+            # SQLite 测试和部分历史数据可能返回无时区 datetime；只用于比较，
+            # 写回仍统一使用 utcnow() 的带时区值。
+            available_at = available_at.replace(tzinfo=now.tzinfo)
+        changed = target_priority != job.priority or available_at > now
+        if not changed:
+            return job
+        job.priority = target_priority
+        job.available_at = now
+        job.updated_at = now
+        self.repository.create_event(
+            job_id=job.id,
+            level="INFO",
+            message="任务已按当前用户请求提升优先级",
+        )
+        self.db.flush()
+        return job
+
     def claim_next(self, *, worker_id: str, queue_names: set[str] | None = None) -> FilesystemJob | None:
         """通过可恢复租约领取下一个可执行任务。
 

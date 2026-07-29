@@ -239,7 +239,6 @@ export function ChatPage({
       if (
         !agentRun
         || agentRun.task_status !== 'processing'
-        || agentRun.pending_job_ids.length === 0
         || pollingAgentRunsRef.current.has(agentRun.task_id)
       ) {
         return;
@@ -248,7 +247,6 @@ export function ChatPage({
       void pollAsyncAgentRun({
         turnId: turn.id,
         messageId: turn.response?.message.id ?? turn.id,
-        jobIds: agentRun.pending_job_ids,
       }).finally(() => {
         pollingAgentRunsRef.current.delete(agentRun.task_id);
       });
@@ -356,45 +354,42 @@ export function ChatPage({
   async function pollAsyncAgentRun({
     turnId,
     messageId,
-    jobIds,
   }: {
     turnId: string;
     messageId: string;
-    jobIds: string[];
   }) {
-    // 后台批量任务完成后重新读取服务端 AgentRun，避免前端拼装分类和 ChangeSet。
+    // 普通前端只轮询原消息任务投影，不读取 filesystem job 类型、队列或任务编号。
+    // worker 会在内部依赖完成后更新同一个 AgentRun，避免向用户暴露“待准备”阶段。
     while (pageActiveRef.current) {
       try {
-        const jobs = await Promise.all(jobIds.map((jobId) => getFilesystemJob(token, jobId)));
-        const completed = jobs.every((job) => ['COMPLETED', 'FAILED'].includes(job.status));
-        if (completed) {
-          const conversation = await getConversationDetail(token, conversationId, { limit: 50 });
-          const historyMessage = conversation.messages.find((item) => item.id === messageId);
-          if (historyMessage?.task_result) {
-            const updatedTaskResult = historyMessage.task_result;
-            setChatTurns((current) => current.map((turn) => (
-              turn.id === turnId
-                ? {
-                    ...turn,
-                    response: {
-                      message: {
-                        id: historyMessage.id,
-                        conversation_id: historyMessage.conversation_id,
-                        user_id: historyMessage.user_id,
-                        role: historyMessage.role,
-                        content: historyMessage.content,
-                        attachments: historyMessage.attachments.map((file) => ({
-                          document_id: file.document_id,
-                        })),
-                      },
-                      task_result: updatedTaskResult,
+        const conversation = await getConversationDetail(token, conversationId, { limit: 50 });
+        const historyMessage = conversation.messages.find((item) => item.id === messageId);
+        if (historyMessage?.task_result) {
+          const updatedTaskResult = historyMessage.task_result;
+          setChatTurns((current) => current.map((turn) => (
+            turn.id === turnId
+              ? {
+                  ...turn,
+                  response: {
+                    message: {
+                      id: historyMessage.id,
+                      conversation_id: historyMessage.conversation_id,
+                      user_id: historyMessage.user_id,
+                      role: historyMessage.role,
+                      content: historyMessage.content,
+                      attachments: historyMessage.attachments.map((file) => ({
+                        document_id: file.document_id,
+                      })),
                     },
-                    status: 'completed',
-                  }
-                : turn
-            )));
+                    task_result: updatedTaskResult,
+                  },
+                  status: 'completed',
+                }
+              : turn
+          )));
+          if (updatedTaskResult.task_status !== 'processing') {
+            return;
           }
-          return;
         }
       } catch (pollError) {
         if (pageActiveRef.current) {

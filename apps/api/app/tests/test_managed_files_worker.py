@@ -9,16 +9,25 @@ from app.core.config import get_settings
 from app.db.models import (
     AgentRun,
     ChangeSet,
+    Conversation,
     DocumentCategorySuggestion,
     FilesystemJob,
     FilesystemJobEvent,
     ManagedFile,
     ManagedRoot,
+    Message,
+    ToolInvocation,
+    User,
     WorkingCopy,
     WorkingCopyRoot,
     utcnow,
 )
-from app.modules.managed_files.worker import _public_job_error_message, process_next_filesystem_job
+from app.modules.agent.state import ToolInvocationRecord
+from app.modules.managed_files.worker import (
+    _advance_waiting_search_runs,
+    _public_job_error_message,
+    process_next_filesystem_job,
+)
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.scanner import ManagedFileScanner
 from app.modules.managed_files.service import sync_configured_managed_roots
@@ -60,6 +69,160 @@ def test_failed_deduplicated_job_is_not_reopened_by_automatic_scan():
         assert same_job.id == job_id
         assert same_job.status == "FAILED"
         assert same_job.attempt_count == 3
+
+
+def test_completed_preparation_job_resumes_original_search_without_new_message(
+    monkeypatch,
+):
+    """内部准备完成后应更新原 AgentRun，不能留下永久 processing 或新增消息。"""
+
+    client, SessionLocal = client_with_database()
+    registered = client.post(
+        "/api/auth/register",
+        json={
+            "username": "search-resume-user",
+            "password": "password123",
+            "display_name": "search-resume-user",
+        },
+    )
+    db = SessionLocal()
+    try:
+        user = db.get(User, registered.json()["id"])
+        conversation = Conversation(
+            id="search-resume-conversation",
+            user_id=user.id,
+            title="检索续跑测试",
+        )
+        message = Message(
+            id="search-resume-message",
+            conversation_id=conversation.id,
+            user_id=user.id,
+            role="user",
+            content="找2025年工作总结",
+            attachments_json=[],
+        )
+        job = FilesystemJob(
+            job_type="ANALYZE_DOCUMENT_VERSION",
+            queue_name="ANALYSIS",
+            status="COMPLETED",
+            payload_json={},
+            result_json={},
+        )
+        db.add_all([conversation, message, job])
+        db.flush()
+        run = AgentRun(
+            conversation_id=conversation.id,
+            message_id=message.id,
+            user_id=user.id,
+            intent="SEARCH_FILES",
+            status="WAITING_FOR_ASYNC_JOB",
+            graph_state_json={
+                "status": "WAITING_FOR_ASYNC_JOB",
+                "async_job_ids": [job.id],
+            },
+        )
+        db.add(run)
+        db.flush()
+        invocation = ToolInvocation(
+            agent_run_id=run.id,
+            tool_name="hybrid-search",
+            input_json={"query": "找2025年工作总结", "document_ids": []},
+            output_json={
+                "kind": "filesystem_job",
+                "source": "search-readiness",
+                "job_id": job.id,
+            },
+            status="PENDING",
+        )
+        db.add(invocation)
+        db.flush()
+
+        def fake_invoke(_registry, name, input_json):
+            assert name == "hybrid-search"
+            return ToolInvocationRecord(
+                tool_name=name,
+                input_json=input_json,
+                output_json={
+                    "kind": "workspace_file_search",
+                    "ok": True,
+                    "query": "找2025年工作总结",
+                    "total_returned": 1,
+                    "results": [{"filename": "2025年工作总结.docx"}],
+                },
+                status="COMPLETED",
+            )
+
+        monkeypatch.setattr("app.modules.managed_files.worker.ToolRegistry.invoke", fake_invoke)
+        _advance_waiting_search_runs(db=db, completed_job=job)
+
+        assert run.status == "COMPLETED"
+        assert run.graph_state_json["async_job_ids"] == []
+        assert "2025年工作总结.docx" in run.final_response
+        assert db.query(Message).count() == 1
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_completed_job_does_not_take_over_unrelated_waiting_agent_run():
+    """普通异步任务完成时不能被检索续跑逻辑误判为 hybrid-search。"""
+
+    client, SessionLocal = client_with_database()
+    registered = client.post(
+        "/api/auth/register",
+        json={
+            "username": "unrelated-waiting-run-user",
+            "password": "password123",
+            "display_name": "unrelated-waiting-run-user",
+        },
+    )
+    db = SessionLocal()
+    try:
+        user = db.get(User, registered.json()["id"])
+        conversation = Conversation(
+            id="unrelated-waiting-conversation",
+            user_id=user.id,
+            title="普通异步任务",
+        )
+        message = Message(
+            id="unrelated-waiting-message",
+            conversation_id=conversation.id,
+            user_id=user.id,
+            role="user",
+            content="对目录中的文件进行分类",
+            attachments_json=[],
+        )
+        job = FilesystemJob(
+            job_type="SCAN_MANAGED_ROOT",
+            queue_name="SCAN",
+            status="COMPLETED",
+            payload_json={},
+            result_json={},
+        )
+        db.add_all([conversation, message, job])
+        db.flush()
+        run = AgentRun(
+            conversation_id=conversation.id,
+            message_id=message.id,
+            user_id=user.id,
+            intent="CLASSIFY_FILES",
+            status="WAITING_FOR_ASYNC_JOB",
+            graph_state_json={
+                "status": "WAITING_FOR_ASYNC_JOB",
+                "async_job_ids": [job.id],
+            },
+        )
+        db.add(run)
+        db.flush()
+
+        _advance_waiting_search_runs(db=db, completed_job=job)
+
+        assert run.status == "WAITING_FOR_ASYNC_JOB"
+        assert run.graph_state_json["async_job_ids"] == [job.id]
+        assert run.final_response is None
+    finally:
+        db.close()
+        clear_overrides()
 
 
 def test_worker_processes_scan_job_and_persists_files(tmp_path: Path, capsys):

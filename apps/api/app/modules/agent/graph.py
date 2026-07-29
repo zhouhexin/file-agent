@@ -426,11 +426,18 @@ def evidence_or_change(state: AgentGraphState, runtime: Runtime[AgentRuntimeCont
         "operation_plan_id": state.get("operation_plan_id"),
         "result_summary": result_summary,
         "document_results": result_summary.get("document_results", []),
-        "async_job_ids": (
-            [str(filesystem_job["job_id"])]
-            if filesystem_job.get("job_id")
-            else []
-        ),
+        "async_job_ids": [
+            str(job_id)
+            for job_id in (
+                filesystem_job.get("job_ids")
+                or (
+                    [filesystem_job.get("job_id")]
+                    if filesystem_job.get("job_id")
+                    else []
+                )
+            )
+            if job_id
+        ],
     }
 
 
@@ -518,7 +525,10 @@ def _filesystem_job_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str
     """提取受管目录异步任务回执。"""
 
     for result in tool_results:
-        if result.get("kind") == "filesystem_job" and result.get("job_id"):
+        if (
+            result.get("kind") == "filesystem_job"
+            and (result.get("job_id") or result.get("job_ids"))
+        ):
             return result
     return {}
 
@@ -673,11 +683,9 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
     if filesystem_job:
         return {
             "status": "WAITING_FOR_ASYNC_JOB",
-            "final_response": (
-                "匹配文件较多，已创建后台分类任务。"
-                f"任务编号：{filesystem_job.get('job_id')}。"
-                "处理完成后将更新本次逐文件分类回执。"
-            ),
+            # 普通对话只展示前端统一的 processing 反馈；任务编号、队列类型和
+            # “待准备”状态仅保留在审计投影中，不能成为聊天气泡正文。
+            "final_response": None,
         }
 
     document_results = result_summary.get("document_results", [])

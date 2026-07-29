@@ -246,7 +246,7 @@ class ToolRegistry:
 def _tool_invocation_status(output: Dict[str, Any]) -> str:
     """根据 Tool 业务输出确定审计状态，避免失败结果被记录为完成。"""
 
-    if output.get("status") == "PENDING":
+    if output.get("status") in {"PENDING", "PROCESSING"}:
         return "PENDING"
     if output.get("ok") is False or output.get("status") == "FAILED":
         return "FAILED"
@@ -384,7 +384,24 @@ def _search_handler(
 
         workspace_id = get_shared_workspace_id(db)
         search_query = str(getattr(tool_input, "query") or "")
-        explicit_document_ids = list(getattr(tool_input, "document_ids", []) or [])
+        requested_document_ids = list(
+            getattr(tool_input, "document_ids", []) or []
+        )
+        # 上传消息引用的是暂存 Document；正式检索必须先映射为共享活动工作副本
+        # Document。尚未完成导入的 ID 只交给内部就绪协调，不能扩大到全库检索。
+        from app.modules.retrieval.readiness import (
+            WorkingCopySearchReadinessService,
+        )
+
+        readiness = WorkingCopySearchReadinessService(
+            db=db,
+            user_id=user_id,
+            workspace_id=workspace_id,
+        )
+        canonical_scope = readiness.canonicalize_document_ids(
+            requested_document_ids
+        )
+        explicit_document_ids = list(canonical_scope.document_ids)
         # 普通召回始终排除回收站；仅当用户明确写出完整文件名且没有活动同名副本时，
         # 才返回待选择的恢复候选。候选不能按版本或哈希自动合并。
         from app.modules.file_lifecycle.trash_lookup import ExactTrashFilenameLookupService
@@ -438,6 +455,27 @@ def _search_handler(
                 result_count=len(list(result.get("results") or [])),
                 message="摘要回退检索完成",
             )
+            if not result.get("results"):
+                from app.modules.retrieval.query_parser import (
+                    FileSearchQueryParser,
+                )
+                from app.modules.chunks.tokenizer import (
+                    ChineseLexicalTokenizer,
+                    load_default_business_terms,
+                )
+
+                prepared = readiness.prepare_after_miss(
+                    parsed_query=FileSearchQueryParser(
+                        tokenizer=ChineseLexicalTokenizer(
+                            load_default_business_terms()
+                        )
+                    ).parse(search_query),
+                    unresolved_document_ids=(
+                        canonical_scope.unresolved_document_ids
+                    ),
+                )
+                if prepared is not None:
+                    return prepared
             return result
 
         # 启用新链路：两阶段检索
@@ -579,6 +617,20 @@ def _search_handler(
                     "user_message": "文件检索暂时不可用，请稍后重试。",
                 }
         result["kind"] = "workspace_file_search"
+        # managed_files 只用于内部发现。只有普通工作副本检索确实未命中时才
+        # 静默准备候选；准备期间不把受管文件名称、路径或内部状态投影给用户。
+        if (
+            result.get("ok")
+            and not result.get("results")
+            and not result.get("search_clarification")
+            and not result.get("trash_restore_selection")
+        ):
+            prepared = readiness.prepare_after_miss(
+                parsed_query=parsed,
+                unresolved_document_ids=canonical_scope.unresolved_document_ids,
+            )
+            if prepared is not None:
+                return prepared
         return result
 
     return handler

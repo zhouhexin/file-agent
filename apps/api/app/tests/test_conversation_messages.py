@@ -15,6 +15,7 @@ from app.core import config
 from app.db.models import AgentRun, Conversation, Message, ToolInvocation
 from app.modules.managed_files.scanner import ManagedFileScanner
 from app.modules.managed_files.service import sync_configured_managed_roots
+from app.modules.managed_files.worker import process_next_filesystem_job
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -159,9 +160,30 @@ def test_message_does_not_expand_explicit_filename_before_working_copy_is_active
 
         assert response.status_code == 200
         task_result = response.json()["task_result"]
-        assert task_result["response_type"] == "evidence_answer"
-        assert "未找到该文件" in task_result["final_response"]
-        assert task_result["evidence_answer_result"]["files"] == []
+        assert task_result["response_type"] == "async_job"
+        assert task_result["task_status"] == "processing"
+        assert task_result["final_response"] is None
+        assert task_result["evidence_answer_result"] is None
+        assert task_result["pending_job_ids"] == []
+
+    # 导入和分析完成后 worker 必须自动续跑原请求；用户不需要再次发送问题。
+    while process_next_filesystem_job(
+        session_factory=session_factory,
+        worker_id="search-readiness-test",
+        queue_names={"IMPORT", "ANALYSIS"},
+    ):
+        pass
+    with session_factory() as db:
+        runs = (
+            db.query(AgentRun)
+            .filter(
+                AgentRun.conversation_id
+                == "managed-filename-summary-chat"
+            )
+            .all()
+        )
+        assert len(runs) == 2
+        assert all(run.status != "WAITING_FOR_ASYNC_JOB" for run in runs)
 
     clear_overrides()
     config.get_settings.cache_clear()
@@ -200,8 +222,11 @@ def test_uploaded_docx_summary_uses_full_text_points_instead_of_preview(monkeypa
     )
 
     assert response.status_code == 200
-    final_response = response.json()["task_result"]["final_response"]
-    assert "正在进入共享工作目录并建立正文索引" in final_response
+    task_result = response.json()["task_result"]
+    assert task_result["task_status"] == "processing"
+    assert task_result["response_type"] == "async_job"
+    assert task_result["final_response"] is None
+    assert task_result["pending_job_ids"] == []
 
     clear_overrides()
     config.get_settings.cache_clear()
@@ -548,8 +573,9 @@ def test_message_can_reference_previous_uploaded_attachment():
     assert second_response.status_code == 200
     data = second_response.json()
     assert data["message"]["attachments"] == [{"document_id": document_id}]
-    assert data["task_result"]["task_status"] == "needs_attention"
-    assert "正在进入共享工作目录并建立正文索引" in data["task_result"]["final_response"]
+    assert data["task_result"]["task_status"] == "processing"
+    assert data["task_result"]["response_type"] == "async_job"
+    assert data["task_result"]["final_response"] is None
     clear_overrides()
 
 
