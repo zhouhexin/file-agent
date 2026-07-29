@@ -85,7 +85,10 @@ export function SearchResultsReceipt({
     );
   }
 
-  const visibleFiles = result.files.slice(0, visibleCount);
+  const showAllResults = Boolean(result.show_all_results);
+  const visibleFiles = showAllResults
+    ? result.files
+    : result.files.slice(0, visibleCount);
 
   return (
     <section className="search-results-receipt">
@@ -109,7 +112,7 @@ export function SearchResultsReceipt({
           />
         ))}
       </div>
-      {visibleCount < result.files.length ? (
+      {!showAllResults && visibleCount < result.files.length ? (
         <button
           type="button"
           className="search-results-more"

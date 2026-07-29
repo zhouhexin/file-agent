@@ -77,6 +77,7 @@ class SearchToolInput(StrictToolInput):
     clarification_option_id: str | None = Field(
         default=None, min_length=1, max_length=80
     )
+    show_all_results: bool = False
 
     @field_validator("phrases")
     @classmethod
@@ -102,6 +103,13 @@ class SearchToolInput(StrictToolInput):
             raise ValueError("AUTO search cannot include explicit phrases")
         if bool(self.clarification_id) != bool(self.clarification_option_id):
             raise ValueError("clarification id and option id must be provided together")
+        if self.show_all_results and (
+            not self.clarification_id
+            or self.clarification_option_id != "show-all-results"
+        ):
+            raise ValueError(
+                "show_all_results requires a resolved show-all-results clarification"
+            )
         return self
 
 

@@ -117,11 +117,19 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
             }
         )
     if file_search_clarification_result:
+        is_result_limit_confirmation = (
+            file_search_clarification_result.get("selection_type")
+            == "RESULT_LIMIT_CONFIRMATION"
+        )
         pending_decisions.append(
             {
                 "type": "file_search_clarification",
                 "clarification_id": file_search_clarification_result.get("id"),
-                "message": "请选择本次文件查找范围。",
+                "message": (
+                    "查询结果较多，请确认是否全部展示。"
+                    if is_result_limit_confirmation
+                    else "请选择本次文件查找范围。"
+                ),
             }
         )
     if file_selection_result:
@@ -494,6 +502,7 @@ def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
             "total_returned": int(output.get("total_returned") or 0),
             "partial": bool(output.get("partial", False)),
             "user_message": str(output.get("user_message") or ""),
+            "show_all_results": bool(output.get("show_all_results", False)),
             "files": files,
         }
     return None
@@ -751,6 +760,10 @@ def _file_search_clarification_result(
                 if isinstance(item, dict) and item.get("id")
             ],
             "allow_custom_phrase": bool(value.get("allow_custom_phrase", False)),
+            "selection_type": str(
+                value.get("selection_type") or "SEARCH_PHRASE"
+            ),
+            "allow_multiple": bool(value.get("allow_multiple", False)),
             "expires_at": value.get("expires_at"),
         }
     return None

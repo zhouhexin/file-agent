@@ -11,9 +11,6 @@ from dataclasses import replace
 from typing import Any
 
 
-MAX_MERGED_RESULTS = 20
-
-
 class FileSearchPhraseStrategyService:
     """在两阶段检索之上执行完整短语合并和证据过滤。"""
 
@@ -93,7 +90,6 @@ class FileSearchPhraseStrategyService:
                 str(item.get("working_copy_id") or ""),
             )
         )
-        results = results[:MAX_MERGED_RESULTS]
         for item in results:
             item.pop("_body_phrase_hit", None)
         return {

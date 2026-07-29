@@ -84,6 +84,7 @@ class FileSearchClarificationPlanner:
             "require_body_evidence": value.require_body_evidence,
             "clarification_id": value.clarification_id,
             "clarification_option_id": value.option_id,
+            "show_all_results": value.show_all_results,
         }
         return PlannerOutput(
             intent="SEARCH_FILES",

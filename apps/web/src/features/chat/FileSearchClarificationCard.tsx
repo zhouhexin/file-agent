@@ -52,6 +52,8 @@ export function FileSearchClarificationCard({
       setError(
         result.selection_type === 'DOCUMENT_SELECTION'
           ? '请至少选择一份文件。'
+          : result.selection_type === 'RESULT_LIMIT_CONFIRMATION'
+          ? '请确认是否全部展示。'
           : '请先选择本次查找范围。',
       );
       return;
@@ -117,7 +119,11 @@ export function FileSearchClarificationCard({
         <Search size={18} aria-hidden />
         <div>
           <strong>
-            {result.selection_type === 'DOCUMENT_SELECTION' ? '请选择文件' : '请选择查找范围'}
+            {result.selection_type === 'DOCUMENT_SELECTION'
+              ? '请选择文件'
+              : result.selection_type === 'RESULT_LIMIT_CONFIRMATION'
+              ? '查询结果较多'
+              : '请选择查找范围'}
           </strong>
           <span>{result.prompt}</span>
         </div>
@@ -183,6 +189,8 @@ export function FileSearchClarificationCard({
             ? '正在继续…'
             : result.selection_type === 'DOCUMENT_SELECTION'
             ? '使用所选文件继续'
+            : result.selection_type === 'RESULT_LIMIT_CONFIRMATION'
+            ? '全部展示'
             : '继续查找'}
         </button>
       </footer>

@@ -20,10 +20,16 @@ from app.modules.retrieval.clarification_service import (
     FileSearchClarificationError,
     FileSearchClarificationService,
 )
+from app.modules.retrieval.clarification_planner import (
+    FileSearchClarificationPlanner,
+)
 from app.modules.retrieval.phrase_strategy import FileSearchPhraseStrategyService
 from app.modules.retrieval.query_parser import FileSearchQueryParser
 from app.modules.retrieval.synonym_service import FileSearchSynonymService
-from app.modules.agent.tool_registry import _execute_controlled_file_search
+from app.modules.agent.tool_registry import (
+    _execute_controlled_file_search,
+    _require_large_search_result_confirmation,
+)
 from app.modules.conversations.schemas import SendMessageRequest
 from app.modules.conversations.service import ConversationMessageService
 
@@ -95,6 +101,26 @@ class _FakeSynonymSearch:
                     "category_path": [],
                     "_body_phrase_hit": True,
                 }
+            ],
+        }
+
+
+class _FakeManySearch:
+    """返回超过直接展示阈值的稳定候选集合。"""
+
+    def search(self, **_kwargs):
+        return {
+            "partial": False,
+            "results": [
+                {
+                    "working_copy_id": f"wc-{index:02d}",
+                    "document_id": f"doc-{index:02d}",
+                    "filename": f"工作总结-{index:02d}.docx",
+                    "overview": "",
+                    "category_path": [],
+                    "_body_phrase_hit": True,
+                }
+                for index in range(25)
             ],
         }
 
@@ -231,6 +257,82 @@ def test_literal_phrase_strategy_drops_file_level_noise_without_body_evidence():
     )
 
     assert [item["document_id"] for item in result["results"]] == ["doc-body"]
+
+
+def test_large_phrase_result_is_not_silently_truncated_to_twenty():
+    """检索层必须保留全部命中，20 条只作为对话确认阈值。"""
+
+    result = FileSearchPhraseStrategyService(
+        search_service=_FakeManySearch(),
+        tokenizer=_Tokenizer(),
+    ).search(
+        original_query="查找工作总结",
+        parsed_query=_Parsed(cleaned="工作总结", terms=["工作总结"]),
+        scope=object(),
+        phrases=["工作总结"],
+        require_body_evidence=False,
+    )
+
+    assert result["total_returned"] == 25
+    assert len(result["results"]) == 25
+
+
+def test_large_result_requires_confirmation_and_yes_resumes_with_all_files():
+    """超过 20 条先询问；自然语言确认后同一查询可以展示全部结果。"""
+
+    db = _db()
+    db.add(Conversation(id="conv-show-all", user_id="user-1", title=""))
+    db.flush()
+    full_result = FileSearchPhraseStrategyService(
+        search_service=_FakeManySearch(),
+        tokenizer=_Tokenizer(),
+    ).search(
+        original_query="查找工作总结",
+        parsed_query=_Parsed(cleaned="工作总结", terms=["工作总结"]),
+        scope=object(),
+        phrases=["工作总结"],
+        require_body_evidence=False,
+    )
+
+    pending = _require_large_search_result_confirmation(
+        db=db,
+        user_id="user-1",
+        conversation_id="conv-show-all",
+        agent_run_id=None,
+        search_query="查找工作总结",
+        core_phrase="工作总结",
+        result=full_result,
+        show_all_results=False,
+    )
+
+    assert pending["results"] == []
+    assert pending["total_returned"] == 25
+    clarification = pending["search_clarification"]
+    assert clarification["selection_type"] == "RESULT_LIMIT_CONFIRMATION"
+    assert clarification["prompt"] == "找到 25 个相关文件，查询结果较多，是否全部展示？"
+
+    selection = FileSearchClarificationService(db).resolve_from_text(
+        conversation_id="conv-show-all",
+        user_id="user-1",
+        message="是",
+    )
+
+    assert selection is not None
+    assert selection.show_all_results is True
+    plan = FileSearchClarificationPlanner(selection).plan()
+    assert plan.steps[0].input["show_all_results"] is True
+    displayed = _require_large_search_result_confirmation(
+        db=db,
+        user_id="user-1",
+        conversation_id="conv-show-all",
+        agent_run_id=None,
+        search_query="查找工作总结",
+        core_phrase="工作总结",
+        result=full_result,
+        show_all_results=True,
+    )
+    assert len(displayed["results"]) == 25
+    assert displayed["show_all_results"] is True
 
 
 def test_clarification_is_user_scoped_and_same_selection_is_idempotent():

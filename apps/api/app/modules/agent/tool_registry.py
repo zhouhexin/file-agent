@@ -98,6 +98,7 @@ class UnknownToolError(ValueError):
 
 
 ToolHandler = Callable[[BaseModel], Dict[str, Any]]
+SEARCH_RESULT_CONFIRMATION_THRESHOLD = 20
 
 
 @dataclass(frozen=True)
@@ -616,6 +617,20 @@ def _search_handler(
                     },
                     "user_message": "文件检索暂时不可用，请稍后重试。",
                 }
+        result = _require_large_search_result_confirmation(
+            db=db,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            agent_run_id=(
+                agent_run_id_getter() if agent_run_id_getter else None
+            ),
+            search_query=search_query,
+            core_phrase=str(parsed.cleaned or "").strip(),
+            result=result,
+            show_all_results=bool(
+                getattr(tool_input, "show_all_results", False)
+            ),
+        )
         result["kind"] = "workspace_file_search"
         # managed_files 只用于内部发现。只有普通工作副本检索确实未命中时才
         # 静默准备候选；准备期间不把受管文件名称、路径或内部状态投影给用户。
@@ -634,6 +649,70 @@ def _search_handler(
         return result
 
     return handler
+
+
+def _require_large_search_result_confirmation(
+    *,
+    db: Any,
+    user_id: str,
+    conversation_id: str | None,
+    agent_run_id: str | None,
+    search_query: str,
+    core_phrase: str,
+    result: Dict[str, Any],
+    show_all_results: bool,
+) -> Dict[str, Any]:
+    """结果超过页面直接展示阈值时，先持久化“全部展示”确认。
+
+    这里不截断真实检索结果。用户确认后用原查询重新执行，并通过受校验的
+    ``show_all_results`` 标记跳过本提示；没有真实会话时无法建立对话确认，
+    因此保持完整内部结果。
+    """
+
+    files = [
+        item for item in result.get("results", []) if isinstance(item, dict)
+    ]
+    if show_all_results:
+        return {**result, "show_all_results": True}
+    if (
+        len(files) <= SEARCH_RESULT_CONFIRMATION_THRESHOLD
+        or not conversation_id
+        or isinstance(result.get("search_clarification"), dict)
+    ):
+        return result
+
+    from app.modules.retrieval.clarification_service import (
+        FileSearchClarificationService,
+    )
+
+    record = FileSearchClarificationService(db).create(
+        conversation_id=conversation_id,
+        user_id=user_id,
+        agent_run_id=agent_run_id,
+        original_query=search_query,
+        core_phrase=core_phrase,
+        relation_mode="RESULT_LIMIT_CONFIRMATION",
+        options=[
+            {
+                "id": "show-all-results",
+                "label": "全部展示",
+                "description": f"展示本次找到的全部 {len(files)} 个相关文件。",
+                "examples": [],
+                "estimated_count": len(files),
+            }
+        ],
+    )
+    public = FileSearchClarificationService.public_payload(record)
+    return {
+        "ok": True,
+        "kind": "workspace_file_search",
+        "query": search_query,
+        "total_returned": len(files),
+        "partial": bool(result.get("partial", False)),
+        "results": [],
+        "search_clarification": public,
+        "user_message": str(public["prompt"]),
+    }
 
 
 def _execute_controlled_file_search(

@@ -81,6 +81,7 @@ export type FileSearchResult = {
   total_returned: number;
   partial: boolean;
   user_message: string;
+  show_all_results?: boolean;
   files: FileSearchResultFile[];
 };
 

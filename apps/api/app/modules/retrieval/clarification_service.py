@@ -33,6 +33,7 @@ class ResolvedSearchSelection:
     match_mode: str
     phrases: tuple[str, ...]
     require_body_evidence: bool
+    show_all_results: bool = False
     document_ids: tuple[str, ...] = ()
     result_message_id: str | None = None
     result_agent_run_id: str | None = None
@@ -129,7 +130,12 @@ class FileSearchClarificationService:
             saved_document_ids = tuple(
                 str(value) for value in saved.get("document_ids", []) if str(value)
             )
-            if not saved_phrases and not saved_document_ids:
+            saved_show_all_results = bool(saved.get("show_all_results", False))
+            if (
+                not saved_phrases
+                and not saved_document_ids
+                and not saved_show_all_results
+            ):
                 raise FileSearchClarificationError("已处理选择缺少执行记录")
             if primary_option_id == "custom" and custom_phrase:
                 requested = validate_custom_search_phrase(custom_phrase)
@@ -145,6 +151,7 @@ class FileSearchClarificationService:
                 match_mode=str(saved.get("match_mode") or "LITERAL"),
                 phrases=saved_phrases,
                 require_body_evidence=bool(saved.get("require_body_evidence", False)),
+                show_all_results=saved_show_all_results,
                 document_ids=saved_document_ids,
                 result_message_id=record.result_message_id,
                 result_agent_run_id=record.result_agent_run_id,
@@ -164,7 +171,22 @@ class FileSearchClarificationService:
             raise FileSearchClarificationError("选择项不属于当前检索")
         option = selected_options[0]
 
-        if record.relation_mode in {
+        show_all_results = False
+        if record.relation_mode == "RESULT_LIMIT_CONFIRMATION":
+            if primary_option_id != "show-all-results":
+                raise FileSearchClarificationError("结果数量确认选项无效")
+            phrases = ()
+            document_ids = ()
+            match_mode = "AUTO"
+            require_body = False
+            show_all_results = True
+            estimated_count = int(option.get("estimated_count") or 0)
+            display_content = (
+                f"全部展示这次找到的 {estimated_count} 个文件"
+                if estimated_count
+                else "全部展示这次找到的文件"
+            )
+        elif record.relation_mode in {
             "DOCUMENT_SELECTION",
             "RENAME_DOCUMENT_SELECTION",
         }:
@@ -223,6 +245,7 @@ class FileSearchClarificationService:
             "match_mode": match_mode,
             "phrases": list(phrases),
             "require_body_evidence": require_body,
+            "show_all_results": show_all_results,
             "document_ids": list(document_ids),
             "option_ids": list(requested_option_ids),
         }
@@ -238,6 +261,7 @@ class FileSearchClarificationService:
             match_mode=match_mode,
             phrases=phrases,
             require_body_evidence=require_body,
+            show_all_results=show_all_results,
             document_ids=document_ids,
         )
 
@@ -320,7 +344,30 @@ class FileSearchClarificationService:
             return None
         normalized = "".join(str(message or "").strip().lower().split())
         option_id: str | None = None
-        if any(value in normalized for value in ("同义", "相近表达", "近义")):
+        if (
+            record.relation_mode == "RESULT_LIMIT_CONFIRMATION"
+            and normalized
+            in {
+                "是",
+                "是的",
+                "好的",
+                "可以",
+                "确认",
+                "全部",
+                "全部展示",
+                "全部显示",
+                "都展示",
+                "都显示",
+                "都要",
+                "全都展示",
+                "展示全部",
+                "显示全部",
+                "查看全部",
+                "全部列出",
+            }
+        ):
+            option_id = "show-all-results"
+        elif any(value in normalized for value in ("同义", "相近表达", "近义")):
             option_id = "synonyms"
         elif any(value in normalized for value in ("只查原文", "精确短语", "完整短语", "原短语")):
             option_id = "exact"
@@ -375,6 +422,8 @@ class FileSearchClarificationService:
                 if record.relation_mode == "RENAME_DOCUMENT_SELECTION"
                 else "请选择一份或多份文件，然后继续原任务。"
                 if record.relation_mode == "DOCUMENT_SELECTION"
+                else _result_limit_prompt(record)
+                if record.relation_mode == "RESULT_LIMIT_CONFIRMATION"
                 else "请选择这次需要查找的范围。"
             ),
             "core_phrase": record.core_phrase,
@@ -382,16 +431,38 @@ class FileSearchClarificationService:
             "allow_custom_phrase": record.relation_mode not in {
                 "DOCUMENT_SELECTION",
                 "RENAME_DOCUMENT_SELECTION",
+                "RESULT_LIMIT_CONFIRMATION",
             },
             "selection_type": (
                 "DOCUMENT_SELECTION"
                 if record.relation_mode
                 in {"DOCUMENT_SELECTION", "RENAME_DOCUMENT_SELECTION"}
+                else "RESULT_LIMIT_CONFIRMATION"
+                if record.relation_mode == "RESULT_LIMIT_CONFIRMATION"
                 else "SEARCH_PHRASE"
             ),
             "allow_multiple": record.relation_mode == "DOCUMENT_SELECTION",
             "expires_at": record.expires_at.isoformat(),
         }
+
+
+def _result_limit_prompt(record: FileSearchClarification) -> str:
+    """生成只含用户可见数量的结果确认提示。"""
+
+    count = next(
+        (
+            int(item.get("estimated_count") or 0)
+            for item in record.options_json
+            if isinstance(item, dict)
+            and item.get("id") == "show-all-results"
+        ),
+        0,
+    )
+    return (
+        f"找到 {count} 个相关文件，查询结果较多，是否全部展示？"
+        if count
+        else "查询结果较多，是否全部展示？"
+    )
 
 
 def _normalize_requested_option_ids(
