@@ -1,0 +1,87 @@
+/* 管理员失败文件页保持轻量表格布局，不复用聊天气泡样式。 */
+.failed-files-page {
+  min-height: 100vh;
+  padding: 32px;
+  background: #f5f7fb;
+  color: #182033;
+}
+
+.failed-files-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 20px;
+}
+
+.failed-files-header h1 {
+  margin: 0 0 6px;
+  font-size: 26px;
+}
+
+.failed-files-header p {
+  margin: 0;
+  color: #667085;
+}
+
+.failed-files-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.failed-files-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 13px;
+  border: 1px solid #cad2e0;
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.failed-files-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #dfe4ec;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.failed-files-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.failed-files-table th,
+.failed-files-table td {
+  padding: 13px 15px;
+  border-bottom: 1px solid #edf0f5;
+  text-align: left;
+  vertical-align: top;
+}
+
+.failed-files-table th {
+  white-space: nowrap;
+  background: #f9fafb;
+  color: #475467;
+}
+
+.failed-files-table td strong,
+.failed-files-table td span {
+  display: block;
+}
+
+.failed-files-table td span {
+  margin-top: 4px;
+  color: #667085;
+  font-size: 12px;
+}
+
+.failed-files-error {
+  padding: 10px 12px;
+  border: 1px solid #f3b7b7;
+  border-radius: 8px;
+  background: #fff1f1;
+  color: #b42318;
+}

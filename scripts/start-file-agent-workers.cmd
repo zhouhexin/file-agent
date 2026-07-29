@@ -31,7 +31,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [File Agent] Starting scheduler, scan worker, and lifecycle/import worker...
+echo [File Agent] Starting scheduler, scan worker, two import workers, and analysis worker...
 
 rem 预检把本机路径提交到数据库后才能启动 scheduler，避免扫描读取其他机器的旧路径。
 set "FILESYSTEM_WORKER_ID="
@@ -43,10 +43,24 @@ set "FILESYSTEM_WORKER_ID=reconcile-scan-worker"
 set "FILESYSTEM_WORKER_QUEUES=RECONCILE,SCAN"
 start "File Agent - Scan Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
 
-rem 上传查重、归档写入、导入和已确认文件操作共用生命周期 worker。
-set "FILESYSTEM_WORKER_ID=import-lifecycle-worker"
-set "FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE,IMPORT,FILE_OPERATION"
+rem 上传查重、归档写入和已确认文件操作由生命周期 worker 消费。
+set "FILESYSTEM_WORKER_ID=lifecycle-worker"
+set "FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION"
 start "File Agent - Lifecycle Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
+
+rem 两个独立 IMPORT worker 并发完成原件复制和活动工作副本登记，缓解大目录积压。
+set "FILESYSTEM_WORKER_ID=import-worker-1"
+set "FILESYSTEM_WORKER_QUEUES=IMPORT"
+start "File Agent - Import Worker 1" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
+
+set "FILESYSTEM_WORKER_ID=import-worker-2"
+set "FILESYSTEM_WORKER_QUEUES=IMPORT"
+start "File Agent - Import Worker 2" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
+
+rem 解析、摘要、分类和正文索引在慢队列串行执行，不阻塞新文件进入共享工作目录。
+set "FILESYSTEM_WORKER_ID=analysis-worker"
+set "FILESYSTEM_WORKER_QUEUES=ANALYSIS"
+start "File Agent - Analysis Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
 
 if /I "%~1"=="--with-watcher" (
     rem watcher 是可选进程；scheduler 轮询已经提供最终一致的目录同步。
@@ -55,6 +69,6 @@ if /I "%~1"=="--with-watcher" (
     start "File Agent - Managed Root Watcher" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.file_lifecycle.watcher"
 )
 
-echo [File Agent] Worker windows were started. Close each worker window or press Ctrl+C inside it to stop.
+echo [File Agent] Worker windows were started. Failed jobs stop after at most 3 attempts.
 popd
 exit /b 0

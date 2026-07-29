@@ -63,6 +63,23 @@ class FilesystemJobEventResponse(BaseModel):
     created_at: datetime
 
 
+class FailedFileJobResponse(BaseModel):
+    """管理员失败文件列表项，不暴露宿主机绝对路径或文件正文。"""
+
+    job_id: str
+    job_type: str
+    queue_name: str
+    filename: str
+    root_key: Optional[str]
+    relative_path: Optional[str]
+    attempt_count: int
+    max_attempts: int
+    error_message: Optional[str]
+    error_reference: Optional[str]
+    created_at: datetime
+    finished_at: Optional[datetime]
+
+
 class ManagedFileResponse(BaseModel):
     """受管文件查询响应，只返回逻辑路径信息。"""
 

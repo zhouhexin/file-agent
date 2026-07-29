@@ -62,7 +62,7 @@ python -m pytest
 上传采用分块流式写入，`UPLOAD_MAX_FILE_SIZE_MB` 是可按部署容量调整的资源保护上限，默认 1024 MB，并非固定业务限制。当前阶段只执行扩展名、基础 MIME、宏和加密风险检查，不实现、也不宣称已执行病毒扫描。
 PDF、DOCX 默认启用本地 Docling 结构化解析，并把文档元素和位置写入 `document_elements`；Docling 不可用时自动回退现有解析器，扫描件仍由现有 OCR 链路处理。
 文件重命名统一生成 `RENAME_WORKING_COPIES` OperationPlan，确认后由工作副本执行器执行；旧的受管原始文件 Native/F2 执行通道和上传暂存重命名通道不再对 Agent 开放。
-上传附件通过查重后由独立 worker 归档到受管原始目录；导入 worker 在隐藏临时文件上完成解析、双摘要、分类和首次命名，再把文件原子提交到最终工作副本路径。后台双摘要默认使用 CPU-only Jieba + LexRank 抽取原文关键句，即使全局 LLM 已启用也不会自动发送上传正文；只有用户明确要求总结或讲解时才使用独立的聊天摘要 LLM Provider。低置信度命名保留原上传文件名并请求确认；目标名称冲突时先询问是否同时保留，不会自动增加版本后缀或覆盖文件。普通用户只看到整理后的文件名、分类和需要本人决定的事项，不展示内部状态、Skill 或 Tool。对话找文件默认使用 CPU-only 两阶段检索：先按最终文件名、分类、元数据和普通文档摘要召回少量当前工作副本，必要时以原文 Chunk 词法索引补召回，再只在候选版本内定位证据。该流程不调用 embedding、GPU、LLM 或 Graph；用户只看到文件卡、分类、概览、命中原因和位置，并能打开有权限的结果文件。精确问答仍必须回到原文取证。后续重命名、移动和删除计划必须以 `working_copy_id` 为对象，不能再修改受管原始目录。
+上传附件通过查重后由独立 worker 归档到受管原始目录；`IMPORT` worker 只完成原子复制、`ACTIVE` 工作副本登记和文件名级检索投影，随后由 `ANALYSIS` worker 异步完成正文解析、双摘要、分类和 Chunk 索引。后台双摘要默认使用 CPU-only Jieba + LexRank 抽取原文关键句，即使全局 LLM 已启用也不会自动发送上传正文；只有用户明确要求总结或讲解时才使用独立的聊天摘要 LLM Provider。低置信度命名保留原上传文件名并请求确认；目标名称冲突时先询问是否同时保留，不会自动增加版本后缀或覆盖文件。普通用户只看到整理后的文件名、分类和需要本人决定的事项，不展示内部状态、Skill 或 Tool。对话找文件默认使用 CPU-only 两阶段检索：先按最终文件名、分类、元数据和普通文档摘要召回少量当前工作副本，必要时以原文 Chunk 词法索引补召回，再只在候选版本内定位证据。该流程不调用 embedding、GPU、LLM 或 Graph；用户只看到文件卡、分类、概览、命中原因和位置，并能打开有权限的结果文件。精确问答仍必须回到原文取证。后续重命名、移动和删除计划必须以 `working_copy_id` 为对象，不能再修改受管原始目录。
 每个成功解析的工作副本内容版本会在发布前幂等建立 Chunk/Evidence。当前无 GPU 部署使用 Jieba + PostgreSQL `simple` FTS/GIN + `pg_trgm` 的 CPU 词法索引；`embedding vector(1536)` 只保留空扩展槽，默认 `EMBEDDING_ENABLED=false`，不会下载向量模型或要求应用服务器安装 GPU。后续可接独立 GPU provider 异步回填，不改变已有 Chunk、Evidence 和引用 ID。
 默认不启用真实 LLM 调用；如需让对话阶段使用大模型理解用户需求，请在 `.env` 中配置 `LLM_ENABLED=true`、`LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_CHAT_MODEL`。当前 LLM 客户端使用 OpenAI-compatible Chat Completions 接口。
 后台普通摘要和分类主题摘要分别由 `DOCUMENT_SUMMARY_PROVIDER=extractive`、`CLASSIFICATION_SUMMARY_PROVIDER=extractive` 控制；这两个默认值不需要 GPU 或模型服务。阶段五的用户问答和完整总结由 `EVIDENCE_ANSWER_PROVIDER=llm` 控制，并且只有 `LLM_ENABLED=true` 时才调用模型；回答必须绑定活动工作副本当前版本的 EvidenceSpan。LLM 关闭或校验失败时只返回带明确限制的原文摘录，不生成猜测答案。表格金额、计数和汇总继续由确定性 `analyze-spreadsheet` 计算。
@@ -75,7 +75,8 @@ Neo4j 图谱增强分类默认关闭。第二版本支持目录角色 Profile、
 
 Windows CMD 可直接执行 `scripts\start-file-agent-workers.cmd`。脚本会先读取项目根 `.env`，把当前
 Windows 机器的 `MANAGED_ROOT_*` 路径同步到数据库并真实验证目录可读；预检失败时不会启动任何
-worker。预检通过后分别启动 scheduler、扫描 worker 和导入/生命周期 worker；增加
+worker。预检通过后分别启动 scheduler、扫描 worker、生命周期 worker、两个 `IMPORT` worker 和一个
+`ANALYSIS` worker；增加
 `--with-watcher` 才会额外启动 watcher。若 Python 不在 PATH，先设置 `FILE_AGENT_PYTHON` 为解释器
 绝对路径。脚本无论从哪个当前目录调用都会先切换到仓库根，因此相对
 `WORKING_COPY_STORAGE_ROOT=./storage/working-copies` 始终指向仓库内目录。共享开发数据库已有
@@ -87,7 +88,11 @@ WorkingCopy 记录但当前机器物理文件缺失时，下一次扫描会重�
 # IMPORT 任务，因此扫描 worker 与导入 worker 同时运行时，工作副本无需等待全量扫描结束。
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
-PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=IMPORT,FILE_OPERATION \
+PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=IMPORT \
+  /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
+PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=ANALYSIS \
+  /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
+PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=FILE_OPERATION \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=RECONCILE,SCAN \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
@@ -120,3 +125,8 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules
 ```
 
 第一版不做完整 Neo4j 图谱、Graphiti 记忆、自动 Skill 演化或外部多智能体平台，但从第一版开始必须使用 LangGraph，并保留 AgentRun、Tool 调用、ChangeSet、OperationPlan 和审计边界。
+
+登录数据库
+```
+psql -h 172.17.16.2 -U fileagent_user -d fileAgent
+```

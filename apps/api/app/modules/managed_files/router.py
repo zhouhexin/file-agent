@@ -15,6 +15,7 @@ from app.modules.auth.dependencies import get_current_user
 from app.modules.managed_files.schemas import (
     FilesystemJobResponse,
     FilesystemJobEventResponse,
+    FailedFileJobResponse,
     ManagedCategoryResponse,
     ManagedFileResponse,
     ManagedRootCreateRequest,
@@ -89,6 +90,22 @@ def get_filesystem_job(
     """查询异步扫描任务状态。"""
 
     return ManagedFileService(db).get_job(job_id=job_id, current_user=current_user)
+
+
+@router.get("/api/admin/failed-files", response_model=list[FailedFileJobResponse])
+def list_failed_files(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[FailedFileJobResponse]:
+    """允许 ops/admin 查看达到最大尝试次数后的失败文件。"""
+
+    return ManagedFileService(db).list_failed_file_jobs(
+        current_user=current_user,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/api/filesystem-jobs/{job_id}", response_model=FilesystemJobResponse)

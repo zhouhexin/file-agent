@@ -421,6 +421,14 @@ def _enqueue_import_jobs_for_files(*, db: Session, root_id: str, files: list[Man
     }
     job_ids: list[str] = []
     for managed_file in files:
+        user_id = fallback_user
+        if managed_file.source_type == "UPLOAD_ARCHIVE" and managed_file.source_upload_version_id:
+            review = lifecycle_repository.get_review_by_version(managed_file.source_upload_version_id)
+            if review is not None:
+                user_id = review.user_id
+        # 新部署尚无用户时不能伪造审计人；下次有管理员或上传者后再调度即可。
+        if not user_id:
+            continue
         existing_pair = existing_by_managed_file_id.get(managed_file.id)
         if existing_pair is not None:
             working_copy, working_root = existing_pair
@@ -450,6 +458,24 @@ def _enqueue_import_jobs_for_files(*, db: Session, root_id: str, files: list[Man
                         # 当前版本已经确定性解析失败且文件级投影可用时，停止自动重试。
                         # 后续只能由显式重处理创建新的解析运行，避免每次扫描无限消耗。
                         continue
+                    analysis_job = queue.create_job(
+                        job_type="ANALYZE_DOCUMENT_VERSION",
+                        queue_name="ANALYSIS",
+                        root_id=root_id,
+                        created_by=user_id,
+                        deduplication_key=f"document-analysis:{working_copy.current_version_id}",
+                        max_attempts=3,
+                        # 成功任务只有在派生数据确实缺失时才允许补建；失败终态不会自动重开。
+                        reuse_completed=True,
+                        payload={
+                            "managed_file_id": managed_file.id,
+                            "working_copy_id": working_copy.id,
+                            "document_id": working_copy.document_id,
+                            "document_version_id": working_copy.current_version_id,
+                            "user_id": user_id,
+                        },
+                    )
+                    job_ids.append(analysis_job.id)
                     log_event(
                         "working_copy.search_repair.queued",
                         document_id=working_copy.document_id,
@@ -460,8 +486,9 @@ def _enqueue_import_jobs_for_files(*, db: Session, root_id: str, files: list[Man
                         root_id=root_id,
                         profile_ready=artifact_status["profile_ready"],
                         index_ready=artifact_status["index_ready"],
-                        message="物理工作副本存在但检索派生数据缺失，准备补发导入修复任务",
+                        message="物理工作副本存在但检索派生数据缺失，准备补发独立分析任务",
                     )
+                    continue
             except OSError:
                 # 无法读取工作目录时仍创建修复任务，由生命周期 worker 记录结构化失败。
                 log_event(
@@ -476,14 +503,6 @@ def _enqueue_import_jobs_for_files(*, db: Session, root_id: str, files: list[Man
                     message="工作副本路径状态读取失败，仍将提交修复任务",
                 )
 
-        user_id = fallback_user
-        if managed_file.source_type == "UPLOAD_ARCHIVE" and managed_file.source_upload_version_id:
-            review = lifecycle_repository.get_review_by_version(managed_file.source_upload_version_id)
-            if review is not None:
-                user_id = review.user_id
-        # 新部署尚无用户时不能伪造审计人；下次有管理员或上传者后再调度即可。
-        if not user_id:
-            continue
         import_job = queue.create_job(
             job_type="IMPORT_WORKING_COPIES",
             queue_name="IMPORT",

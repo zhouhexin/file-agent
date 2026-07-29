@@ -19,10 +19,47 @@ from app.db.models import (
     utcnow,
 )
 from app.modules.managed_files.worker import _public_job_error_message, process_next_filesystem_job
+from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.scanner import ManagedFileScanner
 from app.modules.managed_files.service import sync_configured_managed_roots
 from app.modules.file_lifecycle.service import FileLifecycleJobProcessor
 from app.tests.helpers import clear_overrides, client_with_database
+
+
+def test_failed_deduplicated_job_is_not_reopened_by_automatic_scan():
+    """终态失败任务不会因扫描再次命中去重键而无限重试。"""
+
+    _client, session_factory = client_with_database()
+    with session_factory() as db:
+        queue = FilesystemJobQueue(db)
+        job = queue.create_job(
+            job_type="IMPORT_WORKING_COPIES",
+            queue_name="IMPORT",
+            root_id=None,
+            created_by=None,
+            deduplication_key="failed-import-regression",
+            max_attempts=99,
+            payload={"managed_file_id": "missing"},
+        )
+        assert job.max_attempts == 3
+        job.status = "FAILED"
+        job.attempt_count = 3
+        db.commit()
+        job_id = job.id
+
+    with session_factory() as db:
+        same_job = FilesystemJobQueue(db).create_job(
+            job_type="IMPORT_WORKING_COPIES",
+            queue_name="IMPORT",
+            root_id=None,
+            created_by=None,
+            deduplication_key="failed-import-regression",
+            reuse_completed=True,
+            payload={"managed_file_id": "missing"},
+        )
+        assert same_job.id == job_id
+        assert same_job.status == "FAILED"
+        assert same_job.attempt_count == 3
 
 
 def test_worker_processes_scan_job_and_persists_files(tmp_path: Path, capsys):

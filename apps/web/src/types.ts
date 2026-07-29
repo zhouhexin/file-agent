@@ -381,6 +381,21 @@ export type FilesystemJobResponse = {
   finished_at: string | null;
 };
 
+export type FailedFileJob = {
+  job_id: string;
+  job_type: string;
+  queue_name: string;
+  filename: string;
+  root_key: string | null;
+  relative_path: string | null;
+  attempt_count: number;
+  max_attempts: number;
+  error_message: string | null;
+  error_reference: string | null;
+  created_at: string;
+  finished_at: string | null;
+};
+
 export type DocumentCategory = {
   suggestion_id?: string;
   category_id?: string;

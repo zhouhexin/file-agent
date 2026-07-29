@@ -36,8 +36,15 @@ class FilesystemJobQueue:
         priority: int = 100,
         max_attempts: int = 3,
         reuse_completed: bool = False,
+        retry_failed: bool = False,
     ) -> FilesystemJob:
-        """在当前事务中幂等创建 PENDING 任务并写入事件。"""
+        """在当前事务中幂等创建 PENDING 任务并写入事件。
+
+        自动扫描不得重新激活已达到终态的失败任务。只有管理员显式发起重处理时，
+        调用方才能传入 ``retry_failed=True``；单个任务的尝试次数始终不超过三次。
+        """
+
+        bounded_max_attempts = max(1, min(3, int(max_attempts)))
 
         if deduplication_key:
             existing = (
@@ -46,7 +53,9 @@ class FilesystemJobQueue:
                 .one_or_none()
             )
             if existing is not None:
-                if existing.status == "FAILED" or (reuse_completed and existing.status == "COMPLETED"):
+                if (retry_failed and existing.status == "FAILED") or (
+                    reuse_completed and existing.status == "COMPLETED"
+                ):
                     # 业务状态仍要求执行时允许补偿任务重置同一幂等键；不创建第二条任务，
                     # 从而保留完整尝试和事件历史。
                     existing.status = "PENDING"
@@ -54,6 +63,7 @@ class FilesystemJobQueue:
                     existing.error_message = None
                     existing.finished_at = None
                     existing.attempt_count = 0
+                    existing.max_attempts = bounded_max_attempts
                     existing.lease_owner = None
                     existing.lease_expires_at = None
                     existing.updated_at = utcnow()
@@ -75,7 +85,7 @@ class FilesystemJobQueue:
             progress_current=0,
             progress_total=0,
             attempt_count=0,
-            max_attempts=max_attempts,
+            max_attempts=bounded_max_attempts,
             available_at=utcnow(),
             payload_json=payload,
             result_json={},
@@ -93,6 +103,22 @@ class FilesystemJobQueue:
         """
 
         now = utcnow()
+        # 兼容升级前可能写入的大于三次配置，领取前统一收紧，避免旧积压任务继续超额重试。
+        (
+            self.db.query(FilesystemJob)
+            .filter(FilesystemJob.max_attempts > 3)
+            .update({FilesystemJob.max_attempts: 3}, synchronize_session=False)
+        )
+        pending_exhausted = (
+            self.db.query(FilesystemJob)
+            .filter(
+                FilesystemJob.status == "PENDING",
+                FilesystemJob.attempt_count >= FilesystemJob.max_attempts,
+            )
+            .all()
+        )
+        for stale_job in pending_exhausted:
+            self.mark_failed(job=stale_job, error_message="任务已达到最大尝试次数")
         exhausted = (
             self.db.query(FilesystemJob)
             .filter(

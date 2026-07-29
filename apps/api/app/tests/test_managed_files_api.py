@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from app.db.models import ManagedFile, ManagedRoot, User
+from app.db.models import FilesystemJob, FilesystemJobEvent, ManagedFile, ManagedRoot, User
 from app.modules.managed_files.scanner import ManagedFileScanner
 from app.modules.managed_files.service import sync_configured_managed_roots
 from app.tests.helpers import clear_overrides, client_with_database
@@ -50,6 +50,77 @@ def _run_reconcile_worker(SessionLocal, root_key: str) -> None:
         db.commit()
     finally:
         db.close()
+
+
+def test_admin_can_view_final_failed_files_but_user_cannot():
+    """失败文件表只向 ops/admin 展示脱敏路径、阶段和错误编号。"""
+
+    client, session_factory = client_with_database()
+    user_id, token = _register_and_login(client, "failed-files-admin")
+    with session_factory() as db:
+        root = ManagedRoot(
+            root_key="school_files",
+            display_name="school_files",
+            container_path="/managed/school-files",
+        )
+        db.add(root)
+        db.flush()
+        managed_file = ManagedFile(
+            root_id=root.id,
+            relative_path="通知/失败文件.docx",
+            filename="失败文件.docx",
+            extension=".docx",
+            size_bytes=10,
+            fingerprint="failed-file-fingerprint",
+            status="ACTIVE",
+        )
+        db.add(managed_file)
+        db.flush()
+        job = FilesystemJob(
+            job_type="ANALYZE_DOCUMENT_VERSION",
+            queue_name="ANALYSIS",
+            root_id=root.id,
+            status="FAILED",
+            payload_json={"managed_file_id": managed_file.id},
+            result_json={},
+            attempt_count=3,
+            max_attempts=3,
+            error_message="文档解析失败，请联系管理员。",
+        )
+        db.add(job)
+        db.flush()
+        db.add(
+            FilesystemJobEvent(
+                job_id=job.id,
+                level="ERROR",
+                message="文档解析失败，请联系管理员。",
+                details_json={"error_reference": "req_failed_file_test"},
+            )
+        )
+        db.commit()
+
+    denied = client.get("/api/admin/failed-files", headers=_auth_header(token))
+    assert denied.status_code == 403
+
+    _make_admin(session_factory, user_id)
+    response = client.get("/api/admin/failed-files", headers=_auth_header(token))
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "job_id": response.json()[0]["job_id"],
+            "job_type": "ANALYZE_DOCUMENT_VERSION",
+            "queue_name": "ANALYSIS",
+            "filename": "失败文件.docx",
+            "root_key": "school_files",
+            "relative_path": "通知/失败文件.docx",
+            "attempt_count": 3,
+            "max_attempts": 3,
+            "error_message": "文档解析失败，请联系管理员。",
+            "error_reference": "req_failed_file_test",
+            "created_at": response.json()[0]["created_at"],
+            "finished_at": None,
+        }
+    ]
 
 
 def test_admin_can_enable_predefined_managed_root(monkeypatch):

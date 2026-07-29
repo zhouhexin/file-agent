@@ -727,7 +727,8 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
 Windows CMD 开发环境可以直接运行 `scripts\start-file-agent-workers.cmd`。脚本会先执行同步预检：
 读取项目根 `.env`，用当前机器的 `MANAGED_ROOT_*` 更新数据库中的运行时目录路径，真实打开每个目录
 验证可读性，并停用旧版本误登记的 `scan_batch_size` 等伪目录。只有预检成功后，才会以独立窗口启动
-scheduler、`RECONCILE,SCAN` 和 `DUPLICATE_CHECK,ARCHIVE,IMPORT,FILE_OPERATION`。它适合本地开发
+scheduler、`RECONCILE,SCAN`、`DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION`、两个 `IMPORT` worker 和
+一个 `ANALYSIS` worker。它适合本地开发
 与烟测；生产环境仍可按以下命令基于容量分别部署更多 worker。
 
 Windows 必须从本机仓库根目录使用 Windows 路径执行，例如：
@@ -755,8 +756,20 @@ PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=duplicate-archive-1 \
   FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 
-PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=import-operation-1 \
-  FILESYSTEM_WORKER_QUEUES=IMPORT,FILE_OPERATION \
+PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=import-1 \
+  FILESYSTEM_WORKER_QUEUES=IMPORT \
+  /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
+
+PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=import-2 \
+  FILESYSTEM_WORKER_QUEUES=IMPORT \
+  /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
+
+PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=analysis-1 \
+  FILESYSTEM_WORKER_QUEUES=ANALYSIS \
+  /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
+
+PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=file-operation-1 \
+  FILESYSTEM_WORKER_QUEUES=FILE_OPERATION \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 
 PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=reconcile-scan-1 \
@@ -770,11 +783,12 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
   -m app.modules.file_lifecycle.watcher
 ```
 
-API 启动钩子、scheduler 和 watcher 都只创建 `filesystem_jobs`。实际 SHA-256 查重、归档、扫描、导入和暂存清理由 worker 完成。受管目录扫描按 `MANAGED_ROOT_SCAN_BATCH_SIZE` 或 `MANAGED_ROOT_SCAN_BATCH_MAX_SECONDS` 分批提交；每批立即创建 `IMPORT` 任务，故 `RECONCILE,SCAN` worker 与 `IMPORT` worker 必须同时运行。任务通过租约和幂等键恢复，状态接口为：
+API 启动钩子、scheduler 和 watcher 都只创建 `filesystem_jobs`。实际 SHA-256 查重、归档、扫描、导入和暂存清理由 worker 完成。受管目录扫描按 `MANAGED_ROOT_SCAN_BATCH_SIZE` 或 `MANAGED_ROOT_SCAN_BATCH_MAX_SECONDS` 分批提交；每批立即创建 `IMPORT` 任务，快速生成活动工作副本后再提交 `ANALYSIS` 任务。脚本默认启动两个 `IMPORT` worker 缓解首次全量导入积压。任务通过租约和幂等键恢复，每个任务最多尝试三次；达到上限后保持 `FAILED`，自动扫描不会重新激活。ops/admin 可在 `/admin/failed-files` 查看失败文件，状态接口为：
 
 ```text
 GET /api/jobs/{job_id}
 GET /api/jobs/{job_id}/events
+GET /api/admin/failed-files
 ```
 
 部署挂载必须保持以下权限边界：

@@ -9,6 +9,7 @@ import type {
   DuplicateReview,
   FileSearchClarificationResult,
   FilePreviewResponse,
+  FailedFileJob,
   UploadArchiveStatus,
   FilesystemJobResponse,
   OperationConfirmResponse,
@@ -149,6 +150,11 @@ export async function getFilesystemJob(
 ): Promise<FilesystemJobResponse> {
   // 普通用户只能轮询自己创建的异步分类任务。
   return request<FilesystemJobResponse>(`/filesystem-jobs/${jobId}`, { token });
+}
+
+export async function getFailedFileJobs(token: string): Promise<FailedFileJob[]> {
+  // 失败列表只对 ops/admin 开放，页面不接收绝对路径和文件正文。
+  return request<FailedFileJob[]>('/admin/failed-files?limit=200', { token });
 }
 
 export async function fetchUploadedFileBlob(token: string, documentId: string): Promise<Blob> {

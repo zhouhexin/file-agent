@@ -6,12 +6,13 @@ import { getCurrentUser } from './api/client';
 import { clearToken, readToken, saveToken } from './auth/storage';
 import { hasCompletedOnboarding, markOnboardingCompleted } from './auth/onboardingStorage';
 import { AuthPage } from './features/auth/AuthPage';
+import { FailedFilesPage } from './features/admin/FailedFilesPage';
 import { ChatPage } from './features/chat/ChatPage';
 import { OnboardingPage } from './features/onboarding/OnboardingPage';
 import './features/chat/chat.css';
 import type { User } from './types';
 
-type AppPath = '/login' | '/chat' | '/getting-started';
+type AppPath = '/login' | '/chat' | '/getting-started' | '/admin/failed-files';
 
 function readInitialPath(): AppPath {
   // 直接读取当前 URL 以支持刷新 / 直接访问 /getting-started 的场景。
@@ -21,6 +22,9 @@ function readInitialPath(): AppPath {
   }
   if (pathname === '/login') {
     return '/login';
+  }
+  if (pathname === '/admin/failed-files') {
+    return '/admin/failed-files';
   }
   return '/chat';
 }
@@ -122,6 +126,12 @@ export function App() {
     setCurrentPath('/getting-started');
   }
 
+  function openFailedFiles() {
+    // 失败文件页只对 ops/admin 展示入口，后端仍会再次执行角色校验。
+    pushPath('/admin/failed-files');
+    setCurrentPath('/admin/failed-files');
+  }
+
   function completeOnboarding() {
     markOnboardingCompleted();
     setPendingExample('');
@@ -154,12 +164,20 @@ export function App() {
     );
   }
 
+  if (
+    currentPath === '/admin/failed-files'
+    && ['ops', 'admin'].includes(currentUser.role)
+  ) {
+    return <FailedFilesPage token={token} onBack={openChat} />;
+  }
+
   return (
     <ChatPage
       token={token}
       user={currentUser}
       onLogout={handleLogout}
       onOpenOnboarding={openOnboarding}
+      onOpenFailedFiles={openFailedFiles}
       initialDraft={pendingExample}
     />
   );

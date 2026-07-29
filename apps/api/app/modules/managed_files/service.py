@@ -14,13 +14,14 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.db.models import FilesystemJob, ManagedFile, ManagedRoot, User
+from app.db.models import FilesystemJob, FilesystemJobEvent, ManagedFile, ManagedRoot, User
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.path_policy import PathPolicyError, resolve_managed_relative_path
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
 from app.modules.managed_files.schemas import (
     FilesystemJobResponse,
     FilesystemJobEventResponse,
+    FailedFileJobResponse,
     ManagedCategoryResponse,
     ManagedFileResponse,
     ManagedRootCreateRequest,
@@ -160,6 +161,87 @@ class ManagedFileService:
             )
             for event in events
         ]
+
+    def list_failed_file_jobs(
+        self,
+        *,
+        current_user: User,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[FailedFileJobResponse]:
+        """列出最终失败的导入和分析任务，供 ops/admin 定位具体文件。"""
+
+        _require_role(current_user, {"admin", "ops"})
+        jobs = (
+            self.db.query(FilesystemJob)
+            .filter(
+                FilesystemJob.status == "FAILED",
+                FilesystemJob.job_type.in_(
+                    {"IMPORT_WORKING_COPIES", "ANALYZE_DOCUMENT_VERSION"}
+                ),
+            )
+            .order_by(FilesystemJob.finished_at.desc(), FilesystemJob.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        managed_file_ids = {
+            str((job.payload_json or {}).get("managed_file_id") or "")
+            for job in jobs
+        }
+        managed_files = {
+            row.id: row
+            for row in self.db.query(ManagedFile)
+            .filter(ManagedFile.id.in_(managed_file_ids))
+            .all()
+            if row.id
+        } if managed_file_ids else {}
+        root_ids = {row.root_id for row in managed_files.values()}
+        roots = {
+            row.id: row
+            for row in self.db.query(ManagedRoot).filter(ManagedRoot.id.in_(root_ids)).all()
+        } if root_ids else {}
+        latest_events: dict[str, FilesystemJobEvent] = {}
+        if jobs:
+            events = (
+                self.db.query(FilesystemJobEvent)
+                .filter(
+                    FilesystemJobEvent.job_id.in_([job.id for job in jobs]),
+                    FilesystemJobEvent.level == "ERROR",
+                )
+                .order_by(FilesystemJobEvent.created_at.desc())
+                .all()
+            )
+            for event in events:
+                latest_events.setdefault(event.job_id, event)
+
+        results: list[FailedFileJobResponse] = []
+        for job in jobs:
+            managed_file_id = str((job.payload_json or {}).get("managed_file_id") or "")
+            managed_file = managed_files.get(managed_file_id)
+            root = roots.get(managed_file.root_id) if managed_file is not None else None
+            details = (
+                dict(latest_events[job.id].details_json or {})
+                if job.id in latest_events
+                else {}
+            )
+            results.append(
+                FailedFileJobResponse(
+                    job_id=job.id,
+                    job_type=job.job_type,
+                    queue_name=job.queue_name,
+                    filename=managed_file.filename if managed_file is not None else "未知文件",
+                    root_key=root.root_key if root is not None else None,
+                    relative_path=managed_file.relative_path if managed_file is not None else None,
+                    attempt_count=job.attempt_count,
+                    max_attempts=min(3, job.max_attempts),
+                    error_message=job.error_message,
+                    error_reference=str(details.get("error_reference") or "") or None,
+                    created_at=job.created_at,
+                    finished_at=job.finished_at,
+                )
+            )
+        return results
 
     def list_files(
         self,

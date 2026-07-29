@@ -119,7 +119,7 @@ def _trash_working_copy(client, headers: dict[str, str], working_copy_id: str, c
 
 
 def test_upload_is_archived_then_imported_by_separate_jobs(monkeypatch, tmp_path):
-    """查重、归档和导入必须串联为三个持久化任务并建立完整追溯关系。"""
+    """查重、归档、快速导入和后台分析必须串联为四个持久化任务。"""
 
     _configure(monkeypatch, tmp_path)
     client, SessionLocal = client_with_database()
@@ -128,7 +128,7 @@ def test_upload_is_archived_then_imported_by_separate_jobs(monkeypatch, tmp_path
 
     processed = _drain(SessionLocal)
 
-    assert len(processed) == 3
+    assert len(processed) == 4
     status = client.get(
         f"/api/uploads/{upload['upload_document_version_id']}/archive-status",
         headers=headers,
@@ -157,7 +157,7 @@ def test_upload_is_archived_then_imported_by_separate_jobs(monkeypatch, tmp_path
         assert ".internal" not in version.storage_path
         assert db.query(DocumentSummary).filter_by(document_id=working_copy.document_id).count() == 1
         assert db.query(DocumentClassificationSummary).filter_by(document_id=working_copy.document_id).count() == 1
-        # 首次工作副本在 ACTIVE 前必须完成 CPU 原文索引，embedding 默认关闭。
+        # 快速导入先创建 ACTIVE 工作副本，随后由独立 ANALYSIS 任务补齐 CPU 原文索引。
         index_run = db.query(DocumentIndexRun).filter_by(document_version_id=version.id).one()
         assert index_run.status == "COMPLETED"
         assert index_run.embedding_status == "DISABLED"
