@@ -3,8 +3,9 @@
 把"加载所有候选到 Python 内存再遍历评分"改为"PostgreSQL 索引查询"。
 召回顺序：
 1. normalized_filename 精确匹配（B-tree 索引）
-2. Jieba/GIN search_vector 主召回（setweight: A=文件名, B=分类, C=元数据, D=摘要）
-3. 受限 pg_trgm 补召回（仅当查询 ≥ 配置最小长度、精确+GIN 不足时启用）
+2. normalized_filename 连续短语匹配（pg_trgm GIN 索引）
+3. Jieba/GIN search_vector 主召回（setweight: A=文件名, B=分类, C=元数据, D=摘要）
+4. 受限 pg_trgm 补召回（仅当查询 ≥ 配置最小长度、精确+GIN 不足时启用）
 
 候选收敛后以有界批量查询补齐显示字段，不执行一对多联合 JOIN 或逐文件 N+1 读取。
 SQLite 下使用 deterministic token 覆盖降级。
@@ -136,8 +137,9 @@ class Stage1DocumentRecallService:
 
         召回顺序：
         1. normalized_filename 精确匹配
-        2. search_vector GIN 主召回
-        3. pg_trgm 补召回（若不足）
+        2. normalized_filename 连续短语匹配
+        3. search_vector GIN 主召回
+        4. pg_trgm 补召回（若不足）
         """
         query_text = parsed_query.cleaned if hasattr(parsed_query, "cleaned") else ""
         if not query_text:
@@ -145,7 +147,11 @@ class Stage1DocumentRecallService:
         short_phrase = exact_short_chinese_phrase(query_text)
         if short_phrase:
             # 短人名和短业务实体必须连续匹配，不能退化为单字 OR 或文件名模糊匹配。
-            return self._exact_short_phrase_match(short_phrase, scope)
+            return self._exact_short_phrase_match(
+                short_phrase,
+                parsed_query,
+                scope,
+            )
 
         candidates = []
         seen_wc_ids: set[str] = set()
@@ -158,7 +164,19 @@ class Stage1DocumentRecallService:
                 seen_wc_ids.add(wc_id)
                 candidates.append(c)
 
-        # 2. GIN 主召回
+        # 2. 文件名连续短语必须先于宽泛 GIN 候选进入结果，避免明确目标被候选上限挤掉。
+        filename_phrase = self._filename_phrase_match(
+            query_text,
+            parsed_query,
+            scope,
+        )
+        for c in filename_phrase:
+            wc_id = c.get("working_copy_id")
+            if wc_id and wc_id not in seen_wc_ids:
+                seen_wc_ids.add(wc_id)
+                candidates.append(c)
+
+        # 3. GIN 主召回
         gin = self._gin_search(query_text, scope)
         for c in gin:
             wc_id = c.get("working_copy_id")
@@ -166,7 +184,7 @@ class Stage1DocumentRecallService:
                 seen_wc_ids.add(wc_id)
                 candidates.append(c)
 
-        # 3. 如果候选不足且查询达最小长度，启用 pg_trgm 补召回
+        # 4. 如果候选不足且查询达最小长度，启用 pg_trgm 补召回
         trgm_min = getattr(self.config, "retrieval_filename_trgm_min_chars", 4)
         candidate_limit = getattr(self.config, "retrieval_document_candidate_limit", 30)
         if len(candidates) < candidate_limit and len(query_text) >= trgm_min:
@@ -204,39 +222,58 @@ class Stage1DocumentRecallService:
                 "working_copy_id": r.working_copy_id,
                 "document_id": r.document_id,
                 "document_version_id": r.document_version_id,
-                "_score": 1.0,
+                "_score": 3.0,
                 "_hit_source": "exact_filename",
             }
             for r in rows
         ]
 
-    def _exact_short_phrase_match(self, phrase: str, scope: Any) -> list[dict]:
-        """在有索引的文件名和瘦投影中连续匹配短中文实体。"""
+    def _filename_phrase_match(
+        self,
+        query_text: str,
+        parsed_query: Any,
+        scope: Any,
+    ) -> list[dict]:
+        """用文件名 pg_trgm 索引连续匹配完整短语，并优先保留显式年份命中。
+
+        该分支只读取活动瘦投影。它不把短语拆成 OR，也不替代后续正文精查；
+        作用是防止文件名已经明确包含机构或主题的文件被宽泛 GIN 候选上限挤掉。
+        """
 
         import sqlalchemy as sa
 
         from app.modules.retrieval.search_profile import _normalize_text
 
-        normalized = _normalize_text(phrase)
+        normalized = _normalize_text(query_text)
         if not normalized:
             return []
+        phrase_match = DocumentSearchProfile.normalized_filename.contains(normalized)
+        year = getattr(parsed_query, "year", None)
+        year_match = (
+            DocumentSearchProfile.normalized_filename.contains(str(year))
+            if year is not None
+            else None
+        )
+        score = (
+            sa.case((year_match, 2.2), else_=2.1)
+            if year_match is not None
+            else sa.literal(2.1)
+        )
+        ordering = [score.desc(), DocumentSearchProfile.normalized_filename.asc()]
         rows = (
             self.db.query(
                 DocumentSearchProfile.working_copy_id,
                 DocumentSearchProfile.document_id,
                 DocumentSearchProfile.document_version_id,
+                score.label("score"),
             )
             .filter(
                 DocumentSearchProfile.workspace_id == self.workspace_id,
                 DocumentSearchProfile.status == "ACTIVE",
-                sa.or_(
-                    DocumentSearchProfile.normalized_filename.contains(normalized),
-                    # combined_search_text 有 pg_trgm GIN；直接匹配连续汉字可同时兼容
-                    # Jieba 词项和 deterministic fallback 保存的完整中文片段。
-                    DocumentSearchProfile.combined_search_text.contains(phrase),
-                ),
+                phrase_match,
                 *self._scope_predicates(scope),
             )
+            .order_by(*ordering)
             .limit(self.config.retrieval_document_candidate_limit)
             .all()
         )
@@ -245,7 +282,75 @@ class Stage1DocumentRecallService:
                 "working_copy_id": row.working_copy_id,
                 "document_id": row.document_id,
                 "document_version_id": row.document_version_id,
-                "_score": 1.0,
+                "_score": float(row.score),
+                "_hit_source": "filename_phrase",
+            }
+            for row in rows
+        ]
+
+    def _exact_short_phrase_match(
+        self,
+        phrase: str,
+        parsed_query: Any,
+        scope: Any,
+    ) -> list[dict]:
+        """在有索引的文件名和瘦投影中连续匹配短中文实体。
+
+        显式年份只调整候选优先级，不排除正文中有年份但文件名无年份的有效结果。
+        """
+
+        import sqlalchemy as sa
+
+        from app.modules.retrieval.search_profile import _normalize_text
+
+        normalized = _normalize_text(phrase)
+        if not normalized:
+            return []
+        filename_match = DocumentSearchProfile.normalized_filename.contains(normalized)
+        year = getattr(parsed_query, "year", None)
+        year_match = (
+            DocumentSearchProfile.normalized_filename.contains(str(year))
+            if year is not None
+            else None
+        )
+        score = (
+            sa.case(
+                (sa.and_(filename_match, year_match), 2.2),
+                (filename_match, 2.1),
+                else_=1.0,
+            )
+            if year_match is not None
+            else sa.case((filename_match, 2.1), else_=1.0)
+        )
+        ordering = [score.desc(), DocumentSearchProfile.normalized_filename.asc()]
+        rows = (
+            self.db.query(
+                DocumentSearchProfile.working_copy_id,
+                DocumentSearchProfile.document_id,
+                DocumentSearchProfile.document_version_id,
+                score.label("score"),
+            )
+            .filter(
+                DocumentSearchProfile.workspace_id == self.workspace_id,
+                DocumentSearchProfile.status == "ACTIVE",
+                sa.or_(
+                    filename_match,
+                    # combined_search_text 有 pg_trgm GIN；直接匹配连续汉字可同时兼容
+                    # Jieba 词项和 deterministic fallback 保存的完整中文片段。
+                    DocumentSearchProfile.combined_search_text.contains(phrase),
+                ),
+                *self._scope_predicates(scope),
+            )
+            .order_by(*ordering)
+            .limit(self.config.retrieval_document_candidate_limit)
+            .all()
+        )
+        return [
+            {
+                "working_copy_id": row.working_copy_id,
+                "document_id": row.document_id,
+                "document_version_id": row.document_version_id,
+                "_score": float(row.score),
                 "_hit_source": "exact_short_phrase",
             }
             for row in rows
@@ -399,13 +504,22 @@ class Stage1DocumentRecallService:
             return []
         short_phrase = exact_short_chinese_phrase(query_text)
         if short_phrase:
-            return self._exact_short_phrase_match(short_phrase, scope)
+            return self._exact_short_phrase_match(
+                short_phrase,
+                parsed_query,
+                scope,
+            )
 
         terms = self._get_terms(query_text)
         if not terms:
             return []
 
-        return self._deterministic_token_match(terms, scope)
+        # SQLite 测试与降级路径保持同一优先级语义，确保文件名完整短语不会被
+        # 大量只在摘要中命中拆分词项的候选挤出。
+        return [
+            *self._filename_phrase_match(query_text, parsed_query, scope),
+            *self._deterministic_token_match(terms, scope),
+        ]
 
     def _get_terms(self, text: str) -> list[str]:
         """从查询文本提取分词词项。"""

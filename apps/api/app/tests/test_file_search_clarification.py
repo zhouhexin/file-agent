@@ -29,6 +29,7 @@ from app.modules.retrieval.query_parser import FileSearchQueryParser
 from app.modules.retrieval.synonym_service import FileSearchSynonymService
 from app.modules.agent.tool_registry import (
     _execute_controlled_file_search,
+    _intersect_file_search_results,
     _require_large_search_result_confirmation,
 )
 from app.modules.conversations.schemas import SendMessageRequest
@@ -384,6 +385,44 @@ def test_school_possessive_query_uses_workspace_topic_instead_of_exact_phrase():
     assert search.phrases == ["工作总结"]
     assert [item["document_id"] for item in result["results"]] == [
         "doc-school-summary"
+    ]
+
+
+def test_entity_topic_intersection_keeps_filename_match_after_topic_truncation():
+    """主题全局候选被截断时，机构候选文件名的完整主题仍应保留目标文件。"""
+
+    target = {
+        "working_copy_id": "wc-target",
+        "document_id": "doc-target",
+        "filename": "计算机学院2025考核工作总结20251231.docx",
+        "overview": "",
+        "category_path": [],
+    }
+    entity_only = {
+        "working_copy_id": "wc-entity-only",
+        "document_id": "doc-entity-only",
+        "filename": "计算机学院2025会议通知.docx",
+        "overview": "",
+        "category_path": [],
+    }
+    topic_noise = [
+        {
+            "working_copy_id": f"wc-topic-noise-{index}",
+            "document_id": f"doc-topic-noise-{index}",
+            "filename": f"其他学院2025工作总结{index:02d}.docx",
+        }
+        for index in range(30)
+    ]
+
+    result = _intersect_file_search_results(
+        original_query="帮我找2025年计算机学院的工作总结",
+        entity_result={"partial": False, "results": [target, entity_only]},
+        topic_result={"partial": False, "results": topic_noise},
+        topic_phrase="工作总结",
+    )
+
+    assert [item["working_copy_id"] for item in result["results"]] == [
+        "wc-target"
     ]
 
 

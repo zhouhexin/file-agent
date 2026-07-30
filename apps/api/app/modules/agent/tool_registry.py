@@ -869,11 +869,29 @@ def _require_large_search_result_confirmation(
     }
 
 
+def _metadata_contains_search_phrase(item: Dict[str, Any], phrase: str) -> bool:
+    """确认文件级公开字段连续包含完整主题短语，不接受拆词 OR 分数。"""
+
+    needle = re.sub(r"\s+", "", str(phrase or "").lower())
+    if not needle:
+        return False
+    values = [
+        str(item.get("filename") or ""),
+        str(item.get("overview") or ""),
+        " ".join(str(value) for value in item.get("category_path", []) if value),
+    ]
+    return any(
+        needle in re.sub(r"\s+", "", value.lower())
+        for value in values
+    )
+
+
 def _intersect_file_search_results(
     *,
     original_query: str,
     entity_result: Dict[str, Any],
     topic_result: Dict[str, Any],
+    topic_phrase: str,
 ) -> Dict[str, Any]:
     """对“机构实体”和“文件主题”分别召回后取稳定文件交集。
 
@@ -881,27 +899,54 @@ def _intersect_file_search_results(
     之间包含年份等字段，也不会退化成“机构 OR 主题”的宽泛查询。
     """
 
-    entity_ids = _search_result_ids(entity_result)
+    entity_items = [
+        item for item in entity_result.get("results", []) if isinstance(item, dict)
+    ]
+    entity_by_id = {
+        str(
+            item.get("working_copy_id")
+            or item.get("document_version_id")
+            or item.get("document_id")
+            or ""
+        ): item
+        for item in entity_items
+        if (
+            item.get("working_copy_id")
+            or item.get("document_version_id")
+            or item.get("document_id")
+        )
+    }
+    topic_items = [
+        item for item in topic_result.get("results", []) if isinstance(item, dict)
+    ]
+    topic_ids = _search_result_ids(topic_result)
+    # 主题全局召回可能先达到候选上限。机构候选自身的文件名、摘要或分类已经连续
+    # 包含完整主题时，也构成确定性交集证据，不能因为主题候选被截断而误删目标。
     results = [
         item
-        for item in topic_result.get("results", [])
-        if isinstance(item, dict)
-        and str(
+        for item in topic_items
+        if str(
             item.get("working_copy_id")
             or item.get("document_version_id")
             or item.get("document_id")
             or ""
         )
-        in entity_ids
+        in entity_by_id
     ]
+    results.extend(
+        item
+        for item_id, item in entity_by_id.items()
+        if item_id not in topic_ids
+        and _metadata_contains_search_phrase(item, topic_phrase)
+    )
     partial = bool(entity_result.get("partial") or topic_result.get("partial"))
     log_event(
         "retrieval.strategy.intersection_completed",
         level="WARNING" if partial or not results else "INFO",
         tool_name="hybrid-search",
         status="DEGRADED" if partial else "COMPLETED",
-        entity_result_count=len(entity_ids),
-        topic_result_count=len(_search_result_ids(topic_result)),
+        entity_result_count=len(entity_by_id),
+        topic_result_count=len(topic_ids),
         intersection_result_count=len(results),
         partial=partial,
         message="机构实体与文件主题交集计算完成",
@@ -1027,6 +1072,7 @@ def _execute_controlled_file_search(
                     original_query=search_query,
                     entity_result=entity_result,
                     topic_result=topic_result,
+                    topic_phrase=topic_phrase,
                 )
             return entity_result
 
@@ -1088,6 +1134,7 @@ def _execute_controlled_file_search(
             original_query=search_query,
             entity_result=entity_result,
             topic_result=topic_result,
+            topic_phrase=topic_phrase,
         )
     group = synonym_service.find_group(core_phrase)
     expanded_phrases = (

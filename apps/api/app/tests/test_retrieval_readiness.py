@@ -51,7 +51,20 @@ def test_managed_only_match_queues_internal_import_without_public_candidate():
             fingerprint="readiness-unrelated-fingerprint",
             status="ACTIVE",
         )
-        db.add_all([managed_file, unrelated_file])
+        noisy_files = [
+            ManagedFile(
+                root_id=root.id,
+                relative_path=f"总结/人文学院2025年工作总结{index:02d}.docx",
+                relative_path_hash=f"readiness-noise-{index}",
+                filename=f"人文学院2025年工作总结{index:02d}.docx",
+                extension=".docx",
+                size_bytes=10,
+                fingerprint=f"readiness-noise-fingerprint-{index}",
+                status="ACTIVE",
+            )
+            for index in range(45)
+        ]
+        db.add_all([managed_file, unrelated_file, *noisy_files])
         db.flush()
 
         service = WorkingCopySearchReadinessService(

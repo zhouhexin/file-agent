@@ -213,6 +213,94 @@ def test_candidate_limit_is_enforced():
         db.close()
 
 
+def test_filename_phrase_with_explicit_year_survives_noisy_candidate_limit():
+    """文件名明确命中机构和年份时，不能被超过上限的旧年份候选挤掉。"""
+
+    db = _db_session()
+    try:
+        for index in range(35):
+            _setup_profile(
+                db,
+                suffix=f"phrase-noise-{index}",
+                user_id="user1",
+                filename=f"计算机学院2024年度材料{index:02d}.docx",
+                summary_text="计算机学院历史材料",
+            )
+        _setup_profile(
+            db,
+            suffix="phrase-target",
+            user_id="user1",
+            filename="计算机学院2025考核工作总结20251231.docx",
+            summary_text="2025年度考核工作总结",
+        )
+        db.commit()
+
+        result = Stage1DocumentRecallService(
+            db=db,
+            user_id="user1",
+            workspace_id="ws-user1",
+            config=_FakeConfig(),
+        ).recall(
+            parsed_query=_FakeParsedQuery(
+                cleaned="计算机学院",
+                terms=["计算机学院"],
+                year=2025,
+            ),
+            scope=_FakeScope(),
+        )
+
+        assert len(result) == 30
+        assert result[0]["working_copy_id"] == "wc-phrase-target"
+        assert any(
+            item["filename"] == "计算机学院2025考核工作总结20251231.docx"
+            for item in result
+        )
+    finally:
+        db.close()
+
+
+def test_short_topic_phrase_prefers_explicit_year_before_candidate_limit():
+    """四字主题连续匹配也必须先保留显式年份文件。"""
+
+    db = _db_session()
+    try:
+        for index in range(35):
+            _setup_profile(
+                db,
+                suffix=f"short-topic-noise-{index}",
+                user_id="user1",
+                filename=f"2024年度工作总结{index:02d}.docx",
+                summary_text="2024年度工作总结",
+            )
+        _setup_profile(
+            db,
+            suffix="short-topic-target",
+            user_id="user1",
+            filename="计算机学院2025考核工作总结20251231.docx",
+            summary_text="2025年度考核工作总结",
+        )
+        db.commit()
+
+        result = Stage1DocumentRecallService(
+            db=db,
+            user_id="user1",
+            workspace_id="ws-user1",
+            config=_FakeConfig(),
+        ).recall(
+            parsed_query=_FakeParsedQuery(
+                cleaned="工作总结",
+                terms=["工作总结"],
+                year=2025,
+            ),
+            scope=_FakeScope(),
+        )
+
+        assert len(result) == 30
+        assert result[0]["working_copy_id"] == "wc-short-topic-target"
+    finally:
+        db.close()
+
+
 def test_cross_user_isolation():
     """其他用户的文件不会出现。"""
 
