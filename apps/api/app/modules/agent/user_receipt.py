@@ -47,6 +47,7 @@ class UserTaskReceipt(BaseModel):
     managed_file_result: dict[str, Any] | None = None
     rename_plan_result: dict[str, Any] | None = None
     file_search_result: dict[str, Any] | None = None
+    search_context: dict[str, Any] | None = None
     trash_restore_result: dict[str, Any] | None = None
     file_search_clarification_result: dict[str, Any] | None = None
     evidence_answer_result: dict[str, Any] | None = None
@@ -71,6 +72,7 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
     managed_file_result = _managed_file_result(result)
     rename_plan_result = _rename_plan_result(result)
     file_search_result = _file_search_result(result)
+    search_context = _safe_search_context(result.search_context)
     trash_restore_result = _trash_restore_result(result)
     file_search_clarification_result = _file_search_clarification_result(result)
     evidence_answer_result = _evidence_answer_result(result)
@@ -185,6 +187,7 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         managed_file_result=managed_file_result,
         rename_plan_result=rename_plan_result,
         file_search_result=file_search_result,
+        search_context=search_context,
         trash_restore_result=trash_restore_result,
         file_search_clarification_result=file_search_clarification_result,
         evidence_answer_result=evidence_answer_result,
@@ -203,6 +206,44 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         pending_decisions=pending_decisions,
         suggested_next_actions=_suggested_next_actions(result=result, response_type=response_type),
     )
+
+
+def _safe_search_context(value: dict[str, Any]) -> dict[str, Any] | None:
+    """投影实际查询条件和轮次摘要，不向普通用户暴露文件 ID 或内部 Tool。"""
+
+    if not isinstance(value, dict):
+        return None
+    conditions = [
+        {
+            key: item.get(key)
+            for key in (
+                "label",
+                "value",
+                "condition_type",
+                "status",
+                "source",
+            )
+            if key in item
+        }
+        for item in list(value.get("effective_conditions") or [])
+        if isinstance(item, dict)
+    ]
+    attempts = [
+        {
+            "query": str(item.get("query") or ""),
+            "result_count": int(item.get("result_count") or 0),
+            "result_status": str(item.get("result_status") or ""),
+            "index_status": str(item.get("index_status") or ""),
+        }
+        for item in list(value.get("attempts") or [])
+        if isinstance(item, dict)
+    ]
+    if not conditions and not attempts:
+        return None
+    return {
+        "effective_conditions": conditions,
+        "attempts": attempts,
+    }
 
 
 def _task_status(status: str) -> str:
@@ -464,7 +505,8 @@ def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
     才激活此投影；旧链路保持 final_response 文本格式不变。
     """
 
-    for invocation in result.tool_invocations:
+    # 多轮规划会产生多次 hybrid-search，用户回执只展示最新一次检索结果。
+    for invocation in reversed(result.tool_invocations):
         output = invocation.output_json
         if invocation.tool_name != "hybrid-search":
             continue
@@ -648,7 +690,8 @@ def _trash_restore_result(result: AgentRunResult) -> dict[str, Any] | None:
 def _evidence_answer_result(result: AgentRunResult) -> dict[str, Any] | None:
     """投影阶段五回答和去重文件框，不暴露证据正文或内部定位。"""
 
-    for invocation in result.tool_invocations:
+    # Planner 在检索后可能继续读取文件，以最后一次证据回答为准。
+    for invocation in reversed(result.tool_invocations):
         output = invocation.output_json
         if invocation.tool_name != "evidence-answer" or output.get("kind") != "evidence_answer":
             continue

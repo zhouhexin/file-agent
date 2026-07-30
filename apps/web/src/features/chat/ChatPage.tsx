@@ -1,6 +1,6 @@
 // 聊天工作台是文件智能体主入口，文件打开动作必须经过后端受控接口。
 import { ChangeEvent, FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, BookOpen, Lightbulb, LogOut, MessageSquare, Paperclip, Send, Trash2, User as UserIcon } from 'lucide-react';
+import { Activity, AlertTriangle, BookOpen, Lightbulb, LogOut, MessageSquare, Paperclip, Send, Trash2, User as UserIcon } from 'lucide-react';
 
 import {
   ApiError,
@@ -69,6 +69,7 @@ type ChatPageProps = {
   onLogout: () => void;
   onOpenOnboarding: () => void;
   onOpenFailedFiles: () => void;
+  onOpenAgentRuns: () => void;
   onOpenCapabilitySuggestions: () => void;
   initialDraft?: string;
 };
@@ -110,6 +111,7 @@ export function ChatPage({
   onLogout,
   onOpenOnboarding,
   onOpenFailedFiles,
+  onOpenAgentRuns,
   onOpenCapabilitySuggestions,
   initialDraft,
 }: ChatPageProps) {
@@ -794,6 +796,14 @@ export function ChatPage({
               >
                 <AlertTriangle size={16} />
                 <span>失败文件</span>
+              </button>
+              <button
+                className="sidebar-menu-item"
+                type="button"
+                onClick={onOpenAgentRuns}
+              >
+                <Activity size={16} />
+                <span>任务诊断</span>
               </button>
               <button
                 className="sidebar-menu-item"

@@ -36,6 +36,41 @@ export type CapabilitySuggestion = {
   updated_at: string;
 };
 
+// 管理员任务诊断只展示业务阶段、中文结论和处置建议，不包含文件正文或模型 Prompt。
+export type AdminAgentRun = {
+  id: string;
+  conversation_id: string;
+  user_id: string;
+  intent: string | null;
+  status: string;
+  planner_mode: string;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AgentDiagnosticEvent = {
+  occurred_at: string;
+  stage: string;
+  event_title: string;
+  status: string | null;
+  operator_message: string;
+  cause_code: string | null;
+  recommended_action: string | null;
+  duration_ms: number | null;
+  tool_name: string | null;
+  document_id: string | null;
+  document_version_id: string | null;
+  filesystem_job_id: string | null;
+};
+
+export type AgentRunDiagnostics = {
+  run: AdminAgentRun;
+  summary: string;
+  recommended_actions: string[];
+  events: AgentDiagnosticEvent[];
+};
+
 // 普通聊天页面只消费稳定任务投影，不依赖 Skill、ToolInvocation 或 Graph 内部结构。
 export type TaskResult = {
   task_id: string;
@@ -62,6 +97,7 @@ export type TaskResult = {
   managed_file_result: { root_key: string; files: ManagedFileResult[] } | null;
   rename_plan_result: import('./features/chat/RenameSuggestionReceipt').RenamePlanResult | null;
   file_search_result: FileSearchResult | null;
+  search_context: SearchContext | null;
   trash_restore_result: TrashRestoreResult | null;
   file_search_clarification_result: FileSearchClarificationResult | null;
   evidence_answer_result: EvidenceAnswerResult | null;
@@ -74,6 +110,22 @@ export type TaskResult = {
   pending_decisions: Array<Record<string, unknown>>;
   references: Array<Record<string, unknown>>;
   suggested_next_actions: string[];
+};
+
+export type SearchContext = {
+  effective_conditions: Array<{
+    label: string;
+    value: string;
+    condition_type: string;
+    status: 'APPLIED' | 'SEMANTIC_ONLY' | 'RELAXED' | 'UNSUPPORTED' | 'REJECTED' | string;
+    source: string;
+  }>;
+  attempts: Array<{
+    query: string;
+    result_count: number;
+    result_status: string;
+    index_status: string;
+  }>;
 };
 
 // 两阶段文件搜索结果的普通用户投影。

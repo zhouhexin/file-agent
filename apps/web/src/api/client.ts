@@ -1,6 +1,8 @@
 // 前端 API 客户端只封装受控 HTTP 接口，不绕过后端 Tool、权限和路径策略。
 import type {
   AgentCapabilityCatalog,
+  AdminAgentRun,
+  AgentRunDiagnostics,
   ClassificationFeedbackResponse,
   CapabilitySuggestion,
   ClassificationClarificationResult,
@@ -165,6 +167,27 @@ export async function getCapabilitySuggestions(
   // 管理员页面只读取脱敏能力建议，普通用户无法通过该接口获取内部 Catalog 信息。
   const query = status ? `?status=${encodeURIComponent(status)}` : '';
   return request<CapabilitySuggestion[]>(`/admin/capability-suggestions${query}`, { token });
+}
+
+export async function getAdminAgentRuns(
+  token: string,
+  status = '',
+): Promise<AdminAgentRun[]> {
+  // 管理员任务列表只读取最近审计摘要，状态过滤由后端校验。
+  const params = new URLSearchParams({ limit: '100' });
+  if (status) params.set('status', status);
+  return request<AdminAgentRun[]>(`/admin/agent-runs?${params.toString()}`, { token });
+}
+
+export async function getAgentRunDiagnostics(
+  token: string,
+  agentRunId: string,
+): Promise<AgentRunDiagnostics> {
+  // 中文诊断时间线由后端聚合，前端不直接解析服务器日志或 Tool 原始输出。
+  return request<AgentRunDiagnostics>(
+    `/admin/agent-runs/${encodeURIComponent(agentRunId)}/diagnostics`,
+    { token },
+  );
 }
 
 export async function reviewCapabilitySuggestion(

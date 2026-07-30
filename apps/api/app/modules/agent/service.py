@@ -183,6 +183,12 @@ class AgentRuntimeService:
                     tool_results=final_state.get("tool_results", []),
                     tool_invocations=invocation_records,
                     document_results=final_state.get("document_results", []),
+                    search_context={
+                        "effective_conditions": final_state.get(
+                            "effective_conditions", []
+                        ),
+                        "attempts": final_state.get("search_attempts", []),
+                    },
                     async_job_ids=final_state.get("async_job_ids", []),
                     changeset_id=final_state.get("changeset_id"),
                     operation_plan_id=final_state.get("operation_plan_id"),
@@ -288,7 +294,12 @@ class AgentRuntimeService:
             "tool_call_count": 0,
             "executed_tool_signatures": [],
             "last_dispatch_results": [],
+            "last_dispatch_tool_name": None,
+            "last_dispatch_step_id": None,
             "observation": {},
+            "search_attempts": [],
+            "effective_conditions": [],
+            "observed_document_ids": [],
             "replan_requested": False,
             "waiting_for_confirmation": False,
             "current_step_index": 0,

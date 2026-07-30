@@ -219,10 +219,13 @@ export function AgentRunReceipt({
     && taskResult.evidence_answer_result
   ) {
     return (
-      <EvidenceAnswerReceipt
-        result={taskResult.evidence_answer_result}
-        onOpenDocument={onOpenDocument}
-      />
+      <>
+        <EvidenceAnswerReceipt
+          result={taskResult.evidence_answer_result}
+          onOpenDocument={onOpenDocument}
+        />
+        <SearchContextSummary context={taskResult.search_context} />
+      </>
     );
   }
   if (
@@ -244,12 +247,15 @@ export function AgentRunReceipt({
     taskResult.file_search_result
   ) {
     return (
-      <SearchResultsReceipt
-        result={taskResult.file_search_result}
-        attachments={attachments}
-        onOpenAttachment={onOpenAttachment}
-        onOpenDocument={onOpenDocument}
-      />
+      <>
+        <SearchResultsReceipt
+          result={taskResult.file_search_result}
+          attachments={attachments}
+          onOpenAttachment={onOpenAttachment}
+          onOpenDocument={onOpenDocument}
+        />
+        <SearchContextSummary context={taskResult.search_context} />
+      </>
     );
   }
   if (
@@ -395,6 +401,49 @@ function decisionLabel(value: string): string {
     UPLOAD_READABLE_COPY: '上传可读取版本',
   };
   return labels[value] || value;
+}
+
+function SearchContextSummary({
+  context,
+}: {
+  context: TaskResult['search_context'];
+}) {
+  // 只展示后端确认后的查询条件和轮次结果，不展示 Planner、Skill 或 Tool 名称。
+  if (!context || context.effective_conditions.length === 0) {
+    return null;
+  }
+  const statusLabels: Record<string, string> = {
+    APPLIED: '已应用',
+    SEMANTIC_ONLY: '用于语义匹配',
+    RELAXED: '已放宽',
+    UNSUPPORTED: '当前无法硬过滤',
+    REJECTED: '未采用',
+  };
+  return (
+    <details className="search-context-summary">
+      <summary>本次查找采用的条件</summary>
+      <ul>
+        {context.effective_conditions.map((condition, index) => (
+          <li key={`${condition.label}-${condition.value}-${index}`}>
+            <span>{condition.label}：{condition.value}</span>
+            <em>{statusLabels[condition.status] || condition.status}</em>
+          </li>
+        ))}
+      </ul>
+      {context.attempts.length > 1 ? (
+        <>
+          <p>系统共进行了 {context.attempts.length} 轮查找，并根据上一轮结果调整了后续条件：</p>
+          <ol>
+            {context.attempts.map((attempt, index) => (
+              <li key={`${attempt.query}-${index}`}>
+                第 {index + 1} 轮“{attempt.query}”：返回 {attempt.result_count} 个结果
+              </li>
+            ))}
+          </ol>
+        </>
+      ) : null}
+    </details>
+  );
 }
 
 type ManagedFileTreeNode = {

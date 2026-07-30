@@ -114,6 +114,22 @@ def test_planner_decision_branches_are_mutually_exclusive():
     assert decision.direct_response == "你好。"
 
 
+def test_planner_finish_decision_contains_no_unverified_answer():
+    """FINISH 只能结束规划循环，最终文件事实仍由后端聚合 Tool 结果。"""
+
+    decision = PlannerDecision(
+        decision_type="FINISH",
+        intent="SEARCH_FILES",
+        user_goal="查找未来五年规划文件",
+        selected_skill_ids=["file-search"],
+        scope=PlannerScope(source="tool_observation"),
+    )
+
+    assert decision.tool_plan is None
+    assert decision.direct_response is None
+    assert decision.clarification is None
+
+
 def test_tool_plan_rejects_duplicate_or_forward_step_bindings():
     """ToolPlan 必须拒绝重复步骤和对尚未执行步骤的前向绑定。"""
 
@@ -255,6 +271,206 @@ def test_search_projection_exposes_only_deduplicated_document_ids():
     )(EmptyInput())
 
     assert projected["document_ids"] == ["doc-1", "doc-2"]
+
+
+def test_search_projection_records_backend_effective_conditions():
+    """LLM 解释出的查询条件必须标记实际生效情况，不能伪装成数据库硬过滤。"""
+
+    from app.modules.agent.tool_schemas import SearchToolInput
+
+    projected = _with_search_binding_projection(
+        lambda _input: {
+            "ok": True,
+            "kind": "workspace_file_search",
+            "query": "未来五年规划",
+            "results": [],
+            "_effective_scope": {
+                "label": "文件范围",
+                "value": "当前对话已确认的 2 个文件",
+                "condition_type": "scope",
+                "status": "APPLIED",
+                "source": "backend",
+            },
+        }
+    )(
+        SearchToolInput(
+            query="未来五年规划",
+            interpreted_conditions=[
+                {
+                    "label": "时间范围",
+                    "value": "未来五年",
+                    "condition_type": "time",
+                },
+                {
+                    "label": "审批状态",
+                    "value": "已审批",
+                    "condition_type": "other",
+                },
+            ],
+        )
+    )
+
+    statuses = {
+        item["label"]: item["status"]
+        for item in projected["effective_conditions"]
+    }
+    assert statuses["时间范围"] == "SEMANTIC_ONLY"
+    assert statuses["审批状态"] == "UNSUPPORTED"
+    scope = next(
+        item
+        for item in projected["effective_conditions"]
+        if item["label"] == "文件范围"
+    )
+    assert scope["value"] == "当前对话已确认的 2 个文件"
+    assert "_effective_scope" not in projected
+    assert projected["result_status"] == "ZERO_RESULTS"
+    assert "REFINE_SEARCH" in projected["available_next_actions"]
+
+
+def test_enabled_adaptive_search_observes_result_then_finishes(
+    monkeypatch,
+    tmp_path,
+):
+    """Adaptive 模式下检索完成后必须把安全观察交给 LLM，再由 FINISH 结束循环。"""
+
+    from app.core import config
+    from app.modules.llm.schemas import UserIntentPlan
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent",
+    )
+    monkeypatch.setenv("ADAPTIVE_PLANNER_MODE", "enabled")
+    monkeypatch.setenv("ADAPTIVE_PLANNER_ROLLOUT_PERCENT", "100")
+    config.get_settings.cache_clear()
+
+    class LegacyMustNotRun:
+        """Adaptive 成功时 Legacy LLM 不应参与可见规划。"""
+
+        enabled = True
+
+        def understand_user_request(self, **kwargs):
+            """若被调用说明 Adaptive 闭环发生了错误回退。"""
+
+            raise AssertionError("Adaptive 成功时不得调用 Legacy Planner")
+
+    class SearchThenFinishPlanner:
+        """第一轮检索，第二轮基于观察结束。"""
+
+        enabled = True
+
+        def __init__(self):
+            """记录后端传入的安全观察。"""
+
+            self.observations = []
+
+        def decide(self, **kwargs):
+            """返回 deterministic PlannerDecision。"""
+
+            self.observations.append(kwargs["observation"])
+            if kwargs["observation"] is None:
+                return PlannerDecision(
+                    decision_type="TOOL_PLAN",
+                    intent="SEARCH_FILES",
+                    user_goal=kwargs["message"],
+                    selected_skill_ids=["file-search"],
+                    scope=PlannerScope(source="workspace"),
+                    tool_plan=ToolPlan(
+                        plan_id="search-plan",
+                        steps=[
+                            ToolStep(
+                                step_id="search",
+                                skill_id="file-search",
+                                tool_name="hybrid-search",
+                                literal_input={
+                                    "query": "未来五年规划",
+                                    "interpreted_conditions": [
+                                        {
+                                            "label": "时间范围",
+                                            "value": "未来五年",
+                                            "condition_type": "time",
+                                        }
+                                    ],
+                                },
+                            )
+                        ],
+                    ),
+                )
+            return PlannerDecision(
+                decision_type="FINISH",
+                intent="SEARCH_FILES",
+                user_goal=kwargs["message"],
+                selected_skill_ids=["file-search"],
+                scope=PlannerScope(source="tool_observation"),
+            )
+
+    class SearchRegistry(ToolRegistry):
+        """复用生产 Catalog 元数据，只替换测试中的真实数据库搜索。"""
+
+        def __init__(self):
+            """初始化真实白名单并记录调用次数。"""
+
+            super().__init__()
+            self.calls = []
+
+        def invoke(self, name, input_json):
+            """返回符合安全观察契约的固定检索结果。"""
+
+            self.calls.append((name, input_json))
+            return ToolInvocationRecord(
+                tool_name=name,
+                input_json=input_json,
+                output_json={
+                    "kind": "workspace_file_search",
+                    "ok": True,
+                    "query": input_json["query"],
+                    "total_returned": 1,
+                    "partial": False,
+                    "results": [
+                        {
+                            "document_id": "doc-observed",
+                            "filename": "未来五年规划.docx",
+                        }
+                    ],
+                    "document_ids": ["doc-observed"],
+                    "effective_conditions": [
+                        {
+                            "label": "检索内容",
+                            "value": input_json["query"],
+                            "condition_type": "semantic",
+                            "status": "APPLIED",
+                            "source": "backend",
+                        }
+                    ],
+                    "index_status": "READY",
+                    "result_status": "MATCHED",
+                    "available_next_actions": ["FINISH_WITH_RESULTS"],
+                },
+                status="COMPLETED",
+            )
+
+    adaptive = SearchThenFinishPlanner()
+    registry = SearchRegistry()
+    result = AgentRuntimeService(
+        registry_factory=lambda db, user_id: registry,
+        llm_intent_service=LegacyMustNotRun(),
+        adaptive_planner_service=adaptive,
+    ).run_message(
+        conversation_id="conv-adaptive-search",
+        user_id="user-adaptive-search",
+        message_id="msg-adaptive-search",
+        message="帮我找未来五年规划相关文件",
+    )
+
+    assert len(registry.calls) == 1
+    assert len(adaptive.observations) == 2
+    assert adaptive.observations[1]["results"][0]["result_status"] == "MATCHED"
+    assert adaptive.observations[1]["results"][0]["document_ids"] == [
+        "doc-observed"
+    ]
+    assert result.status == "COMPLETED"
+    assert result.search_context["attempts"][0]["result_count"] == 1
 
 
 def test_binding_resolver_rejects_oversized_array():

@@ -297,6 +297,21 @@ ops/admin 可以查看并评审；只有 admin 可以标记为接受或已实现
 Shadow 生成失败和校验失败也会进入分母。接口不返回 Prompt、正文或 Tool 输入，也不能通过该接口切换
 灰度。
 
+任务诊断的管理入口为 `/admin/agent-runs`，仅允许 ops/admin 使用。页面把 AgentRun、
+ToolInvocation、FilesystemJob 和同一份 JSONL 结构化日志合并为中文时间线，显示处理阶段、状态、原因
+和建议操作，不展示文件正文、绝对路径、密钥或完整 Prompt。接口为：
+
+```text
+GET /api/admin/agent-runs
+GET /api/admin/agent-runs/{agent_run_id}/diagnostics
+```
+
+当自然语言检索启用 Adaptive 灰度时，`hybrid-search` 执行后会把结果数量、实际生效条件、索引状态和
+受控文件 ID 交回 Planner。Planner 在最多 3 轮规划、5 次 Tool 调用预算内决定结束、调整查询或继续
+读取证据；相同 Tool 输入不会重复执行。普通用户回执只展示后端确认的查询条件和各轮结果数量，不展示
+Planner、Skill、Tool 或内部任务 ID。当前消息包含完整文件名时，该文件名直接构成硬范围，不依赖上一轮
+搜索上下文。
+
 上传导入和分类阶段的持久化双摘要默认使用 `extractive` Provider：本地 Jieba 分词后以有候选上限的
 LexRank 选择可定位原文句子，不下载模型、不要求 GPU，也不会因为 `LLM_ENABLED=true` 自动外发正文。
 阶段五开始，用户明确提出“总结、讲解、询问正文事实”等任务时，优先通过

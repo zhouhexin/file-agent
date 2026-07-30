@@ -91,13 +91,51 @@ class DocumentClassificationsToolOutput(GenericToolOutput):
     documents: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class SearchEffectiveCondition(BaseModel):
+    """后端确认后的单条检索条件，用于 Planner 观察和用户回执。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(min_length=1, max_length=40)
+    value: str = Field(min_length=1, max_length=300)
+    condition_type: Literal[
+        "semantic",
+        "scope",
+        "time",
+        "file_type",
+        "entity",
+        "relation",
+        "other",
+    ] = "semantic"
+    status: Literal[
+        "APPLIED",
+        "SEMANTIC_ONLY",
+        "RELAXED",
+        "UNSUPPORTED",
+        "REJECTED",
+    ]
+    source: Literal["user_and_llm", "backend", "tool"] = "backend"
+
+
 class WorkspaceFileSearchToolOutput(GenericToolOutput):
     """工作副本检索 Tool 的业务输出契约。"""
 
     kind: str = "workspace_file_search"
     query: str = ""
+    total_returned: int = Field(default=0, ge=0)
+    partial: bool = False
     results: list[dict[str, Any]] = Field(default_factory=list)
     document_ids: list[str] = Field(default_factory=list, max_length=100)
+    effective_conditions: list[SearchEffectiveCondition] = Field(
+        default_factory=list,
+        max_length=30,
+    )
+    index_status: str = "READY"
+    result_status: str = "ZERO_RESULTS"
+    available_next_actions: list[str] = Field(default_factory=list, max_length=10)
+    user_message: str = ""
+    search_clarification: dict[str, Any] | None = None
+    trash_restore_selection: dict[str, Any] | None = None
 
 
 class EvidenceAnswerToolOutput(GenericToolOutput):

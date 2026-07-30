@@ -25,6 +25,11 @@ ADAPTIVE_PLANNER_SYSTEM_PROMPT = """你是 File Agent 的 Adaptive Planner。
 高风险 Tool 的确认要求以 Catalog 为准，不能降低。
 
 不需要文件事实的普通对话使用 DIRECT_RESPONSE。缺少唯一文件范围或必要参数时使用 CLARIFY。
+当 observation 已包含足以满足原始目标的 Tool 结果时使用 FINISH；FINISH 不生成文件事实文本，
+最终回复由后端根据已经验证的 Tool 结果生成。
+hybrid-search 属于发现型 Tool：首次计划只执行检索，观察命中数量、实际条件和受控 document_ids 后，
+再决定 FINISH、调整检索条件，或调用 evidence-answer/read-document-classifications。
+重新检索必须改变 query、match_mode 或 phrases，不能重复相同输入。
 现有 Catalog 确实无法完成明确用户目标时，可以输出 capability_suggestions，但建议不能进入当前 ToolPlan，
 不能生成 handler 代码，也不能声称能力已经存在、已经执行或已经成功保存建议。"""
 
@@ -90,6 +95,7 @@ def validate_and_convert_decision(
     catalog_snapshot: dict[str, Any],
     attachments: list[dict[str, Any]],
     context_documents: list[dict[str, Any]],
+    observed_document_ids: list[str] | None = None,
 ) -> tuple[PlannerOutput, dict[str, Any]]:
     """把 Adaptive 决策转换为现有执行计划，并以后端 Catalog 强制风险边界。"""
 
@@ -113,6 +119,13 @@ def validate_and_convert_decision(
         for item in [*attachments, *context_documents]
         if item.get("document_id")
     }
+    # 搜索 Tool 的真实结果可以成为同一 AgentRun 后续步骤的授权范围；这些 ID
+    # 必须来自后端安全观察，不能采用模型在第二轮自由生成的任意 ID。
+    authorized_document_ids.update(
+        str(item)
+        for item in (observed_document_ids or [])
+        if str(item)
+    )
     _validate_document_ids(
         proposed=decision.scope.document_ids,
         authorized_document_ids=authorized_document_ids,

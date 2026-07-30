@@ -8,6 +8,7 @@ import { hasCompletedOnboarding, markOnboardingCompleted } from './auth/onboardi
 import { AuthPage } from './features/auth/AuthPage';
 import { FailedFilesPage } from './features/admin/FailedFilesPage';
 import { CapabilitySuggestionsPage } from './features/admin/CapabilitySuggestionsPage';
+import { AgentRunsPage } from './features/admin/AgentRunsPage';
 import { ChatPage } from './features/chat/ChatPage';
 import { OnboardingPage } from './features/onboarding/OnboardingPage';
 import './features/chat/chat.css';
@@ -18,6 +19,7 @@ type AppPath =
   | '/chat'
   | '/getting-started'
   | '/admin/failed-files'
+  | '/admin/agent-runs'
   | '/admin/capability-suggestions';
 
 function readInitialPath(): AppPath {
@@ -31,6 +33,9 @@ function readInitialPath(): AppPath {
   }
   if (pathname === '/admin/failed-files') {
     return '/admin/failed-files';
+  }
+  if (pathname === '/admin/agent-runs') {
+    return '/admin/agent-runs';
   }
   if (pathname === '/admin/capability-suggestions') {
     return '/admin/capability-suggestions';
@@ -141,6 +146,12 @@ export function App() {
     setCurrentPath('/admin/failed-files');
   }
 
+  function openAgentRuns() {
+    // 任务诊断页面只对 ops/admin 提供入口，服务端继续执行最终权限校验。
+    pushPath('/admin/agent-runs');
+    setCurrentPath('/admin/agent-runs');
+  }
+
   function openCapabilitySuggestions() {
     // 能力建议清单只对 ops/admin 展示，后端继续执行最终角色校验。
     pushPath('/admin/capability-suggestions');
@@ -199,6 +210,13 @@ export function App() {
     );
   }
 
+  if (
+    currentPath === '/admin/agent-runs'
+    && ['ops', 'admin'].includes(currentUser.role)
+  ) {
+    return <AgentRunsPage token={token} onBack={openChat} />;
+  }
+
   return (
     <ChatPage
       token={token}
@@ -206,6 +224,7 @@ export function App() {
       onLogout={handleLogout}
       onOpenOnboarding={openOnboarding}
       onOpenFailedFiles={openFailedFiles}
+      onOpenAgentRuns={openAgentRuns}
       onOpenCapabilitySuggestions={openCapabilitySuggestions}
       initialDraft={pendingExample}
     />

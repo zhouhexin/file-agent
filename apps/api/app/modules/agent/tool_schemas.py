@@ -61,6 +61,26 @@ class SpreadsheetDocumentInput(StrictToolInput):
     document_id: str = Field(min_length=1)
 
 
+class SearchConditionInput(StrictToolInput):
+    """Planner 对自然语言检索条件的可审计描述。
+
+    这些条件只用于语义查询说明和回执。后端只有在真实执行后才会把条件标记为已应用，
+    不能让模型通过本结构生成 SQL、路径或任意数据库过滤器。
+    """
+
+    label: str = Field(min_length=1, max_length=40)
+    value: str = Field(min_length=1, max_length=200)
+    condition_type: Literal[
+        "semantic",
+        "scope",
+        "time",
+        "file_type",
+        "entity",
+        "relation",
+        "other",
+    ] = "semantic"
+
+
 class SearchToolInput(StrictToolInput):
     """检索类 Tool 的输入。
 
@@ -73,6 +93,10 @@ class SearchToolInput(StrictToolInput):
     match_mode: Literal["AUTO", "LITERAL", "RELATED", "BROAD"] = "AUTO"
     phrases: List[str] = Field(default_factory=list, max_length=8)
     require_body_evidence: bool | None = None
+    interpreted_conditions: List[SearchConditionInput] = Field(
+        default_factory=list,
+        max_length=12,
+    )
     clarification_id: str | None = Field(default=None, min_length=1, max_length=36)
     clarification_option_id: str | None = Field(
         default=None, min_length=1, max_length=80

@@ -247,6 +247,12 @@ class AgentRunRepository:
             tool_results=[item.output_json for item in invocation_models],
             tool_invocations=invocation_models,
             document_results=graph_state.get("document_results", []),
+            search_context={
+                "effective_conditions": graph_state.get(
+                    "effective_conditions", []
+                ),
+                "attempts": graph_state.get("search_attempts", []),
+            },
             async_job_ids=graph_state.get("async_job_ids", []),
             changeset_id=_first_valid_uuid([run.changeset_id, *[item.changeset_id for item in invocation_models]]),
             operation_plan_id=_last_non_empty(
@@ -284,6 +290,9 @@ def _safe_graph_state_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         "tool_call_count": state.get("tool_call_count", 0),
         "executed_tool_signatures": state.get("executed_tool_signatures", []),
         "observation": state.get("observation", {}),
+        "search_attempts": state.get("search_attempts", []),
+        "effective_conditions": state.get("effective_conditions", []),
+        "observed_document_ids": state.get("observed_document_ids", []),
         "replan_requested": state.get("replan_requested", False),
         "waiting_for_confirmation": state.get(
             "waiting_for_confirmation",

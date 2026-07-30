@@ -36,7 +36,12 @@ class AgentGraphState(TypedDict, total=False):
     tool_call_count: int
     executed_tool_signatures: List[str]
     last_dispatch_results: List[Dict[str, Any]]
+    last_dispatch_tool_name: Optional[str]
+    last_dispatch_step_id: Optional[str]
     observation: Dict[str, Any]
+    search_attempts: List[Dict[str, Any]]
+    effective_conditions: List[Dict[str, Any]]
+    observed_document_ids: List[str]
     replan_requested: bool
     waiting_for_confirmation: bool
     current_step_index: int
@@ -90,6 +95,7 @@ class AgentRunResult(BaseModel):
     tool_invocations: List[ToolInvocationRecord]
 
     document_results: List[Dict[str, Any]] = Field(default_factory=list)
+    search_context: Dict[str, Any] = Field(default_factory=dict)
     async_job_ids: List[str] = Field(default_factory=list)
 
     changeset_id: Optional[str] = None

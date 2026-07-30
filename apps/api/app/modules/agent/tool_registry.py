@@ -10,7 +10,7 @@ import hashlib
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Type
+from typing import Any, Callable, Dict, List, Literal, Type
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ValidationError
@@ -120,6 +120,12 @@ class UnknownToolError(ValueError):
 
 ToolHandler = Callable[[BaseModel], Dict[str, Any]]
 SEARCH_RESULT_CONFIRMATION_THRESHOLD = 20
+ObservationPolicy = Literal[
+    "CONTINUE_PLAN",
+    "PLANNER_AFTER_EXECUTION",
+    "PLANNER_ON_SIGNAL",
+    "FINALIZE",
+]
 
 
 @dataclass(frozen=True)
@@ -143,6 +149,9 @@ class ToolDefinition:
     expose_to_planner: bool
     adaptive_ready: bool
     handler: ToolHandler
+    # 未显式声明的自研或测试 Tool 维持旧行为，只在 handler 主动返回
+    # replan_required 时才进入下一轮规划，避免升级后无意增加 LLM 调用。
+    observation_policy: ObservationPolicy = "PLANNER_ON_SIGNAL"
 
     def catalog_item(self) -> Dict[str, Any]:
         """返回可安全暴露给 Tool catalog 接口的元数据。"""
@@ -163,6 +172,7 @@ class ToolDefinition:
             "retry_policy": self.retry_policy,
             "enabled": self.enabled,
             "adaptive_ready": self.adaptive_ready,
+            "observation_policy": self.observation_policy,
         }
 
 
@@ -494,6 +504,22 @@ def _search_handler(
             requested_document_ids
         )
         explicit_document_ids = list(canonical_scope.document_ids)
+        canonical_scope_condition = {
+            "label": "文件范围",
+            "value": (
+                f"后端已确认的 {len(explicit_document_ids)} 个活动文件"
+                if requested_document_ids
+                else "当前共享工作区全部活动文件"
+            ),
+            "condition_type": "scope",
+            "status": (
+                "APPLIED"
+                if not requested_document_ids
+                or len(explicit_document_ids) == len(requested_document_ids)
+                else "RELAXED"
+            ),
+            "source": "backend",
+        }
         log_event(
             "retrieval.attachment_scope.canonicalized",
             tool_name="hybrid-search",
@@ -545,6 +571,7 @@ def _search_handler(
                 "results": [],
                 "trash_restore_selection": trash_restore_selection,
                 "user_message": str(trash_restore_selection["message"]),
+                "_effective_scope": canonical_scope_condition,
             }
         log_event(
             "retrieval.route.selected",
@@ -613,7 +640,10 @@ def _search_handler(
                         or (1 if prepared.get("job_id") else 0),
                         message="摘要回退未命中，检索进入静默准备等待",
                     )
-                    return prepared
+                    return {
+                        **prepared,
+                        "_effective_scope": canonical_scope_condition,
+                    }
             log_event(
                 "retrieval.request.completed",
                 tool_name="hybrid-search",
@@ -623,7 +653,10 @@ def _search_handler(
                 result_count=len(list(result.get("results") or [])),
                 message="摘要回退文件检索请求完成",
             )
-            return result
+            return {
+                **result,
+                "_effective_scope": canonical_scope_condition,
+            }
 
         # 启用新链路：两阶段检索
         # 文件检索读取唯一共享工作目录；default workspace 只保留用户会话来源。
@@ -691,6 +724,7 @@ def _search_handler(
             explicit_attachment_ids=explicit_document_ids,
             conversation_id=conversation_id,
         )
+        resolved_scope_condition = _resolved_search_scope_condition(scope)
         log_event(
             "retrieval.scope.resolved",
             tool_name="hybrid-search",
@@ -713,20 +747,24 @@ def _search_handler(
             config=settings, tokenizer=tokenizer,
         )
         try:
-            result = _execute_controlled_file_search(
-                db=db,
-                user_id=user_id,
-                conversation_id=conversation_id,
-                agent_run_id=(
-                    agent_run_id_getter() if agent_run_id_getter else None
-                ),
-                tool_input=tool_input,
-                search_query=search_query,
-                parsed=parsed,
-                scope=scope,
-                tokenizer=tokenizer,
-                search_service=service,
-            )
+            # PostgreSQL 中任一检索 SQL 失败都会把当前事务标记为 aborted。
+            # 主检索必须运行在 savepoint 内，才能在回滚后继续写 ToolInvocation、
+            # AgentRun 和降级结果，不能让可重建索引故障污染业务审计事务。
+            with db.begin_nested():
+                result = _execute_controlled_file_search(
+                    db=db,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    agent_run_id=(
+                        agent_run_id_getter() if agent_run_id_getter else None
+                    ),
+                    tool_input=tool_input,
+                    search_query=search_query,
+                    parsed=parsed,
+                    scope=scope,
+                    tokenizer=tokenizer,
+                    search_service=service,
+                )
         except Exception as exc:
             # 两阶段索引属于可重建派生能力。迁移未完成、扩展不可用或 SQL 超时时，
             # 必须在已回滚的 savepoint 之后降级，不能让 PostgreSQL aborted 状态
@@ -787,7 +825,7 @@ def _search_handler(
                     workspace_id=workspace_id,
                     query_fingerprint=query_fingerprint,
                     result_count=0,
-                    error_code="FILE_SEARCH_TEMPORARILY_UNAVAILABLE",
+                    error_code="SEARCH_ENGINE_UNAVAILABLE",
                     message="文件检索主链路和安全回退均失败",
                 )
                 return {
@@ -798,10 +836,11 @@ def _search_handler(
                     "partial": True,
                     "results": [],
                     "error": {
-                        "code": "FILE_SEARCH_TEMPORARILY_UNAVAILABLE",
+                        "code": "SEARCH_ENGINE_UNAVAILABLE",
                         "message": "文件检索暂时不可用，请稍后重试。",
                     },
                     "user_message": "文件检索暂时不可用，请稍后重试。",
+                    "_effective_scope": resolved_scope_condition,
                 }
         result = _require_large_search_result_confirmation(
             db=db,
@@ -856,7 +895,10 @@ def _search_handler(
                     or (1 if prepared.get("job_id") else 0),
                     message="活动范围未命中，检索进入静默准备等待",
                 )
-                return prepared
+                return {
+                    **prepared,
+                    "_effective_scope": resolved_scope_condition,
+                }
         log_event(
             "retrieval.request.completed",
             level="WARNING" if not result.get("ok") else "INFO",
@@ -867,13 +909,16 @@ def _search_handler(
             result_count=len(list(result.get("results") or [])),
             message="文件检索请求完成",
         )
-        return result
+        return {
+            **result,
+            "_effective_scope": resolved_scope_condition,
+        }
 
     return handler
 
 
 def _with_search_binding_projection(handler: ToolHandler) -> ToolHandler:
-    """为检索结果补充后续 Tool 可绑定的去重 document_ids。
+    """为检索结果补充绑定 ID、实际条件和后续 Planner 安全观察。
 
     投影只读取后端检索结果中的稳定 ID；澄清、异步等待和未命中结果不会凭空生成文件范围。
     """
@@ -882,6 +927,11 @@ def _with_search_binding_projection(handler: ToolHandler) -> ToolHandler:
         """执行真实检索后生成严格、有限的文件 ID 投影。"""
 
         result = handler(tool_input)
+        effective_scope = (
+            result.pop("_effective_scope", None)
+            if isinstance(result.get("_effective_scope"), dict)
+            else None
+        )
         document_ids: list[str] = []
         seen: set[str] = set()
         for item in list(result.get("results") or []):
@@ -894,9 +944,167 @@ def _with_search_binding_projection(handler: ToolHandler) -> ToolHandler:
             # 与 EvidenceAnswerInput 的文件范围上限一致，避免绑定后才因数组过大失败。
             if len(document_ids) >= 50:
                 break
-        return {**result, "document_ids": document_ids}
+        result_status, index_status, next_actions = _search_result_status(result)
+        return {
+            **result,
+            "document_ids": document_ids,
+            "total_returned": int(
+                result.get("total_returned")
+                if result.get("total_returned") is not None
+                else len(document_ids)
+            ),
+            "effective_conditions": _effective_search_conditions(
+                tool_input=tool_input,
+                effective_scope=effective_scope,
+            ),
+            "index_status": index_status,
+            "result_status": result_status,
+            "available_next_actions": next_actions,
+        }
 
     return projected
+
+
+def _search_result_status(
+    result: Dict[str, Any],
+) -> tuple[str, str, list[str]]:
+    """把搜索业务结果收敛为 Planner 可判断的有限状态。"""
+
+    if result.get("kind") == "filesystem_job":
+        return "INDEX_PENDING", "INDEX_PENDING", ["WAIT_FOR_INDEX"]
+    if isinstance(result.get("search_clarification"), dict):
+        return "NEEDS_CLARIFICATION", "READY", ["WAIT_FOR_USER"]
+    if isinstance(result.get("trash_restore_selection"), dict):
+        return "NEEDS_CONFIRMATION", "READY", ["WAIT_FOR_USER"]
+    if result.get("ok") is False:
+        error = result.get("error") if isinstance(result.get("error"), dict) else {}
+        code = str(error.get("code") or "SEARCH_FAILED")
+        return code, "SEARCH_ENGINE_UNAVAILABLE", ["STOP_WITH_ERROR"]
+    if list(result.get("results") or []):
+        return (
+            "MATCHED",
+            "PARTIAL_INDEX" if result.get("partial") else "READY",
+            [
+                "FINISH_WITH_RESULTS",
+                "READ_MATCHED_DOCUMENTS",
+                "REFINE_SEARCH",
+            ],
+        )
+    return (
+        "ZERO_RESULTS",
+        "PARTIAL_INDEX" if result.get("partial") else "READY",
+        ["REFINE_SEARCH", "CLARIFY"],
+    )
+
+
+def _effective_search_conditions(
+    *,
+    tool_input: BaseModel,
+    effective_scope: dict[str, str] | None = None,
+) -> list[dict[str, str]]:
+    """根据真实 Tool 输入生成后端确认的查询条件，不把 LLM 自报条件伪装为硬过滤。"""
+
+    query = str(getattr(tool_input, "query", "") or "").strip()
+    match_mode = str(getattr(tool_input, "match_mode", "AUTO") or "AUTO")
+    document_ids = list(getattr(tool_input, "document_ids", []) or [])
+    phrases = [
+        str(item).strip()
+        for item in list(getattr(tool_input, "phrases", []) or [])
+        if str(item).strip()
+    ]
+    conditions: list[dict[str, str]] = [
+        {
+            "label": "检索内容",
+            "value": query,
+            "condition_type": "semantic",
+            "status": "APPLIED",
+            "source": "backend",
+        },
+        effective_scope
+        or {
+            "label": "文件范围",
+            "value": (
+                f"Planner 请求的 {len(document_ids)} 个文件，等待后端范围确认"
+                if document_ids
+                else "当前共享工作区全部活动文件"
+            ),
+            "condition_type": "scope",
+            "status": "APPLIED" if not document_ids else "SEMANTIC_ONLY",
+            "source": "backend",
+        },
+        {
+            "label": "匹配方式",
+            "value": match_mode,
+            "condition_type": "relation",
+            "status": "APPLIED",
+            "source": "backend",
+        },
+    ]
+    if phrases:
+        conditions.append(
+            {
+                "label": "受控短语",
+                "value": "、".join(phrases),
+                "condition_type": "semantic",
+                "status": "APPLIED",
+                "source": "backend",
+            }
+        )
+    normalized_query = re.sub(r"\s+", "", query).casefold()
+    normalized_phrases = {
+        re.sub(r"\s+", "", value).casefold() for value in phrases
+    }
+    for raw in list(getattr(tool_input, "interpreted_conditions", []) or []):
+        item = raw.model_dump() if isinstance(raw, BaseModel) else dict(raw)
+        value = str(item.get("value") or "").strip()
+        if not value:
+            continue
+        normalized = re.sub(r"\s+", "", value).casefold()
+        applied = bool(
+            normalized
+            and (
+                normalized in normalized_query
+                or normalized in normalized_phrases
+            )
+        )
+        conditions.append(
+            {
+                "label": str(item.get("label") or "查询条件")[:40],
+                "value": value[:300],
+                "condition_type": str(
+                    item.get("condition_type") or "semantic"
+                ),
+                "status": "SEMANTIC_ONLY" if applied else "UNSUPPORTED",
+                "source": "user_and_llm",
+            }
+        )
+    return conditions[:30]
+
+
+def _resolved_search_scope_condition(scope: Any) -> dict[str, str]:
+    """把后端范围解析结果转换为不含 document_id 的实际范围说明。"""
+
+    scope_mode = str(getattr(scope, "scope_mode", "global") or "global")
+    strict_count = len(list(getattr(scope, "strict_document_ids", ()) or ()))
+    conversation_count = len(
+        list(getattr(scope, "conversation_document_ids", ()) or ())
+    )
+    include_workspace = bool(getattr(scope, "include_workspace", True))
+    if strict_count:
+        value = f"后端唯一确认的 {strict_count} 个文件"
+    elif scope_mode == "conversation" and conversation_count:
+        value = f"当前对话已确认的 {conversation_count} 个文件"
+    elif include_workspace:
+        value = "当前共享工作区全部活动文件"
+    else:
+        value = "当前对话可访问文件"
+    return {
+        "label": "文件范围",
+        "value": value,
+        "condition_type": "scope",
+        "status": "APPLIED",
+        "source": "backend",
+    }
 
 
 def _require_large_search_result_confirmation(
@@ -2781,6 +2989,7 @@ def _tool(
     enabled: bool = True,
     expose_to_planner: bool = True,
     adaptive_ready: bool = False,
+    observation_policy: ObservationPolicy = "PLANNER_ON_SIGNAL",
 ) -> ToolDefinition:
     """使用 MVP Tool 的共享默认值构造一个 ToolDefinition。"""
 
@@ -2801,6 +3010,7 @@ def _tool(
         enabled=enabled,
         expose_to_planner=expose_to_planner,
         adaptive_ready=adaptive_ready,
+        observation_policy=observation_policy,
         handler=handler,
     )
 
@@ -2986,6 +3196,7 @@ def _build_mvp_tools(
             ),
             output_model=WorkspaceFileSearchToolOutput,
             adaptive_ready=True,
+            observation_policy="PLANNER_AFTER_EXECUTION",
         ),
         _tool(
             "evidence-answer",

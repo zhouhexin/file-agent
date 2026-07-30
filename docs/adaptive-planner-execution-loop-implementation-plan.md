@@ -1,8 +1,8 @@
 # 自适应 Planner 与 LangGraph 规划执行循环实施方案
 
-- 文档状态：开发中（阶段 0～6 主体已落地，阶段 7 保持 Shadow 观察）
+- 文档状态：开发中（现有循环骨架已落地，阶段 3 搜索观察闭环待完善，阶段 7 保持 Shadow 观察）
 - 编写日期：2026-07-30
-- 代码审计范围：当前工作树，包含尚未提交的 LangGraph 最小条件路由改动
+- 代码审计范围：当前工作树，包含现有 LangGraph 步骤级循环、Adaptive Planner 和 Shadow 链路
 - 上位产品方案：`docs/automatic-organization-conversational-access-implementation-plan.md`
 - 关联问题记录：`docs/langgraph-runtime-issues.md`
 
@@ -76,39 +76,44 @@ Catalog、绑定表达式或 Shadow 对比详情。
 | 2 | 定义 PlannerDecision 和 Tool 输出 schema | 部分完成 | 已新增独立 `PlannerDecision`、`ToolPlan`、`ToolStep`、`ToolResultEnvelope`、`ToolError`，Registry 强制校验 input/output model | 部分旧 Tool 仍使用迁移期 `GenericToolOutput`，需按核心 Tool 清单继续收敛严格业务 schema |
 | 3 | 实现动态 Tool/Skill Catalog | 已完成 | 请求级 Registry 动态投影 Tool；13 个 Skill 已有 `manifest.json`；启动与请求时交叉校验；AgentRun 保存版本和指纹 | 后续如增加后台启停，只能通过受审计发布流程 |
 | 4 | 实现 Tool 结果绑定解析器 | 已完成 | 已实现安全点分字段绑定、成功来源校验、受信任字段保护、数组上限和绑定后 Tool 输入二次 schema 校验 | 后续可按具体 Tool 补充更细类型提示 |
-| 5 | 重构 LangGraph 为规划执行循环 | 部分完成 | Dispatcher 每次只执行一个步骤；支持前序结果绑定、继续原计划、最多 3 轮规划、5 次调用、重复拒绝和确认暂停 | 异步恢复仍是同步占位；尚未把选择、绑定、记录拆成独立图节点，也未接数据库 checkpointer |
+| 5 | 完善 LangGraph 规划执行循环 | 部分完成 | 已存在 `planning -> tool_dispatch -> observe_tool_result` 循环；Dispatcher 每次只执行一个步骤；支持前序结果绑定、继续原计划、最多 3 轮规划、5 次调用、重复拒绝和确认暂停 | 搜索观察仍只有状态字段，主要由 Tool 的 `replan_required` 决定是否重规划；尚未实现“LLM 观察搜索结果后判断结束、改查或继续读取”的完整语义闭环 |
 | 6 | 接入 DIRECT_RESPONSE 和 CLARIFY | 已完成 | 三分支已进入独立 PlannerDecision；文件事实不能通过 DIRECT_RESPONSE 绕过 Tool；缺少唯一范围进入 CLARIFY | 继续用回放集监测不必要澄清 |
 | 7 | 实现分类证据读取能力 | 部分完成 | 已新增当前版本 EvidenceReader；优先活动工作副本当前版本，只取最新成功运行；EvidenceAnswer 复用该服务 | 仍需补齐失败运行、回收站、同名文件和无 quote 的完整测试矩阵，并收敛严格 output model |
 | 8 | 缩减确定性关键词路由 | 部分完成 | 正常 LLM 主路径只保留重命名、确认、分类等安全 preflight；普通搜索、总结、解释、能力咨询和表格语义交给 Catalog Planner | Legacy/故障降级仍保留 `_has_*`，需在 Shadow 回放达标后再删除重叠规则 |
 | 9 | 调整后台 LexRank 摘要 Provider | 已完成 | 后台双摘要默认 CPU-only `Jieba + LexRank`；全局 LLM 开关不隐式外发；已有配置测试 | 继续保护最终回答必须回到 Evidence |
 | 10 | Shadow 模式对比新旧 Planner 后再默认启用 | 部分完成 | 已实现 `legacy/shadow/enabled`、只读双决策、对比表、稳定分桶、灰度开关和失败回退；Shadow 不执行第二次 Tool | 尚未完成生产观察期、离线回放指标报表和 5%→100% 灰度，因此不得默认启用 Adaptive |
 
-### 3.3 现有实现不能算完整规划执行循环的原因
+### 3.3 现有循环骨架与剩余缺口
 
-改造前最小图为：
-
-```text
-planning
--> tool_dispatch：遍历并执行本轮全部 steps
--> observe_tool_result：整批结果完成后观察
--> 可选 replan，总规划最多 3 轮
-```
-
-目标循环必须是：
+当前运行图已经具备以下物理链路：
 
 ```text
 planning
--> validate decision and plan
--> select next step
--> resolve bindings
--> dispatch one step
--> validate and record result
--> observe
--> continue current plan / replan / clarify / wait confirmation / finalize
+-> record_capability_suggestions
+-> tool_dispatch
+-> observe_tool_result
+-> route_after_observation
+   -> planning
+   -> tool_dispatch
+   -> async_job_wait
+-> evidence_or_change
+-> response
 ```
 
-只有后者才能安全支持“先检索文件，再把检索结果交给证据回答”“先读取分类证据，再解释为什么分类”
-等不能预先写死全部 Tool 输入的自然语言任务。
+因此后续工作不是重新搭建 LangGraph，也不以拆出更多物理节点为完成条件。当前
+`tool_dispatch`、绑定解析和结果记录可以继续保留为组合节点，只要职责边界、schema 校验和审计事实清晰。
+
+当前仍未形成完整语义闭环的原因是：
+
+1. `observe_tool_result` 主要依赖 Tool 输出 `replan_required=true` 才返回 `planning`。
+2. `ExecutionObservation` 目前只包含 `kind/status/ok/error_code/replan_required` 等状态字段。
+3. 搜索命中数量、实际条件、结果文件 ID、索引状态和条件调整建议没有进入安全观察。
+4. LLM 因此不能可靠判断“已经完成”“放宽条件再查”“读取命中文件”或“请求用户澄清”。
+5. `ADAPTIVE_PLANNER_MODE=shadow` 时 Adaptive Planner 只做只读对比，真实 Tool 仍由 Legacy Planner 驱动。
+
+目标是在保留现有图结构的基础上，把循环控制从“Tool 预先决定是否重规划”扩展为“后端观察策略决定是否
+需要 Planner 判断，LLM 再根据受控观察选择下一步”。这样才能安全支持“先检索文件，再把检索结果交给
+证据回答”等无法预先写死全部 Tool 输入的自然语言任务。
 
 ## 4. 不变安全边界
 
@@ -449,31 +454,32 @@ Catalog 版本、首次/最近出现时间和评审状态。`ops`、`admin` 可�
 
 ### 7.1 节点
 
+当前实际节点保持为：
+
 ```text
 chat_intake
 -> collect_context
 -> build_catalog_snapshot
 -> planning
--> validate_decision
+-> record_capability_suggestions
    -> direct_response
    -> clarification_response
-   -> select_next_step
--> resolve_bindings
--> dispatch_step
--> record_step_result
--> observe_step_result
-   -> select_next_step
+   -> tool_dispatch
+-> observe_tool_result
+   -> tool_dispatch
    -> planning
-   -> waiting_for_async_job
-   -> waiting_for_confirmation
-   -> needs_review
-   -> evidence_or_change
+   -> async_job_wait
+-> evidence_or_change
 -> response
 ```
 
+其中决策校验、步骤选择、结果绑定和结果记录可以继续作为 `planning`、`tool_dispatch` 内部的明确职责，
+不强制为了节点数量而拆分物理节点。后续验收关注的是每一步是否受 schema、Catalog、权限、预算、确认和
+审计边界控制，而不是图上节点名称是否与逻辑职责一一对应。
+
 ### 7.2 单步执行
 
-`dispatch_step` 每次只执行一个 ToolStep。这样才能：
+现有 `tool_dispatch` 每次只执行一个 ToolStep。这样才能：
 
 - 在执行前验证前序结果绑定。
 - 在单步后判断是否继续原计划。
@@ -509,6 +515,253 @@ AGENT_MAX_REPLANS=2
 
 预算限制的是一次 AgentRun 的自主执行范围，不限制用户的自然语言表达。批量文件处理应由一个受控异步
 Tool 创建 Job，不能靠提高 Planner Tool 调用预算逐文件同步执行。
+
+### 7.5 循环控制的两层职责
+
+必须明确区分“后端观察策略”和“LLM 下一步决策”：
+
+```text
+Tool 完成
+-> 后端根据 ToolDefinition.observation_policy 判断是否需要 Planner 观察
+-> 生成脱敏 ExecutionObservation
+-> Planner 根据原始用户目标和观察结果生成 PlannerDecision
+-> 后端再次校验 Catalog、schema、范围、风险和预算
+-> 执行下一步或结束
+```
+
+第一版建议为 ToolDefinition 增加：
+
+```text
+observation_policy:
+  CONTINUE_PLAN
+  PLANNER_AFTER_EXECUTION
+  PLANNER_ON_SIGNAL
+  FINALIZE
+```
+
+语义如下：
+
+- `CONTINUE_PLAN`：成功后优先执行既有 ToolPlan 的下一步，不额外消耗规划轮数。
+- `PLANNER_AFTER_EXECUTION`：每次成功执行后都让 Planner 判断下一步；`hybrid-search` 等发现型 Tool
+  使用此策略。
+- `PLANNER_ON_SIGNAL`：只有结构化业务信号要求调整计划时才进入 Planner，兼容现有
+  `replan_required/replan_signal`。
+- `FINALIZE`：结果本身已经满足本轮固定任务，直接进入汇总。
+
+`observation_policy` 由后端 Catalog 定义，LLM 不能在 PlannerDecision 中修改。Tool 仍可返回业务信号，
+但不能独占“是否允许 LLM 观察”的控制权。
+
+### 7.6 搜索 Tool 的 ExecutionObservation
+
+搜索 Tool 必须拥有独立严格输出 schema。Tool 原始业务结果经过后端投影后，再生成以下安全观察：
+
+```json
+{
+  "tool_name": "hybrid-search",
+  "status": "COMPLETED",
+  "error_code": null,
+  "query": "未来五年发展规划",
+  "result_count": 6,
+  "document_ids": ["document-uuid"],
+  "effective_conditions": [
+    {
+      "label": "主题",
+      "value": "未来五年计划及五年发展规划",
+      "condition_type": "semantic",
+      "status": "APPLIED"
+    }
+  ],
+  "index_status": "READY",
+  "partial": false,
+  "available_next_actions": [
+    "FINISH_WITH_RESULTS",
+    "READ_MATCHED_DOCUMENTS",
+    "REFINE_SEARCH"
+  ]
+}
+```
+
+安全边界：
+
+1. `document_ids` 只能来自当前 Tool 的真实授权结果，必须去重并限制最大数量。
+2. 观察不包含文件正文、OCR 全文、本地绝对路径、数据库字段或未授权文件名。
+3. 后续 Tool 使用 `document_ids` 时必须通过 `ToolResultBindingResolver`，模型不能重新拼造 ID。
+4. `effective_conditions` 是后端根据实际 Tool 输入和检索执行情况确认的条件，不直接照抄 LLM 文本。
+5. Tool 失败时只暴露结构化错误代码和允许的下一步，不把数据库异常原文交给模型。
+
+### 7.7 无法穷举条件时的查询表达
+
+不能为学校业务中的每一种主题、人物、事件或关系预先增加固定字段。搜索输入采用三层表达：
+
+1. `semantic_query`：保存不能穷举的自然语言主题和关系，由全文、摘要和向量检索处理。
+2. `hard_filters`：只包含后端真实支持并可以确定性校验的年份、文件类型、文档 ID 和授权范围。
+3. `interpreted_conditions`：保存 Planner 对用户目标的结构化理解，用于审计和回执；后端为每项标记是否
+   真正执行。
+
+`interpreted_conditions.status` 统一使用：
+
+```text
+APPLIED
+SEMANTIC_ONLY
+RELAXED
+UNSUPPORTED
+REJECTED
+```
+
+其中 `UNSUPPORTED` 不能伪装为已应用过滤条件；`REJECTED` 必须说明权限或安全边界；LLM 提取出的任意
+业务概念可以作为 `SEMANTIC_ONLY` 条件参与语义查询，但不能直接转换为 SQL、绝对路径或数据库写操作。
+
+### 7.8 搜索后的 Planner 决策
+
+当 `hybrid-search` 使用 `PLANNER_AFTER_EXECUTION` 时，无论结果是否为空，都由 Planner 在剩余预算内
+作出下一步决策：
+
+- 用户只问“有哪些文件”且已经命中：结束并生成搜索结果回执。
+- 用户要求总结、比较或回答正文问题且已经命中：把真实 `document_ids` 绑定到正文读取或
+  `evidence-answer`。
+- 结果为 `ZERO_RESULTS`：允许调整语义条件或放宽非强制条件后再次搜索。
+- 结果为 `INDEX_PENDING`：进入异步等待，不改写用户语义条件。
+- 结果为 `SEARCH_ENGINE_UNAVAILABLE`：停止语义重试并返回服务降级，不得当作零结果。
+- 文件范围不唯一或关键条件互相冲突：返回 `CLARIFY`，只询问阻止继续执行的最小信息。
+- 预算耗尽：使用已有结果生成部分完成回执，列出未满足条件，不得无限循环。
+
+每轮仍受最大规划 3 轮、最多 5 次 Tool 调用、重复签名拒绝、副作用 Tool 不自动重试和 OperationPlan
+确认边界限制。
+
+### 7.9 查询条件与用户回执
+
+普通用户不展示 Planner、Tool、Skill、规划轮数或 Catalog。搜索结果和后续证据回答应携带统一
+`search_context`：
+
+```text
+本次查找条件
+- 主题：未来五年计划及五年发展规划
+- 范围：当前用户全部已整理文件
+- 匹配位置：文件标题、摘要和正文
+- 匹配方式：相关主题
+- 条件调整：首次精确主题无结果，随后扩展到五年发展规划和规划纲要
+```
+
+回执中的条件必须来自后端确认的 `effective_conditions`。同时保留每次 `search_attempt`，最终结果选择
+最后一次成功且有效的搜索；不得因为第一轮返回零结果而覆盖后续成功结果。若搜索后继续执行
+`evidence-answer`，证据回答作为主结果，`search_context` 继续展示在结果上方。
+
+### 7.10 完整文件名问题不依赖上一轮搜索上下文
+
+当用户在当前消息中给出受支持扩展名的完整文件名，例如：
+
+```text
+为什么二级管理--建议（计算机）.docx 涉及到了学生工作管理
+```
+
+完整文件名本身已经构成明确文件范围。该请求不得强制读取上一轮 `search_context`，也不得因为上一轮曾经
+展示过其他文件而扩大本次范围。正确链路为：
+
+```text
+当前消息提取完整文件名
+-> 后端在当前用户可访问的 ACTIVE 工作副本中执行完整名称匹配
+-> 唯一命中：固定 document_id 和 current_version_id
+-> 多个同名命中：CLARIFY，让用户选择
+-> 未命中：返回有限相似候选或明确未找到
+-> 检查当前版本正文、摘要、分类证据和索引状态
+-> 根据问题选择 read-document-classifications 或 evidence-answer
+-> 返回原因和可定位证据
+```
+
+Planner 可以把“学生工作管理”理解为本次语义条件，但后端必须把完整文件名作为不可被模型放宽的硬条件。
+如果用户询问的是正文为什么与该主题相关，直接使用 `evidence-answer`；只有问题明确指向“为什么这样
+分类、为什么归到该目录”时，才优先使用 `read-document-classifications`。证据不足时必须明确返回无依据，
+不能借用其他同名或相似文件回答。
+
+`search_context` 只用于“这些文件”“刚才找到的结果”等明确依赖上一轮结果的省略表达，以及展示由搜索
+继续进入证据回答时的真实查询条件；它不是完整文件名问题的必需输入。
+
+### 7.11 面向运维人员的中文诊断日志
+
+现有 JSONL 技术日志继续保留，但不能只依赖英文事件名、内部枚举或需要阅读代码才能理解的字段。每个关键
+事件使用同一条结构化记录，同时提供机器字段和运维可读字段，避免维护两套可能不一致的日志。
+
+统一增加或规范以下字段：
+
+```text
+event
+event_title
+stage
+status
+operator_message
+cause_code
+recommended_action
+request_id
+agent_run_id
+conversation_id
+user_id
+tool_name
+document_id
+document_version_id
+filesystem_job_id
+duration_ms
+created_at
+```
+
+字段规则：
+
+- `event`、`stage`、`cause_code` 使用稳定英文代码，供程序检索、告警和统计。
+- `event_title` 使用简短中文，例如“精确定位文件”“检查正文索引”“等待后台分析”。
+- `operator_message` 使用不需要阅读代码即可理解的中文，说明系统完成了什么、正在等待什么或为什么失败。
+- `recommended_action` 只在等待过久或失败时提供明确操作，例如“确认 worker 进程正在运行，并检查该任务
+  是否达到最大重试次数”。
+- 普通成功事件不重复打印无意义建议。
+- 日志不得包含文件正文、OCR 全文、完整 LLM prompt、API key、JWT、密码或本地绝对路径。
+- 普通用户界面不展示 Tool、Skill、Job ID 和技术错误；`ops/admin` 的诊断页面可以查看受控技术字段。
+
+完整文件名证据回答至少记录以下诊断时间线：
+
+```text
+收到自然语言请求
+-> Planner 已生成受控决策
+-> 已从当前消息提取完整文件名
+-> 完整文件名匹配结果：唯一 / 多个 / 未找到
+-> ACTIVE 工作副本和当前版本检查结果
+-> 摘要、分类证据、DocumentChunk 和 EvidenceSpan 就绪状态
+-> 是否创建检索就绪任务
+-> worker 是否领取任务
+-> 文件分析任务完成或失败
+-> 等待中的 AgentRun 是否成功续跑
+-> 证据回答完成、无证据或失败
+-> 最终回执状态已更新
+```
+
+示例日志：
+
+```json
+{
+  "event": "evidence_answer.index_checked",
+  "event_title": "检查文件正文索引",
+  "stage": "EVIDENCE_INDEX_CHECK",
+  "status": "WAITING",
+  "operator_message": "已唯一定位文件，但当前版本正文索引尚未完成，正在等待后台分析。",
+  "cause_code": "INDEX_PENDING",
+  "recommended_action": "若长时间未完成，请确认 worker 进程正在运行，并检查关联任务是否失败。",
+  "request_id": "request-uuid",
+  "agent_run_id": "agent-run-uuid",
+  "document_id": "document-uuid",
+  "document_version_id": "version-uuid",
+  "filesystem_job_id": "job-uuid",
+  "duration_ms": 24
+}
+```
+
+运维入口建议增加：
+
+```text
+GET /api/admin/agent-runs
+GET /api/admin/agent-runs/{agent_run_id}/diagnostics
+/admin/agent-runs
+```
+
+诊断详情按时间顺序展示“阶段、状态、中文说明、耗时、原因、建议操作”，并关联 AgentRun、
+ToolInvocation、FilesystemJob 和处理事件。页面默认隐藏原始 JSON，需要时由 ops/admin 展开；不能把
+日志页面开放给普通 user。
 
 ## 8. DIRECT_RESPONSE 和 CLARIFY 收敛
 
@@ -712,6 +965,9 @@ created_at
 - DIRECT_RESPONSE 文件事实越权拦截次数。
 - CLARIFY 率和不必要澄清率。
 - Tool 集合一致率和步骤依赖有效率。
+- 搜索后 `FINISH/REFINE_SEARCH/READ_MATCHED_DOCUMENTS/CLARIFY` 决策正确率。
+- 零结果后的有效条件调整率和无意义重复查询率。
+- 搜索实际条件与用户目标的一致率。
 - LLM 空响应、超时、非法 JSON 的降级率。
 - Adaptive Planner 平均延迟和 token 使用量。
 
@@ -726,8 +982,10 @@ created_at
 5. 回放基准集覆盖搜索、总结、分类解释、表格、重命名建议、删除确认、歧义澄清和普通对话。
 6. Shadow 连续观察期内 schema 通过率不低于 99%。
 7. 关键安全意图的 scope/risk/confirmation 一致率为 100%。
-8. 自动化测试、后端全量测试和前端构建通过。
-9. 管理员可以一键回退 `legacy`，回退不要求数据库回滚。
+8. 搜索回放集中不存在把服务故障解释为零结果、把未应用条件展示为已应用条件的样本。
+9. 搜索后决策不存在越权扩大文件范围或重复执行相同 Tool 输入的样本。
+10. 自动化测试、后端全量测试和前端构建通过。
+11. 管理员可以一键回退 `legacy`，回退不要求数据库回滚。
 
 灰度顺序：
 
@@ -751,7 +1009,7 @@ legacy
 
 任务：
 
-1. 保留并复核当前尚未提交的最小 LangGraph 改动。
+1. 保留并复核当前已经落地的最小 LangGraph 循环。
 2. 固化空、HTML、非法 JSON、超时和连接失败的降级测试。
 3. 固化直接回复不得回答文件事实的安全测试。
 4. 固化最多 3 轮规划、Tool 调用预算、重复调用拒绝和有副作用 Tool 不盲目重试测试。
@@ -792,22 +1050,44 @@ legacy
 
 完成门槛：不存在任何 `eval` 或自由模板替换；错误绑定不会调用目标 Tool。
 
-### 阶段 3：重构 LangGraph 为步骤级规划执行循环
+### 阶段 3：完善 LangGraph 步骤级规划执行循环
 
-目标：将整批 dispatch 改为单步循环。
+目标：保留已经完成的单步循环骨架，补齐搜索观察和 LLM 下一步决策语义。
 
 任务：
 
-1. 增加 `validate_decision`、`select_next_step`、`resolve_bindings`。
-2. 将 `tool_dispatch` 拆为 `dispatch_step` 和 `record_step_result`。
-3. 增加 `current_step_id`、`step_states`、`completed_step_ids`、`failed_step_ids`。
-4. 区分继续当前计划和重新规划。
-5. 增加 waiting for async、waiting for confirmation、needs review 分支。
-6. 保留全局预算和重复调用签名。
-7. 给有副作用调用增加 idempotency key。
-8. 为确认暂停和恢复预留 checkpoint 接口；本阶段可先保持同步最小实现。
+1. 保留现有 `planning -> tool_dispatch -> observe_tool_result` 物理节点和单步执行方式。
+2. 为 ToolDefinition 增加后端不可被 LLM 覆盖的 `observation_policy`。
+3. 为 `hybrid-search` 增加严格输出 schema 和 `PLANNER_AFTER_EXECUTION` 策略。
+4. 扩展 `_safe_tool_observation`，投影结果数量、受控文件 ID、实际条件、索引状态和允许的下一步。
+5. Planner 第二、三轮必须消费上一轮 `ExecutionObservation`，不能再次生成相同 Tool 和相同输入。
+6. 建立 `semantic_query + hard_filters + interpreted_conditions` 三层查询表达。
+7. 区分 `ZERO_RESULTS`、`INDEX_PENDING`、`SEARCH_ENGINE_UNAVAILABLE` 和范围歧义。
+8. 修复主检索失败后的事务/savepoint 降级，基础设施失败不能被解释为没有相关文件。
+9. 修复多轮聚合优先读取第一条搜索结果的问题，最终选择最后一次成功有效结果。
+10. 为搜索结果回执和证据回答增加统一 `search_context`。
+11. 保留全局预算、重复调用签名、副作用 Tool 不盲目重试和 OperationPlan 确认边界。
+12. 为异步等待和确认恢复继续保留 checkpoint 接口；本阶段可保持同步最小实现。
+13. 为完整文件名问题增加独立硬范围测试，不读取上一轮 `search_context`，不扩大到其他文件。
+14. 为精确文件定位、证据就绪检查、异步任务领取、AgentRun 续跑和最终回执增加运维可读中文日志。
+15. 增加 AgentRun 诊断时间线 API，并以现有 AgentRun、ToolInvocation、FilesystemJob 和结构化日志作为
+    事实来源，不新增不可审计的自由文本状态。
+16. 增加 `/admin/agent-runs` 诊断页面；普通用户聊天页面继续只显示任务结果和安全状态。
 
-完成门槛：至少支持“两步有绑定的只读任务”、中间澄清、单步失败停止依赖分支和高风险确认暂停。
+完成门槛：至少支持“搜索命中后结束”“零结果后放宽一次条件”“搜索结果绑定到证据回答”“索引等待”
+和“检索故障停止语义重试”，且最终回执能展示后端确认的实际查询条件；运维人员能够仅根据中文诊断时间线
+确认完整文件名问答卡在文件定位、证据索引、worker、续跑还是最终回执阶段。
+
+截至 2026-07-30 的实施状态：
+
+- 已完成 `observation_policy`、`hybrid-search` 安全观察、`FINISH`、三轮规划预算和搜索结果 ID 授权扩展。
+- 已完成主搜索 savepoint 降级、多轮结果取最后一轮、`search_context` 持久化与普通用户安全投影。
+- 已完成 JSONL 运维可读字段、`/api/admin/agent-runs` 诊断接口和 `/admin/agent-runs` 页面。
+- 已完成完整文件名独立硬范围日志，当前消息中的完整文件名不依赖上一轮 `search_context`。
+- 已增加“搜索后观察并结束”、实际条件状态、最新轮结果、诊断权限与中文时间线自动化测试。
+- 仍需在生产可用 LLM 和真实 PostgreSQL/pgvector 数据上完成“零结果后由模型放宽条件”和“搜索后继续
+  证据回答”的手工烟测；这两条路径的运行时结构已经具备，但不能用 deterministic fake 代替生产语义验收。
+- Adaptive Planner 默认值继续保持 `shadow`，待第 7 阶段的生产指标和回退演练完成后再灰度启用。
 
 ### 阶段 4：接入分类证据读取
 
@@ -862,9 +1142,10 @@ legacy
 2. 新增 comparison 持久化和结构化日志。
 3. 建立离线回放和在线 Shadow 指标。
 4. Shadow 只生成决策，不调用 Tool。
-5. 按稳定哈希执行 5%、25%、50%、100% 灰度。
-6. 达到门槛后将 Adaptive Planner 设为默认值。
-7. 保留即时回退 Legacy 的配置能力。
+5. 回放覆盖搜索命中、零结果放宽、索引等待、搜索故障、搜索后证据回答和条件澄清。
+6. 按稳定哈希执行 5%、25%、50%、100% 灰度。
+7. 达到门槛后将 Adaptive Planner 设为默认值。
+8. 保留即时回退 Legacy 的配置能力。
 
 完成门槛：安全指标全部满足，自动化和手工烟测通过，且回退开关经过演练。
 
@@ -898,7 +1179,12 @@ apps/api/app/modules/agent/tool_registry.py
 apps/api/app/modules/llm/schemas.py
 apps/api/app/modules/llm/service.py
 apps/api/app/modules/evidence_answer/service.py
+apps/api/app/modules/retrieval/service.py
+apps/api/app/modules/conversations/user_receipt.py
+apps/api/app/modules/admin/router.py
+apps/api/app/modules/admin/service.py
 apps/api/app/core/config.py
+apps/web/src/features/admin/AgentRunsPage.tsx
 .env.example
 README.md
 docs/runbook.md
@@ -954,6 +1240,22 @@ analyze-spreadsheet
 - 有副作用 Tool 失败不自动重试。
 - 高风险 Tool 在未确认状态下不能调用。
 - 异步 Tool 进入等待状态而不是阻塞请求。
+- 搜索 Tool 执行后由 `PLANNER_AFTER_EXECUTION` 进入 Planner，而不是依赖 Tool 猜测任务是否完成。
+- 第一次搜索零结果后，第二轮可以改变语义条件并成功返回文件。
+- 搜索已经满足“列出文件”目标时直接结束，不产生无意义的正文读取。
+- 用户要求总结或问答时，把搜索结果的真实 `document_ids` 绑定到证据 Tool。
+- 相同搜索条件不能在第二轮重复执行。
+- 第三轮仍不能完成时返回部分结果和未满足条件，不进入第四轮。
+- `INDEX_PENDING` 进入异步等待，不触发查询条件放宽。
+- `SEARCH_ENGINE_UNAVAILABLE` 返回服务降级，不触发语义重试。
+- 多轮搜索最终采用最后一次成功有效结果，不采用第一轮零结果。
+- 用户回执显示后端确认的 `search_context`，不显示 Tool、Skill 和内部规划预算。
+- 当前消息包含完整文件名时，不读取上一轮 `search_context`，只在唯一 ACTIVE 工作副本范围内回答。
+- 完整文件名存在多个同名活动副本时进入 CLARIFY，不合并内容。
+- 完整文件名没有命中时只返回有限相似候选或明确未找到，不退回全库宽泛回答。
+- `ops/admin` 可以按 AgentRun 查看中文诊断时间线，普通 user 无权访问。
+- 诊断时间线可以区分文件定位、索引等待、worker 未领取、任务失败、续跑失败和回执更新失败。
+- JSONL 和诊断 API 不包含文件正文、绝对路径、密钥、JWT 或完整 LLM prompt。
 
 ### 15.4 分类证据
 
@@ -1021,6 +1323,11 @@ Adaptive Planner 灰度失败后回退 Legacy
 13. 不存在的能力可以生成去重、脱敏、可审计的 CapabilitySuggestion，并在管理员页面评审。
 14. CapabilitySuggestion 不会自动注册、启用或执行 Tool/Skill。
 15. 后端全量测试通过，前端构建成功，手工烟测通过。
+16. 搜索 Tool 的结果能够作为安全观察进入 Planner，由 LLM 在 3 轮预算内决定结束、改查、读取证据或澄清。
+17. 最终查询条件来自后端确认的实际执行条件，零结果、索引等待和检索服务故障不会互相混淆。
+18. 当前消息包含完整文件名时以该名称作为硬范围，不依赖上一轮搜索上下文，也不会扩大到其他文件。
+19. ops/admin 可以通过中文诊断时间线定位文件定位、证据准备、worker、AgentRun 续跑和回执更新问题。
+20. 运维可读字段与机器事件来自同一结构化日志事实，不形成两套互相矛盾的日志。
 
 ## 17. 实施后隐藏问题审计收口
 

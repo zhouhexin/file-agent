@@ -79,6 +79,13 @@ def log_event(
     duration_ms: int | None = None,
     error_code: str | None = None,
     message: str | None = None,
+    event_title: str | None = None,
+    stage: str | None = None,
+    operator_message: str | None = None,
+    cause_code: str | None = None,
+    recommended_action: str | None = None,
+    document_version_id: str | None = None,
+    filesystem_job_id: str | None = None,
     **extra: Any,
 ) -> None:
     """写入一条结构化 JSONL 日志。
@@ -106,9 +113,58 @@ def log_event(
         "duration_ms": duration_ms,
         "error_code": error_code,
         "message": message,
+        # 以下字段面向管理员诊断时间线。保留稳定 code 便于机器筛选，同时提供
+        # 中文标题、结论和处置建议，运维人员无需理解内部节点或 Tool 名称。
+        "event_title": event_title or _default_event_title(event),
+        "stage": stage or _default_stage(event),
+        "operator_message": operator_message or message,
+        "cause_code": cause_code or error_code,
+        "recommended_action": recommended_action,
+        "document_version_id": document_version_id,
+        "filesystem_job_id": filesystem_job_id,
     }
     record.update({key: value for key, value in extra.items() if value is not None})
     _append_jsonl(record, settings=resolved_settings)
+
+
+def _default_event_title(event: str) -> str:
+    """为未显式提供标题的旧日志生成可读中文事件名。"""
+
+    if event.startswith("api."):
+        return "接口请求"
+    if event.startswith("agent.node."):
+        return "任务阶段执行"
+    if event.startswith("tool."):
+        return "文件能力执行"
+    if event.startswith("retrieval."):
+        return "文件检索"
+    if event.startswith("evidence_answer."):
+        return "文件内容回答"
+    if event.startswith("filesystem."):
+        return "后台文件任务"
+    if event.startswith("classification."):
+        return "文件分类"
+    return "系统处理事件"
+
+
+def _default_stage(event: str) -> str:
+    """从稳定事件名推导管理员可筛选的业务阶段。"""
+
+    if event.startswith("api."):
+        return "API"
+    if event.startswith("agent."):
+        return "AGENT"
+    if event.startswith("tool."):
+        return "TOOL"
+    if event.startswith("retrieval."):
+        return "SEARCH"
+    if event.startswith("evidence_answer."):
+        return "EVIDENCE"
+    if event.startswith("filesystem."):
+        return "ASYNC_JOB"
+    if event.startswith("classification."):
+        return "CLASSIFICATION"
+    return "SYSTEM"
 
 
 def format_exception_traceback(error: BaseException, *, settings: Settings | None = None) -> str:

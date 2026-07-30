@@ -70,7 +70,10 @@ def build_agent_graph():
         _logged_node("clarification_response", clarification_response),
     )
     graph.add_node("tool_dispatch", _logged_runtime_node("tool_dispatch", tool_dispatch))
-    graph.add_node("observe_tool_result", _logged_node("observe_tool_result", observe_tool_result))
+    graph.add_node(
+        "observe_tool_result",
+        _logged_runtime_node("observe_tool_result", observe_tool_result),
+    )
     graph.add_node("async_job_wait", _logged_node("async_job_wait", async_job_wait))
     graph.add_node("evidence_or_change", _logged_runtime_node("evidence_or_change", evidence_or_change))
     graph.add_node("response", _logged_runtime_node("response", response))
@@ -87,6 +90,7 @@ def build_agent_graph():
             "tool_dispatch": "tool_dispatch",
             "direct_response": "direct_response",
             "clarification_response": "clarification_response",
+            "finalize": "evidence_or_change",
         },
     )
     graph.add_edge("direct_response", END)
@@ -183,7 +187,12 @@ def chat_intake(state: AgentGraphState) -> Dict[str, Any]:
         "tool_call_count": state.get("tool_call_count", 0),
         "executed_tool_signatures": state.get("executed_tool_signatures", []),
         "last_dispatch_results": [],
+        "last_dispatch_tool_name": None,
+        "last_dispatch_step_id": None,
         "observation": state.get("observation", {}),
+        "search_attempts": state.get("search_attempts", []),
+        "effective_conditions": state.get("effective_conditions", []),
+        "observed_document_ids": state.get("observed_document_ids", []),
         "replan_requested": False,
         "waiting_for_confirmation": False,
     }
@@ -261,6 +270,9 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                     catalog_snapshot=runtime.context.catalog_snapshot,
                     attachments=planning_attachments,
                     context_documents=state.get("context_documents", []),
+                    observed_document_ids=state.get(
+                        "observed_document_ids", []
+                    ),
                 )
             else:
                 plan, user_intent_plan = _run_legacy_llm_planner(
@@ -467,6 +479,7 @@ def _run_shadow_planner(
             catalog_snapshot=runtime.context.catalog_snapshot,
             attachments=attachments,
             context_documents=state.get("context_documents", []),
+            observed_document_ids=state.get("observed_document_ids", []),
         )
         return {
             "validation_status": "COMPLETED",
@@ -671,6 +684,22 @@ def _build_planner_decision(
             ),
             confidence=0.5,
         )
+    if decision_type == "FINISH":
+        return PlannerDecision(
+            decision_type="FINISH",
+            intent=plan.intent,
+            user_goal=plan.user_goal,
+            selected_skill_ids=plan.selected_skills,
+            scope=PlannerScope(
+                document_ids=list(plan.slots.get("document_ids", [])),
+                source=str(
+                    user_intent_plan.get("target_scope")
+                    or "tool_observation"
+                ),
+            ),
+            capability_suggestions=suggestions,
+            confidence=0.5,
+        )
     return PlannerDecision(
         decision_type="TOOL_PLAN",
         intent=plan.intent,
@@ -797,6 +826,8 @@ def route_after_planning(state: AgentGraphState) -> str:
         return "direct_response"
     if decision_type == "CLARIFY":
         return "clarification_response"
+    if decision_type == "FINISH":
+        return "finalize"
     return "tool_dispatch"
 
 
@@ -846,6 +877,8 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
     if current_step_index >= len(steps):
         return {
             "last_dispatch_results": [],
+            "last_dispatch_tool_name": None,
+            "last_dispatch_step_id": None,
             "status": "SUMMARIZING",
         }
 
@@ -865,6 +898,8 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
             "tool_results": tool_results,
             "tool_invocations": tool_invocations,
             "last_dispatch_results": [],
+            "last_dispatch_tool_name": str(step.get("tool_name") or ""),
+            "last_dispatch_step_id": step_id,
             "tool_call_count": tool_call_count,
             "executed_tool_signatures": executed_signatures,
             "errors": errors,
@@ -990,6 +1025,8 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
         "tool_results": tool_results,
         "tool_invocations": tool_invocations,
         "last_dispatch_results": last_dispatch_results,
+        "last_dispatch_tool_name": str(step.get("tool_name") or ""),
+        "last_dispatch_step_id": step_id,
         "tool_call_count": tool_call_count,
         "executed_tool_signatures": executed_signatures,
         "errors": errors,
@@ -1099,8 +1136,11 @@ def _dispatch_rejection_invocation(
     )
 
 
-def observe_tool_result(state: AgentGraphState) -> Dict[str, Any]:
-    """观察单步 Tool 结果，并在明确请求时将总规划轮数限制为 3。"""
+def observe_tool_result(
+    state: AgentGraphState,
+    runtime: Runtime[AgentRuntimeContext],
+) -> Dict[str, Any]:
+    """生成脱敏 Tool 观察，并按后端策略决定是否让 Adaptive Planner 继续判断。"""
 
     if state.get("waiting_for_confirmation"):
         return {
@@ -1114,40 +1154,157 @@ def observe_tool_result(state: AgentGraphState) -> Dict[str, Any]:
         }
 
     last_results = state.get("last_dispatch_results", [])
-    observation_items = [_safe_tool_observation(item) for item in last_results]
+    tool_name = str(state.get("last_dispatch_tool_name") or "")
+    observation_items = [
+        _safe_tool_observation(item, tool_name=tool_name)
+        for item in last_results
+    ]
     has_failed_result = any(
         item.get("ok") is False or str(item.get("status") or "").upper() == "FAILED"
         for item in last_results
     )
+    has_waiting_result = any(
+        item.get("kind") == "filesystem_job"
+        or str(item.get("status") or "").upper()
+        in {"PENDING", "PROCESSING", "WAITING_FOR_ASYNC_JOB"}
+        or str(item.get("result_status") or "") == "INDEX_PENDING"
+        for item in last_results
+    )
+    has_user_decision = any(
+        isinstance(item.get("search_clarification"), dict)
+        or isinstance(item.get("trash_restore_selection"), dict)
+        for item in last_results
+    )
     explicit_replan = any(item.get("replan_required") is True for item in last_results)
+    observation_policy = _tool_observation_policy(
+        registry=runtime.context.registry,
+        tool_name=tool_name,
+    )
+    planner_after_execution = (
+        observation_policy == "PLANNER_AFTER_EXECUTION"
+        and state.get("adaptive_planner_mode") == "enabled"
+    )
     can_replan = (
-        explicit_replan
+        (explicit_replan or planner_after_execution)
         and not has_failed_result
+        and not has_waiting_result
+        and not has_user_decision
         and int(state.get("planning_round", 0)) < MAX_PLANNING_ROUNDS
         and int(state.get("tool_call_count", 0)) < MAX_TOOL_CALLS
     )
+    search_attempts = list(state.get("search_attempts", []))
+    observed_document_ids = list(state.get("observed_document_ids", []))
+    effective_conditions = list(state.get("effective_conditions", []))
+    for observation_item in observation_items:
+        if tool_name != "hybrid-search":
+            continue
+        search_attempts.append(
+            {
+                "planning_round": int(state.get("planning_round", 0)),
+                "query": observation_item.get("query", ""),
+                "result_count": observation_item.get("result_count", 0),
+                "result_status": observation_item.get("result_status", ""),
+                "index_status": observation_item.get("index_status", ""),
+                "effective_conditions": observation_item.get(
+                    "effective_conditions", []
+                ),
+            }
+        )
+        for document_id in observation_item.get("document_ids", []):
+            if document_id not in observed_document_ids:
+                observed_document_ids.append(document_id)
+        effective_conditions = list(
+            observation_item.get("effective_conditions", [])
+        )
     return {
         "observation": {
             "planning_round": int(state.get("planning_round", 0)),
             "tool_call_count": int(state.get("tool_call_count", 0)),
+            "remaining_planning_rounds": max(
+                0,
+                MAX_PLANNING_ROUNDS
+                - int(state.get("planning_round", 0)),
+            ),
+            "remaining_tool_calls": max(
+                0,
+                MAX_TOOL_CALLS - int(state.get("tool_call_count", 0)),
+            ),
             "results": observation_items,
         },
+        "search_attempts": search_attempts[-MAX_PLANNING_ROUNDS:],
+        "effective_conditions": effective_conditions,
+        "observed_document_ids": observed_document_ids[:50],
         "replan_requested": can_replan,
         "status": "PLANNING" if can_replan else "SUMMARIZING",
     }
 
 
-def _safe_tool_observation(result: Dict[str, Any]) -> Dict[str, Any]:
+def _safe_tool_observation(
+    result: Dict[str, Any],
+    *,
+    tool_name: str,
+) -> Dict[str, Any]:
     """只保留重规划必需的 Tool 状态，避免正文和内部路径进入 LLM 输入。"""
 
     error = result.get("error") if isinstance(result.get("error"), dict) else {}
-    return {
+    observation = {
+        "tool_name": tool_name,
         "kind": str(result.get("kind") or ""),
         "status": str(result.get("status") or ""),
         "ok": result.get("ok"),
         "error_code": str(error.get("code") or ""),
         "replan_required": result.get("replan_required") is True,
     }
+    if tool_name != "hybrid-search":
+        return observation
+    document_ids = [
+        str(value)
+        for value in list(result.get("document_ids") or [])
+        if str(value)
+    ][:50]
+    conditions = [
+        {
+            "label": str(item.get("label") or "")[:40],
+            "value": str(item.get("value") or "")[:300],
+            "condition_type": str(
+                item.get("condition_type") or "semantic"
+            ),
+            "status": str(item.get("status") or "UNSUPPORTED"),
+            "source": str(item.get("source") or "backend"),
+        }
+        for item in list(result.get("effective_conditions") or [])
+        if isinstance(item, dict)
+    ][:30]
+    return {
+        **observation,
+        "query": str(result.get("query") or "")[:500],
+        "result_count": int(
+            result.get("total_returned")
+            if result.get("total_returned") is not None
+            else len(document_ids)
+        ),
+        "document_ids": document_ids,
+        "effective_conditions": conditions,
+        "result_status": str(result.get("result_status") or ""),
+        "index_status": str(result.get("index_status") or ""),
+        "partial": bool(result.get("partial", False)),
+        "available_next_actions": [
+            str(value)
+            for value in list(result.get("available_next_actions") or [])
+            if str(value)
+        ][:10],
+    }
+
+
+def _tool_observation_policy(*, registry: Any, tool_name: str) -> str:
+    """从后端 Registry 读取观察策略；测试 fake 或未知 Tool 使用兼容信号模式。"""
+
+    if not tool_name or not hasattr(registry, "get"):
+        return "PLANNER_ON_SIGNAL"
+    try:
+        return str(registry.get(tool_name).observation_policy)
+    except Exception:
+        return "PLANNER_ON_SIGNAL"
 
 
 def route_after_observation(state: AgentGraphState) -> str:
@@ -1327,7 +1484,7 @@ def _tool_errors_from_invocations(tool_invocations: List[Dict[str, Any]]) -> Lis
 def _filesystem_job_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """提取受管目录异步任务回执。"""
 
-    for result in tool_results:
+    for result in reversed(tool_results):
         if (
             result.get("kind") == "filesystem_job"
             and (result.get("job_id") or result.get("job_ids"))
@@ -1361,7 +1518,7 @@ def _evidence_answer_from_results(
 ) -> Dict[str, Any]:
     """提取阶段五回答、文件选择或回收站恢复卡的安全 Tool 结果。"""
 
-    for result in tool_results:
+    for result in reversed(tool_results):
         if result.get("kind") in {
             "evidence_answer",
             "file_selection",
@@ -1849,7 +2006,9 @@ def _managed_file_list_from_results(tool_results: List[Dict[str, Any]]) -> Dict[
 def _workspace_file_search_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """提取工作副本摘要优先检索载荷，空结果也必须生成明确回复。"""
 
-    for result in tool_results:
+    # 自适应 Planner 可能执行多轮检索；最终回复必须采用最新一轮观察，
+    # 不能因为第一轮零结果而掩盖后续放宽条件后的命中。
+    for result in reversed(tool_results):
         if result.get("kind") != "workspace_file_search":
             continue
         return {

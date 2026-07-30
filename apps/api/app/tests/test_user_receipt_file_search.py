@@ -134,3 +134,63 @@ def test_non_search_tool_not_activating_search_field():
     receipt = build_user_task_receipt(_make_result(tool_invocations=[invocation]))
 
     assert receipt.file_search_result is None
+
+
+def test_multiple_search_rounds_use_latest_result_and_safe_conditions():
+    """多轮搜索必须展示最后一轮结果，并移除观察中的 document_id。"""
+
+    first = ToolInvocationRecord(
+        tool_name="hybrid-search",
+        input_json={"query": "未来五年"},
+        output_json={
+            "kind": "workspace_file_search",
+            "ok": True,
+            "query": "未来五年",
+            "total_returned": 0,
+            "results": [],
+        },
+        status="COMPLETED",
+    )
+    second = ToolInvocationRecord(
+        tool_name="hybrid-search",
+        input_json={"query": "五年规划"},
+        output_json={
+            "kind": "workspace_file_search",
+            "ok": True,
+            "query": "五年规划",
+            "total_returned": 1,
+            "results": [{"document_id": "d-2", "filename": "五年规划.docx"}],
+        },
+        status="COMPLETED",
+    )
+    result = _make_result(tool_invocations=[first, second])
+    result.search_context = {
+        "effective_conditions": [
+            {
+                "label": "时间范围",
+                "value": "未来五年",
+                "condition_type": "time",
+                "status": "SEMANTIC_ONLY",
+                "source": "user_and_llm",
+                "document_ids": ["d-2"],
+            }
+        ],
+        "attempts": [
+            {"query": "未来五年", "result_count": 0},
+            {
+                "query": "五年规划",
+                "result_count": 1,
+                "document_ids": ["d-2"],
+            },
+        ],
+    }
+
+    receipt = build_user_task_receipt(result)
+
+    assert receipt.file_search_result["query"] == "五年规划"
+    assert receipt.search_context["attempts"][1]["result_count"] == 1
+    assert "document_ids" not in receipt.search_context["attempts"][1]
+    assert (
+        "document_ids"
+        not in receipt.search_context["effective_conditions"][0]
+    )

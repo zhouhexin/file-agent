@@ -191,9 +191,46 @@ class EvidenceAnswerService:
         exact_filename = _explicit_filename_from_question(normalized_question)
         active_rows = self._resolve_active_working_copies(explicit_ids)
         if exact_filename:
+            log_event(
+                "evidence_answer.exact_filename.detected",
+                settings=self.settings,
+                agent_run_id=self.agent_run_id,
+                user_id=self.user_id,
+                conversation_id=self.conversation_id,
+                status="RUNNING",
+                event_title="识别完整文件名",
+                stage="SCOPE",
+                operator_message=(
+                    "用户问题包含完整文件名，本轮将按该文件名独立确定范围，"
+                    "不会依赖上一轮检索上下文。"
+                ),
+                filename=exact_filename,
+            )
             # 完整文件名是最高优先级范围约束。会话上下文即使因历史附件模糊匹配
             # 传入多个 document_id，也不能把它们当作本次总结的依据。
             exact_rows = self._resolve_exact_filename_working_copies(exact_filename)
+            log_event(
+                "evidence_answer.exact_filename.resolved",
+                settings=self.settings,
+                agent_run_id=self.agent_run_id,
+                user_id=self.user_id,
+                conversation_id=self.conversation_id,
+                status="COMPLETED" if exact_rows else "NOT_FOUND",
+                event_title="确认目标文件",
+                stage="SCOPE",
+                operator_message=(
+                    f"完整文件名匹配到 {len(exact_rows)} 个活动工作副本。"
+                    if exact_rows
+                    else "完整文件名尚未匹配到活动工作副本。"
+                ),
+                recommended_action=(
+                    None
+                    if exact_rows
+                    else "检查文件是否仍在后台导入，或确认用户提供的完整文件名。"
+                ),
+                filename=exact_filename,
+                matched_count=len(exact_rows),
+            )
             exact_selection = self._exact_filename_selection(
                 exact_rows,
                 question=normalized_question,

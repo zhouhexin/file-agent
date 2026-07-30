@@ -9,7 +9,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
 from app.core.database import SessionLocal, init_database
 from app.core.logging import cleanup_old_logs, log_context, log_event, new_request_id
-from app.modules.agent.router import agent_runs_router, router as agent_router
+from app.modules.agent.router import (
+    admin_agent_runs_router,
+    agent_runs_router,
+    router as agent_router,
+)
 from app.modules.agent.capability_suggestions import (
     router as capability_suggestions_router,
 )
@@ -124,6 +128,7 @@ app.add_middleware(
 
 app.include_router(agent_router)
 app.include_router(agent_runs_router)
+app.include_router(admin_agent_runs_router)
 app.include_router(capability_suggestions_router)
 app.include_router(planner_shadow_router)
 app.include_router(auth_router)

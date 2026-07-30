@@ -105,7 +105,7 @@ class PlannerDecision(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    decision_type: Literal["TOOL_PLAN", "DIRECT_RESPONSE", "CLARIFY"]
+    decision_type: Literal["TOOL_PLAN", "DIRECT_RESPONSE", "CLARIFY", "FINISH"]
     intent: str = Field(min_length=1, max_length=120)
     user_goal: str = Field(min_length=1, max_length=2000)
     selected_skill_ids: list[str] = Field(default_factory=list, max_length=20)
@@ -121,7 +121,7 @@ class PlannerDecision(BaseModel):
 
     @model_validator(mode="after")
     def validate_decision_branch(self) -> "PlannerDecision":
-        """保证三种决策分支互斥，避免空回复或直接回复夹带 Tool。"""
+        """保证四种决策分支互斥，避免空回复或直接回复夹带 Tool。"""
 
         if self.decision_type == "TOOL_PLAN":
             if self.tool_plan is None:
@@ -145,9 +145,19 @@ class PlannerDecision(BaseModel):
                 raise ValueError("DIRECT_RESPONSE requires direct_response")
             if self.tool_plan is not None or self.clarification is not None:
                 raise ValueError("DIRECT_RESPONSE cannot include tool plan or clarification")
-        else:
+        elif self.decision_type == "CLARIFY":
             if self.clarification is None:
                 raise ValueError("CLARIFY requires clarification")
             if self.tool_plan is not None or self.direct_response is not None:
                 raise ValueError("CLARIFY cannot include tool plan or direct response")
+        else:
+            # FINISH 只表示现有 Tool 结果已经满足用户目标，最终文本仍由后端聚合器生成。
+            if (
+                self.tool_plan is not None
+                or self.direct_response is not None
+                or self.clarification is not None
+            ):
+                raise ValueError(
+                    "FINISH cannot include tool plan, response or clarification"
+                )
         return self
