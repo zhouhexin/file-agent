@@ -4,7 +4,7 @@
 
 参考来源：`/Users/zhouhexin/Downloads/langgraph_state_node_edge_issues_summary.md`
 
-更新时间：2026-06-25
+更新时间：2026-07-30
 
 ## 当前已改善项
 
@@ -24,6 +24,14 @@
 - 已修正 ToolInvocation 审计状态：Tool 输出 `ok=false` 或 `status=FAILED` 时，调用记录状态写为 `FAILED`。
 - AgentRun 快照已记录 `context_documents` 和 `user_intent_plan`，便于审计和排查模型规划结果。
 - 已新增 `AgentRuntimeContext`：`planner`、`registry`、`context_loader`、`llm_intent_service` 已从 `AgentGraphState` 移出，LangGraph 节点通过 `runtime.context` 获取运行依赖。
+- 已完成最小自适应路由：Planner 输出被后端归一为 `TOOL_PLAN`、`DIRECT_RESPONSE` 或 `CLARIFY`，
+  LLM 明确生成的普通直接回复和缺少文件范围的澄清不再为了占位审计调用 `intent-summary` Tool；
+  LLM 关闭时原有 deterministic 普通对话计划继续兼容。
+- 已新增 `observe_tool_result` 节点。只有白名单 Tool 明确返回 `replan_required=true`、本轮没有失败且
+  仍在预算内时，才允许把脱敏观察摘要交给 LLM 重规划；最多规划 3 轮。
+- 已新增重复 Tool 调用和调用预算保护；调度拒绝会形成 `FAILED` 审计记录和用户可理解的回执。
+- OpenAI-compatible 接口返回 HTTP 200 空正文、HTML 或非法 JSON 时会统一转换为
+  `LLMResponseError`，由确定性 Planner 降级，不再让 `JSONDecodeError` 穿透为 ASGI 500。
 
 ## P0 问题：下一阶段优先处理
 
@@ -54,33 +62,42 @@ Persistent Stores     数据库/对象存储/长期事实
 - 已采用 LangGraph Runtime Context，即 `StateGraph(..., context_schema=AgentRuntimeContext)`，节点通过 `runtime.context` 获取依赖。
 - `planner`、`registry`、`context_loader`、`llm_intent_service`、`db session`、LLM client、API key 不得写入 State、checkpoint 或 `graph_state_json`。
 
-### 1. LangGraph 仍是固定线性流程
+### 1. LangGraph 最小条件路由已完成，完整恢复流程仍待实现
 
-当前主流程仍接近：
+当前最小主流程为：
 
 ```text
 chat_intake
 -> collect_context
 -> planning
--> tool_dispatch
--> async_job_wait
+-> decision route
+   -> DIRECT_RESPONSE -> response
+   -> CLARIFY -> clarification response
+   -> TOOL_PLAN -> tool_dispatch
+-> observe_tool_result
+   -> 最多 3 次 planning（初始规划加最多 2 次重规划）
+   -> async_job_wait
 -> evidence_or_change
 -> response
 ```
 
-问题：
+当前执行限制：
 
-- 没有条件边。
-- 没有失败分支。
-- 没有人工复核分支。
-- 没有确认暂停与恢复分支。
-- 没有异步任务轮询与恢复循环。
+- 最多规划 3 轮，即初始规划加最多 2 次重规划。
+- 最多实际调用 5 次 Tool；失败的实际调用也计入预算。
+- 相同 `tool_name + schema 校验后的 input` 只允许实际调用一次。
+- Tool 失败不会自动触发重规划；有副作用 Tool 失败后不得盲目重试。
+- 重规划观察只包含结果类型、状态、错误码和计数，不包含正文、绝对路径或服务对象。
+- 高风险动作继续要求 OperationPlan 和用户确认；规划轮数或 Tool 预算不能绕过确认。
 
-改造目标：
+这些限制约束的是一次 AgentRun 的自主执行范围，不限制用户如何用自然语言表达。超过预算时系统保留
+已经完成的逐文件结果，并要求用户缩小文件范围或发起下一次任务。
 
-- 引入 `add_conditional_edges`。
-- 增加 `validate_plan`、`failure`、`needs_review`、`waiting_for_confirmation` 等节点。
-- 根据 intent、确认状态、错误状态、异步任务状态路由。
+仍待实现：
+
+- 独立 `validate_plan`、`failure`、`needs_review` 和 `waiting_for_confirmation` 节点。
+- 基于 checkpoint 的确认暂停、恢复和运行版本迁移。
+- 异步任务轮询、超时、失败恢复和批量 map/reduce。
 
 ### 2. State 缺少步骤级执行状态
 
@@ -259,6 +276,11 @@ change-report         -> ChangeSet / ChangeItem 聚合
 ```
 
 ## 建议的下一阶段开发顺序
+
+自 2026-07-30 起，自适应 Planner、动态 Tool/Skill Catalog、Tool 结果绑定、步骤级规划执行循环、
+分类证据读取和 Planner Shadow 的完整实施顺序，以
+`docs/adaptive-planner-execution-loop-implementation-plan.md` 为准。本节保留为早期 Runtime
+问题背景，不再作为上述能力的直接开发清单。
 
 1. 扩展 `AgentGraphState`：增加 `document_results`、步骤状态、结构化 errors。
 2. 新增 `validate_plan` 节点。

@@ -1549,6 +1549,9 @@ external model use for file content must be explicit
 | `GET /api/admin/feedback` | no | yes | yes |
 | `POST /api/admin/feedback/{id}/resolve` | no | yes | yes |
 | `GET/PUT /api/admin/settings/llm` | no | yes | yes |
+| `GET /api/admin/capability-suggestions` | no | yes | yes |
+| `POST /api/admin/capability-suggestions/{id}/review` | no | review | review/accept |
+| `GET /api/admin/planner-shadow/metrics` | no | yes | yes |
 
 ## 19. Three-tier File Lifecycle APIs
 
@@ -1582,3 +1585,42 @@ POST /api/trash-entries/{trash_entry_id}/restore-plan
 DocumentVersion 或内容哈希自动复活或合并已删除文件。
 
 工作副本高风险计划使用 `RENAME_WORKING_COPIES`、`MOVE_WORKING_COPIES`、`TRASH_WORKING_COPIES` 和 `RESTORE_WORKING_COPIES`。创建请求只能提交 `working_copy_id` 和目标逻辑字段，后端必须从数据库重建 before/version/SHA-256 快照；确认后逐文件执行并写 ChangeSet。任何响应不得返回三个目录的宿主机绝对路径。
+
+## 20. Adaptive Planner Admin APIs
+
+### 20.1 List Capability Suggestions
+
+```text
+GET /api/admin/capability-suggestions?status=NEW&limit=100
+```
+
+只允许 ops/admin。响应是脱敏、去重后的能力缺口，不包含用户消息全文、文件正文、Prompt 或 Tool 输入。
+
+### 20.2 Review Capability Suggestion
+
+```text
+POST /api/admin/capability-suggestions/{suggestion_id}/review
+```
+
+Request:
+
+```json
+{
+  "status": "UNDER_REVIEW",
+  "review_note": "评估是否进入下一版本"
+}
+```
+
+ops 可以标记评审中、拒绝或合并；只有 admin 可以标记接受或已实现。任何状态变化都不会自动创建代码、
+注册 Tool、启用 Skill 或扩大权限。
+
+### 20.3 Read Planner Shadow Metrics
+
+```text
+GET /api/admin/planner-shadow/metrics?limit=5000
+```
+
+响应包含当前聚合批次的 `catalog_fingerprint`、`schema_version`、样本数、schema 校验通过率、
+决策/范围/风险/确认一致率以及错误码计数。服务默认只聚合最新 Catalog 与 Planner schema 的同一批
+样本，失败生成和失败校验同样计入分母。接口不能修改 `ADAPTIVE_PLANNER_MODE` 或灰度比例，也不能
+返回 Shadow 决策中的输入内容。

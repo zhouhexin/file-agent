@@ -1124,3 +1124,31 @@ filesystem_jobs queue/lease/idempotency fields
 `working_copies.managed_file_id` 不为空；每个主导入工作副本必须追溯到 `managed_files`。重命名和移动只更新 `working_copies.relative_path`、当前版本的存储路径缓存和 `working_copy_path_records`，不能创建新版本。删除只把当前版本移动到回收站并创建 `trash_entries`，不得删除受管原始文件或消息引用。
 
 完整字段、状态机、唯一约束和权限边界以 `docs/managed-original-working-copy-trash-implementation-plan.md` 为准。
+
+## 10. Adaptive Planner Audit Extension
+
+迁移 `20260730_0001` 增加 Adaptive Planner 的可审计边界：
+
+```text
+agent_runs:
+- planner_mode
+- planner_schema_version
+- catalog_version
+- catalog_fingerprint
+
+capability_suggestions:
+- LLM 发现当前 Catalog 无法满足目标时生成的脱敏待评审建议
+- deduplication_fingerprint 唯一，重复建议只累计 occurrence_count
+- 状态只允许由 ops/admin 评审
+- ACCEPTED/IMPLEMENTED 只允许 admin
+- 不得自动注册 Tool、修改 SkillManifest 或生成代码
+
+planner_shadow_comparisons:
+- 只保存 Legacy/Adaptive 的决策类型、intent、Skill/Tool 名称集合和安全一致性
+- 不保存用户消息、Prompt、文件正文、绝对路径或 Tool 输入
+- Shadow 记录只能用于指标与灰度判断，不能驱动 Tool 执行
+```
+
+`CatalogSnapshot` 的完整 schema 只存在于请求级运行上下文；`agent_runs` 和 Graph 快照只持久化版本、
+指纹与启用名称。这样可以审计“当时允许模型看到哪些能力”，又不会把 handler、数据库会话或模型客户
+端写入持久化状态。

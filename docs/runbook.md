@@ -47,7 +47,7 @@ python -m pytest
 当前期望结果：
 
 ```text
-504 passed, 19 skipped
+全部自动化测试通过；只保留有明确外部环境原因的 skipped 项
 ```
 
 当前跳过项是需要真实外部执行器或独立环境的既有集成测试。Paddle、PyMuPDF 等依赖可能输出弃用或
@@ -247,6 +247,10 @@ EVIDENCE_ANSWER_MAX_INPUT_CHARS=120000
 EVIDENCE_ANSWER_MAX_CALLS=3
 EVIDENCE_ANSWER_REPAIR_CALLS=1
 EVIDENCE_ANSWER_CACHE_ENABLED=true
+ADAPTIVE_PLANNER_MODE=shadow
+ADAPTIVE_PLANNER_ROLLOUT_PERCENT=0
+ADAPTIVE_PLANNER_SHADOW_SAMPLE_PERCENT=100
+ADAPTIVE_PLANNER_SCHEMA_VERSION=planner-decision-v1
 OCR_ENABLED=true
 OCR_PADDLE_MODEL_SOURCE=BOS
 OCR_LLM_ENABLED=false
@@ -257,6 +261,41 @@ DOCLING_OCR_ENABLED=false
 ```
 
 当前客户端调用 OpenAI-compatible `/chat/completions` 接口，并要求模型返回符合 `UserIntentPlan` 的 JSON 对象。上传阶段的 deterministic ingest 不依赖 LLM；对话阶段启用 LLM 后，会先理解用户需求，再通过白名单 Tool 读取 `document_insights` 或执行后续受控工具。
+
+Adaptive Planner 使用独立的 `PlannerDecision` 契约，并且只能引用请求级 `CatalogSnapshot` 中存在、已启用且
+被 SkillManifest 允许的 Tool。三种运行模式为：
+
+```text
+legacy：只运行现有 Planner。
+shadow：现有 Planner 产生用户可见结果，Adaptive Planner 只生成并校验决策，不调用 Tool。
+enabled：按用户稳定哈希和 ADAPTIVE_PLANNER_ROLLOUT_PERCENT 灰度启用 Adaptive Planner；
+         未命中用户继续进入 Shadow，Adaptive 失败时先回退 Legacy，再回退确定性 Planner。
+```
+
+默认保持 `shadow` 且灰度比例为 0。只有生产 Shadow 指标满足
+`docs/adaptive-planner-execution-loop-implementation-plan.md` 的安全门槛后，才允许逐步调整为
+5%、25%、50%、100%。每次运行最多规划 3 轮、调用 5 次 Tool；同名 Tool 加规范化输入的重复调用会在
+执行前拒绝，高风险 Tool 在未确认时会暂停当前步骤，不继续后续步骤。
+
+部署本版本前必须执行迁移 `20260730_0001_add_adaptive_planner_catalog`。该迁移新增
+`capability_suggestions`、`planner_shadow_comparisons`，并给 `agent_runs` 增加 Planner 模式、
+schema 版本与 Catalog 指纹。服务启动时会交叉校验 `skills/*/manifest.json` 与代码白名单；存在未知
+Tool 或缺少 `SKILL.md` 时会关闭式启动失败。
+
+能力缺口建议的管理接口为：
+
+```text
+GET  /api/admin/capability-suggestions
+GET  /api/admin/capability-suggestions/{suggestion_id}
+POST /api/admin/capability-suggestions/{suggestion_id}/review
+GET  /api/admin/planner-shadow/metrics
+```
+
+ops/admin 可以查看并评审；只有 admin 可以标记为接受或已实现。即使标记为接受，也不会自动生成代码、
+注册 Tool、修改 SkillManifest 或扩大权限。前端入口为 `/admin/capability-suggestions`。Shadow 指标
+接口只返回当前最新 Catalog/schema 批次的指纹、schema、决策、范围、风险与确认一致率以及错误计数；
+Shadow 生成失败和校验失败也会进入分母。接口不返回 Prompt、正文或 Tool 输入，也不能通过该接口切换
+灰度。
 
 上传导入和分类阶段的持久化双摘要默认使用 `extractive` Provider：本地 Jieba 分词后以有候选上限的
 LexRank 选择可定位原文句子，不下载模型、不要求 GPU，也不会因为 `LLM_ENABLED=true` 自动外发正文。
@@ -859,6 +898,8 @@ NEO4J_SYNC_ENABLED=false
 ## 9. 当前限制
 
 - 当前已接入 OpenAI-compatible LLM 意图理解；默认 `LLM_ENABLED=false` 时仍使用 `DeterministicPlanner`。
+- Adaptive Planner 已具备 Catalog 校验、步骤级绑定、3 轮规划预算、Shadow 对比和稳定灰度开关，但尚未达到生产 Shadow 观察期与默认启用门槛；当前默认只读 Shadow，不能直接改为 100% enabled。
+- 现有 Tool 已统一经过输出模型校验，但部分旧 Tool 仍使用迁移期通用输出模型；进入 Adaptive 主路径的核心 Tool 需要继续收敛为各自严格业务 output schema。
 - 当前已持久化 user、default workspace、message、AgentRun、ToolInvocation、Document、document_insights、document_extraction_runs、document_pages、document_classification_runs、document_category_suggestions、document_category_feedback、change_sets、change_items、operation_plans 和 operation_confirmations。
 - OperationPlan 已支持工作副本重命名、移动、移入回收站和恢复；普通用户可以在 `/chat` 通过自然语言生成同名冲突、移入回收站和恢复计划，并在页面确认后执行。重命名、移动不新增工作副本版本，所有路径变更写入 `working_copy_path_records`。受管原始目录保持不变；自动永久删除仍未开放。
 - 没有白名单执行器的 OperationPlan 不能确认，计划保持 `WAITING_CONFIRMATION`，不会伪造 `EXECUTED`。
