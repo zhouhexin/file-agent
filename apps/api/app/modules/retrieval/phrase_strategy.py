@@ -6,9 +6,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import replace
 from typing import Any
+
+from app.core.logging import log_event
 
 
 class FileSearchPhraseStrategyService:
@@ -36,9 +39,20 @@ class FileSearchPhraseStrategyService:
         """
 
         unique_phrases = list(dict.fromkeys(str(item).strip() for item in phrases if str(item).strip()))[:8]
+        log_event(
+            "retrieval.phrase_strategy.started",
+            tool_name="hybrid-search",
+            status="RUNNING",
+            phrase_count=len(unique_phrases),
+            require_body_evidence=require_body_evidence,
+            message="受控短语检索开始",
+        )
         merged: dict[str, dict[str, Any]] = {}
         partial = False
         for phrase in unique_phrases:
+            phrase_fingerprint = hashlib.sha256(
+                phrase.lower().encode("utf-8")
+            ).hexdigest()[:12]
             phrase_query = replace(
                 parsed_query,
                 cleaned=phrase,
@@ -57,6 +71,10 @@ class FileSearchPhraseStrategyService:
                 include_internal_match_flags=True,
             )
             partial = partial or bool(payload.get("partial"))
+            raw_result_count = len(
+                [item for item in payload.get("results", []) if isinstance(item, dict)]
+            )
+            accepted_count = 0
             for item in payload.get("results", []):
                 if not isinstance(item, dict):
                     continue
@@ -81,6 +99,19 @@ class FileSearchPhraseStrategyService:
                     existing["matched_phrases"].append(phrase)
                 if body_hit:
                     existing["_body_phrase_hit"] = True
+                accepted_count += 1
+            log_event(
+                "retrieval.phrase_strategy.phrase_completed",
+                level="WARNING" if payload.get("partial") else "INFO",
+                tool_name="hybrid-search",
+                status="DEGRADED" if payload.get("partial") else "COMPLETED",
+                phrase_fingerprint=phrase_fingerprint,
+                phrase_chars=len(phrase),
+                raw_result_count=raw_result_count,
+                accepted_result_count=accepted_count,
+                require_body_evidence=require_body_evidence,
+                message="单个受控短语检索和证据门槛处理完成",
+            )
 
         results = list(merged.values())
         results.sort(
@@ -92,6 +123,16 @@ class FileSearchPhraseStrategyService:
         )
         for item in results:
             item.pop("_body_phrase_hit", None)
+        log_event(
+            "retrieval.phrase_strategy.completed",
+            level="WARNING" if partial or not results else "INFO",
+            tool_name="hybrid-search",
+            status="DEGRADED" if partial else "COMPLETED",
+            phrase_count=len(unique_phrases),
+            result_count=len(results),
+            partial=partial,
+            message="受控短语检索合并完成",
+        )
         return {
             "ok": True,
             "kind": "workspace_file_search",

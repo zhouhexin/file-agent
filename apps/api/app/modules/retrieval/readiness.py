@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
 
+from app.core.logging import log_event
 from app.db.models import (
     Document,
     DocumentVersion,
@@ -131,18 +132,57 @@ class WorkingCopySearchReadinessService:
         """
 
         upload_document_ids = unresolved_upload_document_ids or []
+        log_event(
+            "retrieval.readiness.started",
+            tool_name="hybrid-search",
+            status="RUNNING",
+            workspace_id=self.workspace_id,
+            unresolved_upload_count=len(upload_document_ids),
+            has_year=getattr(parsed, "year", None) is not None,
+            query_term_count=len(list(getattr(parsed, "terms", []) or [])),
+            message="工作副本检索就绪检查开始",
+        )
         job_ids = self._pending_upload_job_ids(upload_document_ids)
         managed_files = self._managed_files_for_uploads(upload_document_ids)
         # 明确附件尚未形成工作副本时只能沿该附件血缘推进，不能再用查询文本匹配
         # 其他受管文件，否则会静默准备与用户附件无关的候选。
         if not upload_document_ids and not managed_files:
             managed_files = self._managed_candidates(query=query, parsed=parsed)
+        log_event(
+            "retrieval.readiness.candidates_resolved",
+            tool_name="hybrid-search",
+            status="COMPLETED",
+            workspace_id=self.workspace_id,
+            pending_upload_dependency_count=len(job_ids),
+            managed_candidate_count=len(managed_files),
+            attachment_lineage_only=bool(upload_document_ids),
+            message="静默准备候选解析完成",
+        )
         for managed_file in managed_files:
             job = self._ensure_ready_job(managed_file)
             if job is not None and job.status in {"PENDING", "RUNNING"}:
                 job_ids.append(str(job.id))
         if not job_ids:
+            log_event(
+                "retrieval.readiness.completed",
+                level="WARNING",
+                tool_name="hybrid-search",
+                status="SKIPPED",
+                workspace_id=self.workspace_id,
+                dependency_count=0,
+                error_code="NO_PREPARABLE_DEPENDENCY",
+                message="没有可等待或可提升的检索准备任务",
+            )
             return None
+        unique_job_ids = list(dict.fromkeys(job_ids))
+        log_event(
+            "retrieval.readiness.completed",
+            tool_name="hybrid-search",
+            status="WAITING_FOR_ASYNC_JOB",
+            workspace_id=self.workspace_id,
+            dependency_count=len(unique_job_ids),
+            message="检索准备任务已创建或提升优先级",
+        )
         return {
             "kind": "filesystem_job",
             "ok": True,
@@ -150,7 +190,7 @@ class WorkingCopySearchReadinessService:
             # 仅供普通回执投影识别并隐藏任务 ID；不包含候选文件或路径。
             "source": "search-readiness",
             "job_id": job_ids[0],
-            "job_ids": list(dict.fromkeys(job_ids)),
+            "job_ids": unique_job_ids,
         }
 
     def _pending_upload_job_ids(self, document_ids: list[str]) -> list[str]:
@@ -322,7 +362,25 @@ class WorkingCopySearchReadinessService:
             .limit(40)
             .all()
         )
-        return [item for item in rows if "/.internal/" not in f"/{item.relative_path}/"]
+        candidates = [
+            item
+            for item in rows
+            if "/.internal/" not in f"/{item.relative_path}/"
+        ]
+        log_event(
+            "retrieval.readiness.managed_candidates.completed",
+            level="WARNING" if not candidates else "INFO",
+            tool_name="hybrid-search",
+            status="COMPLETED",
+            workspace_id=self.workspace_id,
+            candidate_count=len(candidates),
+            entity_alias_mode=bool(entity_terms),
+            has_topic_condition=bool(topic_phrase),
+            has_year=year is not None,
+            term_count=len(terms),
+            message="受管元数据静默候选检索完成",
+        )
+        return candidates
 
     def _ensure_ready_job(self, managed_file: ManagedFile) -> FilesystemJob | None:
         """保证候选拥有活动副本及检索派生数据，终态失败任务绝不自动重开。"""
@@ -355,9 +413,43 @@ class WorkingCopySearchReadinessService:
                     "user_id": self.user_id,
                 },
             )
-            return queue.promote_pending_job(job=job, priority=10)
+            promoted = queue.promote_pending_job(job=job, priority=10)
+            log_event(
+                "retrieval.readiness.import_dependency",
+                tool_name="hybrid-search",
+                document_id=None,
+                status=promoted.status,
+                workspace_id=self.workspace_id,
+                managed_file_id=managed_file.id,
+                filesystem_job_id=promoted.id,
+                attempt_count=promoted.attempt_count,
+                max_attempts=promoted.max_attempts,
+                message="候选尚无活动工作副本，已确认导入依赖",
+            )
+            return promoted
         status = working_copy_search_artifact_status(self.db, working_copy)
         if status["ready"] or status["repair_blocked"] or not working_copy.current_version_id:
+            log_event(
+                "retrieval.readiness.artifact_checked",
+                level="WARNING" if status["repair_blocked"] else "INFO",
+                tool_name="hybrid-search",
+                document_id=working_copy.document_id,
+                status=(
+                    "READY"
+                    if status["ready"]
+                    else (
+                        "BLOCKED"
+                        if status["repair_blocked"]
+                        else "SKIPPED"
+                    )
+                ),
+                workspace_id=self.workspace_id,
+                working_copy_id=working_copy.id,
+                profile_ready=status["profile_ready"],
+                index_ready=status["index_ready"],
+                repair_blocked=status["repair_blocked"],
+                message="活动工作副本检索派生状态检查完成",
+            )
             return None
         job = queue.create_job(
             job_type="ANALYZE_DOCUMENT_VERSION",
@@ -375,4 +467,19 @@ class WorkingCopySearchReadinessService:
                 "user_id": self.user_id,
             },
         )
-        return queue.promote_pending_job(job=job, priority=10)
+        promoted = queue.promote_pending_job(job=job, priority=10)
+        log_event(
+            "retrieval.readiness.analysis_dependency",
+            tool_name="hybrid-search",
+            document_id=working_copy.document_id,
+            status=promoted.status,
+            workspace_id=self.workspace_id,
+            working_copy_id=working_copy.id,
+            filesystem_job_id=promoted.id,
+            profile_ready=status["profile_ready"],
+            index_ready=status["index_ready"],
+            attempt_count=promoted.attempt_count,
+            max_attempts=promoted.max_attempts,
+            message="活动工作副本缺少检索派生数据，已确认分析依赖",
+        )
+        return promoted

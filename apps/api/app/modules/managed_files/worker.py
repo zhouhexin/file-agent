@@ -603,6 +603,18 @@ def _advance_waiting_search_runs(
         ]
         if str(completed_job.id) not in waiting_ids:
             continue
+        log_event(
+            "retrieval.waiting_run.dependency_completed",
+            agent_run_id=str(candidate.id),
+            user_id=str(candidate.user_id),
+            conversation_id=str(candidate.conversation_id),
+            tool_name="hybrid-search",
+            status="RUNNING",
+            filesystem_job_id=str(completed_job.id),
+            filesystem_job_type=completed_job.job_type,
+            previous_dependency_count=len(waiting_ids),
+            message="检索等待链收到依赖任务完成事件",
+        )
         run = _lock_waiting_agent_run(db=db, agent_run_id=str(candidate.id))
         if run is None or not _is_search_readiness_run(db=db, run=run):
             continue
@@ -638,6 +650,18 @@ def _advance_waiting_search_runs(
             graph_state["async_job_ids"] = next_ids
             run.graph_state_json = graph_state
             run.updated_at = utcnow()
+            log_event(
+                "retrieval.waiting_run.dependencies_updated",
+                agent_run_id=str(run.id),
+                user_id=str(run.user_id),
+                conversation_id=str(run.conversation_id),
+                tool_name="hybrid-search",
+                status="WAITING_FOR_ASYNC_JOB",
+                completed_job_type=completed_job.job_type,
+                remaining_dependency_count=len(next_ids),
+                child_dependency_count=len(child_job_ids),
+                message="检索等待依赖集合已更新",
+            )
             # 多候选准备时不必等待全部文件。任一分析任务完成后立即重跑原检索；
             # 已经出现活动结果就更新原消息，其余后台导入仍可独立继续。
             if completed_job.job_type != "ANALYZE_DOCUMENT_VERSION":
@@ -723,6 +747,17 @@ def _resume_waiting_hybrid_search(
         .first()
     )
     if invocation is None:
+        log_event(
+            "retrieval.waiting_run.resume_failed",
+            level="ERROR",
+            agent_run_id=str(run.id),
+            user_id=str(run.user_id),
+            conversation_id=str(run.conversation_id),
+            tool_name="hybrid-search",
+            status="FAILED",
+            error_code="TOOL_INVOCATION_NOT_FOUND",
+            message="检索续跑缺少原始 ToolInvocation",
+        )
         _finish_waiting_search_as_failed(
             run=run,
             graph_state=graph_state,
@@ -730,6 +765,18 @@ def _resume_waiting_hybrid_search(
         )
         return
 
+    log_event(
+        "retrieval.waiting_run.resume_started",
+        agent_run_id=str(run.id),
+        user_id=str(run.user_id),
+        conversation_id=str(run.conversation_id),
+        tool_name=invocation.tool_name,
+        status="RUNNING",
+        previous_dependency_count=len(
+            list(graph_state.get("async_job_ids", []) or [])
+        ),
+        message="原文件检索开始自动续跑",
+    )
     registry = ToolRegistry(db=db, user_id=run.user_id)
     registry.set_run_context(
         conversation_id=run.conversation_id,
@@ -767,6 +814,16 @@ def _resume_waiting_hybrid_search(
             run.final_response = None
             run.graph_state_json = graph_state
             run.updated_at = utcnow()
+            log_event(
+                "retrieval.waiting_run.resume_waiting",
+                agent_run_id=str(run.id),
+                user_id=str(run.user_id),
+                conversation_id=str(run.conversation_id),
+                tool_name=invocation.tool_name,
+                status="WAITING_FOR_ASYNC_JOB",
+                dependency_count=len(job_ids),
+                message="自动续跑仍需等待新的检索准备依赖",
+            )
             return
 
     if invocation.tool_name == "evidence-answer":
@@ -801,6 +858,17 @@ def _resume_waiting_hybrid_search(
         run.error_message = None if succeeded else final_response
         run.graph_state_json = graph_state
         run.updated_at = utcnow()
+        log_event(
+            "retrieval.waiting_run.resume_completed",
+            level="WARNING" if not succeeded else "INFO",
+            agent_run_id=str(run.id),
+            user_id=str(run.user_id),
+            conversation_id=str(run.conversation_id),
+            tool_name=invocation.tool_name,
+            status=status,
+            result_count=len(list(output.get("citations") or [])),
+            message="证据回答自动续跑完成",
+        )
         return
 
     from app.modules.agent.graph import _build_workspace_file_search_response
@@ -830,6 +898,18 @@ def _resume_waiting_hybrid_search(
     run.error_message = None if succeeded else final_response
     run.graph_state_json = graph_state
     run.updated_at = utcnow()
+    log_event(
+        "retrieval.waiting_run.resume_completed",
+        level="WARNING" if not succeeded else "INFO",
+        agent_run_id=str(run.id),
+        user_id=str(run.user_id),
+        conversation_id=str(run.conversation_id),
+        tool_name=invocation.tool_name,
+        status=status,
+        result_count=len(list(output.get("results") or [])),
+        clarification_required=bool(clarification),
+        message="文件检索自动续跑完成",
+    )
 
 
 def _fail_waiting_search_runs(
@@ -853,6 +933,20 @@ def _fail_waiting_search_runs(
         }
         if str(failed_job.id) not in waiting_ids:
             continue
+        log_event(
+            "retrieval.waiting_run.dependency_failed",
+            level="ERROR",
+            agent_run_id=str(candidate.id),
+            user_id=str(candidate.user_id),
+            conversation_id=str(candidate.conversation_id),
+            tool_name="hybrid-search",
+            status="FAILED",
+            filesystem_job_id=str(failed_job.id),
+            filesystem_job_type=failed_job.job_type,
+            attempt_count=failed_job.attempt_count,
+            max_attempts=failed_job.max_attempts,
+            message="检索等待链依赖任务达到失败终态",
+        )
         run = _lock_waiting_agent_run(db=db, agent_run_id=str(candidate.id))
         if run is None or not _is_search_readiness_run(db=db, run=run):
             continue

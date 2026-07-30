@@ -12,6 +12,7 @@ from typing import Any, Dict, List
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.logging import log_event
 from app.modules.agent.capability_router import route_user_intent
 from app.modules.classification.conversation_decision import (
     classification_decision_action,
@@ -1291,6 +1292,20 @@ def _file_search_plan(
     """生成面向当前用户工作副本的摘要优先文件检索计划。"""
 
     scoped_document_ids = document_ids or []
+    log_event(
+        "retrieval.planner.file_search_plan",
+        status="COMPLETED",
+        tool_name="hybrid-search",
+        query_chars=len(str(query or "")),
+        scoped_document_count=len(scoped_document_ids),
+        response_style=response_style,
+        has_clarification_question=bool(clarification_question),
+        source=(
+            str((llm_intent_plan or {}).get("source") or "")
+            or "deterministic_or_validated_intent"
+        ),
+        message="Planner 已生成文件检索计划",
+    )
     return PlannerOutput(
         intent="SEARCH_FILES",
         user_goal=user_goal,

@@ -6,6 +6,7 @@ Planner 输出永远不能直接调用 Tool handler，必须经过这里的 Regi
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ValidationError
 
 from app.core.config import get_settings
-from app.core.logging import log_event
+from app.core.logging import format_exception_traceback, log_event
 from app.db.models import (
     Document,
     DocumentCategorySuggestion,
@@ -371,6 +372,14 @@ def _search_handler(
         """在当前用户边界内按最终文件名、分类和持久化摘要检索。"""
 
         if db is None or user_id is None:
+            log_event(
+                "retrieval.request.rejected",
+                level="ERROR",
+                tool_name="hybrid-search",
+                status="FAILED",
+                error_code="RUNTIME_CONTEXT_REQUIRED",
+                message="文件检索缺少数据库或用户运行上下文",
+            )
             return {
                 "kind": "workspace_file_search",
                 "ok": False,
@@ -386,8 +395,22 @@ def _search_handler(
 
         workspace_id = get_shared_workspace_id(db)
         search_query = str(getattr(tool_input, "query") or "")
+        query_fingerprint = hashlib.sha256(
+            search_query.strip().lower().encode("utf-8")
+        ).hexdigest()[:12]
         requested_document_ids = list(
             getattr(tool_input, "document_ids", []) or []
+        )
+        log_event(
+            "retrieval.request.started",
+            tool_name="hybrid-search",
+            status="RUNNING",
+            workspace_id=workspace_id,
+            query_fingerprint=query_fingerprint,
+            query_chars=len(search_query),
+            requested_document_count=len(requested_document_ids),
+            two_stage_enabled=bool(settings.two_stage_retrieval_enabled),
+            message="文件检索请求进入受控 Tool",
         )
         # 上传消息引用的是暂存 Document；正式检索必须先映射为共享活动工作副本
         # Document。尚未完成导入的 ID 只交给内部就绪协调，不能扩大到全库检索。
@@ -404,6 +427,19 @@ def _search_handler(
             requested_document_ids
         )
         explicit_document_ids = list(canonical_scope.document_ids)
+        log_event(
+            "retrieval.attachment_scope.canonicalized",
+            tool_name="hybrid-search",
+            status="COMPLETED",
+            workspace_id=workspace_id,
+            query_fingerprint=query_fingerprint,
+            requested_document_count=len(requested_document_ids),
+            active_document_count=len(explicit_document_ids),
+            unresolved_document_count=len(
+                canonical_scope.unresolved_document_ids
+            ),
+            message="检索附件范围映射完成",
+        )
         # 普通召回始终排除回收站；仅当用户明确写出完整文件名且没有活动同名副本时，
         # 才返回待选择的恢复候选。候选不能按版本或哈希自动合并。
         from app.modules.file_lifecycle.trash_lookup import ExactTrashFilenameLookupService
@@ -413,7 +449,26 @@ def _search_handler(
             user_id=user_id,
             workspace_id=workspace_id,
         ).lookup(query=search_query)
+        log_event(
+            "retrieval.trash_lookup.completed",
+            tool_name="hybrid-search",
+            status="COMPLETED",
+            workspace_id=workspace_id,
+            query_fingerprint=query_fingerprint,
+            restore_selection_found=bool(trash_restore_selection),
+            message="回收站精确文件名检查完成",
+        )
         if trash_restore_selection:
+            log_event(
+                "retrieval.request.completed",
+                tool_name="hybrid-search",
+                status="NEEDS_REVIEW",
+                workspace_id=workspace_id,
+                query_fingerprint=query_fingerprint,
+                result_count=0,
+                restore_selection_found=True,
+                message="文件检索请求转入回收站恢复选择",
+            )
             return {
                 "kind": "workspace_file_search",
                 "ok": True,
@@ -429,6 +484,7 @@ def _search_handler(
             tool_name="hybrid-search",
             status="COMPLETED",
             workspace_id=workspace_id,
+            query_fingerprint=query_fingerprint,
             retrieval_mode=(
                 "two_stage"
                 if settings.two_stage_retrieval_enabled
@@ -454,6 +510,7 @@ def _search_handler(
                 tool_name="hybrid-search",
                 status="COMPLETED",
                 workspace_id=workspace_id,
+                query_fingerprint=query_fingerprint,
                 result_count=len(list(result.get("results") or [])),
                 message="摘要回退检索完成",
             )
@@ -477,7 +534,28 @@ def _search_handler(
                     ),
                 )
                 if prepared is not None:
+                    log_event(
+                        "retrieval.request.waiting",
+                        tool_name="hybrid-search",
+                        status="WAITING_FOR_ASYNC_JOB",
+                        workspace_id=workspace_id,
+                        query_fingerprint=query_fingerprint,
+                        dependency_count=len(
+                            list(prepared.get("job_ids") or [])
+                        )
+                        or (1 if prepared.get("job_id") else 0),
+                        message="摘要回退未命中，检索进入静默准备等待",
+                    )
                     return prepared
+            log_event(
+                "retrieval.request.completed",
+                tool_name="hybrid-search",
+                status="COMPLETED",
+                workspace_id=workspace_id,
+                query_fingerprint=query_fingerprint,
+                result_count=len(list(result.get("results") or [])),
+                message="摘要回退文件检索请求完成",
+            )
             return result
 
         # 启用新链路：两阶段检索
@@ -500,8 +578,19 @@ def _search_handler(
                 load_default_business_terms,
             )
             tokenizer = ChineseLexicalTokenizer(load_default_business_terms())
-        except Exception:
+        except Exception as exc:
             tokenizer = None
+            log_event(
+                "retrieval.tokenizer.failed",
+                level="ERROR",
+                tool_name="hybrid-search",
+                status="DEGRADED",
+                workspace_id=workspace_id,
+                query_fingerprint=query_fingerprint,
+                error_code=exc.__class__.__name__,
+                exception_traceback=format_exception_traceback(exc),
+                message="中文检索分词器初始化失败",
+            )
 
         parser = FileSearchQueryParser(tokenizer=tokenizer)
         parsed = parser.parse(search_query)
@@ -511,10 +600,13 @@ def _search_handler(
             tool_name="hybrid-search",
             status="COMPLETED" if parsed.cleaned else "EMPTY",
             workspace_id=workspace_id,
+            query_fingerprint=query_fingerprint,
             query_chars=len(search_query),
             cleaned_query_chars=len(parsed.cleaned),
             query_term_count=len(parsed.terms),
             exact_short_phrase_mode=exact_short_chinese_phrase(parsed.cleaned) is not None,
+            relation_mode=parsed.relation_mode,
+            year=parsed.year,
             has_year=parsed.year is not None or parsed.relative_year is not None,
             has_doc_number=parsed.doc_number is not None,
             message="文件检索查询解析完成",
@@ -537,6 +629,7 @@ def _search_handler(
             tool_name="hybrid-search",
             status="COMPLETED",
             workspace_id=workspace_id,
+            query_fingerprint=query_fingerprint,
             scope_mode=str(getattr(scope, "scope_mode", "global") or "global"),
             strict_document_count=len(
                 list(getattr(scope, "strict_document_ids", ()) or ())
@@ -577,7 +670,9 @@ def _search_handler(
                 tool_name="hybrid-search",
                 status="DEGRADED",
                 workspace_id=workspace_id,
+                query_fingerprint=query_fingerprint,
                 error_code=exc.__class__.__name__,
+                exception_traceback=format_exception_traceback(exc),
                 message="两阶段检索失败，尝试摘要级安全回退",
             )
             try:
@@ -595,6 +690,16 @@ def _search_handler(
                     result.get("user_message")
                     or "正文索引暂不可用，当前结果来自文件名和摘要检索。"
                 )
+                log_event(
+                    "retrieval.summary_fallback.completed",
+                    level="WARNING",
+                    tool_name="hybrid-search",
+                    status="DEGRADED",
+                    workspace_id=workspace_id,
+                    query_fingerprint=query_fingerprint,
+                    result_count=len(list(result.get("results") or [])),
+                    message="两阶段失败后的摘要级安全回退完成",
+                )
             except Exception as fallback_exc:
                 log_event(
                     "retrieval.summary_fallback.failed",
@@ -602,8 +707,21 @@ def _search_handler(
                     tool_name="hybrid-search",
                     status="FAILED",
                     workspace_id=workspace_id,
+                    query_fingerprint=query_fingerprint,
                     error_code=fallback_exc.__class__.__name__,
+                    exception_traceback=format_exception_traceback(fallback_exc),
                     message="摘要级检索回退失败",
+                )
+                log_event(
+                    "retrieval.request.completed",
+                    level="ERROR",
+                    tool_name="hybrid-search",
+                    status="FAILED",
+                    workspace_id=workspace_id,
+                    query_fingerprint=query_fingerprint,
+                    result_count=0,
+                    error_code="FILE_SEARCH_TEMPORARILY_UNAVAILABLE",
+                    message="文件检索主链路和安全回退均失败",
                 )
                 return {
                     "kind": "workspace_file_search",
@@ -633,6 +751,19 @@ def _search_handler(
             ),
         )
         result["kind"] = "workspace_file_search"
+        log_event(
+            "retrieval.active_scope.completed",
+            level="WARNING" if result.get("partial") else "INFO",
+            tool_name="hybrid-search",
+            status="COMPLETED" if result.get("ok") else "FAILED",
+            workspace_id=workspace_id,
+            query_fingerprint=query_fingerprint,
+            result_count=len(list(result.get("results") or [])),
+            partial=bool(result.get("partial")),
+            clarification_required=bool(result.get("search_clarification")),
+            restore_selection_found=bool(result.get("trash_restore_selection")),
+            message="活动工作副本检索完成",
+        )
         # managed_files 只用于内部发现。只有普通工作副本检索确实未命中时才
         # 静默准备候选；准备期间不把受管文件名称、路径或内部状态投影给用户。
         if (
@@ -646,7 +777,29 @@ def _search_handler(
                 unresolved_document_ids=canonical_scope.unresolved_document_ids,
             )
             if prepared is not None:
+                log_event(
+                    "retrieval.request.waiting",
+                    tool_name="hybrid-search",
+                    status="WAITING_FOR_ASYNC_JOB",
+                    workspace_id=workspace_id,
+                    query_fingerprint=query_fingerprint,
+                    dependency_count=len(
+                        list(prepared.get("job_ids") or [])
+                    )
+                    or (1 if prepared.get("job_id") else 0),
+                    message="活动范围未命中，检索进入静默准备等待",
+                )
                 return prepared
+        log_event(
+            "retrieval.request.completed",
+            level="WARNING" if not result.get("ok") else "INFO",
+            tool_name="hybrid-search",
+            status="COMPLETED" if result.get("ok") else "FAILED",
+            workspace_id=workspace_id,
+            query_fingerprint=query_fingerprint,
+            result_count=len(list(result.get("results") or [])),
+            message="文件检索请求完成",
+        )
         return result
 
     return handler
@@ -742,6 +895,17 @@ def _intersect_file_search_results(
         in entity_ids
     ]
     partial = bool(entity_result.get("partial") or topic_result.get("partial"))
+    log_event(
+        "retrieval.strategy.intersection_completed",
+        level="WARNING" if partial or not results else "INFO",
+        tool_name="hybrid-search",
+        status="DEGRADED" if partial else "COMPLETED",
+        entity_result_count=len(entity_ids),
+        topic_result_count=len(_search_result_ids(topic_result)),
+        intersection_result_count=len(results),
+        partial=partial,
+        message="机构实体与文件主题交集计算完成",
+    )
     return {
         "ok": True,
         "kind": "workspace_file_search",
@@ -795,6 +959,18 @@ def _execute_controlled_file_search(
     explicit_mode = str(getattr(tool_input, "match_mode", "AUTO") or "AUTO")
     explicit_phrases = list(getattr(tool_input, "phrases", []) or [])
     if explicit_mode != "AUTO" and explicit_phrases:
+        log_event(
+            "retrieval.strategy.selected",
+            tool_name="hybrid-search",
+            status="COMPLETED",
+            strategy="confirmed_phrase_scope",
+            match_mode=explicit_mode,
+            phrase_count=len(explicit_phrases),
+            require_body_evidence=bool(
+                getattr(tool_input, "require_body_evidence", False)
+            ),
+            message="采用用户已确认的短语范围执行检索",
+        )
         return strategy.search(
             original_query=search_query,
             parsed_query=parsed,
@@ -817,6 +993,17 @@ def _execute_controlled_file_search(
             # 取交集，机构允许正式简称等价，主题仍然必须命中。
             topic_phrase = core_phrase.replace(matched_name, " ", 1).strip()
             topic_phrase = re.sub(r"^[的与和及\s]+|[的与和及\s]+$", "", topic_phrase)
+            log_event(
+                "retrieval.strategy.selected",
+                tool_name="hybrid-search",
+                status="COMPLETED",
+                strategy="equivalent_entity_topic_intersection",
+                relation_mode=relation_mode,
+                synonym_group_id=group.group_id,
+                entity_phrase_count=len(group.phrases),
+                has_topic_phrase=bool(topic_phrase),
+                message="采用正式机构别名与主题交集检索",
+            )
             entity_result = strategy.search(
                 original_query=search_query,
                 parsed_query=parsed,
@@ -842,6 +1029,17 @@ def _execute_controlled_file_search(
         # 用户明确要求“正文提到完整短语”时继续执行连续短语匹配，只替换
         # 正式机构全称与简称，不能把实体和主题拆开。
         equivalent_phrases = synonym_service.expand_equivalent_mentions(core_phrase)
+        log_event(
+            "retrieval.strategy.selected",
+            tool_name="hybrid-search",
+            status="COMPLETED",
+            strategy="literal_equivalent_phrase",
+            relation_mode=relation_mode,
+            synonym_group_id=group.group_id,
+            phrase_count=len(equivalent_phrases),
+            require_body_evidence=True,
+            message="采用正式机构别名的正文连续短语检索",
+        )
         return strategy.search(
             original_query=search_query,
             parsed_query=parsed,
@@ -852,6 +1050,20 @@ def _execute_controlled_file_search(
     group = synonym_service.find_group(core_phrase)
     expanded_phrases = (
         list(group.phrases) if group is not None else [core_phrase]
+    )
+    log_event(
+        "retrieval.strategy.selected",
+        tool_name="hybrid-search",
+        status="COMPLETED",
+        strategy=(
+            "controlled_synonym"
+            if group is not None
+            else "exact_core_phrase"
+        ),
+        relation_mode=relation_mode,
+        synonym_group_id=group.group_id if group is not None else None,
+        phrase_count=len(expanded_phrases),
+        message="文件检索短语策略已确定",
     )
     exact = strategy.search(
         original_query=search_query,

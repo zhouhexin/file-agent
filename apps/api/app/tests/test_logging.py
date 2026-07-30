@@ -92,6 +92,64 @@ def test_message_processing_writes_agent_tool_file_classification_and_changeset_
     config.get_settings.cache_clear()
 
 
+def test_file_search_writes_end_to_end_node_diagnostics(monkeypatch, tmp_path):
+    """文件检索必须记录从 Planner 到就绪检查的完整节点，不写入查询正文。"""
+
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("TWO_STAGE_RETRIEVAL_ENABLED", "true")
+    config.get_settings.cache_clear()
+    client, _ = client_with_database()
+    auth_header = _auth_header(client)
+
+    response = client.post(
+        "/api/conversations/search-log-conv/messages",
+        headers=auth_header,
+        json={
+            "content": "帮我找2025年计算机学院的工作总结",
+            "attachments": [],
+        },
+    )
+
+    assert response.status_code == 200
+    records = _read_jsonl_logs(tmp_path / "logs")
+    events = {item["event"] for item in records}
+    assert {
+        "retrieval.planner.file_search_plan",
+        "retrieval.request.started",
+        "retrieval.attachment_scope.canonicalized",
+        "retrieval.trash_lookup.completed",
+        "retrieval.route.selected",
+        "retrieval.query.parsed",
+        "retrieval.scope.resolved",
+        "retrieval.strategy.selected",
+        "retrieval.phrase_strategy.started",
+        "retrieval.phrase_strategy.phrase_completed",
+        "retrieval.phrase_strategy.completed",
+        "retrieval.stage1.completed",
+        "retrieval.chunk_fallback.completed",
+        "retrieval.stage2.skipped",
+        "retrieval.evidence.skipped",
+        "retrieval.search.completed",
+        "retrieval.strategy.intersection_completed",
+        "retrieval.active_scope.completed",
+        "retrieval.readiness.started",
+        "retrieval.readiness.candidates_resolved",
+        "retrieval.readiness.completed",
+        "retrieval.request.completed",
+    }.issubset(events)
+    retrieval_records = [
+        item for item in records if str(item.get("event") or "").startswith("retrieval.")
+    ]
+    assert retrieval_records
+    assert all(
+        "帮我找2025年计算机学院的工作总结"
+        not in json.dumps(item, ensure_ascii=False)
+        for item in retrieval_records
+    )
+    clear_overrides()
+    config.get_settings.cache_clear()
+
+
 def _auth_header(client) -> dict[str, str]:
     """注册并登录日志测试用户。"""
 

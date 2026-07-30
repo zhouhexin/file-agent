@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
+from app.core.logging import log_event
 from app.db.models import (
     Document,
     DocumentCategorySuggestion,
@@ -62,10 +64,25 @@ class WorkingCopySummarySearchService:
 
         # 摘要检索既是显式关闭两阶段检索时的低成本路径，也是数据库索引异常时的
         # 安全降级路径，必须与主链路使用同一个核心查询，不能重新从原句切出语法噪声。
+        started_at = time.perf_counter()
         cleaned_query = normalize_file_search_query(query)
         normalized_query = _normalize_text(cleaned_query)
         terms = _query_terms(cleaned_query)
         if not normalized_query or not terms:
+            log_event(
+                "retrieval.summary_search.completed",
+                level="WARNING",
+                tool_name="hybrid-search",
+                status="SKIPPED",
+                duration_ms=int((time.perf_counter() - started_at) * 1000),
+                workspace_id=self.workspace_id,
+                cleaned_query_chars=len(cleaned_query),
+                query_term_count=len(terms),
+                candidate_count=0,
+                result_count=0,
+                error_code="EMPTY_SUMMARY_QUERY",
+                message="摘要级检索查询清洗后为空",
+            )
             return {"kind": "workspace_file_search", "ok": True, "query": query, "results": []}
 
         candidates = self._load_candidates(document_ids=document_ids or [])
@@ -83,11 +100,28 @@ class WorkingCopySummarySearchService:
                 ranked.append(scored)
 
         ranked.sort(key=lambda item: (-item[0], item[1]["filename"], item[1]["document_id"]))
+        result_rows = [
+            item for _, item in ranked[: max(1, min(limit, 50))]
+        ]
+        log_event(
+            "retrieval.summary_search.completed",
+            level="WARNING" if not result_rows else "INFO",
+            tool_name="hybrid-search",
+            status="COMPLETED",
+            duration_ms=int((time.perf_counter() - started_at) * 1000),
+            workspace_id=self.workspace_id,
+            cleaned_query_chars=len(cleaned_query),
+            query_term_count=len(terms),
+            scoped_document_count=len(document_ids or []),
+            candidate_count=len(candidates),
+            result_count=len(result_rows),
+            message="摘要级工作副本检索完成",
+        )
         return {
             "kind": "workspace_file_search",
             "ok": True,
             "query": query,
-            "results": [item for _, item in ranked[: max(1, min(limit, 50))]],
+            "results": result_rows,
         }
 
     def _load_candidates(self, *, document_ids: list[str]) -> list[_SearchCandidate]:
