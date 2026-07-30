@@ -1033,6 +1033,12 @@ class AgentRun(Base):
     selected_skills_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     plan_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     graph_state_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    planner_mode: Mapped[str] = mapped_column(String(40), nullable=False, default="legacy", index=True)
+    planner_schema_version: Mapped[str] = mapped_column(
+        String(80), nullable=False, default="planner-decision-v1"
+    )
+    catalog_version: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    catalog_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, default="", index=True)
     changeset_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("change_sets.id"), nullable=True, index=True)
     final_response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -1061,6 +1067,80 @@ class ToolInvocation(Base):
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     agent_run: Mapped[AgentRun] = relationship(back_populates="tool_invocations")
+
+
+class CapabilitySuggestion(Base):
+    """当前 Catalog 无法满足用户目标时生成的管理员待评审能力建议。
+
+    建议只是产品待办事实，不能自动创建 Tool、修改 SkillManifest 或获得执行权限。
+    """
+
+    __tablename__ = "capability_suggestions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    suggestion_kind: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="CAPABILITY", index=True
+    )
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    missing_capability: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_inputs_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    expected_outputs_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    related_skill_ids_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    deduplication_fingerprint: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+    occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    first_agent_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    latest_agent_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    requested_by_user_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    catalog_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="NEW", index=True)
+    review_note: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    reviewed_by: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class PlannerShadowComparison(Base):
+    """Legacy 与 Adaptive Planner 的只读决策对比记录。"""
+
+    __tablename__ = "planner_shadow_comparisons"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    agent_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    legacy_decision_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    adaptive_decision_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    legacy_intent: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    adaptive_intent: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    legacy_skill_ids_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    adaptive_skill_ids_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    legacy_tool_names_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    adaptive_tool_names_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    scope_match: Mapped[bool] = mapped_column(default=False, nullable=False)
+    risk_match: Mapped[bool] = mapped_column(default=False, nullable=False)
+    confirmation_match: Mapped[bool] = mapped_column(default=False, nullable=False)
+    adaptive_validation_status: Mapped[str] = mapped_column(String(40), nullable=False)
+    adaptive_error_code: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    catalog_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    schema_version: Mapped[str] = mapped_column(
+        String(80), nullable=False, default="planner-decision-v1"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class FileSearchClarification(Base):
