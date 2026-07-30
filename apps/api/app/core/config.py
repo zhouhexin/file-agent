@@ -17,6 +17,10 @@ DEFAULT_JWT_ALGORITHM = "HS256"
 DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 DEFAULT_FILE_STORAGE_ROOT = "./storage/uploads"
 DEFAULT_LLM_TIMEOUT_SECONDS = 180
+DEFAULT_ADAPTIVE_PLANNER_MODE = "shadow"
+DEFAULT_ADAPTIVE_PLANNER_ROLLOUT_PERCENT = 0
+DEFAULT_ADAPTIVE_PLANNER_SHADOW_SAMPLE_PERCENT = 100
+DEFAULT_ADAPTIVE_PLANNER_SCHEMA_VERSION = "planner-decision-v1"
 DEFAULT_LOG_DIR = "./logs"
 DEFAULT_LOG_RETENTION_DAYS = 7
 DEFAULT_OCR_LLM_FALLBACK_QUALITY_THRESHOLD = 0.68
@@ -108,6 +112,12 @@ class Settings(BaseModel):
     llm_base_url: str = ""
     llm_chat_model: str = ""
     llm_timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS
+    adaptive_planner_mode: str = DEFAULT_ADAPTIVE_PLANNER_MODE
+    adaptive_planner_rollout_percent: int = DEFAULT_ADAPTIVE_PLANNER_ROLLOUT_PERCENT
+    adaptive_planner_shadow_sample_percent: int = (
+        DEFAULT_ADAPTIVE_PLANNER_SHADOW_SAMPLE_PERCENT
+    )
+    adaptive_planner_schema_version: str = DEFAULT_ADAPTIVE_PLANNER_SCHEMA_VERSION
     llm_classification_mode: str = "rule_only"
     llm_classification_allow_free_paths: bool = False
     document_summary_enabled: bool = True
@@ -353,6 +363,28 @@ def get_settings() -> Settings:
         llm_base_url=os.getenv("LLM_BASE_URL", ""),
         llm_chat_model=os.getenv("LLM_CHAT_MODEL", ""),
         llm_timeout_seconds=int(os.getenv("LLM_TIMEOUT_SECONDS", str(DEFAULT_LLM_TIMEOUT_SECONDS))),
+        adaptive_planner_mode=_choice(
+            os.getenv("ADAPTIVE_PLANNER_MODE", DEFAULT_ADAPTIVE_PLANNER_MODE),
+            allowed={"legacy", "shadow", "enabled"},
+            default=DEFAULT_ADAPTIVE_PLANNER_MODE,
+        ),
+        adaptive_planner_rollout_percent=_bounded_int_env(
+            "ADAPTIVE_PLANNER_ROLLOUT_PERCENT",
+            DEFAULT_ADAPTIVE_PLANNER_ROLLOUT_PERCENT,
+            minimum=0,
+            maximum=100,
+        ),
+        adaptive_planner_shadow_sample_percent=_bounded_int_env(
+            "ADAPTIVE_PLANNER_SHADOW_SAMPLE_PERCENT",
+            DEFAULT_ADAPTIVE_PLANNER_SHADOW_SAMPLE_PERCENT,
+            minimum=0,
+            maximum=100,
+        ),
+        adaptive_planner_schema_version=os.getenv(
+            "ADAPTIVE_PLANNER_SCHEMA_VERSION",
+            DEFAULT_ADAPTIVE_PLANNER_SCHEMA_VERSION,
+        ).strip()
+        or DEFAULT_ADAPTIVE_PLANNER_SCHEMA_VERSION,
         llm_classification_mode=os.getenv("LLM_CLASSIFICATION_MODE", "rule_only").lower(),
         llm_classification_allow_free_paths=os.getenv("LLM_CLASSIFICATION_ALLOW_FREE_PATHS", "false").lower() == "true",
         document_summary_enabled=os.getenv("DOCUMENT_SUMMARY_ENABLED", "true").lower() == "true",

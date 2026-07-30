@@ -1,0 +1,10 @@
+{
+  "id": "confirmed-file-action",
+  "version": "1",
+  "status": "ACTIVE",
+  "description": "执行已经用户确认且目标匹配的 OperationPlan。",
+  "trigger_hints": ["确认执行", "执行计划"],
+  "allowed_tools": ["confirmed-file-action"],
+  "required_capabilities": ["confirmed_file_action"],
+  "risk_ceiling": "high"
+}

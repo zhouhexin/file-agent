@@ -25,7 +25,6 @@ from app.db.models import (
     AnswerReference,
     Document,
     DocumentChunk,
-    DocumentCategorySuggestion,
     DocumentIndexRun,
     DocumentSummary,
     DocumentVersion,
@@ -37,6 +36,9 @@ from app.db.models import (
 )
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
 from app.modules.classification.summary_service import build_extractive_document_overview
+from app.modules.classification.evidence_reader import (
+    CurrentClassificationEvidenceReader,
+)
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.modules.file_lifecycle.trash_lookup import ExactTrashFilenameLookupService
 from app.modules.llm.client import LLMResponseError, OpenAICompatibleLLMClient
@@ -1493,28 +1495,27 @@ class EvidenceAnswerService:
 
         cards: dict[str, dict[str, Any]] = {}
         document_ids = list(dict.fromkeys(item.document_id for item in items))
-        category_rows = (
-            self.db.query(DocumentCategorySuggestion)
-            .filter(DocumentCategorySuggestion.document_id.in_(document_ids))
-            .order_by(
-                DocumentCategorySuggestion.document_id.asc(),
-                DocumentCategorySuggestion.created_at.desc(),
-                DocumentCategorySuggestion.rank.asc(),
-            )
-            .all()
-        )
         category_labels: dict[str, list[str]] = defaultdict(list)
-        for suggestion in category_rows:
-            path = [
-                str(value) for value in (suggestion.category_path_json or []) if str(value)
-            ]
-            label = " / ".join(path) or str(suggestion.category_name or "")
-            if (
-                label
-                and label not in category_labels[suggestion.document_id]
-                and len(category_labels[suggestion.document_id]) < 3
-            ):
-                category_labels[suggestion.document_id].append(label)
+        current_classifications = CurrentClassificationEvidenceReader(
+            db=self.db,
+            # document_ids 已来自本服务完成授权的当前回答证据范围。
+            user_id=None,
+        ).read(document_ids=document_ids)
+        for document in current_classifications:
+            for category in document.get("categories", []):
+                path = [
+                    str(value)
+                    for value in (category.get("category_path") or [])
+                    if str(value)
+                ]
+                label = " / ".join(path) or str(category.get("name") or "")
+                document_id = str(document.get("document_id") or "")
+                if (
+                    label
+                    and label not in category_labels[document_id]
+                    and len(category_labels[document_id]) < 3
+                ):
+                    category_labels[document_id].append(label)
         reference_indexes_by_document: dict[str, list[int]] = defaultdict(list)
         for reference in (
             self.db.query(AnswerReference)

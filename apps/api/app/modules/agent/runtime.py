@@ -34,6 +34,15 @@ class DocumentSummaryServiceProtocol(Protocol):
         """基于完整文档正文返回总结文本。"""
 
 
+class AdaptivePlannerProtocol(Protocol):
+    """Catalog 驱动 Planner 的最小运行时接口。"""
+
+    enabled: bool
+
+    def decide(self, **kwargs: Any) -> Any:
+        """生成不产生副作用的 PlannerDecision。"""
+
+
 @dataclass(slots=True)
 class AgentRuntimeContext:
     """一次 AgentRun 所需的运行依赖。
@@ -47,3 +56,7 @@ class AgentRuntimeContext:
     llm_intent_service: LLMIntentService
     classification_service: ClassificationServiceProtocol
     document_summary_service: DocumentSummaryServiceProtocol
+    catalog_snapshot: dict[str, Any]
+    adaptive_planner_service: AdaptivePlannerProtocol
+    adaptive_planner_mode: str
+    adaptive_planner_schema_version: str

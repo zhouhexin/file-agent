@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
 import time
 from pathlib import Path
@@ -14,9 +16,24 @@ from langgraph.graph import END, StateGraph
 from langgraph.runtime import Runtime
 
 from app.core.logging import log_context, log_event
-from app.modules.agent.planner import build_plan_from_user_intent # 导入一个函数：把 LLM 理解出来的用户意图转换成工具执行计划。
-from app.modules.agent.runtime import AgentRuntimeContext # LangGraph runtime 里要用的上下文类型。这个上下文里会放 planner、registry、context_loader、llm_intent_service 等运行时对象。
-from app.modules.agent.state import AgentGraphState, ToolInvocationRecord # AgentGraphState 是整个图在节点之间传递的状态结构；ToolInvocationRecord 是工具调用记录结构。
+from app.modules.agent.adaptive_planner import validate_and_convert_decision
+from app.modules.agent.binding_resolver import (
+    ToolBindingError,
+    ToolResultBindingResolver,
+)
+from app.modules.agent.planner import build_plan_from_user_intent
+from app.modules.agent.planner_contracts import (
+    PlannerClarification,
+    PlannerDecision,
+    PlannerScope,
+    ToolPlan,
+    ToolStep,
+)
+from app.modules.agent.runtime import AgentRuntimeContext
+from app.modules.agent.state import AgentGraphState, ToolInvocationRecord
+from app.modules.agent.tool_contracts import ToolOutputValidationError
+from app.modules.agent.tool_registry import UnknownToolError
+from app.modules.agent.tool_schemas import ToolInputValidationError
 from app.modules.classification.result_builder import build_document_results_from_extraction_results
 from app.modules.llm.client import LLMResponseError
 # 两个表格结果格式化器，用于最终 response 阶段生成自然语言回复。
@@ -24,24 +41,66 @@ from app.modules.spreadsheet_analysis.formatter import format_spreadsheet_analys
 from app.modules.spreadsheet_workbench.formatter import format_spreadsheet_workbench_response
 
 
+MAX_PLANNING_ROUNDS = 3
+MAX_TOOL_CALLS = 5
+
+
 # 构建 LangGraph 主流程
 def build_agent_graph():
-    """编译 MVP LangGraph 工作流。"""
+    """编译带受控决策分支和最多 3 轮规划的 LangGraph 工作流。"""
 
     graph = StateGraph(AgentGraphState, context_schema=AgentRuntimeContext)
     graph.add_node("chat_intake", _logged_node("chat_intake", chat_intake))
     graph.add_node("collect_context", _logged_runtime_node("collect_context", collect_context))
+    graph.add_node(
+        "build_catalog_snapshot",
+        _logged_runtime_node("build_catalog_snapshot", build_catalog_snapshot),
+    )
     graph.add_node("planning", _logged_runtime_node("planning", planning))
+    graph.add_node(
+        "record_capability_suggestions",
+        _logged_runtime_node(
+            "record_capability_suggestions",
+            record_capability_suggestions,
+        ),
+    )
+    graph.add_node("direct_response", _logged_node("direct_response", direct_response))
+    graph.add_node(
+        "clarification_response",
+        _logged_node("clarification_response", clarification_response),
+    )
     graph.add_node("tool_dispatch", _logged_runtime_node("tool_dispatch", tool_dispatch))
+    graph.add_node("observe_tool_result", _logged_node("observe_tool_result", observe_tool_result))
     graph.add_node("async_job_wait", _logged_node("async_job_wait", async_job_wait))
     graph.add_node("evidence_or_change", _logged_runtime_node("evidence_or_change", evidence_or_change))
     graph.add_node("response", _logged_runtime_node("response", response))
 
     graph.set_entry_point("chat_intake")
     graph.add_edge("chat_intake", "collect_context")
-    graph.add_edge("collect_context", "planning")
-    graph.add_edge("planning", "tool_dispatch")
-    graph.add_edge("tool_dispatch", "async_job_wait")
+    graph.add_edge("collect_context", "build_catalog_snapshot")
+    graph.add_edge("build_catalog_snapshot", "planning")
+    graph.add_edge("planning", "record_capability_suggestions")
+    graph.add_conditional_edges(
+        "record_capability_suggestions",
+        route_after_planning,
+        {
+            "tool_dispatch": "tool_dispatch",
+            "direct_response": "direct_response",
+            "clarification_response": "clarification_response",
+        },
+    )
+    graph.add_edge("direct_response", END)
+    graph.add_edge("clarification_response", END)
+    graph.add_edge("tool_dispatch", "observe_tool_result")
+    graph.add_conditional_edges(
+        "observe_tool_result",
+        route_after_observation,
+        {
+            "planning": "planning",
+            "tool_dispatch": "tool_dispatch",
+            "async_job_wait": "async_job_wait",
+        },
+    )
     graph.add_edge("async_job_wait", "evidence_or_change")
     graph.add_edge("evidence_or_change", "response")
     graph.add_edge("response", END)
@@ -120,6 +179,13 @@ def chat_intake(state: AgentGraphState) -> Dict[str, Any]:
         "errors": state.get("errors", []),
         "tool_results": state.get("tool_results", []),
         "tool_invocations": state.get("tool_invocations", []),
+        "planning_round": state.get("planning_round", 0),
+        "tool_call_count": state.get("tool_call_count", 0),
+        "executed_tool_signatures": state.get("executed_tool_signatures", []),
+        "last_dispatch_results": [],
+        "observation": state.get("observation", {}),
+        "replan_requested": False,
+        "waiting_for_confirmation": False,
     }
 
 
@@ -134,53 +200,84 @@ def collect_context(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext
     }
 
 
-def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
-    """调用 Planner，并且只保存通过校验的声明式计划。"""
+def build_catalog_snapshot(
+    state: AgentGraphState,
+    runtime: Runtime[AgentRuntimeContext],
+) -> Dict[str, Any]:
+    """把运行时完整 Catalog 投影为可持久化身份，不把大段 schema 写入 State。"""
 
+    snapshot = runtime.context.catalog_snapshot
+    return {
+        "catalog_snapshot": {
+            "catalog_version": snapshot.get("catalog_version"),
+            "catalog_fingerprint": snapshot.get("catalog_fingerprint"),
+            "enabled_tool_names": snapshot.get("enabled_tool_names", []),
+            "enabled_skill_ids": snapshot.get("enabled_skill_ids", []),
+        }
+    }
+
+
+def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
+    """调用 Planner，并且只保存通过校验的声明式计划和受控决策。"""
+
+    planning_round = int(state.get("planning_round", 0)) + 1
     planning_attachments = _planning_attachments(state)
+    shadow_planner_decision: Dict[str, Any] = {}
     if state.get("planner_mode") == "llm":
-        preflight_plan = _deterministic_preflight_plan(
-            state=state,
-            runtime=runtime,
-            attachments=planning_attachments,
+        # 重规划必须消费上一轮观察，不能再次被同一个 deterministic preflight 截回原计划。
+        preflight_plan = (
+            _deterministic_preflight_plan(
+                state=state,
+                runtime=runtime,
+                attachments=planning_attachments,
+            )
+            if planning_round == 1
+            else None
         )
         if preflight_plan is not None:
-            return _planner_state_update(plan=preflight_plan, user_intent_plan={"source": "deterministic_preflight"})
+            update = _planner_state_update(
+                plan=preflight_plan,
+                user_intent_plan={"source": "deterministic_preflight"},
+                planning_round=planning_round,
+            )
+            if runtime.context.adaptive_planner_mode == "shadow":
+                shadow_planner_decision = _run_shadow_planner(
+                    state=state,
+                    runtime=runtime,
+                    attachments=planning_attachments,
+                )
+                update["shadow_planner_decision"] = shadow_planner_decision
+            return update
         try:
-            intent_plan = runtime.context.llm_intent_service.understand_user_request(
-                message=state["message"],
-                attachments=planning_attachments,
-                context_documents=state.get("context_documents", []),
-            )
-            log_event(
-                "agent.planning.llm_intent",
-                status="COMPLETED",
-                intent=intent_plan.intent,
-                target_scope=intent_plan.target_scope,
-                managed_root_key=intent_plan.managed_root_key,
-                managed_path_prefix=intent_plan.managed_path_prefix,
-                managed_path_candidates=intent_plan.managed_path_candidates,
-                managed_scope_confidence=intent_plan.managed_scope_confidence,
-                managed_extension=intent_plan.managed_extension,
-                managed_filename_contains=intent_plan.managed_filename_contains,
-                required_capabilities=intent_plan.required_capabilities,
-                tool_plan_hint=intent_plan.tool_plan_hint,
-            )
-            plan = build_plan_from_user_intent(
-                intent_plan=intent_plan,
-                message=state["message"],
-                attachments=planning_attachments,
-            )
-            log_event(
-                "agent.planning.tool_plan",
-                status="COMPLETED",
-                intent=plan.intent,
-                tool_name=plan.steps[0].tool_name if plan.steps else None,
-                tool_input=plan.steps[0].input if plan.steps else {},
-            )
-            user_intent_plan = intent_plan.model_dump()
+            if runtime.context.adaptive_planner_mode == "enabled":
+                decision = _request_adaptive_decision(
+                    state=state,
+                    runtime=runtime,
+                    attachments=planning_attachments,
+                )
+                plan, user_intent_plan = validate_and_convert_decision(
+                    decision=decision,
+                    registry=runtime.context.registry,
+                    catalog_snapshot=runtime.context.catalog_snapshot,
+                    attachments=planning_attachments,
+                    context_documents=state.get("context_documents", []),
+                )
+            else:
+                plan, user_intent_plan = _run_legacy_llm_planner(
+                    state=state,
+                    runtime=runtime,
+                    attachments=planning_attachments,
+                    planning_round=planning_round,
+                )
+                if runtime.context.adaptive_planner_mode == "shadow":
+                    shadow_planner_decision = _run_shadow_planner(
+                        state=state,
+                        runtime=runtime,
+                        attachments=planning_attachments,
+                    )
         except LLMResponseError as exc:
-            # LLM 意图理解失败时回退确定性 Planner，保证消息入口可用；错误原因只进入审计快照，不交给 Tool 执行。
+            # Adaptive 失败时先回退已经验证的 Legacy LLM 链路；若模型网关整体不可用，
+            # Legacy 同样会抛出 LLMResponseError，再进入确定性降级。
             log_event(
                 "llm.intent.fallback",
                 level="WARNING",
@@ -188,18 +285,13 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                 error_code=exc.__class__.__name__,
                 message=str(exc),
             )
-            plan = runtime.context.planner.plan(
-                conversation_id=state["conversation_id"],
-                user_id=state["user_id"],
-                message_id=state["message_id"],
-                message=state["message"],
+            plan, user_intent_plan = _fallback_planner(
+                state=state,
+                runtime=runtime,
                 attachments=planning_attachments,
+                planning_round=planning_round,
+                adaptive_error=exc,
             )
-            user_intent_plan = {
-                "fallback_reason": "LLM_INTENT_FAILED",
-                "error_code": exc.__class__.__name__,
-                "message": str(exc),
-            }
     else:
         plan = runtime.context.planner.plan(
             conversation_id=state["conversation_id"],
@@ -217,7 +309,201 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
         tool_input=plan.steps[0].input if plan.steps else {},
     )
     # 把 plan 转成 LangGraph state 更新
-    return _planner_state_update(plan=plan, user_intent_plan=user_intent_plan)
+    update = _planner_state_update(
+        plan=plan,
+        user_intent_plan=user_intent_plan,
+        planning_round=planning_round,
+    )
+    if shadow_planner_decision:
+        update["shadow_planner_decision"] = shadow_planner_decision
+    return update
+
+
+def _fallback_planner(
+    *,
+    state: AgentGraphState,
+    runtime: Runtime[AgentRuntimeContext],
+    attachments: List[Dict[str, Any]],
+    planning_round: int,
+    adaptive_error: LLMResponseError,
+):
+    """Adaptive 失败时优先回退 Legacy，网关失败时再使用确定性 Planner。"""
+
+    if runtime.context.adaptive_planner_mode == "enabled":
+        try:
+            plan, intent_plan = _run_legacy_llm_planner(
+                state=state,
+                runtime=runtime,
+                attachments=attachments,
+                planning_round=planning_round,
+            )
+            intent_plan["fallback_reason"] = "ADAPTIVE_PLANNER_FAILED"
+            intent_plan["adaptive_error_code"] = adaptive_error.__class__.__name__
+            return plan, intent_plan
+        except LLMResponseError as legacy_error:
+            log_event(
+                "llm.intent.legacy_fallback",
+                level="WARNING",
+                status="FAILED",
+                error_code=legacy_error.__class__.__name__,
+                message=str(legacy_error),
+            )
+    plan = runtime.context.planner.plan(
+        conversation_id=state["conversation_id"],
+        user_id=state["user_id"],
+        message_id=state["message_id"],
+        message=state["message"],
+        attachments=attachments,
+    )
+    return plan, {
+        "fallback_reason": "LLM_INTENT_FAILED",
+        "error_code": adaptive_error.__class__.__name__,
+        "message": str(adaptive_error),
+    }
+
+
+def _run_legacy_llm_planner(
+    *,
+    state: AgentGraphState,
+    runtime: Runtime[AgentRuntimeContext],
+    attachments: List[Dict[str, Any]],
+    planning_round: int,
+):
+    """运行现有 UserIntentPlan 兼容链路，作为 Legacy Planner 用户可见基线。"""
+
+    llm_request = {
+        "message": state["message"],
+        "attachments": attachments,
+        "context_documents": state.get("context_documents", []),
+    }
+    if state.get("observation"):
+        llm_request["observation"] = state["observation"]
+    intent_plan = _understand_user_request(
+        service=runtime.context.llm_intent_service,
+        request=llm_request,
+        catalog_snapshot=runtime.context.catalog_snapshot,
+    )
+    log_event(
+        "agent.planning.llm_intent",
+        status="COMPLETED",
+        intent=intent_plan.intent,
+        decision_type=intent_plan.decision_type,
+        planning_round=planning_round,
+        target_scope=intent_plan.target_scope,
+        required_capabilities=intent_plan.required_capabilities,
+        tool_plan_hint=intent_plan.tool_plan_hint,
+    )
+    plan = build_plan_from_user_intent(
+        intent_plan=intent_plan,
+        message=state["message"],
+        attachments=attachments,
+    )
+    _validate_legacy_llm_plan_against_catalog(
+        plan=plan,
+        intent_plan=intent_plan,
+        catalog_snapshot=runtime.context.catalog_snapshot,
+    )
+    return plan, intent_plan.model_dump()
+
+
+def _validate_legacy_llm_plan_against_catalog(
+    *,
+    plan: Any,
+    intent_plan: Any,
+    catalog_snapshot: Dict[str, Any],
+) -> None:
+    """Legacy LLM 兼容输出也只能引用本次 Catalog 中已启用的 Tool/Skill。"""
+
+    if str(intent_plan.decision_type or "TOOL_PLAN") in {
+        "DIRECT_RESPONSE",
+        "CLARIFY",
+    }:
+        # 兼容链路会创建不执行的 intent-summary 占位步骤，实际图分支不会 Dispatch。
+        return
+    tool_names = set(catalog_snapshot.get("enabled_tool_names", []))
+    for step in plan.steps:
+        if step.tool_name not in tool_names:
+            raise LLMResponseError(
+                f"Legacy Planner 引用了 Catalog 外 Tool：{step.tool_name}"
+            )
+
+
+def _request_adaptive_decision(
+    *,
+    state: AgentGraphState,
+    runtime: Runtime[AgentRuntimeContext],
+    attachments: List[Dict[str, Any]],
+) -> PlannerDecision:
+    """调用 Adaptive Planner；这里只生成决策，不执行任何 Tool。"""
+
+    return runtime.context.adaptive_planner_service.decide(
+        message=state["message"],
+        attachments=attachments,
+        context_documents=state.get("context_documents", []),
+        observation=state.get("observation") or None,
+        catalog_snapshot=runtime.context.catalog_snapshot,
+    )
+
+
+def _run_shadow_planner(
+    *,
+    state: AgentGraphState,
+    runtime: Runtime[AgentRuntimeContext],
+    attachments: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """只读运行 Adaptive Planner；失败只记录状态，绝不改变用户计划。"""
+
+    decision: PlannerDecision | None = None
+    try:
+        decision = _request_adaptive_decision(
+            state=state,
+            runtime=runtime,
+            attachments=attachments,
+        )
+        # Shadow 也必须执行 Catalog 与文件范围校验，但转换结果绝不送入 Dispatcher。
+        normalized_plan, _intent_projection = validate_and_convert_decision(
+            decision=decision,
+            registry=runtime.context.registry,
+            catalog_snapshot=runtime.context.catalog_snapshot,
+            attachments=attachments,
+            context_documents=state.get("context_documents", []),
+        )
+        return {
+            "validation_status": "COMPLETED",
+            "decision": decision.model_dump(exclude_none=True),
+            "normalized_tool_plan": normalized_plan.model_dump(),
+        }
+    except Exception as exc:
+        log_event(
+            "agent.planner_shadow.failed",
+            level="WARNING",
+            status="FAILED",
+            error_code=exc.__class__.__name__,
+            message=str(exc),
+        )
+        return {
+            "validation_status": "FAILED",
+            "error_code": exc.__class__.__name__,
+            "decision": (
+                decision.model_dump(exclude_none=True)
+                if decision is not None
+                else None
+            ),
+        }
+
+
+def _understand_user_request(
+    *,
+    service: Any,
+    request: Dict[str, Any],
+    catalog_snapshot: Dict[str, Any],
+):
+    """兼容测试 fake，并向支持新契约的 LLM 服务注入完整请求级 Catalog。"""
+
+    parameters = inspect.signature(service.understand_user_request).parameters
+    if "catalog_snapshot" in parameters:
+        request["catalog_snapshot"] = catalog_snapshot
+    return service.understand_user_request(**request)
 
 
 def _deterministic_preflight_plan(
@@ -226,7 +512,7 @@ def _deterministic_preflight_plan(
     runtime: Runtime[AgentRuntimeContext],
     attachments: List[Dict[str, Any]],
 ):
-    """在 LLM 前识别稳定意图，避免固定文件任务被模型波动改变路由。"""
+    """只在 LLM 前固定安全敏感操作；普通业务语义交给 Catalog Planner。"""
 
     plan = runtime.context.planner.plan(
         conversation_id=state["conversation_id"],
@@ -235,23 +521,14 @@ def _deterministic_preflight_plan(
         message=state["message"],
         attachments=attachments,
     )
-    if plan.intent in {"SUGGEST_RENAME", "CLASSIFY_AND_SUGGEST_RENAME"} and plan.slots.get(
-        "document_ids"
-    ):
-        return plan
     if plan.intent in {
-        "LIST_MANAGED_FILES",
-        # “查找与某人/主题有关的文件”是明确的工作副本语义检索。
-        # 必须在 LLM 前固定进入 hybrid-search，不能随机退化成仅查文件名的目录列表。
-        "SEARCH_FILES",
-        "EVIDENCE_ANSWER",
+        "SUGGEST_RENAME",
+        "CLASSIFY_AND_SUGGEST_RENAME",
         "RESOLVE_RENAME_REVIEW",
-        "CAPABILITY_HELP",
-        "LIST_CLASSIFICATION_TAXONOMY",
-        # 表格统计的文件类型来自后端已校验附件元数据，属于稳定路由。
-        # 简单筛选聚合由确定性查询计划执行，不应因 LLM 意图波动退回分类。
-        "ANALYZE_SPREADSHEET",
+        "PREPARE_WORKING_COPY_ACTION",
     }:
+        return plan
+    if plan.intent.endswith("_CLASSIFICATION"):
         return plan
     return None
 
@@ -287,83 +564,604 @@ def _planning_attachments(state: AgentGraphState) -> List[Dict[str, Any]]:
     return enriched
 
 
-def _planner_state_update(*, plan, user_intent_plan: Dict[str, Any]) -> Dict[str, Any]:
-    """把 Planner 输出转换为 LangGraph State 更新。"""
+def _planner_state_update(
+    *,
+    plan,
+    user_intent_plan: Dict[str, Any],
+    planning_round: int,
+) -> Dict[str, Any]:
+    """把 Planner 输出转换为 LangGraph State 更新，并固化三类决策。"""
 
+    decision_type = str(user_intent_plan.get("decision_type") or "TOOL_PLAN")
+    if plan.intent == "MISSING_FILE_SCOPE":
+        decision_type = "CLARIFY"
+    elif decision_type == "CLARIFY":
+        # LLM 不能用澄清分支跳过后端已经能够执行的文件计划。
+        decision_type = "TOOL_PLAN"
+    if decision_type == "DIRECT_RESPONSE" and not _is_direct_response_plan(
+        plan=plan,
+        user_intent_plan=user_intent_plan,
+    ):
+        # 直接回复只允许无文件事实的普通对话；文件任务仍必须经过白名单 Tool。
+        decision_type = "TOOL_PLAN"
+    direct_response_text = str(user_intent_plan.get("direct_response") or "").strip() or None
+    clarification_question = (
+        str(
+            user_intent_plan.get("clarification_question")
+            or plan.slots.get("clarification_question")
+            or ""
+        ).strip()
+        or None
+    )
+    planner_decision = _build_planner_decision(
+        plan=plan,
+        user_intent_plan=user_intent_plan,
+        decision_type=decision_type,
+        direct_response=direct_response_text,
+        clarification_question=clarification_question,
+        planning_round=planning_round,
+    )
     return {
         "intent": plan.intent,
         "slots": plan.slots,
         "selected_skills": plan.selected_skills,
         "tool_plan": plan.model_dump(),
         "user_intent_plan": user_intent_plan,
-        "status": "RUNNING_TOOL",
+        "planner_decision": planner_decision.model_dump(exclude_none=True),
+        "capability_suggestions": [
+            item.model_dump()
+            for item in planner_decision.capability_suggestions
+        ],
+        "decision_type": decision_type,
+        "direct_response": direct_response_text,
+        "clarification_question": clarification_question,
+        "planning_round": planning_round,
+        "current_step_index": 0,
+        # 新计划使用独立步骤命名空间；历史调用仍留在 ToolInvocation 审计列表，
+        # 但不能因重用 step_id 被本轮绑定解析器误读。
+        "step_results": {},
+        "completed_step_ids": [],
+        "failed_step_ids": [],
+        "replan_requested": False,
+        "waiting_for_confirmation": False,
+        "status": "RUNNING_TOOL" if decision_type == "TOOL_PLAN" else "SUMMARIZING",
+    }
+
+
+def _build_planner_decision(
+    *,
+    plan: Any,
+    user_intent_plan: Dict[str, Any],
+    decision_type: str,
+    direct_response: str | None,
+    clarification_question: str | None,
+    planning_round: int,
+) -> PlannerDecision:
+    """把现有 PlannerOutput 适配为独立 PlannerDecision，逐步移除占位 Tool 依赖。"""
+
+    suggestions = user_intent_plan.get("capability_suggestions", [])
+    if decision_type == "DIRECT_RESPONSE":
+        return PlannerDecision(
+            decision_type="DIRECT_RESPONSE",
+            intent=plan.intent,
+            user_goal=plan.user_goal,
+            selected_skill_ids=plan.selected_skills,
+            scope=PlannerScope(
+                document_ids=list(plan.slots.get("document_ids", [])),
+                source=str(user_intent_plan.get("target_scope") or "unspecified"),
+            ),
+            capability_suggestions=suggestions,
+            direct_response=direct_response or "我已收到。",
+            confidence=0.5,
+        )
+    if decision_type == "CLARIFY":
+        return PlannerDecision(
+            decision_type="CLARIFY",
+            intent=plan.intent,
+            user_goal=plan.user_goal,
+            selected_skill_ids=plan.selected_skills,
+            scope=PlannerScope(
+                document_ids=list(plan.slots.get("document_ids", [])),
+                source=str(user_intent_plan.get("target_scope") or "unspecified"),
+                requires_backend_resolution=True,
+            ),
+            capability_suggestions=suggestions,
+            clarification=PlannerClarification(
+                question=clarification_question or "请补充完成任务所需的文件范围。"
+            ),
+            confidence=0.5,
+        )
+    return PlannerDecision(
+        decision_type="TOOL_PLAN",
+        intent=plan.intent,
+        user_goal=plan.user_goal,
+        # Legacy Planner 的历史测试/计划可能漏列步骤 Skill；适配为新契约时补齐，
+        # 但 Adaptive LLM 原生输出仍由 PlannerDecision 严格拒绝漏选。
+        selected_skill_ids=list(
+            dict.fromkeys(
+                [
+                    *plan.selected_skills,
+                    *(step.skill for step in plan.steps),
+                ]
+            )
+        ),
+        scope=PlannerScope(
+            document_ids=list(plan.slots.get("document_ids", [])),
+            source=str(user_intent_plan.get("target_scope") or "unspecified"),
+        ),
+        tool_plan=ToolPlan(
+            plan_id=f"plan-{planning_round}",
+            steps=[
+                ToolStep(
+                    step_id=step.step_id,
+                    skill_id=step.skill,
+                    tool_name=step.tool_name,
+                    literal_input=step.input,
+                    bindings=step.bindings,
+                    requires_confirmation=step.requires_confirmation,
+                    expected_output_kind=(
+                        step.expected_outputs[0] if step.expected_outputs else None
+                    ),
+                )
+                for step in plan.steps
+            ],
+        ),
+        capability_suggestions=suggestions,
+        confidence=0.5,
+    )
+
+
+def record_capability_suggestions(
+    state: AgentGraphState,
+    runtime: Runtime[AgentRuntimeContext],
+) -> Dict[str, Any]:
+    """通过内部白名单 Tool 记录经 schema 校验的能力缺口建议。"""
+
+    suggestions = list(state.get("capability_suggestions", []))
+    if not suggestions:
+        return {}
+    catalog = state.get("catalog_snapshot", {})
+    tool_input = {
+            "suggestions": suggestions,
+            "user_goal": str(
+                state.get("planner_decision", {}).get("user_goal")
+                or state.get("message")
+                or ""
+            ),
+            "catalog_fingerprint": str(
+                catalog.get("catalog_fingerprint") or "catalog-unavailable"
+            ),
+            "enabled_tool_names": list(catalog.get("enabled_tool_names", [])),
+            "enabled_skill_ids": list(catalog.get("enabled_skill_ids", [])),
+        }
+    try:
+        invocation = runtime.context.registry.invoke(
+            "capability-suggestion-record",
+            tool_input,
+        )
+    except Exception as exc:
+        # 建议清单是辅助审计能力，写入失败不能阻断用户的安全回复，也不能盲目
+        # 重试数据库副作用；失败仍作为 ToolInvocation 进入运行回执和日志。
+        log_event(
+            "agent.capability_suggestion.failed",
+            level="ERROR",
+            status="FAILED",
+            error_code=exc.__class__.__name__,
+            message=str(exc),
+        )
+        invocation = _dispatch_rejection_invocation(
+            step={"tool_name": "capability-suggestion-record"},
+            tool_input=tool_input,
+            code="CAPABILITY_SUGGESTION_RECORD_FAILED",
+            message="能力建议暂时无法保存，管理员可通过本次运行日志复核。",
+        )
+    return {
+        "tool_invocations": [
+            *state.get("tool_invocations", []),
+            invocation.model_dump(),
+        ],
+        "tool_results": [
+            *state.get("tool_results", []),
+            invocation.output_json,
+        ],
+    }
+
+
+def _is_direct_response_plan(*, plan, user_intent_plan: Dict[str, Any]) -> bool:
+    """确认 Planner 已把请求判定为不需要文件事实的普通对话。"""
+
+    return (
+        plan.intent
+        in {
+            "GENERAL_CHAT",
+            "CHAT",
+            "UNKNOWN",
+            "UNSPECIFIED",
+            "CAPABILITY_UNAVAILABLE",
+            "UNSUPPORTED_REQUEST",
+        }
+        and not plan.slots.get("document_ids")
+        and not user_intent_plan.get("needs_file_context")
+        and not user_intent_plan.get("required_capabilities")
+        and not user_intent_plan.get("tool_plan_hint")
+        and bool(plan.steps)
+        and all(step.tool_name == "intent-summary" for step in plan.steps)
+    )
+
+
+def route_after_planning(state: AgentGraphState) -> str:
+    """按受控决策选择 Tool、直接回复或澄清分支。"""
+
+    decision_type = str(state.get("decision_type") or "TOOL_PLAN")
+    if decision_type == "DIRECT_RESPONSE":
+        return "direct_response"
+    if decision_type == "CLARIFY":
+        return "clarification_response"
+    return "tool_dispatch"
+
+
+def direct_response(state: AgentGraphState) -> Dict[str, Any]:
+    """返回 LLM 已生成的普通对话文本，不调用文件 Tool。"""
+
+    return {
+        "status": "COMPLETED",
+        "final_response": state.get("direct_response")
+        or "我已收到。请继续说明你的需求。",
+    }
+
+
+def clarification_response(state: AgentGraphState) -> Dict[str, Any]:
+    """返回一次最关键的补充信息请求，不猜测文件范围。"""
+
+    fallback_question = _build_general_chat_response(
+        {
+            "intent": "MISSING_FILE_SCOPE",
+            "user_goal": state.get("message", ""),
+        }
+    )
+    return {
+        "status": "NEEDS_REVIEW",
+        "final_response": state.get("clarification_question")
+        or fallback_question,
     }
 
 
 def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
-    """通过白名单 Registry 执行不需要确认的 Tool 步骤。"""
+    """通过白名单 Registry 执行当前一个 ToolStep，并记录步骤级结果。"""
 
     registry = runtime.context.registry
-    tool_results: List[Dict[str, Any]] = []
-    tool_invocations: List[Dict[str, Any]] = []
+    tool_results: List[Dict[str, Any]] = list(state.get("tool_results", []))
+    tool_invocations: List[Dict[str, Any]] = list(state.get("tool_invocations", []))
+    last_dispatch_results: List[Dict[str, Any]] = []
+    executed_signatures = list(state.get("executed_tool_signatures", []))
+    tool_call_count = int(state.get("tool_call_count", 0))
+    errors = list(state.get("errors", []))
     operation_plan_id = state.get("operation_plan_id")
     changeset_id = state.get("changeset_id")
+    steps = list(state.get("tool_plan", {}).get("steps", []))
+    current_step_index = int(state.get("current_step_index", 0))
+    step_results = dict(state.get("step_results", {}))
+    completed_step_ids = list(state.get("completed_step_ids", []))
+    failed_step_ids = list(state.get("failed_step_ids", []))
+    if current_step_index >= len(steps):
+        return {
+            "last_dispatch_results": [],
+            "status": "SUMMARIZING",
+        }
 
-    for step in state["tool_plan"]["steps"]:
-        if step["requires_confirmation"]:
-            operation_plan_id = operation_plan_id or "operation-plan-pending"
-            continue
+    step = steps[current_step_index]
+    step_id = str(step.get("step_id") or f"step-{current_step_index + 1}")
+    if step["requires_confirmation"]:
+        # 高风险步骤只能由用户确认后的新请求恢复执行。本次运行保留当前位置，
+        # 不伪造 OperationPlan ID，也不继续后续步骤，避免绕过确认边界。
+        step_results[step_id] = {
+            "status": "WAITING_FOR_CONFIRMATION",
+            "output": {
+                "operation_plan_id": operation_plan_id,
+                "message": "该操作需要先确认操作计划。",
+            },
+        }
+        return {
+            "tool_results": tool_results,
+            "tool_invocations": tool_invocations,
+            "last_dispatch_results": [],
+            "tool_call_count": tool_call_count,
+            "executed_tool_signatures": executed_signatures,
+            "errors": errors,
+            "changeset_id": changeset_id,
+            "operation_plan_id": operation_plan_id,
+            "current_step_index": current_step_index,
+            "step_results": step_results,
+            "completed_step_ids": completed_step_ids,
+            "failed_step_ids": failed_step_ids,
+            "waiting_for_confirmation": True,
+            "status": "WAITING_FOR_CONFIRMATION",
+        }
+    else:
         try:
-            tool_input = dict(step["input"])
-            if step["tool_name"] in {
-                "generate-rename-suggestions",
-                "resolve-rename-reviews",
-                "working-copy-action-plan-create",
-                "classification-decision",
-                "classify-managed-files",
-            }:
-                # 运行标识来自受信任 State，不能由 LLM 直接提供。
-                tool_input["conversation_id"] = state["conversation_id"]
-                tool_input["agent_run_id"] = state["agent_run_id"]
-            if step["tool_name"] == "resolve-rename-reviews":
-                # 用户确认文本必须来自原始消息，不能采用 LLM 改写后的内容。
-                tool_input["message"] = state["message"]
-            if step["tool_name"] == "working-copy-action-plan-create":
-                # 文件动作文本和会话标识只能来自受信任 State，不能采用 LLM 改写或自报 ID。
-                tool_input["message"] = state["message"]
-            if step["tool_name"] == "classification-decision":
-                # 分类决定原话和运行标识必须来自受信任 State，不能采用 LLM 自报 ID。
-                tool_input["message"] = state["message"]
-            # 调用工具注册表执行工具
-            invocation = registry.invoke(step["tool_name"], tool_input)
-        except Exception as exc:
-            if step["tool_name"] not in {
-                "extract-document-text",
-                "analyze-spreadsheet",
-                "profile-spreadsheet",
-                "validate-spreadsheet",
-            }:
-                raise
-            invocation = _failed_tool_invocation(step=step, error=exc)
-        invocation_json = invocation.model_dump()
-        tool_invocations.append(invocation_json)
-        tool_results.append(invocation.output_json)
-        changeset_id = invocation.changeset_id or changeset_id
-        # 同名冲突卡中的明确“覆盖”回复本身就是用户确认。该链路仍会创建并执行
-        # OperationPlan 供审计，但已执行计划不能再投影成第二张待确认卡。
-        if not (
-            invocation.output_json.get("kind") == "working_copy_operation_result"
-            and invocation.output_json.get("status") == "EXECUTED"
-        ):
-            operation_plan_id = invocation.operation_plan_id or operation_plan_id
+            literal_input = dict(step.get("input") or step.get("literal_input") or {})
+            bound_input = ToolResultBindingResolver().resolve(
+                literal_input=literal_input,
+                bindings=list(step.get("bindings") or []),
+                step_results=step_results,
+            )
+            tool_input = _trusted_tool_input(
+                step={**step, "input": bound_input},
+                state=state,
+            )
+        except ToolBindingError as exc:
+            invocation = _dispatch_rejection_invocation(
+                step=step,
+                tool_input=dict(step.get("input") or {}),
+                code="BINDING_VALIDATION_FAILED",
+                message=str(exc),
+            )
+            invocation_json = invocation.model_dump()
+            tool_invocations.append(invocation_json)
+            tool_results.append(invocation.output_json)
+            last_dispatch_results.append(invocation.output_json)
+            errors.append("BINDING_VALIDATION_FAILED")
+            failed_step_ids.append(step_id)
+            step_results[step_id] = _step_result(invocation)
+            current_step_index += 1
+        else:
+            signature_input = _canonical_tool_input(
+                registry=registry,
+                tool_name=str(step["tool_name"]),
+                tool_input=tool_input,
+            )
+            signature = _tool_call_signature(
+                tool_name=str(step["tool_name"]),
+                tool_input=signature_input,
+            )
+            if signature in executed_signatures:
+                invocation = _dispatch_rejection_invocation(
+                    step=step,
+                    tool_input=tool_input,
+                    code="DUPLICATE_TOOL_CALL",
+                    message="Agent 已阻止重复执行相同的文件操作，请补充或调整请求。",
+                )
+                errors.append("DUPLICATE_TOOL_CALL")
+            elif tool_call_count >= MAX_TOOL_CALLS:
+                invocation = _dispatch_rejection_invocation(
+                    step=step,
+                    tool_input=tool_input,
+                    code="TOOL_CALL_BUDGET_EXCEEDED",
+                    message=f"本次任务最多执行 {MAX_TOOL_CALLS} 次文件操作，请缩小文件范围后重试。",
+                )
+                errors.append("TOOL_CALL_BUDGET_EXCEEDED")
+            else:
+                try:
+                    # 预算统计的是实际调用尝试；允许降级的失败同样消耗一次额度。
+                    tool_call_count += 1
+                    executed_signatures.append(signature)
+                    invocation = registry.invoke(step["tool_name"], tool_input)
+                except (
+                    ToolInputValidationError,
+                    ToolOutputValidationError,
+                    UnknownToolError,
+                ) as exc:
+                    # LLM 或旧计划的 schema 错误属于可审计的计划拒绝，不能冒泡成
+                    # ASGI 500；Registry 仍是拒绝发生副作用的最终边界。
+                    error_code = (
+                        "TOOL_INPUT_VALIDATION_FAILED"
+                        if isinstance(exc, ToolInputValidationError)
+                        else (
+                            "TOOL_OUTPUT_VALIDATION_FAILED"
+                            if isinstance(exc, ToolOutputValidationError)
+                            else "UNKNOWN_TOOL"
+                        )
+                    )
+                    invocation = _dispatch_rejection_invocation(
+                        step=step,
+                        tool_input=tool_input,
+                        code=error_code,
+                        message=str(exc),
+                    )
+                except Exception as exc:
+                    if step["tool_name"] not in {
+                        "extract-document-text",
+                        "analyze-spreadsheet",
+                        "profile-spreadsheet",
+                        "validate-spreadsheet",
+                    }:
+                        raise
+                    invocation = _failed_tool_invocation(step=step, error=exc)
+            invocation_json = invocation.model_dump()
+            tool_invocations.append(invocation_json)
+            tool_results.append(invocation.output_json)
+            last_dispatch_results.append(invocation.output_json)
+            step_results[step_id] = _step_result(invocation)
+            if invocation.status in {"COMPLETED", "PARTIAL"}:
+                completed_step_ids.append(step_id)
+            else:
+                failed_step_ids.append(step_id)
+            current_step_index += 1
+            changeset_id = invocation.changeset_id or changeset_id
+            # 同名冲突卡中的明确“覆盖”回复本身就是用户确认。该链路仍会创建并执行
+            # OperationPlan 供审计，但已执行计划不能再投影成第二张待确认卡。
+            if not (
+                invocation.output_json.get("kind") == "working_copy_operation_result"
+                and invocation.output_json.get("status") == "EXECUTED"
+            ):
+                operation_plan_id = invocation.operation_plan_id or operation_plan_id
 
     return {
         "tool_results": tool_results,
         "tool_invocations": tool_invocations,
+        "last_dispatch_results": last_dispatch_results,
+        "tool_call_count": tool_call_count,
+        "executed_tool_signatures": executed_signatures,
+        "errors": errors,
         "changeset_id": changeset_id,
         "operation_plan_id": operation_plan_id,
+        "current_step_index": current_step_index,
+        "step_results": step_results,
+        "completed_step_ids": completed_step_ids,
+        "failed_step_ids": failed_step_ids,
         "status": "SUMMARIZING",
     }
+
+
+def _step_result(invocation: ToolInvocationRecord) -> Dict[str, Any]:
+    """把 ToolInvocation 投影为绑定解析器可消费的步骤级结果。"""
+
+    return {
+        "status": invocation.status,
+        "output": invocation.output_json,
+        "invocation_id": invocation.id,
+        "changeset_id": invocation.changeset_id,
+        "operation_plan_id": invocation.operation_plan_id,
+    }
+
+
+def _trusted_tool_input(
+    *,
+    step: Dict[str, Any],
+    state: AgentGraphState,
+) -> Dict[str, Any]:
+    """把受信任运行标识注入 Tool 输入，禁止 LLM 自报会话和确认文本。"""
+
+    tool_input = dict(step["input"])
+    if step["tool_name"] in {
+        "generate-rename-suggestions",
+        "resolve-rename-reviews",
+        "working-copy-action-plan-create",
+        "classification-decision",
+        "classify-managed-files",
+    }:
+        tool_input["conversation_id"] = state["conversation_id"]
+        tool_input["agent_run_id"] = state["agent_run_id"]
+    if step["tool_name"] in {
+        "resolve-rename-reviews",
+        "working-copy-action-plan-create",
+        "classification-decision",
+    }:
+        tool_input["message"] = state["message"]
+    return tool_input
+
+
+def _tool_call_signature(*, tool_name: str, tool_input: Dict[str, Any]) -> str:
+    """生成稳定 Tool 调用签名，阻止重规划重复执行相同输入。"""
+
+    serialized = json.dumps(
+        {"tool_name": tool_name, "input": tool_input},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _canonical_tool_input(
+    *,
+    registry,
+    tool_name: str,
+    tool_input: Dict[str, Any],
+) -> Dict[str, Any]:
+    """用 Registry schema 规范化签名输入；测试 fake 不提供目录时保持兼容。"""
+
+    if not hasattr(registry, "get"):
+        return tool_input
+    try:
+        tool = registry.get(tool_name)
+        return tool.input_model.model_validate(tool_input).model_dump()
+    except Exception:
+        # 这里只生成幂等签名；真实 invoke 仍负责抛出标准未知 Tool 或 schema 校验错误。
+        return tool_input
+
+
+def _dispatch_rejection_invocation(
+    *,
+    step: Dict[str, Any],
+    tool_input: Dict[str, Any],
+    code: str,
+    message: str,
+) -> ToolInvocationRecord:
+    """记录 Dispatcher 在调用前拒绝的计划步骤，保留安全审计事实。"""
+
+    return ToolInvocationRecord(
+        tool_name=str(step.get("tool_name") or "unknown-tool"),
+        input_json=tool_input,
+        output_json={
+            "kind": "agent_dispatch_rejection",
+            "ok": False,
+            "status": "FAILED",
+            "error": {
+                "code": code,
+                "message": message,
+                "retryable": False,
+                "user_action_required": True,
+            },
+        },
+        status="FAILED",
+    )
+
+
+def observe_tool_result(state: AgentGraphState) -> Dict[str, Any]:
+    """观察单步 Tool 结果，并在明确请求时将总规划轮数限制为 3。"""
+
+    if state.get("waiting_for_confirmation"):
+        return {
+            "observation": {
+                "planning_round": int(state.get("planning_round", 0)),
+                "tool_call_count": int(state.get("tool_call_count", 0)),
+                "results": [],
+            },
+            "replan_requested": False,
+            "status": "WAITING_FOR_CONFIRMATION",
+        }
+
+    last_results = state.get("last_dispatch_results", [])
+    observation_items = [_safe_tool_observation(item) for item in last_results]
+    has_failed_result = any(
+        item.get("ok") is False or str(item.get("status") or "").upper() == "FAILED"
+        for item in last_results
+    )
+    explicit_replan = any(item.get("replan_required") is True for item in last_results)
+    can_replan = (
+        explicit_replan
+        and not has_failed_result
+        and int(state.get("planning_round", 0)) < MAX_PLANNING_ROUNDS
+        and int(state.get("tool_call_count", 0)) < MAX_TOOL_CALLS
+    )
+    return {
+        "observation": {
+            "planning_round": int(state.get("planning_round", 0)),
+            "tool_call_count": int(state.get("tool_call_count", 0)),
+            "results": observation_items,
+        },
+        "replan_requested": can_replan,
+        "status": "PLANNING" if can_replan else "SUMMARIZING",
+    }
+
+
+def _safe_tool_observation(result: Dict[str, Any]) -> Dict[str, Any]:
+    """只保留重规划必需的 Tool 状态，避免正文和内部路径进入 LLM 输入。"""
+
+    error = result.get("error") if isinstance(result.get("error"), dict) else {}
+    return {
+        "kind": str(result.get("kind") or ""),
+        "status": str(result.get("status") or ""),
+        "ok": result.get("ok"),
+        "error_code": str(error.get("code") or ""),
+        "replan_required": result.get("replan_required") is True,
+    }
+
+
+def route_after_observation(state: AgentGraphState) -> str:
+    """优先重规划，否则继续执行当前计划的下一步骤。"""
+
+    if state.get("waiting_for_confirmation"):
+        return "async_job_wait"
+    if state.get("replan_requested"):
+        return "planning"
+    if int(state.get("current_step_index", 0)) < len(
+        state.get("tool_plan", {}).get("steps", [])
+    ):
+        return "tool_dispatch"
+    return "async_job_wait"
 
 
 def _failed_tool_invocation(*, step: Dict[str, Any], error: Exception) -> ToolInvocationRecord:
@@ -406,8 +1204,10 @@ def _failed_tool_invocation(*, step: Dict[str, Any], error: Exception) -> ToolIn
     )
 
 def async_job_wait(state: AgentGraphState) -> Dict[str, Any]:
-    """异步任务边界占位，后续用于接入 processing job。"""
+    """保留异步任务与确认暂停边界，不在同步请求中阻塞等待。"""
 
+    if state.get("waiting_for_confirmation"):
+        return {"status": "WAITING_FOR_CONFIRMATION"}
     return {"status": "SUMMARIZING"}
 
 
@@ -501,10 +1301,13 @@ def _tool_errors_from_invocations(tool_invocations: List[Dict[str, Any]]) -> Lis
     for invocation in tool_invocations:
         if str(invocation.get("status") or "").upper() != "FAILED":
             continue
-        if invocation.get("tool_name") == "extract-document-text":
-            continue
         result = invocation.get("output_json")
         if not isinstance(result, dict):
+            continue
+        if (
+            invocation.get("tool_name") == "extract-document-text"
+            and result.get("kind") != "agent_dispatch_rejection"
+        ):
             continue
         error = result.get("error")
         if not isinstance(error, dict):
@@ -583,7 +1386,43 @@ def _spreadsheet_workbench_results_from_results(
 def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
     """生成面向用户的最终运行摘要。"""
 
+    if state.get("waiting_for_confirmation"):
+        return {
+            "status": "WAITING_FOR_CONFIRMATION",
+            "final_response": (
+                "该操作需要先确认操作计划，当前尚未执行。"
+                if state.get("operation_plan_id")
+                else "当前高风险操作尚未生成可确认的操作计划，请先生成计划后再确认执行。"
+            ),
+        }
+
     result_summary = state.get("result_summary", {})
+    dispatch_rejections = [
+        item
+        for item in result_summary.get("tool_errors", [])
+        if item.get("code") in {"DUPLICATE_TOOL_CALL", "TOOL_CALL_BUDGET_EXCEEDED"}
+    ]
+    if dispatch_rejections:
+        # 调度限制属于安全边界，必须向用户明确说明；已经完成的文件仍保留逐文件回执。
+        document_results = result_summary.get("document_results", [])
+        completed_receipt = (
+            _build_document_results_response(document_results)
+            if document_results
+            else ""
+        )
+        rejection_messages = "\n".join(
+            dict.fromkeys(
+                str(item.get("message") or "").strip()
+                for item in dispatch_rejections
+                if str(item.get("message") or "").strip()
+            )
+        )
+        return {
+            "status": "NEEDS_REVIEW",
+            "final_response": "\n\n".join(
+                item for item in [completed_receipt, rejection_messages] if item
+            ),
+        }
 
     classification_decision = result_summary.get("classification_decision", {})
     if classification_decision:

@@ -97,6 +97,46 @@ def test_llm_client_wraps_remote_protocol_error(monkeypatch):
     assert "LLM 请求失败" in str(exc_info.value)
 
 
+@pytest.mark.parametrize(
+    ("body", "content_type", "expected_message"),
+    [
+        (b"", "application/json", "LLM HTTP 响应为空"),
+        (b"<html>upstream error</html>", "text/html", "LLM HTTP 响应不是合法 JSON"),
+        (b"{invalid-json", "application/json", "LLM HTTP 响应不是合法 JSON"),
+    ],
+)
+def test_llm_client_wraps_empty_or_non_json_http_response(
+    monkeypatch,
+    body,
+    content_type,
+    expected_message,
+):
+    """模型网关返回空内容、HTML 或非法 JSON 时，必须转成 Planner 可降级错误。"""
+
+    def fake_post(*args, **kwargs):
+        """返回 HTTP 200 但正文不可解析的兼容接口响应。"""
+
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": content_type},
+            request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
+        )
+
+    monkeypatch.setattr("app.modules.llm.client.httpx.post", fake_post)
+    client = OpenAICompatibleLLMClient(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="test-model",
+        timeout_seconds=180,
+    )
+
+    with pytest.raises(LLMResponseError) as exc_info:
+        client.complete_json(system_prompt="system", user_payload={"message": "分类"})
+
+    assert expected_message in str(exc_info.value)
+
+
 def test_llm_intent_service_rejects_invalid_schema_response():
     """LLM 意图输出缺少必填字段时，应转成可被 Planner 兜底捕获的 LLMResponseError。"""
 

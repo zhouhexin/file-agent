@@ -1,0 +1,10 @@
+{
+  "id": "spreadsheet-workbench",
+  "version": "1",
+  "status": "ACTIVE",
+  "description": "读取、分析和校验电子表格。",
+  "trigger_hints": ["表格统计", "工作表", "公式错误"],
+  "allowed_tools": ["profile-spreadsheet", "analyze-spreadsheet", "validate-spreadsheet", "table-extract"],
+  "required_capabilities": ["spreadsheet_analysis"],
+  "risk_ceiling": "medium"
+}

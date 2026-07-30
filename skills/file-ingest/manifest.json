@@ -1,0 +1,10 @@
+{
+  "id": "file-ingest",
+  "version": "1",
+  "status": "ACTIVE",
+  "description": "登记、扫描、解析、索引上传或导入文件。",
+  "trigger_hints": ["读取", "解析", "OCR", "上传文件"],
+  "allowed_tools": ["document-register-upload", "security-scan", "document-convert", "table-extract", "artifact-write", "chunk-build", "embedding-generate", "metadata-extract", "extract-document-text", "read-original-file"],
+  "required_capabilities": ["document_read"],
+  "risk_ceiling": "medium"
+}

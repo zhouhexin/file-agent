@@ -1,0 +1,10 @@
+{
+  "id": "file-rename",
+  "version": "1",
+  "status": "ACTIVE",
+  "description": "为工作副本生成命名建议并处理明确更正。",
+  "trigger_hints": ["重命名", "文件名建议", "更正文件名"],
+  "allowed_tools": ["generate-rename-suggestions", "resolve-rename-reviews", "confirmed-file-action"],
+  "required_capabilities": ["file_rename"],
+  "risk_ceiling": "high"
+}

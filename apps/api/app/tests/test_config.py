@@ -152,6 +152,56 @@ def test_settings_accepts_explicit_llm_summary_providers(monkeypatch, tmp_path):
     assert settings.chat_document_summary_provider == "disabled"
 
 
+def test_settings_defaults_adaptive_planner_to_safe_shadow(monkeypatch, tmp_path):
+    """Adaptive Planner 默认只做 Shadow 对比，不直接改变用户可见 Tool 执行。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent",
+    )
+    for name in (
+        "ADAPTIVE_PLANNER_MODE",
+        "ADAPTIVE_PLANNER_ROLLOUT_PERCENT",
+        "ADAPTIVE_PLANNER_SHADOW_SAMPLE_PERCENT",
+        "ADAPTIVE_PLANNER_SCHEMA_VERSION",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.adaptive_planner_mode == "shadow"
+    assert settings.adaptive_planner_rollout_percent == 0
+    assert settings.adaptive_planner_shadow_sample_percent == 100
+    assert settings.adaptive_planner_schema_version == "planner-decision-v1"
+
+
+def test_settings_loads_adaptive_planner_rollout(monkeypatch, tmp_path):
+    """Planner 灰度比例和契约版本必须由独立配置控制。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent",
+    )
+    monkeypatch.setenv("ADAPTIVE_PLANNER_MODE", "enabled")
+    monkeypatch.setenv("ADAPTIVE_PLANNER_ROLLOUT_PERCENT", "25")
+    monkeypatch.setenv("ADAPTIVE_PLANNER_SHADOW_SAMPLE_PERCENT", "40")
+    monkeypatch.setenv(
+        "ADAPTIVE_PLANNER_SCHEMA_VERSION",
+        "planner-decision-v2-preview",
+    )
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.adaptive_planner_mode == "enabled"
+    assert settings.adaptive_planner_rollout_percent == 25
+    assert settings.adaptive_planner_shadow_sample_percent == 40
+    assert settings.adaptive_planner_schema_version == "planner-decision-v2-preview"
+
+
 def test_settings_loads_accuracy_first_evidence_answer_limits(monkeypatch, tmp_path):
     """阶段五调用与证据上限必须可配置，未知 Provider 必须关闭式降级。"""
 

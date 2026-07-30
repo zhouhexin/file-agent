@@ -1,0 +1,274 @@
+"""Catalog 驱动的 Adaptive Planner 服务和后端计划适配器。
+
+模型只能输出 PlannerDecision。后端随后校验 Skill/Tool 是否存在、Skill 是否允许调用该 Tool、文件 ID
+是否属于已解析上下文，以及 Tool 的真实风险和确认要求。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import ValidationError
+
+from app.core.config import Settings, get_settings
+from app.modules.agent.planner import PlannerOutput, PlannerStep
+from app.modules.agent.planner_contracts import PlannerDecision
+from app.modules.llm.client import LLMResponseError, OpenAICompatibleLLMClient
+
+
+ADAPTIVE_PLANNER_SYSTEM_PROMPT = """你是 File Agent 的 Adaptive Planner。
+只输出符合 PlannerDecision schema 的 JSON，不直接执行 Tool，不编造文件事实。
+
+你只能选择 catalog_snapshot 中 ACTIVE Skill 允许的 Tool。Tool 输入必须符合 input_schema；
+前序 Tool 输出只能通过 bindings 引用，不能使用模板、代码、Shell、SQL 或路径表达式。
+文件 document_id 只能使用 attachments/context_documents 中后端提供的 ID，不能猜测。
+高风险 Tool 的确认要求以 Catalog 为准，不能降低。
+
+不需要文件事实的普通对话使用 DIRECT_RESPONSE。缺少唯一文件范围或必要参数时使用 CLARIFY。
+现有 Catalog 确实无法完成明确用户目标时，可以输出 capability_suggestions，但建议不能进入当前 ToolPlan，
+不能生成 handler 代码，也不能声称能力已经存在、已经执行或已经成功保存建议。"""
+
+
+class AdaptivePlannerService:
+    """调用 LLM 生成独立 PlannerDecision，并执行 schema 校验。"""
+
+    def __init__(
+        self,
+        *,
+        settings: Settings | None = None,
+        client: Any | None = None,
+    ) -> None:
+        """允许测试注入 deterministic fake，默认复用 OpenAI-compatible 配置。"""
+
+        self.settings = settings or get_settings()
+        self.enabled = (
+            self.settings.llm_enabled
+            and self.settings.adaptive_planner_mode in {"shadow", "enabled"}
+        )
+        self.client = client
+
+    def decide(
+        self,
+        *,
+        message: str,
+        attachments: list[dict[str, Any]],
+        context_documents: list[dict[str, Any]],
+        observation: dict[str, Any] | None,
+        catalog_snapshot: dict[str, Any],
+    ) -> PlannerDecision:
+        """生成 PlannerDecision；模型响应异常统一转为可降级错误。"""
+
+        client = self.client or OpenAICompatibleLLMClient(
+            api_key=self.settings.llm_api_key,
+            base_url=self.settings.llm_base_url,
+            model=self.settings.llm_chat_model,
+            timeout_seconds=self.settings.llm_timeout_seconds,
+        )
+        parsed = client.complete_json(
+            system_prompt=ADAPTIVE_PLANNER_SYSTEM_PROMPT,
+            user_payload={
+                "message": message,
+                "attachments": attachments,
+                "context_documents": context_documents,
+                "observation": observation or {},
+                "catalog_snapshot": catalog_snapshot,
+                "output_schema": PlannerDecision.model_json_schema(),
+            },
+        )
+        try:
+            return PlannerDecision.model_validate(parsed)
+        except ValidationError as exc:
+            raise LLMResponseError(
+                f"Adaptive Planner 响应不符合 PlannerDecision schema：{exc}"
+            ) from exc
+
+
+def validate_and_convert_decision(
+    *,
+    decision: PlannerDecision,
+    registry: Any,
+    catalog_snapshot: dict[str, Any],
+    attachments: list[dict[str, Any]],
+    context_documents: list[dict[str, Any]],
+) -> tuple[PlannerOutput, dict[str, Any]]:
+    """把 Adaptive 决策转换为现有执行计划，并以后端 Catalog 强制风险边界。"""
+
+    tool_catalog = {
+        str(item.get("name") or ""): item
+        for item in catalog_snapshot.get("tools", [])
+    }
+    skill_catalog = {
+        str(item.get("id") or ""): item
+        for item in catalog_snapshot.get("skills", [])
+    }
+    unknown_skills = sorted(
+        set(decision.selected_skill_ids) - set(skill_catalog)
+    )
+    if unknown_skills:
+        raise LLMResponseError(
+            f"Adaptive Planner 引用了未知 Skill：{unknown_skills}"
+        )
+    authorized_document_ids = {
+        str(item.get("document_id") or "")
+        for item in [*attachments, *context_documents]
+        if item.get("document_id")
+    }
+    _validate_document_ids(
+        proposed=decision.scope.document_ids,
+        authorized_document_ids=authorized_document_ids,
+        source="Planner scope",
+    )
+    user_intent_plan = {
+        "decision_type": decision.decision_type,
+        "direct_response": decision.direct_response,
+        "clarification_question": (
+            decision.clarification.question
+            if decision.clarification is not None
+            else None
+        ),
+        "target_scope": decision.scope.source,
+        "referenced_document_ids": decision.scope.document_ids,
+        "capability_suggestions": [
+            suggestion.model_dump()
+            for suggestion in decision.capability_suggestions
+        ],
+        "source": "adaptive_planner",
+    }
+    if decision.decision_type != "TOOL_PLAN":
+        intent = (
+            "MISSING_FILE_SCOPE"
+            if decision.decision_type == "CLARIFY"
+            else decision.intent
+        )
+        return (
+            PlannerOutput(
+                intent=intent,
+                user_goal=decision.user_goal,
+                slots={
+                    "document_ids": decision.scope.document_ids,
+                    "clarification_question": user_intent_plan[
+                        "clarification_question"
+                    ],
+                },
+                selected_skills=decision.selected_skill_ids
+                or ["chat-intake"],
+                steps=[
+                    PlannerStep(
+                        step_id="adaptive-response-audit",
+                        skill="chat-intake",
+                        tool_name="intent-summary",
+                        input={
+                            "intent": decision.intent,
+                            "user_goal": decision.user_goal,
+                        },
+                    )
+                ],
+                evidence_policy={
+                    "require_page_or_cell": False,
+                    "allow_no_evidence_answer": True,
+                },
+                confirmation_policy={"operation_plan_required": False},
+            ),
+            user_intent_plan,
+        )
+
+    assert decision.tool_plan is not None
+    steps: list[PlannerStep] = []
+    for adaptive_step in decision.tool_plan.steps:
+        tool = tool_catalog.get(adaptive_step.tool_name)
+        if tool is None:
+            raise LLMResponseError(
+                f"Adaptive Planner 引用了未知或未启用 Tool：{adaptive_step.tool_name}"
+            )
+        skill = skill_catalog.get(adaptive_step.skill_id)
+        if skill is None:
+            raise LLMResponseError(
+                f"Adaptive Planner 步骤引用未知 Skill：{adaptive_step.skill_id}"
+            )
+        if adaptive_step.tool_name not in set(skill.get("allowed_tools", [])):
+            raise LLMResponseError(
+                f"Skill {adaptive_step.skill_id} 不允许调用 Tool {adaptive_step.tool_name}"
+            )
+        _validate_document_scope(
+            literal_input=adaptive_step.literal_input,
+            authorized_document_ids=authorized_document_ids,
+        )
+        # Registry 是最终事实来源；即使 CatalogSnapshot 被旧 checkpoint 复用，也要重新取定义。
+        definition = registry.get(adaptive_step.tool_name)
+        steps.append(
+            PlannerStep(
+                step_id=adaptive_step.step_id,
+                skill=adaptive_step.skill_id,
+                tool_name=adaptive_step.tool_name,
+                input=adaptive_step.literal_input,
+                bindings=adaptive_step.bindings,
+                requires_confirmation=(
+                    definition.requires_confirmation
+                    or adaptive_step.requires_confirmation
+                ),
+                risk_level=definition.risk_level,
+                expected_outputs=(
+                    [adaptive_step.expected_output_kind]
+                    if adaptive_step.expected_output_kind
+                    else []
+                ),
+                writes=list(definition.writes),
+            )
+        )
+    return (
+        PlannerOutput(
+            intent=decision.intent,
+            user_goal=decision.user_goal,
+            slots={"document_ids": decision.scope.document_ids},
+            selected_skills=decision.selected_skill_ids,
+            steps=steps,
+            evidence_policy={
+                "require_page_or_cell": True,
+                "allow_no_evidence_answer": False,
+            },
+            confirmation_policy={
+                "operation_plan_required": any(
+                    step.requires_confirmation for step in steps
+                )
+            },
+        ),
+        user_intent_plan,
+    )
+
+
+def _validate_document_scope(
+    *,
+    literal_input: dict[str, Any],
+    authorized_document_ids: set[str],
+) -> None:
+    """拒绝模型在 Tool 字面量输入中编造未授权 document_id。"""
+
+    proposed: list[str] = []
+    if literal_input.get("document_id"):
+        proposed.append(str(literal_input["document_id"]))
+    proposed.extend(
+        str(item) for item in literal_input.get("document_ids", []) if str(item)
+    )
+    _validate_document_ids(
+        proposed=proposed,
+        authorized_document_ids=authorized_document_ids,
+        source="Tool literal input",
+    )
+
+
+def _validate_document_ids(
+    *,
+    proposed: list[str],
+    authorized_document_ids: set[str],
+    source: str,
+) -> None:
+    """统一拒绝 Planner scope 或 Tool 输入中的未授权文件 ID。"""
+
+    unknown = sorted(
+        {str(item) for item in proposed if str(item)}
+        - authorized_document_ids
+    )
+    if unknown:
+        raise LLMResponseError(
+            f"Adaptive Planner 的 {source} 引用了未授权文件范围：{unknown}"
+        )

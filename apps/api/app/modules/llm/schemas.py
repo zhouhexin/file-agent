@@ -5,9 +5,11 @@ LLM 只能输出这里定义的受控结构，后续 Tool 调用仍由 Agent Pla
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.modules.agent.planner_contracts import CapabilitySuggestionDraft
 
 ALLOWED_TARGET_SCOPES = {
     "unspecified",
@@ -28,6 +30,8 @@ class UserIntentPlan(BaseModel):
 
     intent: str = Field(min_length=1)
     user_goal: str = Field(min_length=1)
+    decision_type: Literal["TOOL_PLAN", "DIRECT_RESPONSE", "CLARIFY"] = "TOOL_PLAN"
+    direct_response: Optional[str] = Field(default=None, max_length=4000)
     needs_file_context: bool = False
     target_scope: str = "unspecified"
     referenced_document_ids: List[str] = Field(default_factory=list)
@@ -36,6 +40,10 @@ class UserIntentPlan(BaseModel):
     tool_plan_hint: List[str] = Field(default_factory=list)
     response_style: str = "concise"
     clarification_question: Optional[str] = None
+    capability_suggestions: List[CapabilitySuggestionDraft] = Field(
+        default_factory=list,
+        max_length=5,
+    )
 
     # 受管目录相关字段只描述用户意图，真实目录和路径仍由后端白名单与 Tool schema 校验。
     managed_root_key: Optional[str] = None
@@ -54,3 +62,17 @@ class UserIntentPlan(BaseModel):
         if value not in ALLOWED_TARGET_SCOPES:
             raise ValueError(f"Unsupported target_scope: {value}")
         return value
+
+    @model_validator(mode="after")
+    def validate_decision_payload(self) -> "UserIntentPlan":
+        """校验直接回复和澄清分支具备必要文本，避免进入空响应节点。"""
+
+        if self.decision_type == "DIRECT_RESPONSE" and not str(
+            self.direct_response or ""
+        ).strip():
+            raise ValueError("DIRECT_RESPONSE requires direct_response")
+        if self.decision_type == "CLARIFY" and not str(
+            self.clarification_question or ""
+        ).strip():
+            raise ValueError("CLARIFY requires clarification_question")
+        return self

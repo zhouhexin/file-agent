@@ -28,8 +28,10 @@ class LLMIntentService:
         message: str,
         attachments: List[Dict[str, Any]],
         context_documents: List[Dict[str, Any]],
+        observation: Dict[str, Any] | None = None,
+        catalog_snapshot: Dict[str, Any] | None = None,
     ) -> UserIntentPlan:
-        """调用 LLM 解析用户需求。"""
+        """调用 LLM 解析用户需求，可在预算内重规划时附带脱敏观察和 Catalog。"""
 
         client = self.client or OpenAICompatibleLLMClient(
             api_key=self.settings.llm_api_key,
@@ -41,6 +43,8 @@ class LLMIntentService:
             "message": message,
             "attachments": attachments,
             "context_documents": context_documents,
+            "observation": observation or {},
+            "catalog_snapshot": catalog_snapshot or {},
             "output_schema": UserIntentPlan.model_json_schema(),
         }
         parsed = client.complete_json(system_prompt=USER_INTENT_SYSTEM_PROMPT, user_payload=payload)

@@ -12,6 +12,8 @@ from typing import Any, Dict, List
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.modules.agent.tool_contracts import ToolResultBinding
+
 from app.core.logging import log_event
 from app.modules.agent.capability_router import route_user_intent
 from app.modules.classification.conversation_decision import (
@@ -127,6 +129,7 @@ class PlannerStep(BaseModel):
     skill: str
     tool_name: str
     input: Dict[str, Any]
+    bindings: List[ToolResultBinding] = Field(default_factory=list)
     requires_confirmation: bool = False
     risk_level: str = "low"
     expected_outputs: List[str] = Field(default_factory=list)
@@ -235,6 +238,23 @@ class DeterministicPlanner:
         # 识别无附件情况下按完整文件名查找文件，命中后生成精确文件检索计划。
         if _has_explicit_filename_lookup_intent(message) and not attachments:
             return _file_search_plan(user_goal=message, query=message, document_ids=[])
+        # 完整文件名本身已经提供稳定的工作副本范围；“为什么/是什么”等正文问题
+        # 不应再依赖文件名中是否包含“通知、报告、材料”等泛化标记。
+        if (
+            not attachments
+            and _has_supported_full_filename(message)
+            and _has_explicit_filename_content_intent(message=message, lowered=lowered)
+        ):
+            return _evidence_answer_plan(
+                user_goal=message,
+                question=message,
+                document_ids=[],
+                answer_mode=(
+                    "AUTO"
+                    if _has_plain_document_summary_intent(message=message, lowered=lowered)
+                    else "FOCUSED"
+                ),
+            )
         # 识别“恢复刚才删除的文件”等恢复请求，命中后生成工作副本恢复计划。
         if _has_restore_working_copy_intent(message):
             return _working_copy_action_plan(
@@ -712,6 +732,24 @@ def build_plan_from_user_intent(
             query=message,
             document_ids=[],
             response_style=intent_plan.response_style,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
+    if (
+        not attachments
+        and _has_supported_full_filename(message)
+        and _has_explicit_filename_content_intent(message=message, lowered=lowered)
+    ):
+        return _evidence_answer_plan(
+            user_goal=intent_plan.user_goal or message,
+            question=message,
+            document_ids=[],
+            answer_mode=(
+                "AUTO"
+                if _has_plain_document_summary_intent(message=message, lowered=lowered)
+                else "FOCUSED"
+            ),
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
             llm_intent_plan=intent_plan.model_dump(),
         )
     if _has_restore_working_copy_intent(message):
@@ -1899,10 +1937,20 @@ def _has_restore_working_copy_intent(message: str) -> bool:
 def _has_explicit_filename_lookup_intent(message: str) -> bool:
     """识别带完整文件名的查找、打开或恢复请求，交由后端精确校验。"""
 
-    suffix_pattern = r"\.(?:pdf|docx?|xlsx?|csv|txt|md)(?:$|[\s。！？，,；;”’》】])"
-    has_full_filename = bool(re.search(suffix_pattern, message, flags=re.IGNORECASE))
     actions = ["找", "查找", "搜索", "打开", "查看", "恢复", "文件名为", "名为"]
-    return has_full_filename and any(action in message for action in actions)
+    return _has_supported_full_filename(message) and any(
+        action in message for action in actions
+    )
+
+
+def _has_supported_full_filename(message: str) -> bool:
+    """识别消息中的受支持完整文件名，文件标题无需包含预设业务关键词。"""
+
+    suffix_pattern = (
+        r"\.(?:pdf|doc|docx|xls|xlsx|xlsm|csv|tsv|txt|md)"
+        r"(?:$|[\s。！？，,；;：:”’\"'》】）)])"
+    )
+    return bool(re.search(suffix_pattern, message, flags=re.IGNORECASE))
 
 
 def _mcp_filesystem_list_plan(

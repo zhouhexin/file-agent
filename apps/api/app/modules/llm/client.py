@@ -44,7 +44,7 @@ class OpenAICompatibleLLMClient:
                 "response_format": {"type": "json_object"},
             }
         )
-        data = response.json()
+        data = _response_json(response)
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -67,7 +67,7 @@ class OpenAICompatibleLLMClient:
                 "temperature": 0,
             }
         )
-        data = response.json()
+        data = _response_json(response)
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -97,7 +97,7 @@ class OpenAICompatibleLLMClient:
                 "response_format": {"type": "json_object"},
             }
         )
-        data = response.json()
+        data = _response_json(response)
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -151,3 +151,22 @@ def _parse_json_object_from_content(content: str) -> Dict[str, Any]:
             return parsed
         raise LLMResponseError("LLM JSON 响应必须是对象。")
     raise LLMResponseError("LLM 响应不是合法 JSON。")
+
+
+def _response_json(response: httpx.Response) -> Dict[str, Any]:
+    """把空响应或非 JSON 响应统一收敛为可降级的 LLMResponseError。"""
+
+    try:
+        data = response.json()
+    except (json.JSONDecodeError, ValueError) as exc:
+        raw_content = getattr(response, "content", b"")
+        if not raw_content:
+            raise LLMResponseError("LLM HTTP 响应为空。") from exc
+        headers = getattr(response, "headers", {})
+        content_type = str(headers.get("content-type") or "unknown")
+        raise LLMResponseError(
+            f"LLM HTTP 响应不是合法 JSON：content_type={content_type}。"
+        ) from exc
+    if not isinstance(data, dict):
+        raise LLMResponseError("LLM HTTP JSON 响应必须是对象。")
+    return data

@@ -423,7 +423,8 @@ def test_target_only_rename_does_not_bind_historical_file_with_same_target_name(
     assert "原文件名.ext" in task_result["final_response"]
     run, tool_names = _latest_agent_audit(session_factory)
     assert run.intent == "MISSING_FILE_SCOPE"
-    assert tool_names == ["intent-summary"]
+    # 澄清属于 LangGraph 响应分支，不需要为了内部占位审计调用无副作用 Tool。
+    assert tool_names == []
     clear_overrides()
 
 

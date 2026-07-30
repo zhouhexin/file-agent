@@ -1,0 +1,10 @@
+{
+  "id": "operation-plan",
+  "version": "1",
+  "status": "ACTIVE",
+  "description": "为高风险工作副本操作创建待确认计划。",
+  "trigger_hints": ["移动", "删除", "复制", "覆盖"],
+  "allowed_tools": ["working-copy-action-plan-create"],
+  "required_capabilities": ["operation_plan"],
+  "risk_ceiling": "high"
+}

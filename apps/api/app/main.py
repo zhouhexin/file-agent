@@ -10,6 +10,12 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal, init_database
 from app.core.logging import cleanup_old_logs, log_context, log_event, new_request_id
 from app.modules.agent.router import agent_runs_router, router as agent_router
+from app.modules.agent.capability_suggestions import (
+    router as capability_suggestions_router,
+)
+from app.modules.agent.catalog import AgentCatalogService
+from app.modules.agent.tool_registry import ToolRegistry
+from app.modules.agent.planner_shadow import router as planner_shadow_router
 from app.modules.auth.router import router as auth_router
 from app.modules.changesets.router import router as changesets_router
 from app.modules.chunks.router import router as chunks_router
@@ -37,6 +43,9 @@ async def lifespan(app: FastAPI):
 
     init_database()
     cleanup_old_logs()
+    # 部署启动时先校验 SkillManifest 与代码白名单交叉引用；Catalog 无效时
+    # 关闭式阻止服务启动，避免运行到用户请求时才发现未知 Tool。
+    AgentCatalogService(registry=ToolRegistry()).build_snapshot()
     # 共享工作区是物理工作副本的唯一归属；用户默认工作区仍只保存会话和上传来源。
     with SessionLocal() as db:
         get_or_create_shared_workspace(db)
@@ -115,6 +124,8 @@ app.add_middleware(
 
 app.include_router(agent_router)
 app.include_router(agent_runs_router)
+app.include_router(capability_suggestions_router)
+app.include_router(planner_shadow_router)
 app.include_router(auth_router)
 app.include_router(changesets_router)
 app.include_router(chunks_router)

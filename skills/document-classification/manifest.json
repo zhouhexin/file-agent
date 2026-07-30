@@ -1,0 +1,10 @@
+{
+  "id": "document-classification",
+  "version": "1",
+  "status": "ACTIVE",
+  "description": "基于当前版本正文和证据生成或读取分类建议。",
+  "trigger_hints": ["分类", "归类", "为什么这样分类"],
+  "allowed_tools": ["multi-label-classify", "read-document-classifications", "read-classification-taxonomy", "classification-decision"],
+  "required_capabilities": ["document_classification"],
+  "risk_ceiling": "medium"
+}

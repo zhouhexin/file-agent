@@ -19,15 +19,31 @@ from app.core.config import get_settings
 from app.core.logging import format_exception_traceback, log_event
 from app.db.models import (
     Document,
-    DocumentCategorySuggestion,
-    DocumentClassificationRun,
     DocumentInsight,
     User,
     WorkingCopy,
 )
 from app.modules.agent.capabilities.service import load_agent_capabilities
+from app.modules.agent.capability_suggestions import (
+    CapabilitySuggestionRecordInput,
+    CapabilitySuggestionService,
+)
 from app.modules.agent.mcp_filesystem_bridge import MCPFilesystemError, get_mcp_filesystem
 from app.modules.agent.state import ToolInvocationRecord
+from app.modules.agent.tool_contracts import (
+    AgentCapabilitiesToolOutput,
+    ClassificationTaxonomyToolOutput,
+    DocumentClassificationsToolOutput,
+    DocumentExtractionToolOutput,
+    DocumentInsightsToolOutput,
+    EvidenceAnswerToolOutput,
+    GenericToolOutput,
+    IntentSummaryToolOutput,
+    ManagedFileCollectionToolOutput,
+    SpreadsheetToolOutput,
+    ToolOutputValidationError,
+    WorkspaceFileSearchToolOutput,
+)
 from app.modules.agent.tool_schemas import (
     AgentCapabilitiesReadInput,
     ClassificationDecisionInput,
@@ -59,6 +75,9 @@ from app.modules.agent.tool_schemas import (
     WorkingCopyActionPlanInput,
 )
 from app.modules.classification.taxonomy_service import read_default_taxonomy_catalog
+from app.modules.classification.evidence_reader import (
+    CurrentClassificationEvidenceReader,
+)
 from app.modules.classification.conversation_decision import (
     ConversationalClassificationDecisionService,
 )
@@ -108,13 +127,21 @@ class ToolDefinition:
     """Tool 的声明式元数据，以及 Registry 调用的 handler。"""
 
     name: str
+    version: str
     description: str
     input_model: Type[BaseModel]
+    output_model: Type[BaseModel]
     side_effects: bool
+    risk_level: str
     requires_confirmation: bool
     allowed_roles: List[str]
+    allowed_skill_ids: List[str]
     writes: List[str]
     failure_strategy: str
+    retry_policy: str
+    enabled: bool
+    expose_to_planner: bool
+    adaptive_ready: bool
     handler: ToolHandler
 
     def catalog_item(self) -> Dict[str, Any]:
@@ -122,14 +149,20 @@ class ToolDefinition:
 
         return {
             "name": self.name,
+            "version": self.version,
             "description": self.description,
             "input_schema": self.input_model.model_json_schema(),
-            "output_schema": {"type": "object"},
+            "output_schema": self.output_model.model_json_schema(),
             "side_effects": self.side_effects,
+            "risk_level": self.risk_level,
             "requires_confirmation": self.requires_confirmation,
             "allowed_roles": self.allowed_roles,
+            "allowed_skill_ids": self.allowed_skill_ids,
             "writes": self.writes,
             "failure_strategy": self.failure_strategy,
+            "retry_policy": self.retry_policy,
+            "enabled": self.enabled,
+            "adaptive_ready": self.adaptive_ready,
         }
 
 
@@ -167,18 +200,29 @@ class ToolRegistry:
 
         self._conversation_id = conversation_id
 
-    def list_tools(self) -> List[Dict[str, Any]]:
-        """返回全部白名单 Tool，供管理和调试查看。"""
+    def list_tools(self, *, planner_only: bool = False) -> List[Dict[str, Any]]:
+        """返回白名单 Tool；Planner Catalog 会排除内部系统 Tool。"""
 
-        return [tool.catalog_item() for tool in self._tools.values()]
+        return [
+            tool.catalog_item()
+            for tool in self._tools.values()
+            if tool.enabled
+            and (
+                not planner_only
+                or (tool.expose_to_planner and tool.adaptive_ready)
+            )
+        ]
 
     def get(self, name: str) -> ToolDefinition:
         """获取白名单 Tool；如果 Planner 引用未知 Tool 则拒绝。"""
 
         try:
-            return self._tools[name]
+            tool = self._tools[name]
         except KeyError as exc:
             raise UnknownToolError(f"Unknown tool: {name}") from exc
+        if not tool.enabled:
+            raise UnknownToolError(f"Tool is disabled: {name}")
+        return tool
 
     def invoke(self, name: str, input_json: Dict[str, Any]) -> ToolInvocationRecord:
         """校验输入、调用 Tool handler，并返回结构化调用记录。"""
@@ -223,6 +267,29 @@ class ToolRegistry:
                 message=str(exc),
             )
             raise
+
+        try:
+            validated_output = tool.output_model.model_validate(output)
+        except ValidationError as exc:
+            log_event(
+                "tool.invoke.failed",
+                level="ERROR",
+                tool_name=name,
+                document_id=document_id or None,
+                status="FAILED",
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                error_code="TOOL_OUTPUT_VALIDATION_FAILED",
+                message=str(exc),
+            )
+            raise ToolOutputValidationError(
+                f"Tool output validation failed: {exc}"
+            ) from exc
+        # output schema 负责验证，不得把模型默认值注入 handler 未返回的业务字段；
+        # 否则异步处理中间态会被误投影成“已有空结果”。
+        output = validated_output.model_dump(
+            exclude_none=True,
+            exclude_unset=True,
+        )
 
         status = _tool_invocation_status(output)
         error = output.get("error") if isinstance(output.get("error"), dict) else {}
@@ -803,6 +870,33 @@ def _search_handler(
         return result
 
     return handler
+
+
+def _with_search_binding_projection(handler: ToolHandler) -> ToolHandler:
+    """为检索结果补充后续 Tool 可绑定的去重 document_ids。
+
+    投影只读取后端检索结果中的稳定 ID；澄清、异步等待和未命中结果不会凭空生成文件范围。
+    """
+
+    def projected(tool_input: BaseModel) -> Dict[str, Any]:
+        """执行真实检索后生成严格、有限的文件 ID 投影。"""
+
+        result = handler(tool_input)
+        document_ids: list[str] = []
+        seen: set[str] = set()
+        for item in list(result.get("results") or []):
+            if not isinstance(item, dict):
+                continue
+            document_id = str(item.get("document_id") or "")
+            if document_id and document_id not in seen:
+                seen.add(document_id)
+                document_ids.append(document_id)
+            # 与 EvidenceAnswerInput 的文件范围上限一致，避免绑定后才因数组过大失败。
+            if len(document_ids) >= 50:
+                break
+        return {**result, "document_ids": document_ids}
+
+    return projected
 
 
 def _require_large_search_result_confirmation(
@@ -1430,7 +1524,7 @@ def _document_insights_handler(db: Any, user_id: str | None) -> ToolHandler:
 
 
 def _document_classifications_handler(db: Any, user_id: str | None) -> ToolHandler:
-    """创建读取历史分类建议的 Tool handler。"""
+    """创建读取当前版本最新成功分类证据的 Tool handler。"""
 
     def handler(tool_input: BaseModel) -> Dict[str, Any]:
         """按当前用户读取文件最近一次分类建议。"""
@@ -1459,52 +1553,15 @@ def _document_classifications_handler(db: Any, user_id: str | None) -> ToolHandl
                     user_id=user_id,
                     filename=str(document.original_filename or ""),
                 )
-        document_lookup = {document.id: document for document in documents}
-        if not document_lookup:
+        if not documents:
             return {"ok": True, "documents": []}
-
-        runs = (
-            db.query(DocumentClassificationRun)
-            .filter(DocumentClassificationRun.document_id.in_(document_lookup.keys()))
-            .order_by(DocumentClassificationRun.created_at.desc(), DocumentClassificationRun.id.desc())
-            .all()
-        )
-        latest_run_by_document_id: Dict[str, DocumentClassificationRun] = {}
-        for run in runs:
-            latest_run_by_document_id.setdefault(run.document_id, run)
-
-        run_ids = [run.id for run in latest_run_by_document_id.values()]
-        suggestions = (
-            db.query(DocumentCategorySuggestion)
-            .filter(DocumentCategorySuggestion.classification_run_id.in_(run_ids))
-            .order_by(DocumentCategorySuggestion.rank.asc(), DocumentCategorySuggestion.confidence.desc())
-            .all()
-            if run_ids
-            else []
-        )
-        suggestions_by_run_id: Dict[str, list[DocumentCategorySuggestion]] = {}
-        for suggestion in suggestions:
-            suggestions_by_run_id.setdefault(suggestion.classification_run_id, []).append(suggestion)
-
         return {
             "ok": True,
-            "documents": [
-                {
-                    "document_id": document_id,
-                    "filename": document_lookup[document_id].original_filename,
-                    "categories": [
-                        {
-                            "name": suggestion.category_name,
-                            "confidence": suggestion.confidence,
-                            "status": suggestion.status,
-                            "source": suggestion.source,
-                            "evidence": suggestion.evidence_json,
-                        }
-                        for suggestion in suggestions_by_run_id.get(run.id, [])
-                    ],
-                }
-                for document_id, run in latest_run_by_document_id.items()
-            ],
+            "version_scope": "CURRENT_WORKING_COPY",
+            "documents": CurrentClassificationEvidenceReader(
+                db=db,
+                user_id=user_id,
+            ).read(document_ids=[document.id for document in documents]),
         }
 
     return handler
@@ -1518,6 +1575,49 @@ def _intent_summary_handler(tool_input: BaseModel) -> Dict[str, Any]:
         "intent": getattr(tool_input, "intent"),
         "user_goal": getattr(tool_input, "user_goal"),
     }
+
+
+def _capability_suggestion_handler(
+    db: Any,
+    user_id: str | None,
+    agent_run_id_getter: Callable[[], str | None] | None,
+) -> ToolHandler:
+    """创建内部能力建议记录 handler；该 Tool 不进入 Planner Catalog。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """经后端校验和去重后写入管理员建议清单。"""
+
+        if db is None or user_id is None:
+            return {
+                "ok": True,
+                "kind": "capability_suggestions_recorded",
+                "recorded_ids": [],
+                "recorded_count": 0,
+                "rejected_count": len(getattr(tool_input, "suggestions", [])),
+            }
+        agent_run_id = (
+            agent_run_id_getter() if agent_run_id_getter is not None else None
+        )
+        if not agent_run_id:
+            return {
+                "ok": False,
+                "status": "FAILED",
+                "error": {
+                    "code": "AGENT_RUN_CONTEXT_REQUIRED",
+                    "message": "能力建议缺少 AgentRun 审计上下文。",
+                    "retryable": False,
+                    "user_action_required": False,
+                },
+            }
+        return CapabilitySuggestionService(db).record(
+            payload=CapabilitySuggestionRecordInput.model_validate(
+                tool_input.model_dump()
+            ),
+            user_id=user_id,
+            agent_run_id=agent_run_id,
+        )
+
+    return handler
 
 
 def _agent_capabilities_handler(tool_input: BaseModel) -> Dict[str, Any]:
@@ -2672,18 +2772,35 @@ def _tool(
     requires_confirmation: bool,
     writes: List[str],
     handler: ToolHandler,
+    *,
+    output_model: Type[BaseModel] = GenericToolOutput,
+    version: str = "1",
+    risk_level: str | None = None,
+    allowed_skill_ids: List[str] | None = None,
+    retry_policy: str = "never",
+    enabled: bool = True,
+    expose_to_planner: bool = True,
+    adaptive_ready: bool = False,
 ) -> ToolDefinition:
     """使用 MVP Tool 的共享默认值构造一个 ToolDefinition。"""
 
     return ToolDefinition(
         name=name,
+        version=version,
         description=description,
         input_model=input_model,
+        output_model=output_model,
         side_effects=side_effects,
+        risk_level=risk_level or ("high" if requires_confirmation else "low"),
         requires_confirmation=requires_confirmation,
         allowed_roles=["user", "ops", "admin"],
+        allowed_skill_ids=list(allowed_skill_ids or []),
         writes=writes,
         failure_strategy="return structured error and record invocation",
+        retry_policy=retry_policy,
+        enabled=enabled,
+        expose_to_planner=expose_to_planner,
+        adaptive_ready=adaptive_ready,
         handler=handler,
     )
 
@@ -2831,14 +2948,45 @@ def _build_mvp_tools(
         _tool("embedding-generate", "Generate and store embeddings.", DocumentToolInput, True, False, ["document_chunks.embedding"], _embedding_generate_handler),
         _tool("metadata-extract", "Extract metadata candidates.", DocumentToolInput, True, False, ["documents.metadata"], _document_handler("metadata-extract")),
         _tool("multi-label-classify", "Generate multi-label classifications with evidence.", DocumentToolInput, True, False, ["document_categories"], _document_handler("multi-label-classify")),
-        _tool("read-document-insights", "Read deterministic ingest insights for uploaded documents.", DocumentInsightsReadInput, False, False, [], _document_insights_handler(db, user_id)),
-        _tool("read-document-classifications", "Read latest persisted classification suggestions for uploaded documents.", DocumentClassificationsReadInput, False, False, [], _document_classifications_handler(db, user_id)),
+        _tool("read-document-insights", "Read deterministic ingest insights for uploaded documents.", DocumentInsightsReadInput, False, False, [], _document_insights_handler(db, user_id), output_model=DocumentInsightsToolOutput, adaptive_ready=True),
+        _tool("read-document-classifications", "Read latest persisted classification suggestions for uploaded documents.", DocumentClassificationsReadInput, False, False, [], _document_classifications_handler(db, user_id), output_model=DocumentClassificationsToolOutput, adaptive_ready=True),
         _tool("read-original-file", "Read safe metadata for an uploaded original file.", DocumentToolInput, False, False, [], _read_original_file_handler(db, user_id)),
-        _tool("extract-document-text", "Extract text from uploaded files and persist document pages.", DocumentToolInput, True, False, ["document_extraction_runs", "document_pages"], _extract_document_text_handler(db, user_id)),
-        _tool("intent-summary", "Record LLM-understood user intent without side effects.", IntentSummaryInput, False, False, [], _intent_summary_handler),
-        _tool("read-agent-capabilities", "Read fixed File Agent capability catalog.", AgentCapabilitiesReadInput, False, False, [], _agent_capabilities_handler),
-        _tool("read-classification-taxonomy", "Read fixed classification taxonomy catalog.", ClassificationTaxonomyReadInput, False, False, [], _classification_taxonomy_handler),
-        _tool("hybrid-search", "Run summary-first workspace retrieval.", SearchToolInput, False, False, [], _search_handler(db, user_id, conversation_id_getter, agent_run_id_getter)),
+        _tool("extract-document-text", "Extract text from uploaded files and persist document pages.", DocumentToolInput, True, False, ["document_extraction_runs", "document_pages"], _extract_document_text_handler(db, user_id), output_model=DocumentExtractionToolOutput, adaptive_ready=True),
+        _tool("intent-summary", "Record LLM-understood user intent without side effects.", IntentSummaryInput, False, False, [], _intent_summary_handler, output_model=IntentSummaryToolOutput, adaptive_ready=True),
+        _tool(
+            "capability-suggestion-record",
+            "Persist a validated capability gap for administrator review.",
+            CapabilitySuggestionRecordInput,
+            True,
+            False,
+            ["capability_suggestions"],
+            _capability_suggestion_handler(
+                db,
+                user_id,
+                agent_run_id_getter,
+            ),
+            expose_to_planner=False,
+        ),
+        _tool("read-agent-capabilities", "Read fixed File Agent capability catalog.", AgentCapabilitiesReadInput, False, False, [], _agent_capabilities_handler, output_model=AgentCapabilitiesToolOutput, adaptive_ready=True),
+        _tool("read-classification-taxonomy", "Read fixed classification taxonomy catalog.", ClassificationTaxonomyReadInput, False, False, [], _classification_taxonomy_handler, output_model=ClassificationTaxonomyToolOutput, adaptive_ready=True),
+        _tool(
+            "hybrid-search",
+            "Run summary-first workspace retrieval.",
+            SearchToolInput,
+            False,
+            False,
+            [],
+            _with_search_binding_projection(
+                _search_handler(
+                    db,
+                    user_id,
+                    conversation_id_getter,
+                    agent_run_id_getter,
+                )
+            ),
+            output_model=WorkspaceFileSearchToolOutput,
+            adaptive_ready=True,
+        ),
         _tool(
             "evidence-answer",
             "Answer from current active working-copy evidence and persist validated references.",
@@ -2852,14 +3000,16 @@ def _build_mvp_tools(
                 conversation_id_getter,
                 agent_run_id_getter,
             ),
+            output_model=EvidenceAnswerToolOutput,
+            adaptive_ready=True,
         ),
         _tool("confirmed-file-action", "Execute confirmed operation plan.", ConfirmedFileActionInput, True, True, ["change_items"], _confirmed_action_handler(db, user_id)),
         _tool("feedback-record", "Record user feedback.", FeedbackRecordInput, True, False, ["feedback", "skill_feedback_samples"], _feedback_handler(user_id)),
         _tool("job-status-read", "Read processing job status.", JobStatusReadInput, False, False, [], _job_status_handler),
         _tool("document-lineage-read", "Read document lineage.", DocumentLineageReadInput, False, False, [], _lineage_handler),
         _tool("managed-root-list", "List server managed logical roots.", ManagedRootListInput, True, False, ["managed_roots"], _managed_root_list_handler(db)),
-        _tool("managed-file-list", "List server managed files by logical metadata filters.", ManagedFileListInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_list_handler(db)),
-        _tool("managed-file-search", "Search server managed files by filename keyword.", ManagedFileSearchInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_search_handler(db)),
+        _tool("managed-file-list", "List server managed files by logical metadata filters.", ManagedFileListInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_list_handler(db), output_model=ManagedFileCollectionToolOutput, adaptive_ready=True),
+        _tool("managed-file-search", "Search server managed files by filename keyword.", ManagedFileSearchInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_search_handler(db), output_model=ManagedFileCollectionToolOutput, adaptive_ready=True),
         _tool("managed-file-read-document", "Read one server managed file by logical filters, snapshot it as a document, and extract text.", ManagedFileReadDocumentInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages"], _managed_file_read_document_handler(db, user_id)),
         _tool("classify-managed-files", "Snapshot, extract and classify files selected from a server managed directory.", ManagedFileClassificationInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages", "document_classification_runs", "document_category_suggestions", "change_sets", "change_items"], _managed_file_classification_handler(db, user_id)),
         _tool("generate-rename-suggestions", "Resolve uploaded attachments or managed-original scope to working copies, then persist controlled rename suggestions without changing original files.", GenerateRenameSuggestionsInput, True, False, ["document_pages", "operation_plans"], _generate_rename_suggestions_handler(db, user_id)),
@@ -2883,6 +3033,8 @@ def _build_mvp_tools(
                 conversation_id_getter,
                 agent_run_id_getter,
             ),
+            output_model=SpreadsheetToolOutput,
+            adaptive_ready=True,
         ),
         _tool(
             "profile-spreadsheet",
@@ -2892,6 +3044,8 @@ def _build_mvp_tools(
             False,
             [],
             _spreadsheet_workbench_handler(db, user_id, action="profile"),
+            output_model=SpreadsheetToolOutput,
+            adaptive_ready=True,
         ),
         _tool(
             "validate-spreadsheet",
@@ -2901,6 +3055,8 @@ def _build_mvp_tools(
             False,
             [],
             _spreadsheet_workbench_handler(db, user_id, action="validation"),
+            output_model=SpreadsheetToolOutput,
+            adaptive_ready=True,
         ),
     ]
     return {tool.name: tool for tool in tools}

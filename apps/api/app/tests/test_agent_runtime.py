@@ -680,18 +680,28 @@ def test_llm_general_chat_is_overridden_for_managed_file_list_request():
     assert plan.steps[0].input["root_key"] == "file_agent_spreadsheet_patch_files"
 
 
-def test_agent_runtime_bypasses_llm_for_managed_file_list_request():
-    """受管目录列表请求必须先走确定性 Planner，不能被 LLM 网络调用阻塞。"""
+def test_agent_runtime_uses_llm_catalog_route_for_managed_file_list_request():
+    """普通受管目录查询应先由 LLM 选择 Catalog 能力，不再被关键词路由抢占。"""
 
-    class BlockingLLMIntentService:
-        """测试用 LLM 服务；如果被调用说明路由顺序错误。"""
+    class ManagedListLLMIntentService:
+        """返回受控受管目录查询意图并记录调用。"""
 
         enabled = True
 
-        def understand_user_request(self, **kwargs):
-            """模拟不可用的 LLM 意图服务。"""
+        def __init__(self):
+            self.called = False
 
-            raise AssertionError("managed file list request should not call LLM")
+        def understand_user_request(self, **kwargs):
+            """使用 Catalog 中已有的 managed-file-list。"""
+
+            self.called = True
+            return UserIntentPlan(
+                intent="LIST_MANAGED_FILES",
+                user_goal=kwargs["message"],
+                required_capabilities=["managed_file_list"],
+                tool_plan_hint=["managed-file-list"],
+                managed_root_key="file_agent_spreadsheet_patch_files",
+            )
 
     class FakeRegistry:
         """测试用 Registry，返回空受管文件清单。"""
@@ -710,9 +720,10 @@ def test_agent_runtime_bypasses_llm_for_managed_file_list_request():
                 status="COMPLETED",
             )
 
+    intent_service = ManagedListLLMIntentService()
     service = AgentRuntimeService(
         registry_factory=lambda db, user_id: FakeRegistry(),
-        llm_intent_service=BlockingLLMIntentService(),
+        llm_intent_service=intent_service,
     )
 
     result = service.run_message(
@@ -722,6 +733,7 @@ def test_agent_runtime_bypasses_llm_for_managed_file_list_request():
         message="列出file_agent_spreadsheet_patch_files下的所有文件",
     )
 
+    assert intent_service.called is True
     assert result.intent == "LIST_MANAGED_FILES"
     assert [item.tool_name for item in result.tool_invocations] == ["managed-file-list"]
 
@@ -2534,3 +2546,376 @@ def test_graph_enabled_rollout_uses_shadow_outside_configured_percentage():
         ),
         user_id="user-rollout",
     ) == "enabled"
+
+
+def test_llm_direct_response_branch_does_not_invoke_tool():
+    """普通对话可由 LLM 直接回复，但不得借此访问文件或产生 ToolInvocation。"""
+
+    class DirectResponseIntentService:
+        """返回受控直接回复决策的 deterministic fake。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """返回无需文件事实的普通对话回答。"""
+
+            return UserIntentPlan(
+                intent="GENERAL_CHAT",
+                user_goal=message,
+                decision_type="DIRECT_RESPONSE",
+                direct_response="你好，我可以继续帮助你处理文件任务。",
+            )
+
+    class FailingRegistry:
+        """若直接回复分支错误调用 Tool，则立即让测试失败。"""
+
+        def invoke(self, tool_name, input_json):
+            """禁止直接回复分支执行任何 Tool。"""
+
+            raise AssertionError("DIRECT_RESPONSE 不得调用 Tool")
+
+    service = AgentRuntimeService(
+        registry_factory=lambda db, user_id: FailingRegistry(),
+        llm_intent_service=DirectResponseIntentService(),
+    )
+
+    result = service.run_message(
+        conversation_id="conv-direct-response",
+        user_id="user-1",
+        message_id="msg-direct-response",
+        message="你好，先聊一下",
+        attachments=[],
+    )
+
+    assert result.status == "COMPLETED"
+    assert result.tool_invocations == []
+    assert result.final_response == "你好，我可以继续帮助你处理文件任务。"
+
+
+def test_llm_direct_response_cannot_bypass_attachment_tool_plan():
+    """附件任务即使被模型标成直接回复，也必须执行后端规划出的白名单 Tool。"""
+
+    class UnsafeDirectResponseIntentService:
+        """模拟模型错误地试图直接回答附件任务。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """返回带附件范围的非法直接回复决策。"""
+
+            return UserIntentPlan(
+                intent="FILE_TASK",
+                user_goal=message,
+                decision_type="DIRECT_RESPONSE",
+                direct_response="附件内容已经处理完成。",
+                referenced_document_ids=[attachments[0]["document_id"]],
+            )
+
+    class RecordingRegistry:
+        """记录后端是否仍执行了受控文件洞察读取。"""
+
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, tool_name, input_json):
+            """返回稳定的白名单 Tool 结果。"""
+
+            self.calls.append(tool_name)
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={"ok": True, "documents": []},
+                status="COMPLETED",
+            )
+
+    registry = RecordingRegistry()
+    service = AgentRuntimeService(
+        registry_factory=lambda db, user_id: registry,
+        llm_intent_service=UnsafeDirectResponseIntentService(),
+    )
+    result = service.run_message(
+        conversation_id="conv-direct-file",
+        user_id="user-1",
+        message_id="msg-direct-file",
+        message="处理这个附件",
+        attachments=[{"document_id": "doc-1"}],
+    )
+
+    assert registry.calls == ["intent-summary"]
+    assert len(result.tool_invocations) == 1
+    assert result.final_response != "附件内容已经处理完成。"
+
+
+def test_llm_clarification_branch_does_not_guess_file_scope():
+    """缺少必要文件范围时只能询问一次，不得让 Tool 猜测用户指的是哪个文件。"""
+
+    class ClarificationIntentService:
+        """返回受控澄清决策的 deterministic fake。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """要求用户补充完整文件名。"""
+
+            return UserIntentPlan(
+                intent="MISSING_FILE_SCOPE",
+                user_goal=message,
+                decision_type="CLARIFY",
+                clarification_question="请提供要处理文件的完整文件名。",
+            )
+
+    service = AgentRuntimeService(llm_intent_service=ClarificationIntentService())
+    result = service.run_message(
+        conversation_id="conv-clarify",
+        user_id="user-1",
+        message_id="msg-clarify",
+        message="帮我处理一下",
+        attachments=[],
+    )
+
+    assert result.status == "NEEDS_REVIEW"
+    assert result.tool_invocations == []
+    assert result.final_response == "请提供要处理文件的完整文件名。"
+
+
+def test_tool_observation_allows_at_most_two_replans():
+    """Tool 明确要求调整计划时最多重规划两次，第三轮后不会形成无限循环。"""
+
+    class ReplanningIntentService:
+        """根据观察轮次返回三轮不同计划。"""
+
+        enabled = True
+
+        def __init__(self):
+            self.observations = []
+
+        def understand_user_request(
+            self,
+            *,
+            message,
+            attachments,
+            context_documents,
+            observation=None,
+        ):
+            """依次返回三个不同计划，验证三轮规划预算。"""
+
+            self.observations.append(observation)
+            if len(self.observations) == 2:
+                return UserIntentPlan(
+                    intent="CAPABILITY_HELP",
+                    user_goal=message,
+                    required_capabilities=["read_agent_capabilities"],
+                    tool_plan_hint=["read-agent-capabilities"],
+                )
+            if len(self.observations) == 3:
+                return UserIntentPlan(
+                    intent="LIST_CLASSIFICATION_TAXONOMY",
+                    user_goal=message,
+                    required_capabilities=["read_classification_taxonomy"],
+                    tool_plan_hint=["read-classification-taxonomy"],
+                )
+            return UserIntentPlan(intent="UNKNOWN", user_goal=message)
+
+    class ReplanningRegistry:
+        """每次都请求重规划，用于验证图只允许预算内两次回边。"""
+
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, tool_name, input_json):
+            """返回不含正文的显式 replan_required 标志。"""
+
+            self.calls.append(tool_name)
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "status": "COMPLETED",
+                    "intent": input_json.get("intent"),
+                    "user_goal": input_json.get("user_goal"),
+                    "replan_required": True,
+                },
+                status="COMPLETED",
+            )
+
+    intent_service = ReplanningIntentService()
+    registry = ReplanningRegistry()
+    service = AgentRuntimeService(
+        registry_factory=lambda db, user_id: registry,
+        llm_intent_service=intent_service,
+    )
+    result = service.run_message(
+        conversation_id="conv-replan",
+        user_id="user-1",
+        message_id="msg-replan",
+        message="处理这个通用请求",
+        attachments=[],
+    )
+
+    assert registry.calls == [
+        "intent-summary",
+        "read-agent-capabilities",
+        "read-classification-taxonomy",
+    ]
+    assert len(intent_service.observations) == 3
+    assert intent_service.observations[0] is None
+    assert intent_service.observations[1]["planning_round"] == 1
+    assert intent_service.observations[2]["planning_round"] == 2
+    assert len(result.tool_invocations) == 3
+
+
+def test_replan_rejects_duplicate_tool_name_and_input():
+    """重规划返回完全相同的 Tool 输入时必须在调用前拒绝，避免重复副作用。"""
+
+    class DuplicateIntentService:
+        """两轮都返回相同计划。"""
+
+        enabled = True
+
+        def understand_user_request(
+            self,
+            *,
+            message,
+            attachments,
+            context_documents,
+            observation=None,
+        ):
+            """保持相同意图以触发重复签名保护。"""
+
+            return UserIntentPlan(intent="UNKNOWN", user_goal=message)
+
+    class DuplicateRegistry:
+        """第一次调用要求重规划，第二次真实调用不应发生。"""
+
+        def __init__(self):
+            self.call_count = 0
+
+        def invoke(self, tool_name, input_json):
+            """记录实际调用次数。"""
+
+            self.call_count += 1
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "status": "COMPLETED",
+                    "intent": input_json["intent"],
+                    "user_goal": input_json["user_goal"],
+                    "replan_required": True,
+                },
+                status="COMPLETED",
+            )
+
+    registry = DuplicateRegistry()
+    service = AgentRuntimeService(
+        registry_factory=lambda db, user_id: registry,
+        llm_intent_service=DuplicateIntentService(),
+    )
+    result = service.run_message(
+        conversation_id="conv-duplicate-call",
+        user_id="user-1",
+        message_id="msg-duplicate-call",
+        message="处理这个普通请求",
+        attachments=[],
+    )
+
+    assert registry.call_count == 1
+    assert [item.status for item in result.tool_invocations] == [
+        "COMPLETED",
+        "FAILED",
+    ]
+    assert result.tool_invocations[-1].output_json["error"]["code"] == "DUPLICATE_TOOL_CALL"
+    assert result.status == "NEEDS_REVIEW"
+
+
+def test_tool_dispatch_stops_after_five_actual_calls():
+    """单次 AgentRun 最多执行五次 Tool，超出范围时保留已完成结果并请求缩小范围。"""
+
+    class SixDocumentIntentService:
+        """返回六个已由后端附件上下文确认的正文读取目标。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """为全部六个附件生成受控读取计划。"""
+
+            return UserIntentPlan(
+                intent="EXTRACT_DOCUMENT_TEXT",
+                user_goal=message,
+                referenced_document_ids=[
+                    item["document_id"] for item in attachments
+                ],
+                required_capabilities=["extract_document_text"],
+                tool_plan_hint=["extract-document-text"],
+            )
+
+    class CountingRegistry:
+        """返回稳定解析结果并记录实际调用次数。"""
+
+        def __init__(self):
+            self.call_count = 0
+
+        def invoke(self, tool_name, input_json):
+            """模拟单文档解析成功。"""
+
+            self.call_count += 1
+            document_id = input_json["document_id"]
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "document_id": document_id,
+                    "extraction_run_id": f"run-{document_id}",
+                    "status": "COMPLETED",
+                    "extractor": "fake",
+                    "pages": [
+                        {
+                            "page_number": 1,
+                            "text_preview": "测试正文",
+                            "char_count": 4,
+                        }
+                    ],
+                },
+                status="COMPLETED",
+            )
+
+    registry = CountingRegistry()
+    service = AgentRuntimeService(
+        registry_factory=lambda db, user_id: registry,
+        llm_intent_service=SixDocumentIntentService(),
+    )
+    attachments = [{"document_id": f"doc-{index}"} for index in range(6)]
+    result = service.run_message(
+        conversation_id="conv-tool-budget",
+        user_id="user-1",
+        message_id="msg-tool-budget",
+        message="读取这些附件",
+        attachments=attachments,
+    )
+
+    assert registry.call_count == 5
+    assert result.tool_invocations[-1].output_json["error"]["code"] == (
+        "TOOL_CALL_BUDGET_EXCEEDED"
+    )
+    assert result.status == "NEEDS_REVIEW"
+    assert "最多执行 5 次" in (result.final_response or "")
+
+
+def test_full_filename_question_routes_to_evidence_answer_without_generic_marker():
+    """完整文件名后的自然语言问题无需标题含“通知/报告/材料”也应进入证据回答。"""
+
+    message = "计算机学院宣传册20230423.docx 为什么涉及学生工作"
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-full-filename-question",
+        user_id="user-1",
+        message_id="msg-full-filename-question",
+        message=message,
+        attachments=[],
+    )
+
+    assert plan.intent == "EVIDENCE_ANSWER"
+    assert [step.tool_name for step in plan.steps] == ["evidence-answer"]
+    assert plan.steps[0].input["question"] == message

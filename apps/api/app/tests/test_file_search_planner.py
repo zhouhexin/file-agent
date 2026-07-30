@@ -106,8 +106,8 @@ def test_semantic_search_phrase_does_not_extract_chinese_stopword_as_filename_fi
     assert _managed_filename_contains_from_list_request("查找与金海燕老师有关的文件") is None
 
 
-def test_llm_mode_bypasses_llm_for_deterministic_semantic_file_search(monkeypatch):
-    """明确的自然语言文件检索必须在 LLM 前固定路由，避免同一句话得到不同 Tool 计划。"""
+def test_llm_mode_routes_semantic_file_search_through_catalog_planner(monkeypatch):
+    """正常 LLM 主路径应依据 Catalog 选择检索 Tool，关键词规则只保留作降级。"""
 
     # Runtime 构造仍需合法数据库配置，但本测试用 FakeRegistry，不会建立真实连接。
     monkeypatch.setenv(
@@ -115,15 +115,32 @@ def test_llm_mode_bypasses_llm_for_deterministic_semantic_file_search(monkeypatc
         "postgresql+psycopg://user:pass@localhost:5432/file_agent_test",
     )
 
-    class BlockingLLMIntentService:
-        """如果本测试调用 LLM，说明确定性检索预路由没有生效。"""
+    class CatalogSearchIntentService:
+        """验证请求级 Catalog 后返回受控检索意图。"""
 
         enabled = True
+        call_count = 0
 
-        def understand_user_request(self, **kwargs):
-            """禁止通过不稳定的模型输出决定主题检索 Tool。"""
+        def understand_user_request(
+            self,
+            *,
+            message,
+            attachments,
+            context_documents,
+            catalog_snapshot,
+        ):
+            """只选择 Catalog 中已启用的检索能力。"""
 
-            raise AssertionError("semantic file search should not call LLM intent routing")
+            self.call_count += 1
+            assert "hybrid-search" in catalog_snapshot["enabled_tool_names"]
+            assert "file-search" in catalog_snapshot["enabled_skill_ids"]
+            return UserIntentPlan(
+                intent="SEARCH_FILES",
+                user_goal=message,
+                required_capabilities=["file_search"],
+                tool_plan_hint=["hybrid-search"],
+                managed_query=message,
+            )
 
     class FakeRegistry:
         """返回稳定的空检索结果，只验证路由边界。"""
@@ -143,9 +160,10 @@ def test_llm_mode_bypasses_llm_for_deterministic_semantic_file_search(monkeypatc
                 status="COMPLETED",
             )
 
+    llm_service = CatalogSearchIntentService()
     service = AgentRuntimeService(
         registry_factory=lambda db, user_id: FakeRegistry(),
-        llm_intent_service=BlockingLLMIntentService(),
+        llm_intent_service=llm_service,
     )
 
     result = service.run_message(
@@ -157,6 +175,7 @@ def test_llm_mode_bypasses_llm_for_deterministic_semantic_file_search(monkeypatc
     )
 
     assert result.intent == "SEARCH_FILES"
+    assert llm_service.call_count == 1
     assert [item.tool_name for item in result.tool_invocations] == ["hybrid-search"]
     assert result.tool_invocations[0].input_json["query"] == "查找与金海燕老师有关的文件"
 

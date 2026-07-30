@@ -1,0 +1,10 @@
+{
+  "id": "file-search",
+  "version": "1",
+  "status": "ACTIVE",
+  "description": "在当前附件、会话和工作区中检索文件。",
+  "trigger_hints": ["查找文件", "搜索材料", "有关文件"],
+  "allowed_tools": ["hybrid-search", "document-lineage-read"],
+  "required_capabilities": ["file_search"],
+  "risk_ceiling": "low"
+}

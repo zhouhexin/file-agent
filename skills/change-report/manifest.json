@@ -1,0 +1,10 @@
+{
+  "id": "change-report",
+  "version": "1",
+  "status": "ACTIVE",
+  "description": "聚合 ChangeSet 并生成逐文件回执。",
+  "trigger_hints": ["处理回执", "变更记录"],
+  "allowed_tools": [],
+  "required_capabilities": ["change_report"],
+  "risk_ceiling": "low"
+}

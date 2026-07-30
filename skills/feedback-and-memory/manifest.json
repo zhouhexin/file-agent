@@ -1,0 +1,10 @@
+{
+  "id": "feedback-and-memory",
+  "version": "1",
+  "status": "ACTIVE",
+  "description": "记录用户明确反馈和受控偏好。",
+  "trigger_hints": ["反馈", "纠正", "记住"],
+  "allowed_tools": ["feedback-record"],
+  "required_capabilities": ["feedback"],
+  "risk_ceiling": "medium"
+}

@@ -22,8 +22,28 @@ class AgentGraphState(TypedDict, total=False):
     message: str
     attachments: List[Dict[str, Any]]
     context_documents: List[Dict[str, Any]]
+    catalog_snapshot: Dict[str, Any]
+    planner_decision: Dict[str, Any]
     user_intent_plan: Dict[str, Any]
     planner_mode: str
+    adaptive_planner_mode: str
+    planner_schema_version: str
+    shadow_planner_decision: Dict[str, Any]
+    decision_type: str
+    direct_response: Optional[str]
+    clarification_question: Optional[str]
+    planning_round: int
+    tool_call_count: int
+    executed_tool_signatures: List[str]
+    last_dispatch_results: List[Dict[str, Any]]
+    observation: Dict[str, Any]
+    replan_requested: bool
+    waiting_for_confirmation: bool
+    current_step_index: int
+    step_results: Dict[str, Dict[str, Any]]
+    completed_step_ids: List[str]
+    failed_step_ids: List[str]
+    capability_suggestions: List[Dict[str, Any]]
     status: str
     intent: Optional[str]
     slots: Dict[str, Any]

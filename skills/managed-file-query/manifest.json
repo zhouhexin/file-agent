@@ -1,0 +1,10 @@
+{
+  "id": "managed-file-query",
+  "version": "1",
+  "status": "ACTIVE",
+  "description": "按受管根和相对目录查询服务器文件。",
+  "trigger_hints": ["受管目录", "目录文件", "服务器文件"],
+  "allowed_tools": ["managed-root-list", "managed-file-list", "managed-file-search", "managed-file-read-document", "mcp-filesystem-list", "mcp-filesystem-search", "mcp-filesystem-info"],
+  "required_capabilities": ["managed_file_query"],
+  "risk_ceiling": "medium"
+}

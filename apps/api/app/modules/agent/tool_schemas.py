@@ -128,9 +128,12 @@ class DocumentInsightsReadInput(StrictToolInput):
 
 
 class DocumentClassificationsReadInput(StrictToolInput):
-    """读取当前会话文件的历史分类建议。"""
+    """读取当前会话文件当前版本的最新成功分类建议。"""
 
     document_ids: List[str] = Field(default_factory=list)
+    version_scope: Literal["CURRENT_WORKING_COPY"] = "CURRENT_WORKING_COPY"
+    include_evidence: bool = True
+    include_explanation_context: bool = True
 
 
 class IntentSummaryInput(StrictToolInput):
