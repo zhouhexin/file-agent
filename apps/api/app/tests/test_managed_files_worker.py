@@ -108,7 +108,14 @@ def test_completed_preparation_job_resumes_original_search_without_new_message(
             payload_json={},
             result_json={},
         )
-        db.add_all([conversation, message, job])
+        other_job = FilesystemJob(
+            job_type="ANALYZE_DOCUMENT_VERSION",
+            queue_name="ANALYSIS",
+            status="PENDING",
+            payload_json={},
+            result_json={},
+        )
+        db.add_all([conversation, message, job, other_job])
         db.flush()
         run = AgentRun(
             conversation_id=conversation.id,
@@ -118,7 +125,7 @@ def test_completed_preparation_job_resumes_original_search_without_new_message(
             status="WAITING_FOR_ASYNC_JOB",
             graph_state_json={
                 "status": "WAITING_FOR_ASYNC_JOB",
-                "async_job_ids": [job.id],
+                "async_job_ids": [job.id, other_job.id],
             },
         )
         db.add(run)
@@ -159,6 +166,7 @@ def test_completed_preparation_job_resumes_original_search_without_new_message(
         assert run.graph_state_json["async_job_ids"] == []
         assert "2025年工作总结.docx" in run.final_response
         assert db.query(Message).count() == 1
+        assert other_job.status == "PENDING"
     finally:
         db.close()
         clear_overrides()

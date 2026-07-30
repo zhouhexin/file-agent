@@ -41,7 +41,17 @@ def test_managed_only_match_queues_internal_import_without_public_candidate():
             fingerprint="readiness-fingerprint",
             status="ACTIVE",
         )
-        db.add(managed_file)
+        unrelated_file = ManagedFile(
+            root_id=root.id,
+            relative_path="总结/人文学院2025年工作总结.docx",
+            relative_path_hash="readiness-unrelated-file",
+            filename="人文学院2025年工作总结.docx",
+            extension=".docx",
+            size_bytes=10,
+            fingerprint="readiness-unrelated-fingerprint",
+            status="ACTIVE",
+        )
+        db.add_all([managed_file, unrelated_file])
         db.flush()
 
         service = WorkingCopySearchReadinessService(
@@ -69,6 +79,12 @@ def test_managed_only_match_queues_internal_import_without_public_candidate():
         assert job.priority == 10
         assert job.max_attempts == 3
         assert job.attempt_count == 0
+        assert (
+            db.query(FilesystemJob)
+            .filter(FilesystemJob.job_type == "IMPORT_WORKING_COPIES")
+            .count()
+            == 1
+        )
     finally:
         db.close()
         clear_overrides()

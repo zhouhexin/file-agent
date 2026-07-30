@@ -125,6 +125,54 @@ class _FakeManySearch:
         }
 
 
+class _FakeCollegeAliasSearch:
+    """分别返回机构和主题候选，用于验证最终必须取交集。"""
+
+    def search(self, *, exact_phrase: str, **_kwargs):
+        mapping = {
+            "计算机科学与工程学院": [
+                {
+                    "working_copy_id": "wc-computer-college",
+                    "document_id": "doc-computer-college",
+                    "filename": "计算机科学与工程学院2025年工作总结.docx",
+                    "overview": "",
+                    "category_path": [],
+                    "_body_phrase_hit": True,
+                },
+                {
+                    "working_copy_id": "wc-entity-only",
+                    "document_id": "doc-entity-only",
+                    "filename": "计算机科学与工程学院会议通知.docx",
+                    "overview": "",
+                    "category_path": [],
+                    "_body_phrase_hit": True,
+                },
+            ],
+            "工作总结": [
+                {
+                    "working_copy_id": "wc-computer-college",
+                    "document_id": "doc-computer-college",
+                    "filename": "计算机科学与工程学院2025年工作总结.docx",
+                    "overview": "",
+                    "category_path": [],
+                    "_body_phrase_hit": True,
+                },
+                {
+                    "working_copy_id": "wc-topic-only",
+                    "document_id": "doc-topic-only",
+                    "filename": "人文学院2025年工作总结.docx",
+                    "overview": "",
+                    "category_path": [],
+                    "_body_phrase_hit": True,
+                },
+            ],
+        }
+        return {
+            "partial": False,
+            "results": mapping.get(exact_phrase, []),
+        }
+
+
 def _db():
     """创建启用完整 ORM 表的 SQLite 会话。"""
 
@@ -199,6 +247,48 @@ def test_synonym_service_returns_complete_phrases_and_broad_topics_separately():
     assert group.canonical == "任职通知"
     assert "任职告示" in group.phrases
     assert group.broad_topics == ("任职", "通知")
+
+
+def test_computer_college_short_name_expands_inside_full_query_without_choice():
+    """学院简称等价扩展后应与主题取交集，并允许年份位于两者之间。"""
+
+    synonym_service = FileSearchSynonymService()
+    assert synonym_service.expand_equivalent_mentions(
+        "计算机学院的工作总结"
+    ) == (
+        "计算机学院的工作总结",
+        "计算机科学与工程学院的工作总结",
+    )
+    db = _db()
+    db.add(Conversation(id="conv-college-alias", user_id="user-1", title=""))
+    db.flush()
+
+    result = _execute_controlled_file_search(
+        db=db,
+        user_id="user-1",
+        conversation_id="conv-college-alias",
+        agent_run_id=None,
+        tool_input=SimpleNamespace(
+            match_mode="AUTO",
+            phrases=[],
+            require_body_evidence=False,
+        ),
+        search_query="帮我找2025年计算机学院的工作总结",
+        parsed=_Parsed(
+            cleaned="计算机学院的工作总结",
+            terms=["计算机学院", "工作总结"],
+            relation_mode="UNSPECIFIED",
+        ),
+        scope=object(),
+        tokenizer=_Tokenizer(),
+        search_service=_FakeCollegeAliasSearch(),
+    )
+
+    assert [item["document_id"] for item in result["results"]] == [
+        "doc-computer-college"
+    ]
+    assert result["total_returned"] == 1
+    assert "search_clarification" not in result
 
 
 def test_unspecified_query_with_different_synonym_results_creates_selection():

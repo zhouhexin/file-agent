@@ -26,6 +26,7 @@ class SearchSynonymGroup:
     canonical: str
     aliases: tuple[str, ...]
     broad_topics: tuple[str, ...]
+    equivalent_in_text: bool = False
 
     @property
     def phrases(self) -> tuple[str, ...]:
@@ -60,6 +61,55 @@ class FileSearchSynonymService:
             return ()
         group = self.find_group(normalized)
         return group.phrases if group is not None else (normalized,)
+
+    def expand_equivalent_mentions(self, phrase: str) -> tuple[str, ...]:
+        """在完整查询短语中替换正式实体别名，不拆词、不扩大业务主题。
+
+        例如“计算机学院的工作总结”会同时生成
+        “计算机科学与工程学院的工作总结”。这类配置表示同一实体的正式简称，
+        因此不需要再让用户选择语义范围。
+        """
+
+        cleaned = _clean_public_phrase(phrase)
+        if not cleaned:
+            return ()
+        variants = [cleaned]
+        for group in self.groups:
+            if not group.equivalent_in_text:
+                continue
+            current_variants = list(variants)
+            for value in current_variants:
+                for source in group.phrases:
+                    if source not in value:
+                        continue
+                    for target in group.phrases:
+                        candidate = value.replace(source, target)
+                        if candidate not in variants:
+                            variants.append(candidate)
+                            if len(variants) >= MAX_SYNONYM_PHRASES:
+                                return tuple(variants)
+        return tuple(variants)
+
+    def find_equivalent_mention(
+        self,
+        phrase: str,
+    ) -> tuple[SearchSynonymGroup, str] | None:
+        """查找完整查询中出现的正式实体名称或简称。
+
+        只返回显式标记为 ``equivalent_in_text`` 的词组，避免把普通业务同义词
+        当作同一机构实体而静默扩大检索范围。
+        """
+
+        cleaned = _clean_public_phrase(phrase)
+        if not cleaned:
+            return None
+        for group in self.groups:
+            if not group.equivalent_in_text:
+                continue
+            for value in sorted(group.phrases, key=len, reverse=True):
+                if value in cleaned:
+                    return group, value
+        return None
 
 
 @lru_cache(maxsize=1)
@@ -115,6 +165,7 @@ def load_default_search_synonyms() -> tuple[SearchSynonymGroup, ...]:
                 canonical=canonical,
                 aliases=aliases,
                 broad_topics=tuple(dict.fromkeys(broad_topics))[:4],
+                equivalent_in_text=bool(raw.get("equivalent_in_text", False)),
             )
         )
     return tuple(groups)

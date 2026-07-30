@@ -628,11 +628,20 @@ def _advance_waiting_search_runs(
                 and child_id not in next_ids
             ):
                 next_ids.append(child_id)
+                # 当前检索正在等待该派生任务时，继承链中的待执行子任务也要进入
+                # 用户请求优先级；只提升 PENDING，不重置失败次数或终态。
+                FilesystemJobQueue(db).promote_pending_job(
+                    job=child,
+                    priority=10,
+                )
         if next_ids:
             graph_state["async_job_ids"] = next_ids
             run.graph_state_json = graph_state
             run.updated_at = utcnow()
-            continue
+            # 多候选准备时不必等待全部文件。任一分析任务完成后立即重跑原检索；
+            # 已经出现活动结果就更新原消息，其余后台导入仍可独立继续。
+            if completed_job.job_type != "ANALYZE_DOCUMENT_VERSION":
+                continue
         _resume_waiting_hybrid_search(db=db, run=run, graph_state=graph_state)
 
 

@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import func, or_
+from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -25,6 +25,7 @@ from app.db.models import (
 )
 from app.modules.file_lifecycle.service import working_copy_search_artifact_status
 from app.modules.managed_files.jobs import FilesystemJobQueue
+from app.modules.retrieval.synonym_service import FileSearchSynonymService
 
 
 @dataclass(frozen=True)
@@ -250,22 +251,63 @@ class WorkingCopySearchReadinessService:
 
         year = getattr(parsed, "year", None)
         cleaned = str(getattr(parsed, "cleaned", "") or "")
-        # 摘要回退路径没有 Jieba tokenizer，需把“计算机学院的工作总结”按中文
-        # 连接词拆成稳定业务短语，不能要求文件名连续包含无信息量的“的”。
-        fragments = re.findall(
-            r"[a-z0-9]{2,}|[\u4e00-\u9fff]{2,}",
-            re.sub(r"的", " ", cleaned.lower()),
+        synonym_service = FileSearchSynonymService()
+        equivalent_mention = synonym_service.find_equivalent_mention(cleaned)
+        # 摘要回退路径没有 Jieba tokenizer，需把复合查询按稳定业务条件处理。
+        # 正式机构别名按同一实体匹配，但机构与主题必须同时命中，不能用 OR
+        # 静默准备其他学院的同主题文件。
+        entity_terms: list[str] = []
+        topic_phrase = ""
+        if equivalent_mention is not None:
+            group, matched_name = equivalent_mention
+            entity_terms = [value.lower() for value in group.phrases]
+            topic_phrase = cleaned.replace(matched_name, " ", 1).strip().lower()
+            topic_phrase = re.sub(
+                r"^[的与和及\s]+|[的与和及\s]+$",
+                "",
+                topic_phrase,
+            )
+        equivalent_phrases = synonym_service.expand_equivalent_mentions(cleaned) or (
+            cleaned,
         )
+        fragments = [
+            fragment
+            for phrase in equivalent_phrases
+            for fragment in re.findall(
+                r"[a-z0-9]{2,}|[\u4e00-\u9fff]{2,}",
+                re.sub(r"的", " ", phrase.lower()),
+            )
+        ]
         terms = list(dict.fromkeys([*fragments, *getattr(parsed, "terms", [])]))
         terms = [str(term).strip().lower() for term in terms if len(str(term).strip()) >= 2]
         metadata = func.lower(ManagedFile.filename + " " + ManagedFile.relative_path)
         filters = []
         if year is not None:
             filters.append(metadata.contains(str(year)))
-        if terms:
+        if entity_terms:
+            filters.append(
+                or_(*(metadata.contains(term) for term in entity_terms))
+            )
+            if len(topic_phrase) >= 2:
+                filters.append(metadata.contains(topic_phrase))
+        elif terms:
             filters.append(or_(*(metadata.contains(term) for term in terms[:12])))
         if not filters:
             return []
+        relevance = (
+            sum(
+                (
+                    case((metadata.contains(term), 1), else_=0)
+                    for term in terms[:12]
+                ),
+                0,
+            )
+            if terms
+            else None
+        )
+        ordering = [ManagedFile.updated_at.desc()]
+        if relevance is not None:
+            ordering.insert(0, relevance.desc())
         rows = (
             self.db.query(ManagedFile)
             .join(ManagedRoot, ManagedRoot.id == ManagedFile.root_id)
@@ -274,7 +316,9 @@ class WorkingCopySearchReadinessService:
                 ManagedRoot.enabled.is_(True),
                 *filters,
             )
-            .order_by(ManagedFile.updated_at.desc())
+            # 同时命中机构名称和主题的文件优先创建任务，避免泛化“工作总结”
+            # 候选排在真实学院文件之前，导致页面长时间保持处理中。
+            .order_by(*ordering)
             .limit(40)
             .all()
         )

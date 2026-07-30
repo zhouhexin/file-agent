@@ -6,6 +6,7 @@ Planner 输出永远不能直接调用 Tool handler，必须经过这里的 Regi
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Type
@@ -715,6 +716,51 @@ def _require_large_search_result_confirmation(
     }
 
 
+def _intersect_file_search_results(
+    *,
+    original_query: str,
+    entity_result: Dict[str, Any],
+    topic_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """对“机构实体”和“文件主题”分别召回后取稳定文件交集。
+
+    机构简称可以等价扩展，但主题仍必须独立命中。这样既允许文件名在机构和主题
+    之间包含年份等字段，也不会退化成“机构 OR 主题”的宽泛查询。
+    """
+
+    entity_ids = _search_result_ids(entity_result)
+    results = [
+        item
+        for item in topic_result.get("results", [])
+        if isinstance(item, dict)
+        and str(
+            item.get("working_copy_id")
+            or item.get("document_version_id")
+            or item.get("document_id")
+            or ""
+        )
+        in entity_ids
+    ]
+    partial = bool(entity_result.get("partial") or topic_result.get("partial"))
+    return {
+        "ok": True,
+        "kind": "workspace_file_search",
+        "query": original_query,
+        "total_returned": len(results),
+        "partial": partial,
+        "results": results,
+        "user_message": (
+            f"找到 {len(results)} 个相关文件。"
+            if results
+            else (
+                "暂未找到相关文件，部分正文索引当前不可用。"
+                if partial
+                else "未找到相关文件。"
+            )
+        ),
+    }
+
+
 def _execute_controlled_file_search(
     *,
     db: Any,
@@ -761,12 +807,52 @@ def _execute_controlled_file_search(
 
     core_phrase = str(parsed.cleaned or "").strip()
     synonym_service = FileSearchSynonymService()
+    relation_mode = str(getattr(parsed, "relation_mode", "UNSPECIFIED"))
+    equivalent_mention = synonym_service.find_equivalent_mention(core_phrase)
+    if equivalent_mention is not None:
+        group, matched_name = equivalent_mention
+        if relation_mode != "LITERAL":
+            # “计算机学院的工作总结”不是一个必须连续出现的标题短语：
+            # 文件名可能是“计算机学院2025年工作总结”。机构与主题分别召回后
+            # 取交集，机构允许正式简称等价，主题仍然必须命中。
+            topic_phrase = core_phrase.replace(matched_name, " ", 1).strip()
+            topic_phrase = re.sub(r"^[的与和及\s]+|[的与和及\s]+$", "", topic_phrase)
+            entity_result = strategy.search(
+                original_query=search_query,
+                parsed_query=parsed,
+                scope=scope,
+                phrases=list(group.phrases),
+                require_body_evidence=False,
+            )
+            if topic_phrase:
+                topic_result = strategy.search(
+                    original_query=search_query,
+                    parsed_query=parsed,
+                    scope=scope,
+                    phrases=[topic_phrase],
+                    require_body_evidence=False,
+                )
+                return _intersect_file_search_results(
+                    original_query=search_query,
+                    entity_result=entity_result,
+                    topic_result=topic_result,
+                )
+            return entity_result
+
+        # 用户明确要求“正文提到完整短语”时继续执行连续短语匹配，只替换
+        # 正式机构全称与简称，不能把实体和主题拆开。
+        equivalent_phrases = synonym_service.expand_equivalent_mentions(core_phrase)
+        return strategy.search(
+            original_query=search_query,
+            parsed_query=parsed,
+            scope=scope,
+            phrases=list(equivalent_phrases),
+            require_body_evidence=True,
+        )
     group = synonym_service.find_group(core_phrase)
     expanded_phrases = (
         list(group.phrases) if group is not None else [core_phrase]
     )
-    relation_mode = str(getattr(parsed, "relation_mode", "UNSPECIFIED"))
-
     exact = strategy.search(
         original_query=search_query,
         parsed_query=parsed,
