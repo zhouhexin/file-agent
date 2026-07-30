@@ -6,13 +6,15 @@
 2. Jieba/GIN search_vector 主召回（setweight: A=文件名, B=分类, C=元数据, D=摘要）
 3. 受限 pg_trgm 补召回（仅当查询 ≥ 配置最小长度、精确+GIN 不足时启用）
 
-候选收敛后以一次批量 JOIN 补齐显示字段，不逐文件 N+1 读取。
+候选收敛后以有界批量查询补齐显示字段，不执行一对多联合 JOIN 或逐文件 N+1 读取。
 SQLite 下使用 deterministic token 覆盖降级。
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from sqlalchemy import tuple_
 
 from app.db.models import (
     Document,
@@ -428,9 +430,9 @@ class Stage1DocumentRecallService:
         return list(result)[:64]
 
     def _enrich(self, candidates: list[dict], *, scope: Any) -> list[dict]:
-        """候选收敛后以一次批量 JOIN 补齐显示字段。
+        """候选收敛后以有界批量查询补齐显示字段。
 
-        禁止逐文件 N+1 查询。
+        禁止一对多联合 JOIN 和逐文件 N+1 查询。
         """
         if not candidates:
             return []
@@ -439,38 +441,11 @@ class Stage1DocumentRecallService:
         if not wc_ids:
             return []
 
-        rows = (
-            self.db.query(
-                WorkingCopy,
-                Document,
-                DocumentSummary,
-                DocumentCategorySuggestion,
-            )
+        # 显示字段分三次有界批量读取。不能把多条摘要和多条分类建议同时
+        # LEFT JOIN，否则两组一对多记录会相乘，候选很少也可能超过 SQL 超时。
+        base_rows = (
+            self.db.query(WorkingCopy, Document)
             .join(Document, Document.id == WorkingCopy.document_id)
-            .outerjoin(
-                DocumentSummary,
-                (DocumentSummary.document_id == WorkingCopy.document_id)
-                & (
-                    DocumentSummary.document_version_id
-                    == WorkingCopy.current_version_id
-                )
-                # 失败或处理中摘要不能成为搜索结果的展示事实。
-                & (DocumentSummary.status == "COMPLETED"),
-            )
-            .outerjoin(
-                DocumentCategorySuggestion,
-                (DocumentCategorySuggestion.document_id == WorkingCopy.document_id)
-                & (
-                    DocumentCategorySuggestion.document_version_id
-                    == WorkingCopy.current_version_id
-                )
-                # 仅展示仍有效的分类建议，避免 REJECTED 历史记录污染结果卡。
-                & (
-                    DocumentCategorySuggestion.status.in_(
-                        ["SUGGESTED", "AUTO_APPLIED", "CONFIRMED"]
-                    )
-                ),
-            )
             .filter(
                 WorkingCopy.id.in_(wc_ids),
                 WorkingCopy.workspace_id == self.workspace_id,
@@ -478,20 +453,79 @@ class Stage1DocumentRecallService:
             )
             .all()
         )
+        version_pairs = list(
+            dict.fromkeys(
+                (str(document.id), str(working_copy.current_version_id))
+                for working_copy, document in base_rows
+                if working_copy.current_version_id
+            )
+        )
+        summaries = (
+            self.db.query(DocumentSummary)
+            .filter(
+                tuple_(
+                    DocumentSummary.document_id,
+                    DocumentSummary.document_version_id,
+                ).in_(version_pairs),
+                DocumentSummary.status == "COMPLETED",
+            )
+            .order_by(DocumentSummary.updated_at.desc())
+            .all()
+            if version_pairs
+            else []
+        )
+        suggestions = (
+            self.db.query(DocumentCategorySuggestion)
+            .filter(
+                tuple_(
+                    DocumentCategorySuggestion.document_id,
+                    DocumentCategorySuggestion.document_version_id,
+                ).in_(version_pairs),
+                DocumentCategorySuggestion.status.in_(
+                    ["SUGGESTED", "AUTO_APPLIED", "CONFIRMED"]
+                ),
+            )
+            .order_by(
+                DocumentCategorySuggestion.rank.asc(),
+                DocumentCategorySuggestion.updated_at.desc(),
+            )
+            .all()
+            if version_pairs
+            else []
+        )
+        summary_by_version: dict[tuple[str, str], DocumentSummary] = {}
+        for summary in summaries:
+            summary_by_version.setdefault(
+                (str(summary.document_id), str(summary.document_version_id)),
+                summary,
+            )
+        suggestion_by_version: dict[
+            tuple[str, str], DocumentCategorySuggestion
+        ] = {}
+        for suggestion in suggestions:
+            suggestion_by_version.setdefault(
+                (
+                    str(suggestion.document_id),
+                    str(suggestion.document_version_id),
+                ),
+                suggestion,
+            )
 
         # 按 working_copy_id 聚合
         enrich_map: dict[str, dict] = {}
-        for wc, doc, summary, sug in rows:
-            if wc.id not in enrich_map:
-                enrich_map[wc.id] = {
-                    "working_copy_id": wc.id,
-                    "document_id": doc.id,
-                    "document_version_id": wc.current_version_id or "",
-                    "filename": wc.filename,
-                    "category_path": [],
-                    "summary": "",
-                    "year": None,
-                }
+        for wc, doc in base_rows:
+            version_key = (str(doc.id), str(wc.current_version_id or ""))
+            summary = summary_by_version.get(version_key)
+            sug = suggestion_by_version.get(version_key)
+            enrich_map[wc.id] = {
+                "working_copy_id": wc.id,
+                "document_id": doc.id,
+                "document_version_id": wc.current_version_id or "",
+                "filename": wc.filename,
+                "category_path": [],
+                "summary": "",
+                "year": None,
+            }
             if sug and sug.category_path_json:
                 enrich_map[wc.id]["category_path"] = sug.category_path_json
             if summary:

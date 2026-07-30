@@ -26,7 +26,11 @@ from app.db.models import (
 )
 from app.modules.file_lifecycle.service import working_copy_search_artifact_status
 from app.modules.managed_files.jobs import FilesystemJobQueue
-from app.modules.retrieval.synonym_service import FileSearchSynonymService
+from app.modules.retrieval.synonym_service import (
+    WORKSPACE_SCOPE_ENTITIES,
+    FileSearchSynonymService,
+    split_entity_topic_phrase,
+)
 
 
 @dataclass(frozen=True)
@@ -307,6 +311,15 @@ class WorkingCopySearchReadinessService:
                 "",
                 topic_phrase,
             )
+        else:
+            entity_topic = split_entity_topic_phrase(cleaned)
+            if entity_topic is not None:
+                entity_phrase, topic_phrase = entity_topic
+                topic_phrase = topic_phrase.lower()
+                # “学校/本校/全校”表示当前共享工作区范围，不要求文件名必须
+                # 包含“学校”；具体学院等机构仍需与主题同时命中。
+                if entity_phrase not in WORKSPACE_SCOPE_ENTITIES:
+                    entity_terms = [entity_phrase.lower()]
         equivalent_phrases = synonym_service.expand_equivalent_mentions(cleaned) or (
             cleaned,
         )
@@ -330,6 +343,8 @@ class WorkingCopySearchReadinessService:
             )
             if len(topic_phrase) >= 2:
                 filters.append(metadata.contains(topic_phrase))
+        elif len(topic_phrase) >= 2:
+            filters.append(metadata.contains(topic_phrase))
         elif terms:
             filters.append(or_(*(metadata.contains(term) for term in terms[:12])))
         if not filters:

@@ -15,6 +15,20 @@ from pathlib import Path
 
 MAX_SYNONYM_PHRASES = 8
 MAX_PHRASE_CHARS = 30
+WORKSPACE_SCOPE_ENTITIES = frozenset({"学校", "本校", "全校"})
+ENTITY_TOPIC_SUFFIXES = (
+    "学校",
+    "学院",
+    "研究院",
+    "实验室",
+    "委员会",
+    "办公室",
+    "中心",
+    "部门",
+    "处",
+    "科",
+    "系",
+)
 
 
 @dataclass(frozen=True)
@@ -110,6 +124,26 @@ class FileSearchSynonymService:
                 if value in cleaned:
                     return group, value
         return None
+
+
+def split_entity_topic_phrase(phrase: str) -> tuple[str, str] | None:
+    """把确定的“机构的文件主题”拆成实体与主题，不拆普通业务短语。
+
+    该规则只接受具有明确学校机构后缀的左侧实体，避免把任意含“的”的自然语言
+    都扩大成两个独立检索条件。
+    """
+
+    cleaned = _clean_public_phrase(phrase)
+    if not cleaned or cleaned.count("的") != 1:
+        return None
+    entity, topic = (value.strip() for value in cleaned.split("的", 1))
+    if len(entity) < 1 or len(topic) < 2:
+        return None
+    if entity not in WORKSPACE_SCOPE_ENTITIES and not entity.endswith(
+        ENTITY_TOPIC_SUFFIXES
+    ):
+        return None
+    return entity, topic
 
 
 @lru_cache(maxsize=1)

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -173,6 +174,40 @@ class _FakeCollegeAliasSearch:
         }
 
 
+class _FakePartialCollegeAliasSearch(_FakeCollegeAliasSearch):
+    """模拟一个机构简称 SQL 超时，其他正式短语仍可正常检索。"""
+
+    def search(self, *, exact_phrase: str, **kwargs):
+        if exact_phrase == "计算机学院":
+            raise OperationalError("statement timeout", {}, Exception("timeout"))
+        return super().search(exact_phrase=exact_phrase, **kwargs)
+
+
+class _FakeWorkspaceTopicSearch:
+    """记录共享工作区主题查询，确保不再搜索连续的“学校的主题”。"""
+
+    def __init__(self) -> None:
+        self.phrases: list[str] = []
+
+    def search(self, *, exact_phrase: str, **_kwargs):
+        self.phrases.append(exact_phrase)
+        if exact_phrase != "工作总结":
+            return {"partial": False, "results": []}
+        return {
+            "partial": False,
+            "results": [
+                {
+                    "working_copy_id": "wc-school-summary",
+                    "document_id": "doc-school-summary",
+                    "filename": "2025年度工作总结.docx",
+                    "overview": "",
+                    "category_path": [],
+                    "_body_phrase_hit": True,
+                }
+            ],
+        }
+
+
 def _db():
     """创建启用完整 ORM 表的 SQLite 会话。"""
 
@@ -289,6 +324,67 @@ def test_computer_college_short_name_expands_inside_full_query_without_choice():
     ]
     assert result["total_returned"] == 1
     assert "search_clarification" not in result
+
+
+def test_failed_equivalent_alias_keeps_successful_alias_results():
+    """一个正式机构别名超时时不能丢弃其他别名已经获得的有效结果。"""
+
+    result = _execute_controlled_file_search(
+        db=_db(),
+        user_id="user-1",
+        conversation_id=None,
+        agent_run_id=None,
+        tool_input=SimpleNamespace(
+            match_mode="AUTO",
+            phrases=[],
+            require_body_evidence=False,
+        ),
+        search_query="帮我找2025年计算机学院的工作总结",
+        parsed=_Parsed(
+            cleaned="计算机学院的工作总结",
+            terms=["计算机学院", "工作总结"],
+            relation_mode="UNSPECIFIED",
+        ),
+        scope=object(),
+        tokenizer=_Tokenizer(),
+        search_service=_FakePartialCollegeAliasSearch(),
+    )
+
+    assert [item["document_id"] for item in result["results"]] == [
+        "doc-computer-college"
+    ]
+    assert result["partial"] is True
+
+
+def test_school_possessive_query_uses_workspace_topic_instead_of_exact_phrase():
+    """“学校的工作总结”应把学校解释为共享范围，只检索独立主题。"""
+
+    search = _FakeWorkspaceTopicSearch()
+    result = _execute_controlled_file_search(
+        db=_db(),
+        user_id="user-1",
+        conversation_id=None,
+        agent_run_id=None,
+        tool_input=SimpleNamespace(
+            match_mode="AUTO",
+            phrases=[],
+            require_body_evidence=False,
+        ),
+        search_query="帮我找学校的工作总结",
+        parsed=_Parsed(
+            cleaned="学校的工作总结",
+            terms=["学校", "工作总结"],
+            relation_mode="UNSPECIFIED",
+        ),
+        scope=object(),
+        tokenizer=_Tokenizer(),
+        search_service=search,
+    )
+
+    assert search.phrases == ["工作总结"]
+    assert [item["document_id"] for item in result["results"]] == [
+        "doc-school-summary"
+    ]
 
 
 def test_unspecified_query_with_different_synonym_results_creates_selection():

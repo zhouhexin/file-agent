@@ -11,6 +11,8 @@ import re
 from dataclasses import replace
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.core.logging import log_event
 
 
@@ -49,6 +51,8 @@ class FileSearchPhraseStrategyService:
         )
         merged: dict[str, dict[str, Any]] = {}
         partial = False
+        successful_phrase_count = 0
+        last_error: SQLAlchemyError | None = None
         for phrase in unique_phrases:
             phrase_fingerprint = hashlib.sha256(
                 phrase.lower().encode("utf-8")
@@ -62,14 +66,33 @@ class FileSearchPhraseStrategyService:
                     else [phrase]
                 ),
             )
-            payload = self.search_service.search(
-                query=original_query,
-                parsed_query=phrase_query,
-                scope=scope,
-                exact_phrase=phrase,
-                require_body_evidence=require_body_evidence,
-                include_internal_match_flags=True,
-            )
+            try:
+                payload = self.search_service.search(
+                    query=original_query,
+                    parsed_query=phrase_query,
+                    scope=scope,
+                    exact_phrase=phrase,
+                    require_body_evidence=require_body_evidence,
+                    include_internal_match_flags=True,
+                )
+            except SQLAlchemyError as exc:
+                # TwoStageFileSearchService 已用 savepoint 隔离每段 SQL。单个正式
+                # 别名失败时保留其他别名的有效结果；若全部失败，循环结束后仍把
+                # 异常交给原有摘要级降级链路处理。
+                partial = True
+                last_error = exc
+                log_event(
+                    "retrieval.phrase_strategy.phrase_failed",
+                    level="WARNING",
+                    tool_name="hybrid-search",
+                    status="DEGRADED",
+                    phrase_fingerprint=phrase_fingerprint,
+                    phrase_chars=len(phrase),
+                    error_code=exc.__class__.__name__,
+                    message="单个受控短语检索失败，继续处理其余短语",
+                )
+                continue
+            successful_phrase_count += 1
             partial = partial or bool(payload.get("partial"))
             raw_result_count = len(
                 [item for item in payload.get("results", []) if isinstance(item, dict)]
@@ -112,6 +135,9 @@ class FileSearchPhraseStrategyService:
                 require_body_evidence=require_body_evidence,
                 message="单个受控短语检索和证据门槛处理完成",
             )
+
+        if successful_phrase_count == 0 and last_error is not None:
+            raise last_error
 
         results = list(merged.values())
         results.sort(

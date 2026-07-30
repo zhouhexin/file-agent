@@ -6,13 +6,13 @@
 3. 精确文件名匹配优先
 4. 候选上限有效
 5. 跨用户隔离
-6. 候选收敛后批量 JOIN 补齐显示字段
+6. 候选收敛后通过有界批量查询补齐显示字段
 """
 
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -267,7 +267,7 @@ def test_strict_scope_never_expands_to_other_active_documents():
 
 
 def test_enrich_includes_display_fields():
-    """候选收敛后批量 JOIN 补齐显示字段。"""
+    """候选收敛后通过有界批量查询补齐显示字段。"""
 
     db = _db_session()
     try:
@@ -288,6 +288,76 @@ def test_enrich_includes_display_fields():
         item = result[0]
         assert item.get("filename") == "奖学金.docx"
         assert len(item.get("category_path", [])) >= 1
+    finally:
+        db.close()
+
+
+def test_enrich_reads_one_to_many_details_in_bounded_batch_queries():
+    """摘要和分类建议必须分批读取，不能通过一对多 JOIN 产生笛卡尔膨胀。"""
+
+    db = _db_session()
+    try:
+        document = _setup_profile(
+            db,
+            suffix="bounded-enrich",
+            user_id="user1",
+            filename="工作总结.docx",
+            summary_text="2025年度工作总结",
+            category_path=["学校", "行政管理", "年度总结"],
+        )
+        db.add(
+            DocumentCategorySuggestion(
+                id="sug-bounded-enrich-secondary",
+                classification_run_id="cr-bounded-enrich-secondary",
+                document_id=document.id,
+                document_version_id="ver-bounded-enrich",
+                category_id="cat-bounded-enrich-secondary",
+                category_name="其他",
+                category_path_json=["其他"],
+                taxonomy_key="school_file_classification",
+                taxonomy_version="v1",
+                confidence=0.2,
+                status="SUGGESTED",
+                evidence_json=[],
+                rank=2,
+            )
+        )
+        db.commit()
+        statements: list[str] = []
+
+        def _record_statement(_conn, _cursor, statement, *_args):
+            statements.append(statement)
+
+        bind = db.get_bind()
+        event.listen(bind, "before_cursor_execute", _record_statement)
+        try:
+            result = Stage1DocumentRecallService(
+                db=db,
+                user_id="user1",
+                workspace_id="ws-user1",
+                config=_FakeConfig(),
+            )._enrich(
+                [
+                    {
+                        "working_copy_id": "wc-bounded-enrich",
+                        "document_id": "doc-bounded-enrich",
+                        "document_version_id": "ver-bounded-enrich",
+                        "_score": 1.0,
+                        "_hit_source": "test",
+                    }
+                ],
+                scope=_FakeScope(),
+            )
+        finally:
+            event.remove(bind, "before_cursor_execute", _record_statement)
+
+        assert len(statements) == 3
+        assert len(result) == 1
+        assert result[0]["category_path"] == [
+            "学校",
+            "行政管理",
+            "年度总结",
+        ]
     finally:
         db.close()
 

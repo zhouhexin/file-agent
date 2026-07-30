@@ -950,7 +950,11 @@ def _execute_controlled_file_search(
     from app.modules.retrieval.phrase_strategy import (
         FileSearchPhraseStrategyService,
     )
-    from app.modules.retrieval.synonym_service import FileSearchSynonymService
+    from app.modules.retrieval.synonym_service import (
+        WORKSPACE_SCOPE_ENTITIES,
+        FileSearchSynonymService,
+        split_entity_topic_phrase,
+    )
 
     strategy = FileSearchPhraseStrategyService(
         search_service=search_service,
@@ -1046,6 +1050,44 @@ def _execute_controlled_file_search(
             scope=scope,
             phrases=list(equivalent_phrases),
             require_body_evidence=True,
+        )
+    entity_topic = split_entity_topic_phrase(core_phrase)
+    if entity_topic is not None and relation_mode != "LITERAL":
+        entity_phrase, topic_phrase = entity_topic
+        workspace_scope_entity = entity_phrase in WORKSPACE_SCOPE_ENTITIES
+        log_event(
+            "retrieval.strategy.selected",
+            tool_name="hybrid-search",
+            status="COMPLETED",
+            strategy=(
+                "workspace_topic"
+                if workspace_scope_entity
+                else "generic_entity_topic_intersection"
+            ),
+            relation_mode=relation_mode,
+            has_topic_phrase=True,
+            message="采用机构范围与文件主题组合检索",
+        )
+        topic_result = strategy.search(
+            original_query=search_query,
+            parsed_query=parsed,
+            scope=scope,
+            phrases=[topic_phrase],
+            require_body_evidence=False,
+        )
+        if workspace_scope_entity:
+            return topic_result
+        entity_result = strategy.search(
+            original_query=search_query,
+            parsed_query=parsed,
+            scope=scope,
+            phrases=[entity_phrase],
+            require_body_evidence=False,
+        )
+        return _intersect_file_search_results(
+            original_query=search_query,
+            entity_result=entity_result,
+            topic_result=topic_result,
         )
     group = synonym_service.find_group(core_phrase)
     expanded_phrases = (

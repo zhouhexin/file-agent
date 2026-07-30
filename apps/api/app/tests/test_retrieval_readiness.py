@@ -90,6 +90,78 @@ def test_managed_only_match_queues_internal_import_without_public_candidate():
         clear_overrides()
 
 
+def test_school_possessive_readiness_prepares_only_topic_matches():
+    """学校表示共享范围，静默准备只能按“工作总结”主题筛选。"""
+
+    client, SessionLocal = client_with_database()
+    registered = client.post(
+        "/api/auth/register",
+        json={
+            "username": "readiness-school-topic-user",
+            "password": "password123",
+            "display_name": "readiness-school-topic-user",
+        },
+    )
+    db = SessionLocal()
+    try:
+        root = ManagedRoot(
+            root_key="school_files",
+            display_name="学校文件",
+            container_path="/managed/school-files",
+        )
+        db.add(root)
+        db.flush()
+        db.add_all(
+            [
+                ManagedFile(
+                    root_id=root.id,
+                    relative_path="总结/计算机学院2025年工作总结.docx",
+                    relative_path_hash="readiness-school-summary",
+                    filename="计算机学院2025年工作总结.docx",
+                    extension=".docx",
+                    size_bytes=10,
+                    fingerprint="readiness-school-summary-fingerprint",
+                    status="ACTIVE",
+                ),
+                ManagedFile(
+                    root_id=root.id,
+                    relative_path="通知/学校会议通知.docx",
+                    relative_path_hash="readiness-school-notice",
+                    filename="学校会议通知.docx",
+                    extension=".docx",
+                    size_bytes=10,
+                    fingerprint="readiness-school-notice-fingerprint",
+                    status="ACTIVE",
+                ),
+            ]
+        )
+        db.flush()
+
+        result = WorkingCopySearchReadinessService(
+            db=db,
+            user_id=registered.json()["id"],
+            workspace_id=get_shared_workspace_id(db),
+        ).prepare_after_miss(
+            parsed_query=SimpleNamespace(
+                year=None,
+                terms=["学校", "工作总结"],
+                cleaned="学校的工作总结",
+            )
+        )
+
+        assert result is not None
+        jobs = (
+            db.query(FilesystemJob)
+            .filter(FilesystemJob.job_type == "IMPORT_WORKING_COPIES")
+            .all()
+        )
+        assert len(jobs) == 1
+        assert jobs[0].payload_json["managed_file_id"]
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def test_terminal_failed_import_is_not_reopened_by_search():
     """用户重复检索不能重新激活已达到终态的失败导入。"""
 
