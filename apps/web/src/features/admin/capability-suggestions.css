@@ -1,0 +1,99 @@
+/* 能力建议页保持轻量管理台布局，不展示内部 Tool 输入或文件内容。 */
+.capability-suggestions-page {
+  min-height: 100vh;
+  padding: 32px;
+  color: #172033;
+  background: #f4f6fa;
+}
+
+.capability-suggestions-header,
+.capability-suggestion-title,
+.capability-suggestions-actions,
+.capability-suggestion-buttons {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.capability-suggestions-header,
+.capability-suggestion-title {
+  justify-content: space-between;
+}
+
+.capability-suggestions-header h1,
+.capability-suggestion-card h2 {
+  margin: 0;
+}
+
+.capability-suggestions-header p {
+  margin: 8px 0 0;
+  color: #5b6475;
+}
+
+.capability-suggestions-actions button,
+.capability-suggestion-buttons button,
+.capability-suggestions-actions select {
+  min-height: 38px;
+  padding: 8px 12px;
+  border: 1px solid #ccd2dd;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.capability-suggestions-list {
+  display: grid;
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.capability-suggestion-card {
+  padding: 20px;
+  border: 1px solid #dfe3eb;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.capability-suggestion-title span,
+.capability-suggestion-title strong {
+  color: #546176;
+  font-size: 12px;
+}
+
+.capability-suggestion-reason {
+  color: #5b6475;
+}
+
+.capability-suggestion-card dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.capability-suggestion-card dt {
+  color: #788194;
+  font-size: 12px;
+}
+
+.capability-suggestion-card dd {
+  margin: 4px 0 0;
+}
+
+.capability-suggestions-error {
+  color: #b42318;
+}
+
+@media (max-width: 800px) {
+  .capability-suggestions-page {
+    padding: 18px;
+  }
+
+  .capability-suggestions-header,
+  .capability-suggestion-title {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .capability-suggestion-card dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

@@ -7,12 +7,18 @@ import { clearToken, readToken, saveToken } from './auth/storage';
 import { hasCompletedOnboarding, markOnboardingCompleted } from './auth/onboardingStorage';
 import { AuthPage } from './features/auth/AuthPage';
 import { FailedFilesPage } from './features/admin/FailedFilesPage';
+import { CapabilitySuggestionsPage } from './features/admin/CapabilitySuggestionsPage';
 import { ChatPage } from './features/chat/ChatPage';
 import { OnboardingPage } from './features/onboarding/OnboardingPage';
 import './features/chat/chat.css';
 import type { User } from './types';
 
-type AppPath = '/login' | '/chat' | '/getting-started' | '/admin/failed-files';
+type AppPath =
+  | '/login'
+  | '/chat'
+  | '/getting-started'
+  | '/admin/failed-files'
+  | '/admin/capability-suggestions';
 
 function readInitialPath(): AppPath {
   // 直接读取当前 URL 以支持刷新 / 直接访问 /getting-started 的场景。
@@ -25,6 +31,9 @@ function readInitialPath(): AppPath {
   }
   if (pathname === '/admin/failed-files') {
     return '/admin/failed-files';
+  }
+  if (pathname === '/admin/capability-suggestions') {
+    return '/admin/capability-suggestions';
   }
   return '/chat';
 }
@@ -132,6 +141,12 @@ export function App() {
     setCurrentPath('/admin/failed-files');
   }
 
+  function openCapabilitySuggestions() {
+    // 能力建议清单只对 ops/admin 展示，后端继续执行最终角色校验。
+    pushPath('/admin/capability-suggestions');
+    setCurrentPath('/admin/capability-suggestions');
+  }
+
   function completeOnboarding() {
     markOnboardingCompleted();
     setPendingExample('');
@@ -171,6 +186,19 @@ export function App() {
     return <FailedFilesPage token={token} onBack={openChat} />;
   }
 
+  if (
+    currentPath === '/admin/capability-suggestions'
+    && ['ops', 'admin'].includes(currentUser.role)
+  ) {
+    return (
+      <CapabilitySuggestionsPage
+        token={token}
+        user={currentUser}
+        onBack={openChat}
+      />
+    );
+  }
+
   return (
     <ChatPage
       token={token}
@@ -178,6 +206,7 @@ export function App() {
       onLogout={handleLogout}
       onOpenOnboarding={openOnboarding}
       onOpenFailedFiles={openFailedFiles}
+      onOpenCapabilitySuggestions={openCapabilitySuggestions}
       initialDraft={pendingExample}
     />
   );

@@ -2,6 +2,7 @@
 import type {
   AgentCapabilityCatalog,
   ClassificationFeedbackResponse,
+  CapabilitySuggestion,
   ClassificationClarificationResult,
   ClassificationTaxonomyOptionsResponse,
   ConversationDetailResponse,
@@ -155,6 +156,31 @@ export async function getFilesystemJob(
 export async function getFailedFileJobs(token: string): Promise<FailedFileJob[]> {
   // 失败列表只对 ops/admin 开放，页面不接收绝对路径和文件正文。
   return request<FailedFileJob[]>('/admin/failed-files?limit=200', { token });
+}
+
+export async function getCapabilitySuggestions(
+  token: string,
+  status = '',
+): Promise<CapabilitySuggestion[]> {
+  // 管理员页面只读取脱敏能力建议，普通用户无法通过该接口获取内部 Catalog 信息。
+  const query = status ? `?status=${encodeURIComponent(status)}` : '';
+  return request<CapabilitySuggestion[]>(`/admin/capability-suggestions${query}`, { token });
+}
+
+export async function reviewCapabilitySuggestion(
+  token: string,
+  suggestionId: string,
+  status: 'UNDER_REVIEW' | 'ACCEPTED' | 'REJECTED' | 'MERGED' | 'IMPLEMENTED',
+  reviewNote = '',
+): Promise<CapabilitySuggestion> {
+  // 评审只改变候选状态，后端不会自动注册或启用 Tool/Skill。
+  return request<CapabilitySuggestion>(
+    `/admin/capability-suggestions/${suggestionId}/review`,
+    {
+      token,
+      body: { status, review_note: reviewNote },
+    },
+  );
 }
 
 export async function fetchUploadedFileBlob(token: string, documentId: string): Promise<Blob> {

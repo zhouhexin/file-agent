@@ -15,6 +15,27 @@ export type TokenResponse = {
   user: User;
 };
 
+// 能力建议只在管理员页面展示脱敏产品缺口，不包含文件正文、Prompt 或 Tool 输入。
+export type CapabilitySuggestion = {
+  id: string;
+  suggestion_kind: 'CAPABILITY' | 'TOOL' | 'SKILL' | string;
+  title: string;
+  missing_capability: string;
+  reason: string;
+  expected_inputs_json: string[];
+  expected_outputs_json: string[];
+  related_skill_ids_json: string[];
+  confidence: number;
+  occurrence_count: number;
+  catalog_fingerprint: string;
+  status: 'NEW' | 'UNDER_REVIEW' | 'ACCEPTED' | 'REJECTED' | 'MERGED' | 'IMPLEMENTED' | string;
+  review_note: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 // 普通聊天页面只消费稳定任务投影，不依赖 Skill、ToolInvocation 或 Graph 内部结构。
 export type TaskResult = {
   task_id: string;
