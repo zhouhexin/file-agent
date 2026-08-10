@@ -10,10 +10,10 @@ Conversation id, user id, document ids or upload ids, requested outputs.
 Document versions, artifacts, pages/tables, chunks, embeddings, metadata, read profile, read quality, initial ChangeSet.
 
 ## Allowed Tools
-`document-register-upload`, `security-scan`, `document-convert`, `table-extract`, `artifact-write`, `metadata-extract`, `chunk-build`, `embedding-generate`
+`extract-document-text`, `read-original-file`, `read-document-insights`, `chunk-build`
 
 ## Open Source Backing
-Uses open-source-backed Tool Adapters: `document-convert` via Unstructured, Haystack, Docling, LlamaIndex, or LangChain; `table-extract` via Haystack or openpyxl; `chunk-build` via LangChain or LlamaIndex.
+Uses open-source-backed Tool Adapters: `extract-document-text` via Docling and controlled format-specific fallbacks; `chunk-build` uses the persisted page/evidence indexing boundary.
 
 ## Steps
 1. Register files and run scan.

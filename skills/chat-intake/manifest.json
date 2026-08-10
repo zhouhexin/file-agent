@@ -4,7 +4,7 @@
   "status": "ACTIVE",
   "description": "解析对话范围并读取任务状态或文件谱系。",
   "trigger_hints": ["任务状态", "处理进度", "文件版本"],
-  "allowed_tools": ["job-status-read", "document-lineage-read", "intent-summary"],
+  "allowed_tools": ["intent-summary"],
   "required_capabilities": [],
   "risk_ceiling": "low"
 }

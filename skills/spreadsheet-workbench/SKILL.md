@@ -21,7 +21,7 @@ profile-spreadsheet
 analyze-spreadsheet
 validate-spreadsheet
 operation-plan-create
-document-lineage-read
+profile-spreadsheet, analyze-spreadsheet, validate-spreadsheet
 ```
 
 后续确认后编辑阶段允许：

@@ -39,7 +39,7 @@ DEFAULT_F2_STDOUT_MAX_BYTES = 1024 * 1024
 DEFAULT_NEO4J_QUERY_TIMEOUT_SECONDS = 3
 DEFAULT_GRAPH_CLASSIFICATION_MAX_HOPS = 1
 DEFAULT_GRAPH_CLASSIFICATION_TOP_K = 8
-DEFAULT_GRAPH_CLASSIFICATION_MODE = "off"
+DEFAULT_GRAPH_CLASSIFICATION_MODE = "shadow"
 DEFAULT_GRAPH_EMBEDDING_DIMENSION = 384
 DEFAULT_GRAPH_VECTOR_TOP_K = 12
 DEFAULT_GRAPH_PROJECTION_BATCH_SIZE = 500
@@ -194,17 +194,18 @@ class Settings(BaseModel):
     f2_expected_version: str = DEFAULT_F2_EXPECTED_VERSION
     f2_fallback_to_native: bool = False
     f2_stdout_max_bytes: int = DEFAULT_F2_STDOUT_MAX_BYTES
-    graph_classification_enabled: bool = False
+    # 图谱增强默认运行在 Shadow：执行投影和候选对比，但在完成评估前不改变用户可见分类结果。
+    graph_classification_enabled: bool = True
     neo4j_uri: str = ""
     neo4j_username: str = ""
     neo4j_password: str = ""
     neo4j_database: str = "neo4j"
     neo4j_query_timeout_seconds: int = DEFAULT_NEO4J_QUERY_TIMEOUT_SECONDS
-    neo4j_sync_enabled: bool = False
+    neo4j_sync_enabled: bool = True
     graph_classification_max_hops: int = DEFAULT_GRAPH_CLASSIFICATION_MAX_HOPS
     graph_classification_top_k: int = DEFAULT_GRAPH_CLASSIFICATION_TOP_K
     graph_classification_mode: str = DEFAULT_GRAPH_CLASSIFICATION_MODE
-    graph_embedding_enabled: bool = False
+    graph_embedding_enabled: bool = True
     graph_embedding_provider: str = "local"
     graph_embedding_model_path: str = ""
     graph_embedding_model_name: str = ""
@@ -213,7 +214,7 @@ class Settings(BaseModel):
     graph_vector_index_name: str = "document_version_embedding_v1"
     graph_vector_top_k: int = DEFAULT_GRAPH_VECTOR_TOP_K
     graph_vector_min_score: float = 0.0
-    graph_projection_worker_enabled: bool = False
+    graph_projection_worker_enabled: bool = True
     graph_projection_batch_size: int = DEFAULT_GRAPH_PROJECTION_BATCH_SIZE
     graph_feedback_collection_enabled: bool = True
     graph_classification_rollout_percent: int = DEFAULT_GRAPH_CLASSIFICATION_ROLLOUT_PERCENT
@@ -668,7 +669,7 @@ def get_settings() -> Settings:
         f2_expected_version=os.getenv("F2_EXPECTED_VERSION", DEFAULT_F2_EXPECTED_VERSION),
         f2_fallback_to_native=os.getenv("F2_FALLBACK_TO_NATIVE", "false").lower() == "true",
         f2_stdout_max_bytes=int(os.getenv("F2_STDOUT_MAX_BYTES", str(DEFAULT_F2_STDOUT_MAX_BYTES))),
-        graph_classification_enabled=os.getenv("GRAPH_CLASSIFICATION_ENABLED", "false").lower() == "true",
+        graph_classification_enabled=os.getenv("GRAPH_CLASSIFICATION_ENABLED", "true").lower() == "true",
         neo4j_uri=os.getenv("NEO4J_URI", "").strip(),
         neo4j_username=os.getenv("NEO4J_USERNAME", "").strip(),
         neo4j_password=os.getenv("NEO4J_PASSWORD", ""),
@@ -677,7 +678,7 @@ def get_settings() -> Settings:
             1,
             int(os.getenv("NEO4J_QUERY_TIMEOUT_SECONDS", str(DEFAULT_NEO4J_QUERY_TIMEOUT_SECONDS))),
         ),
-        neo4j_sync_enabled=os.getenv("NEO4J_SYNC_ENABLED", "false").lower() == "true",
+        neo4j_sync_enabled=os.getenv("NEO4J_SYNC_ENABLED", "true").lower() == "true",
         graph_classification_max_hops=max(
             1,
             min(2, int(os.getenv("GRAPH_CLASSIFICATION_MAX_HOPS", str(DEFAULT_GRAPH_CLASSIFICATION_MAX_HOPS)))),
@@ -691,7 +692,7 @@ def get_settings() -> Settings:
             allowed={"off", "shadow", "enabled"},
             default=DEFAULT_GRAPH_CLASSIFICATION_MODE,
         ),
-        graph_embedding_enabled=os.getenv("GRAPH_EMBEDDING_ENABLED", "false").lower() == "true",
+        graph_embedding_enabled=os.getenv("GRAPH_EMBEDDING_ENABLED", "true").lower() == "true",
         graph_embedding_provider=os.getenv("GRAPH_EMBEDDING_PROVIDER", "local").strip().lower() or "local",
         graph_embedding_model_path=os.getenv("GRAPH_EMBEDDING_MODEL_PATH", "").strip(),
         graph_embedding_model_name=os.getenv("GRAPH_EMBEDDING_MODEL_NAME", "").strip(),
@@ -711,7 +712,7 @@ def get_settings() -> Settings:
             min(50, int(os.getenv("GRAPH_VECTOR_TOP_K", str(DEFAULT_GRAPH_VECTOR_TOP_K)))),
         ),
         graph_vector_min_score=max(0.0, min(1.0, float(os.getenv("GRAPH_VECTOR_MIN_SCORE", "0.0")))),
-        graph_projection_worker_enabled=os.getenv("GRAPH_PROJECTION_WORKER_ENABLED", "false").lower() == "true",
+        graph_projection_worker_enabled=os.getenv("GRAPH_PROJECTION_WORKER_ENABLED", "true").lower() == "true",
         graph_projection_batch_size=max(
             1,
             min(5000, int(os.getenv("GRAPH_PROJECTION_BATCH_SIZE", str(DEFAULT_GRAPH_PROJECTION_BATCH_SIZE)))),

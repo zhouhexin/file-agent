@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.core.api_errors import internal_error_response, register_api_error_handlers
 from app.core.config import get_settings
 from app.core.database import SessionLocal, init_database
 from app.core.logging import cleanup_old_logs, log_context, log_event, new_request_id
@@ -72,6 +73,7 @@ async def lifespan(app: FastAPI):
 # 这里故意保持应用入口很薄，具体业务边界交给各模块路由维护，
 # 避免 Agent Runtime 扩展后把 main.py 变成混杂的调度中心。
 app = FastAPI(title="File Agent API", lifespan=lifespan)
+register_api_error_handlers(app)
 
 
 @app.middleware("http")
@@ -79,6 +81,8 @@ async def request_logging_middleware(request: Request, call_next):
     """为每个请求生成 request_id，并记录 API 请求耗时和异常。"""
 
     request_id = request.headers.get("X-Request-ID") or new_request_id()
+    # 异常处理器通过 request.state 读取同一个 ID，保证响应体、响应头和 JSONL 日志可以互相定位。
+    request.state.request_id = request_id
     start = time.perf_counter()
     with log_context(request_id=request_id):
         log_event(
@@ -99,9 +103,13 @@ async def request_logging_middleware(request: Request, call_next):
                 error_code=exc.__class__.__name__,
                 method=request.method,
                 path=request.url.path,
-                message=str(exc),
+                # 只记录异常类型和请求定位信息；异常文本可能包含路径、正文片段或第三方响应。
+                message="API 请求发生未捕获异常",
             )
-            raise
+            # 最外层中间件直接返回统一 500，避免 ServerErrorMiddleware 绕过 X-Request-ID 响应头。
+            response = internal_error_response(request)
+            response.headers["X-Request-ID"] = request_id
+            return response
 
         duration_ms = int((time.perf_counter() - start) * 1000)
         response.headers["X-Request-ID"] = request_id

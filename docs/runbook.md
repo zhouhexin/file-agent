@@ -720,8 +720,9 @@ WORKING_COPY_STORAGE_ROOT/<working_root_relative_path>/<new_basename>
 
 ## 8. Neo4j 图谱增强分类
 
-图谱分类默认关闭。PostgreSQL、taxonomy v2、分类反馈和受管目录扫描结果仍是事实源；Neo4j 只保存
+图谱分类和图向量默认以 Shadow 模式开启。PostgreSQL、taxonomy v2、分类反馈和受管目录扫描结果仍是事实源；Neo4j 只保存
 可重建分类层级、目录角色、可信或弱分类关系及文档级聚合向量。全文和分块正文不会写入 Neo4j。
+连接、依赖或本地模型不完整时服务显示 `DEGRADED` 并继续使用基础分类和 Jieba/GIN 检索。
 
 本地或非 Docker 环境安装可选依赖：
 
@@ -738,17 +739,17 @@ INSTALL_GRAPH_DEPENDENCIES=true
 Neo4j 服务可以由独立主机或独立部署栈提供；当前生产 compose 不强制创建 Neo4j 容器。连接配置：
 
 ```text
-GRAPH_CLASSIFICATION_ENABLED=false
+GRAPH_CLASSIFICATION_ENABLED=true
 NEO4J_URI=bolt://127.0.0.1:7687
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=<password>
 NEO4J_DATABASE=neo4j
 NEO4J_QUERY_TIMEOUT_SECONDS=3
-NEO4J_SYNC_ENABLED=false
+NEO4J_SYNC_ENABLED=true
 GRAPH_CLASSIFICATION_MAX_HOPS=1
 GRAPH_CLASSIFICATION_TOP_K=8
-GRAPH_CLASSIFICATION_MODE=off
-GRAPH_EMBEDDING_ENABLED=false
+GRAPH_CLASSIFICATION_MODE=shadow
+GRAPH_EMBEDDING_ENABLED=true
 GRAPH_EMBEDDING_PROVIDER=local
 GRAPH_EMBEDDING_MODEL_PATH=/absolute/path/to/local/model
 GRAPH_EMBEDDING_MODEL_NAME=<model-name>
@@ -757,6 +758,7 @@ GRAPH_EMBEDDING_DIMENSION=384
 GRAPH_VECTOR_INDEX_NAME=document_version_embedding_v1
 GRAPH_VECTOR_TOP_K=12
 GRAPH_VECTOR_MIN_SCORE=0.0
+GRAPH_PROJECTION_WORKER_ENABLED=true
 GRAPH_FEEDBACK_COLLECTION_ENABLED=true
 GRAPH_CLASSIFICATION_ROLLOUT_PERCENT=10
 GRAPH_FEEDBACK_EVAL_MIN_SAMPLES=100
@@ -863,7 +865,7 @@ worker 使用 `MANAGED_FILE_CLASSIFICATION_BATCH_SIZE` 分页读取文件，并�
 
 首次上线顺序：
 
-1. 保持 `GRAPH_CLASSIFICATION_ENABLED=false` 发布 API。
+1. 保持默认 `GRAPH_CLASSIFICATION_MODE=shadow` 发布 API；Shadow 结果不得改变用户可见分类。
 2. 执行数据库迁移：`python -m alembic -c apps/api/alembic.ini upgrade head`。
 3. 安装图谱依赖，准备本地 Embedding 模型并验证 Neo4j 网络连接。
 4. 为需要弱标签治理的受管根创建 `rules/managed-root-classification/<root_key>.json`；没有 Profile 的弱标签目录保持 `UNKNOWN`。
@@ -875,7 +877,7 @@ worker 使用 `MANAGED_FILE_CLASSIFICATION_BATCH_SIZE` 分页读取文件，并�
    ```
 
 6. 访问 `GET /api/health`，确认 `knowledge_graph.status=ok`、`graphrag_package=available` 和 `embedding_package=available`。
-7. 设置 `GRAPH_CLASSIFICATION_ENABLED=true`、`GRAPH_EMBEDDING_ENABLED=true`、`GRAPH_CLASSIFICATION_MODE=shadow`，重启并完成分类 smoke test。
+7. 确认 `GRAPH_CLASSIFICATION_ENABLED=true`、`GRAPH_EMBEDDING_ENABLED=true`、`GRAPH_CLASSIFICATION_MODE=shadow`，重启并完成分类 smoke test。
 8. 分层生成首批最多 1,000 份文档向量：
 
    ```bash

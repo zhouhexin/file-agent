@@ -150,7 +150,7 @@ def test_confirm_operation_plan_rejects_operation_without_executor():
     )
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "Operation type does not have a controlled executor"
+    assert response.json()["error"]["message"] == "Operation type does not have a controlled executor"
 
     db = SessionLocal()
     try:

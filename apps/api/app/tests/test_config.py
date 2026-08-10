@@ -342,8 +342,8 @@ def test_settings_loads_file_rename_llm_validation(monkeypatch, tmp_path):
     assert settings.file_rename_llm_validation_max_items_per_batch == 8
 
 
-def test_settings_defaults_graph_classification_to_disabled(monkeypatch, tmp_path):
-    """图谱分类必须默认关闭，未部署 Neo4j 时不能影响后端启动。"""
+def test_settings_defaults_graph_classification_to_shadow(monkeypatch, tmp_path):
+    """图谱能力默认开启 Shadow，缺少 Neo4j 配置时仍由运行时无损降级。"""
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
@@ -355,6 +355,7 @@ def test_settings_defaults_graph_classification_to_disabled(monkeypatch, tmp_pat
         "GRAPH_CLASSIFICATION_MAX_HOPS",
         "GRAPH_CLASSIFICATION_TOP_K",
         "GRAPH_EMBEDDING_ENABLED",
+        "GRAPH_PROJECTION_WORKER_ENABLED",
         "GRAPH_CLASSIFICATION_ROLLOUT_PERCENT",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -362,12 +363,13 @@ def test_settings_defaults_graph_classification_to_disabled(monkeypatch, tmp_pat
 
     settings = config.get_settings()
 
-    assert settings.graph_classification_enabled is False
-    assert settings.neo4j_sync_enabled is False
+    assert settings.graph_classification_enabled is True
+    assert settings.neo4j_sync_enabled is True
     assert settings.graph_classification_max_hops == 1
     assert settings.graph_classification_top_k == 8
-    assert settings.graph_classification_mode == "off"
-    assert settings.graph_embedding_enabled is False
+    assert settings.graph_classification_mode == "shadow"
+    assert settings.graph_embedding_enabled is True
+    assert settings.graph_projection_worker_enabled is True
     assert settings.graph_classification_rollout_percent == 10
 
 

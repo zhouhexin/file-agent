@@ -282,7 +282,7 @@ def test_deferred_upload_rename_plan_executes_after_background_import(monkeypatc
         json={"confirmation": "确认执行"},
     )
     assert early_confirmation.status_code == 409
-    assert "后台归档或导入工作副本" in early_confirmation.json()["detail"]
+    assert "后台归档或导入工作副本" in early_confirmation.json()["error"]["message"]
     assert client.get(
         f"/api/operations/plans/{plan_id}",
         headers=headers,
@@ -814,9 +814,9 @@ def test_trashed_upload_source_cannot_read_historical_content(monkeypatch, tmp_p
         headers=headers,
     )
     assert content_response.status_code == 410
-    assert "已删除" in content_response.json()["detail"]
+    assert "已删除" in content_response.json()["error"]["message"]
     assert preview_response.status_code == 410
-    assert "已删除" in preview_response.json()["detail"]
+    assert "已删除" in preview_response.json()["error"]["message"]
 
     spreadsheet_request = client.post(
         "/api/conversations/trashed-source-read-conv/messages",
@@ -1711,7 +1711,7 @@ def test_chat_creates_and_confirms_trash_then_restore_plans(monkeypatch, tmp_pat
         headers=headers,
     )
     assert trashed_download.status_code == 410
-    assert trashed_download.json()["detail"] == "文件已删除，请先恢复。"
+    assert trashed_download.json()["error"]["message"] == "文件已删除，请先恢复。"
     with SessionLocal() as db:
         operation_messages = db.query(Message).filter(
             Message.content.like("工作副本操作完成：%")

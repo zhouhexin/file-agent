@@ -22,11 +22,18 @@ from app.db.models import (
 class CurrentClassificationEvidenceReader:
     """读取当前版本最新成功分类建议及原文 evidence_items。"""
 
-    def __init__(self, *, db: Session, user_id: str | None) -> None:
-        """保存请求级数据库会话；Tool 调用时必须传 user_id 校验所有权。"""
+    def __init__(
+        self,
+        *,
+        db: Session,
+        user_id: str | None,
+        workspace_id: str | None = None,
+    ) -> None:
+        """保存请求级权限范围；调用方必须提供用户或已验证的共享工作区。"""
 
         self.db = db
         self.user_id = user_id
+        self.workspace_id = workspace_id
 
     def read(self, *, document_ids: list[str]) -> list[dict[str, Any]]:
         """按输入顺序返回当前版本分类，找不到时返回明确空结果。"""
@@ -45,12 +52,18 @@ class CurrentClassificationEvidenceReader:
     def _read_document(self, document: Document) -> dict[str, Any]:
         """解析活动工作副本当前版本，并选择该版本最新成功分类运行。"""
 
-        working_copy = (
-            self.db.query(WorkingCopy)
-            .filter(
-                WorkingCopy.document_id == document.id,
-                WorkingCopy.status == "ACTIVE",
+        working_copy_query = self.db.query(WorkingCopy).filter(
+            WorkingCopy.document_id == document.id,
+            WorkingCopy.status == "ACTIVE",
+        )
+        if self.workspace_id is not None:
+            # 共享文件读取已经由调用方按 workspace 授权；这里必须继续固定同一范围，
+            # 不能因历史遗留用户工作区中存在另一条 ACTIVE 副本而选错版本。
+            working_copy_query = working_copy_query.filter(
+                WorkingCopy.workspace_id == self.workspace_id
             )
+        working_copy = (
+            working_copy_query
             .order_by(WorkingCopy.updated_at.desc(), WorkingCopy.id.desc())
             .first()
         )
@@ -172,4 +185,3 @@ class CurrentClassificationEvidenceReader:
             "error_code": error_code,
             "categories": [],
         }
-

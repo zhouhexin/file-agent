@@ -297,6 +297,50 @@ class FileSearchClarificationService:
         record.result_agent_run_id = agent_run_id
         self.db.flush()
 
+    def validate_resolved_document_selection(
+        self,
+        *,
+        clarification_id: str,
+        user_id: str,
+        conversation_id: str,
+        document_ids: list[str],
+    ) -> None:
+        """验证证据回答范围确实来自当前用户已解决的文件选择。
+
+        该校验是续跑范围的信任边界：Tool 输入里出现选择记录 ID 并不代表可信，
+        必须同时匹配用户、会话、选择类型、状态和完整文件集合。这样既能避免续跑
+        再次扩张到同名文件，也不能被 LLM 或客户端伪造字段绕过确认。
+        """
+
+        record = self.db.get(FileSearchClarification, clarification_id)
+        if (
+            record is None
+            or record.user_id != user_id
+            or record.conversation_id != conversation_id
+            or record.relation_mode != "DOCUMENT_SELECTION"
+            or record.status != "RESOLVED"
+        ):
+            raise FileSearchClarificationError("已确认文件范围不存在或尚未解决")
+        resolution = (
+            record.resolution_json
+            if isinstance(record.resolution_json, dict)
+            else {}
+        )
+        saved_document_ids = [
+            str(value)
+            for value in resolution.get("document_ids", [])
+            if str(value)
+        ]
+        requested_document_ids = list(
+            dict.fromkeys(str(value) for value in document_ids if str(value))
+        )
+        if (
+            not saved_document_ids
+            or len(saved_document_ids) != len(requested_document_ids)
+            or set(saved_document_ids) != set(requested_document_ids)
+        ):
+            raise FileSearchClarificationError("已确认文件范围与本次 Tool 输入不一致")
+
     def get_public(
         self,
         *,

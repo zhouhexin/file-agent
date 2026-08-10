@@ -21,7 +21,10 @@ from app.modules.agent.binding_resolver import (
     ToolBindingError,
     ToolResultBindingResolver,
 )
-from app.modules.agent.planner import build_plan_from_user_intent
+from app.modules.agent.planner import (
+    build_plan_from_user_intent,
+    has_explicit_filename_content_request,
+)
 from app.modules.agent.planner_contracts import (
     PlannerClarification,
     PlannerDecision,
@@ -273,6 +276,7 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                     observed_document_ids=state.get(
                         "observed_document_ids", []
                     ),
+                    has_tool_observation=bool(state.get("observation")),
                 )
             else:
                 plan, user_intent_plan = _run_legacy_llm_planner(
@@ -480,6 +484,7 @@ def _run_shadow_planner(
             attachments=attachments,
             context_documents=state.get("context_documents", []),
             observed_document_ids=state.get("observed_document_ids", []),
+            has_tool_observation=bool(state.get("observation")),
         )
         return {
             "validation_status": "COMPLETED",
@@ -525,7 +530,12 @@ def _deterministic_preflight_plan(
     runtime: Runtime[AgentRuntimeContext],
     attachments: List[Dict[str, Any]],
 ):
-    """只在 LLM 前固定安全敏感操作；普通业务语义交给 Catalog Planner。"""
+    """在 LLM 前固定安全操作和用户已经明确给出的文件范围。
+
+    完整文件名不是业务关键词路由，而是后端可验证的对象约束。此类正文请求必须
+    先进入 ``evidence-answer`` 做同名检测和活动副本校验，不能允许模型把它改成
+    全工作区 ``hybrid-search`` 后进入无关的后台准备链。
+    """
 
     plan = runtime.context.planner.plan(
         conversation_id=state["conversation_id"],
@@ -542,6 +552,11 @@ def _deterministic_preflight_plan(
     }:
         return plan
     if plan.intent.endswith("_CLASSIFICATION"):
+        return plan
+    if (
+        plan.intent == "EVIDENCE_ANSWER"
+        and has_explicit_filename_content_request(state["message"])
+    ):
         return plan
     return None
 
@@ -1894,23 +1909,60 @@ def _classification_documents_from_results(tool_results: List[Dict[str, Any]]) -
 
 
 def _build_classification_summary_response(documents: List[Dict[str, Any]]) -> str:
-    """把历史分类建议汇总为用户可读文本。"""
+    """把当前版本分类建议、置信度和可定位依据汇总为用户可读文本。"""
 
-    blocks = [f"已汇总 {len(documents)} 个文件的分类建议："]
+    blocks = [f"已汇总当前 {len(documents)} 个文件的分类建议及依据："]
     for index, document in enumerate(documents, start=1):
         filename = document.get("filename") or document.get("document_id") or "未知文件"
         categories = [item for item in document.get("categories", []) if isinstance(item, dict)]
         if not categories:
-            blocks.append(f"{index}. {filename}\n暂无分类建议。")
+            blocks.append(
+                f"{index}. {filename}\n"
+                "暂无当前版本的分类证据，不能说明该文件为什么属于某个类别。"
+            )
             continue
         category_lines = []
         for category in categories[:5]:
             confidence = float(category.get("confidence") or 0)
-            status = category.get("status") or "SUGGESTED"
-            # category_lines.append(f"- {category.get('name') or '其他'}，置信度 {confidence:.2f}，状态 {status}")
-            category_lines.append(f"- {category.get('name') or '其他'} ")
+            path = [
+                str(value)
+                for value in list(category.get("category_path") or [])
+                if str(value)
+            ]
+            label = " / ".join(path) or str(category.get("name") or "其他")
+            category_lines.append(f"- {label}\n  置信度：{confidence:.2f}")
+            evidence_items = [
+                item
+                for item in list(category.get("evidence_items") or [])
+                if isinstance(item, dict)
+            ]
+            evidence_line = _classification_evidence_line(evidence_items)
+            category_lines.append(
+                f"  依据：{evidence_line}"
+                if evidence_line
+                else "  依据：没有找到可定位的原文引用，该建议需要人工复核。"
+            )
         blocks.append(f"{index}. {filename}\n" + "\n".join(category_lines))
     return "\n\n".join(blocks)
+
+
+def _classification_evidence_line(evidence_items: List[Dict[str, Any]]) -> str:
+    """格式化首条分类原文依据，不向普通用户暴露分类器内部信号。"""
+
+    for item in evidence_items:
+        quote = " ".join(str(item.get("quote") or "").split()).strip()
+        if not quote:
+            continue
+        location = ""
+        if item.get("sheet_name"):
+            location = f"工作表“{item['sheet_name']}”"
+            if item.get("cell_range"):
+                location += f" {item['cell_range']}"
+        elif item.get("page_number"):
+            location = f"第 {item['page_number']} 页"
+        clipped_quote = quote[:180] + ("…" if len(quote) > 180 else "")
+        return f"{location + '：' if location else ''}“{clipped_quote}”"
+    return ""
 
 
 def _capability_catalog_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:

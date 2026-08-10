@@ -16,7 +16,11 @@ from app.modules.agent.capabilities.service import load_agent_capabilities
 from app.modules.agent.capability_router import route_user_intent
 from app.modules.classification.result_builder import build_document_results_from_extraction_results
 from app.modules.llm.schemas import UserIntentPlan
-from app.modules.agent.graph import _build_document_results_response, response
+from app.modules.agent.graph import (
+    _build_classification_summary_response,
+    _build_document_results_response,
+    response,
+)
 from app.modules.agent.repository import _safe_graph_state_snapshot
 from app.modules.agent.planner import DeterministicPlanner, build_plan_from_user_intent
 from app.modules.agent.service import (
@@ -71,7 +75,9 @@ def test_tool_registry_contains_mvp_catalog_and_endpoint_requires_authentication
 
     assert response.status_code == 401
     tool_names = {tool["name"] for tool in ToolRegistry().list_tools()}
-    assert "document-convert" in tool_names
+    assert "document-convert" not in tool_names
+    assert "job-status-read" not in tool_names
+    assert "document-lineage-read" not in tool_names
     assert "working-copy-action-plan-create" in tool_names
     # 未接真实持久化服务的旧占位入口不得继续出现在可调用白名单中。
     assert "operation-plan-create" not in tool_names
@@ -1528,7 +1534,7 @@ def test_invalid_tool_input_is_rejected():
     registry = ToolRegistry()
 
     with pytest.raises(ToolInputValidationError):
-        registry.invoke("document-convert", {})
+        registry.invoke("extract-document-text", {})
 
 
 def test_message_starts_langgraph_run_and_records_tool_invocations():
@@ -2513,6 +2519,38 @@ def test_document_results_response_hides_extra_low_confidence_categories():
     assert "另有 2 个低置信度候选未展示。" in response
 
 
+def test_classification_explanation_includes_confidence_and_locatable_evidence():
+    """“为什么这样分类”必须展示当前建议的置信度和原文位置，不能只列标签。"""
+
+    response = _build_classification_summary_response(
+        [
+            {
+                "document_id": "doc-classification-reason",
+                "filename": "学生工作实施建议.docx",
+                "categories": [
+                    {
+                        "name": "学生工作",
+                        "category_path": ["学校", "学生工作"],
+                        "confidence": 0.91,
+                        "evidence_items": [
+                            {
+                                "type": "text_quote",
+                                "page_number": 2,
+                                "quote": "完善学生教育管理与服务保障机制。",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert "学校 / 学生工作" in response
+    assert "置信度：0.91" in response
+    assert "第 2 页" in response
+    assert "完善学生教育管理与服务保障机制" in response
+
+
 def test_graph_does_not_execute_direct_file_writes_from_planner_output():
     """不安全的直接文件系统指令必须在 Planner 校验阶段被拒绝。"""
 
@@ -2919,3 +2957,60 @@ def test_full_filename_question_routes_to_evidence_answer_without_generic_marker
     assert plan.intent == "EVIDENCE_ANSWER"
     assert [step.tool_name for step in plan.steps] == ["evidence-answer"]
     assert plan.steps[0].input["question"] == message
+
+
+def test_llm_mode_preserves_exact_filename_scope_before_catalog_planning():
+    """LLM 模式也必须保留完整文件名范围，不能误改成全工作区检索并永久等待。"""
+
+    class MisroutingIntentService:
+        """模拟会把单文件问题错误路由为模糊检索的模型服务。"""
+
+        enabled = True
+
+        def understand_user_request(self, **_kwargs):
+            """精确范围预检生效后不应再调用该模型入口。"""
+
+            raise AssertionError("完整文件名正文请求不应再交给 LLM 扩大范围")
+
+    class EvidenceRegistry:
+        """记录精确文件名请求最终调用的白名单 Tool。"""
+
+        def __init__(self):
+            """初始化调用记录。"""
+
+            self.calls = []
+
+        def invoke(self, tool_name, input_json):
+            """返回稳定的无依据结果，测试只关注路由和范围。"""
+
+            self.calls.append((tool_name, input_json))
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "kind": "evidence_answer",
+                    "ok": True,
+                    "status": "NO_EVIDENCE",
+                    "answer": "当前文件没有足够证据支持该结论。",
+                    "references": [],
+                },
+                status="COMPLETED",
+            )
+
+    registry = EvidenceRegistry()
+    message = "二级管理--建议（计算机）.docx 为什么涉及到了学生工作"
+    result = AgentRuntimeService(
+        registry_factory=lambda db, user_id: registry,
+        llm_intent_service=MisroutingIntentService(),
+    ).run_message(
+        conversation_id="conv-exact-filename-preflight",
+        user_id="user-1",
+        message_id="msg-exact-filename-preflight",
+        message=message,
+        attachments=[],
+    )
+
+    assert result.intent == "EVIDENCE_ANSWER"
+    assert [name for name, _input in registry.calls] == ["evidence-answer"]
+    assert registry.calls[0][1]["question"] == message
+    assert registry.calls[0][1]["document_ids"] == []

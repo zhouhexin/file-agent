@@ -347,7 +347,7 @@ Planner 输出至少包含：
     {
       "step_id": "step-1",
       "skill": "file-ingest",
-      "tool_name": "document-convert",
+      "tool_name": "extract-document-text",
       "input": {
         "document_id": "document-uuid"
       },
@@ -379,27 +379,22 @@ Planner 规则：
 
 ### 7.2 MVP Tool Catalog
 
-MVP Tool 必须明确命名、输入 schema、输出 schema、副作用和确认要求。第一版至少实现或占位以下 Tool：
+MVP Tool 必须明确命名、输入 schema、输出 schema、副作用和确认要求。只有已经接入真实 handler 的 Tool
+才能注册到运行时白名单；未实现能力保留在路线图或能力建议中，不得用返回空成功结果的占位 Tool 冒充完成。
 
 | Tool | 职责 | 副作用 | 是否需确认 |
 |---|---|---:|---:|
-| `document-register-upload` | 将已上传文件登记为 Document / DocumentVersion | yes | no |
-| `security-scan` | 文件安全扫描与 MIME 校验；MVP 可用占位实现 | yes | no |
-| `document-convert` | 用 Unstructured/Haystack/LlamaIndex/LangChain adapter 抽取文档文本和结构 | yes | no |
-| `table-extract` | 用 Haystack/openpyxl adapter 读取 XLSX sheet、表头、单元格文本 | yes | no |
-| `artifact-write` | 写入抽取文本、预览、OCR、导出等派生件记录 | yes | no |
+| `extract-document-text` | 解析文件并持久化页面文本和结构 | yes | no |
 | `chunk-build` | 基于页面或 sheet 生成 chunk 和 evidence_spans | yes | no |
-| `embedding-generate` | 调用 embedding 服务并写入向量 | yes | no |
-| `metadata-extract` | 提取年份、关键词、实体候选 | yes | no |
-| `multi-label-classify` | 生成多标签分类、置信度、状态和证据 | yes | no |
+| `read-document-insights` | 读取持久化摘要、关键词、年份和实体 | no | no |
+| `read-document-classifications` | 读取当前版本最新分类建议和证据 | no | no |
 | `hybrid-search` | 执行当前附件、当前会话、workspace 范围检索 | no | no |
 | `evidence-answer` | 基于证据生成回答和引用 | yes | no |
-| `change-report` | 聚合 ChangeSet，生成逐文件回执数据 | yes | no |
-| `operation-plan-create` | 为高风险操作生成 OperationPlan | yes | no |
+| `classification-decision` | 记录用户接受、拒绝或更正分类 | yes | no |
+| `working-copy-action-plan-create` | 为工作副本高风险操作生成 OperationPlan | yes | no |
 | `confirmed-file-action` | 执行已确认的改名、移动、复制、导出等动作 | yes | yes |
 | `feedback-record` | 记录用户反馈 | yes | no |
-| `job-status-read` | 查询处理任务状态和事件 | no | no |
-| `document-lineage-read` | 查询 DocumentVersion、Artifact 和关系 | no | no |
+| `managed-root-scan` | 创建受管目录异步扫描任务 | yes | no |
 
 Tool 输出规则：
 

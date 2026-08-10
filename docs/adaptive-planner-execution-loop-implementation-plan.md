@@ -61,8 +61,8 @@ Catalog、绑定表达式或 Shadow 对比详情。
 
 截至 2026-07-30 当前工作树，10 项均已开始实现：
 
-- 已完成：4 项。
-- 部分完成：6 项。
+- 已完成：5 项。
+- 部分完成：5 项。
 - 未开始：0 项。
 
 “存在字段、占位接口或静态清单”不等于能力完成。完成状态以运行时强制校验、持久化审计和自动化测试
@@ -76,9 +76,9 @@ Catalog、绑定表达式或 Shadow 对比详情。
 | 2 | 定义 PlannerDecision 和 Tool 输出 schema | 部分完成 | 已新增独立 `PlannerDecision`、`ToolPlan`、`ToolStep`、`ToolResultEnvelope`、`ToolError`，Registry 强制校验 input/output model | 部分旧 Tool 仍使用迁移期 `GenericToolOutput`，需按核心 Tool 清单继续收敛严格业务 schema |
 | 3 | 实现动态 Tool/Skill Catalog | 已完成 | 请求级 Registry 动态投影 Tool；13 个 Skill 已有 `manifest.json`；启动与请求时交叉校验；AgentRun 保存版本和指纹 | 后续如增加后台启停，只能通过受审计发布流程 |
 | 4 | 实现 Tool 结果绑定解析器 | 已完成 | 已实现安全点分字段绑定、成功来源校验、受信任字段保护、数组上限和绑定后 Tool 输入二次 schema 校验 | 后续可按具体 Tool 补充更细类型提示 |
-| 5 | 完善 LangGraph 规划执行循环 | 部分完成 | 已存在 `planning -> tool_dispatch -> observe_tool_result` 循环；Dispatcher 每次只执行一个步骤；支持前序结果绑定、继续原计划、最多 3 轮规划、5 次调用、重复拒绝和确认暂停 | 搜索观察仍只有状态字段，主要由 Tool 的 `replan_required` 决定是否重规划；尚未实现“LLM 观察搜索结果后判断结束、改查或继续读取”的完整语义闭环 |
+| 5 | 完善 LangGraph 规划执行循环 | 已完成 | 已存在 `planning -> tool_dispatch -> observe_tool_result` 循环；Dispatcher 每次只执行一个步骤；`hybrid-search` 使用 `PLANNER_AFTER_EXECUTION`，安全观察包含命中数量、受控文件 ID、实际条件、索引状态和允许动作；支持结束、改查、继续读证据、最多 3 轮规划、5 次调用、重复拒绝和确认暂停 | 继续在真实生产模型上观察不必要改查与预算耗尽率 |
 | 6 | 接入 DIRECT_RESPONSE 和 CLARIFY | 已完成 | 三分支已进入独立 PlannerDecision；文件事实不能通过 DIRECT_RESPONSE 绕过 Tool；缺少唯一范围进入 CLARIFY | 继续用回放集监测不必要澄清 |
-| 7 | 实现分类证据读取能力 | 部分完成 | 已新增当前版本 EvidenceReader；优先活动工作副本当前版本，只取最新成功运行；EvidenceAnswer 复用该服务 | 仍需补齐失败运行、回收站、同名文件和无 quote 的完整测试矩阵，并收敛严格 output model |
+| 7 | 实现分类证据读取能力 | 部分完成 | 已新增当前版本 EvidenceReader；优先共享活动工作副本当前版本，只取最新成功运行；EvidenceAnswer 复用该服务；检索命中的跨导入者共享文件可继续读取分类，普通回复展示置信度与页码/Sheet 原文依据 | 仍需补齐失败运行、回收站、同名文件和无 quote 的完整测试矩阵，并收敛严格 output model |
 | 8 | 缩减确定性关键词路由 | 部分完成 | 正常 LLM 主路径只保留重命名、确认、分类等安全 preflight；普通搜索、总结、解释、能力咨询和表格语义交给 Catalog Planner | Legacy/故障降级仍保留 `_has_*`，需在 Shadow 回放达标后再删除重叠规则 |
 | 9 | 调整后台 LexRank 摘要 Provider | 已完成 | 后台双摘要默认 CPU-only `Jieba + LexRank`；全局 LLM 开关不隐式外发；已有配置测试 | 继续保护最终回答必须回到 Evidence |
 | 10 | Shadow 模式对比新旧 Planner 后再默认启用 | 部分完成 | 已实现 `legacy/shadow/enabled`、只读双决策、对比表、稳定分桶、灰度开关和失败回退；Shadow 不执行第二次 Tool | 尚未完成生产观察期、离线回放指标报表和 5%→100% 灰度，因此不得默认启用 Adaptive |
@@ -103,17 +103,19 @@ planning
 因此后续工作不是重新搭建 LangGraph，也不以拆出更多物理节点为完成条件。当前
 `tool_dispatch`、绑定解析和结果记录可以继续保留为组合节点，只要职责边界、schema 校验和审计事实清晰。
 
-当前仍未形成完整语义闭环的原因是：
+当前语义闭环已经形成：
 
-1. `observe_tool_result` 主要依赖 Tool 输出 `replan_required=true` 才返回 `planning`。
-2. `ExecutionObservation` 目前只包含 `kind/status/ok/error_code/replan_required` 等状态字段。
-3. 搜索命中数量、实际条件、结果文件 ID、索引状态和条件调整建议没有进入安全观察。
-4. LLM 因此不能可靠判断“已经完成”“放宽条件再查”“读取命中文件”或“请求用户澄清”。
-5. `ADAPTIVE_PLANNER_MODE=shadow` 时 Adaptive Planner 只做只读对比，真实 Tool 仍由 Legacy Planner 驱动。
+1. `ToolDefinition.observation_policy` 由后端决定是否需要重新进入 Planner。
+2. `hybrid-search` 使用 `PLANNER_AFTER_EXECUTION`，不依赖 Tool 自报 `replan_required`。
+3. 安全观察包含命中数量、实际条件、受控文件 ID、索引状态和允许的下一步，不包含正文和内部路径。
+4. Planner 可以选择 `FINISH`、改变语义查询再次检索、调用 `evidence-answer`、
+   `read-document-classifications`，或在范围不唯一时请求澄清。
+5. 多轮检索最终采用最后一次有效结果，并在回执中保留后端确认的条件与各轮结果数量。
+6. 已建立自然语言回归矩阵，覆盖“检索后回答正文”“检索后解释分类”“零结果后调整条件再查”。
 
-目标是在保留现有图结构的基础上，把循环控制从“Tool 预先决定是否重规划”扩展为“后端观察策略决定是否
-需要 Planner 判断，LLM 再根据受控观察选择下一步”。这样才能安全支持“先检索文件，再把检索结果交给
-证据回答”等无法预先写死全部 Tool 输入的自然语言任务。
+当前剩余工作不是重新修改 LangGraph 主体，而是完成真实生产模型的 Shadow 指标观察和分阶段灰度。
+`ADAPTIVE_PLANNER_MODE=shadow` 时 Adaptive Planner 仍只做只读对比，这是上线安全策略，不是循环缺失；
+只有部署显式进入 `enabled` 灰度后，Adaptive 决策才接管真实 Tool 链路。
 
 ## 4. 不变安全边界
 
@@ -676,6 +678,35 @@ Planner 可以把“学生工作管理”理解为本次语义条件，但后端
 `search_context` 只用于“这些文件”“刚才找到的结果”等明确依赖上一轮结果的省略表达，以及展示由搜索
 继续进入证据回答时的真实查询条件；它不是完整文件名问题的必需输入。
 
+### 7.10.1 同名文件选择后的封闭范围续跑
+
+完整文件名匹配到多个活动工作副本时，用户只需要选择一次。选择完成后，后端必须把持久化
+`FileSearchClarification` 作为本轮续跑的范围凭据，原问题中的完整文件名不能再次触发全库同名扫描。
+
+```text
+多个同名文件
+-> 后端创建 DOCUMENT_SELECTION 记录
+-> 前端只提交后端生成的 option_id
+-> 后端校验用户、会话、选择状态和 option_id
+-> 生成 document_ids + document_selection_clarification_id
+-> evidence-answer 回查持久化选择记录
+-> 校验记录中的完整 document_ids 与 Tool 输入一致
+-> 将所选文件集合锁定为封闭范围
+-> 继续执行最开始的问题并直接返回证据回答
+```
+
+安全和一致性规则：
+
+1. `document_selection_clarification_id` 不是 LLM 的授权声明。即使模型生成该字段，服务端仍必须验证
+   记录属于当前用户和会话、类型为 `DOCUMENT_SELECTION`、状态为 `RESOLVED`，并且文件集合完全一致。
+2. 已确认范围不得被完整文件名解析、相似文件召回、上一轮 `search_context`、同名回收站项目或后续
+   Planner 观察再次扩张。
+3. 所选文件已经删除、失效或不再授权时，返回明确不可用状态，不得自动换用另一个同名文件。
+4. 用户选择多份文件时，这几份文件共同构成封闭范围；系统不能补入未勾选的同名文件。
+5. 该规则适用于总结、正文问答、分类原因解释和比较等自然语言读取任务。表格分析、重命名等其他
+   Tool 也必须只消费已确认的稳定文件 ID，不得重新按名称猜测范围。
+6. 运维日志必须记录“锁定用户所选文件”、选择记录 ID 和文件数量，但不得记录正文内容。
+
 ### 7.11 面向运维人员的中文诊断日志
 
 现有 JSONL 技术日志继续保留，但不能只依赖英文事件名、内部枚举或需要阅读代码才能理解的字段。每个关键
@@ -1085,6 +1116,11 @@ legacy
 - 已完成 JSONL 运维可读字段、`/api/admin/agent-runs` 诊断接口和 `/admin/agent-runs` 页面。
 - 已完成完整文件名独立硬范围日志，当前消息中的完整文件名不依赖上一轮 `search_context`。
 - 已增加“搜索后观察并结束”、实际条件状态、最新轮结果、诊断权限与中文时间线自动化测试。
+- 已增加自然语言规划执行矩阵，覆盖“搜索后继续证据回答”“搜索后读取当前分类依据”和“零结果后调整
+  语义条件再查”；测试使用 deterministic fake，不依赖外部模型。
+- 已修复共享工作副本在 `read-document-insights` / `read-document-classifications` 中被导入者
+  `Document.user_id` 错误隔离的问题；授权范围统一为用户自己的上传文件或共享工作区 ACTIVE 工作副本。
+- 分类解释回执展示置信度与首条可定位原文依据；没有 quote 时明确要求人工复核，不再只列分类名称。
 - 仍需在生产可用 LLM 和真实 PostgreSQL/pgvector 数据上完成“零结果后由模型放宽条件”和“搜索后继续
   证据回答”的手工烟测；这两条路径的运行时结构已经具备，但不能用 deterministic fake 代替生产语义验收。
 - Adaptive Planner 默认值继续保持 `shadow`，待第 7 阶段的生产指标和回退演练完成后再灰度启用。

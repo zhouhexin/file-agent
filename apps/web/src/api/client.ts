@@ -34,13 +34,35 @@ type RequestOptions = {
 };
 
 export class ApiError extends Error {
-  // 保留 HTTP 状态码，页面可据此展示登录失效、重复用户名等不同提示。
+  // 保留稳定业务错误码和 request_id，页面负责用户提示，运维可据此关联服务端日志。
   status: number;
+  code: string;
+  details: unknown;
+  requestId: string | null;
 
-  constructor(status: number, message: string) {
+  constructor(
+    status: number,
+    message: string,
+    options: { code?: string; details?: unknown; requestId?: string | null } = {},
+  ) {
     super(message);
     this.status = status;
+    this.code = options.code ?? `HTTP_${status}`;
+    this.details = options.details;
+    this.requestId = options.requestId ?? null;
   }
+}
+
+async function readApiError(response: Response, fallbackMessage: string): Promise<ApiError> {
+  // 新版服务统一返回 error Envelope；detail 仅用于滚动升级期间兼容尚未更新的旧实例。
+  const data = await response.json().catch(() => ({}));
+  const error = data?.error;
+  const message = error?.message ?? data?.detail ?? fallbackMessage;
+  return new ApiError(response.status, String(message), {
+    code: typeof error?.code === 'string' ? error.code : undefined,
+    details: error?.details,
+    requestId: typeof error?.request_id === 'string' ? error.request_id : null,
+  });
 }
 
 export async function registerUser(payload: {
@@ -215,9 +237,7 @@ export async function fetchUploadedFileBlob(token: string, documentId: string): 
   });
 
   if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    const message = data?.detail ?? data?.error?.message ?? '文件打开失败';
-    throw new ApiError(response.status, String(message));
+    throw await readApiError(response, '文件打开失败');
   }
   return response.blob();
 }
@@ -247,9 +267,7 @@ export async function fetchManagedFileBlob(
   });
 
   if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    const message = data?.detail ?? data?.error?.message ?? '文件预览失败';
-    throw new ApiError(response.status, String(message));
+    throw await readApiError(response, '文件预览失败');
   }
   return response.blob();
 }
@@ -268,11 +286,10 @@ export async function uploadFile(token: string, file: File, conversationId: stri
     body: formData,
   });
 
-  const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const message = data?.detail ?? data?.error?.message ?? '上传失败';
-    throw new ApiError(response.status, String(message));
+    throw await readApiError(response, '上传失败');
   }
+  const data = await response.json();
   return data as UploadedFile;
 }
 
@@ -317,10 +334,8 @@ export async function deleteUploadedFile(token: string, documentId: string): Pro
     },
   });
 
-  const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const message = data?.detail ?? data?.error?.message ?? '删除失败';
-    throw new ApiError(response.status, String(message));
+    throw await readApiError(response, '删除失败');
   }
 }
 
@@ -335,11 +350,10 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
 
-  const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const message = data?.detail ?? data?.error?.message ?? '请求失败';
-    throw new ApiError(response.status, String(message));
+    throw await readApiError(response, '请求失败');
   }
+  const data = await response.json();
   return data as T;
 }
 

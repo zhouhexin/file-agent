@@ -45,7 +45,10 @@ from app.modules.llm.client import LLMResponseError, OpenAICompatibleLLMClient
 from app.modules.retrieval.chunk_lexical_search import DocumentChunkLexicalSearchService
 from app.modules.retrieval.query_parser import FileSearchQueryParser
 from app.modules.retrieval.readiness import WorkingCopySearchReadinessService
-from app.modules.retrieval.clarification_service import FileSearchClarificationService
+from app.modules.retrieval.clarification_service import (
+    FileSearchClarificationError,
+    FileSearchClarificationService,
+)
 from app.modules.retrieval.scope_resolver import (
     ConversationFileSearchContextService,
     FileSearchScopeResolver,
@@ -119,8 +122,13 @@ class EvidenceAnswerService:
         question: str,
         document_ids: list[str] | None = None,
         answer_mode: str = "AUTO",
+        document_selection_clarification_id: str | None = None,
     ) -> dict[str, Any]:
-        """从当前活动版本检索证据、生成回答并持久化可验证引用。"""
+        """从当前活动版本检索证据、生成回答并持久化可验证引用。
+
+        已解决的文件选择必须携带持久化凭据。服务端验证凭据后会把所选文件范围
+        视为封闭集合，后续完整文件名解析和召回都不能再次扩张到其他同名文件。
+        """
 
         normalized_question = str(question or "").strip()
         started_at = time.perf_counter()
@@ -136,6 +144,39 @@ class EvidenceAnswerService:
         )
         canonical_scope = readiness.canonicalize_document_ids(requested_ids)
         explicit_ids = list(canonical_scope.document_ids)
+        confirmed_document_scope = False
+        if document_selection_clarification_id:
+            try:
+                FileSearchClarificationService(
+                    self.db
+                ).validate_resolved_document_selection(
+                    clarification_id=document_selection_clarification_id,
+                    user_id=self.user_id,
+                    conversation_id=self.conversation_id,
+                    document_ids=requested_ids,
+                )
+            except FileSearchClarificationError as exc:
+                return self._failure(
+                    "INVALID_DOCUMENT_SELECTION",
+                    f"已选择的文件范围无效：{exc}",
+                )
+            confirmed_document_scope = True
+            log_event(
+                "evidence_answer.document_selection.locked",
+                settings=self.settings,
+                agent_run_id=self.agent_run_id,
+                user_id=self.user_id,
+                conversation_id=self.conversation_id,
+                status="COMPLETED",
+                event_title="锁定用户所选文件",
+                stage="SCOPE",
+                operator_message=(
+                    f"已校验文件选择记录，本轮只允许读取用户确认的 "
+                    f"{len(explicit_ids)} 份文件，不再扩张同名候选。"
+                ),
+                document_count=len(explicit_ids),
+                clarification_id=document_selection_clarification_id,
+            )
         parsed_question = FileSearchQueryParser(
             tokenizer=self.tokenizer
         ).parse(normalized_question)
@@ -152,11 +193,16 @@ class EvidenceAnswerService:
         if not normalized_question:
             return self._failure("EMPTY_QUESTION", "请输入需要查询或总结的问题。")
 
-        trash = ExactTrashFilenameLookupService(
-            db=self.db,
-            user_id=self.user_id,
-            workspace_id=self.workspace_id,
-        ).lookup(query=normalized_question)
+        # 已确认文件选择不能再被同名回收站文件或其他全局名称结果覆盖。
+        trash = (
+            None
+            if confirmed_document_scope
+            else ExactTrashFilenameLookupService(
+                db=self.db,
+                user_id=self.user_id,
+                workspace_id=self.workspace_id,
+            ).lookup(query=normalized_question)
+        )
         if trash is not None:
             self._log_completed(
                 event="evidence_answer.degraded",
@@ -206,9 +252,14 @@ class EvidenceAnswerService:
                 ),
                 filename=exact_filename,
             )
-            # 完整文件名是最高优先级范围约束。会话上下文即使因历史附件模糊匹配
-            # 传入多个 document_id，也不能把它们当作本次总结的依据。
-            exact_rows = self._resolve_exact_filename_working_copies(exact_filename)
+            # 用户完成同名单选后，选择范围优先于原问题中的完整文件名；否则重新
+            # 全库解析会再次找出全部同名文件，形成永不结束的二次选择循环。
+            # 普通会话附件仍按原规则使用完整文件名独立锁定，不能绕过歧义确认。
+            exact_rows = (
+                active_rows
+                if confirmed_document_scope
+                else self._resolve_exact_filename_working_copies(exact_filename)
+            )
             log_event(
                 "evidence_answer.exact_filename.resolved",
                 settings=self.settings,
@@ -231,9 +282,13 @@ class EvidenceAnswerService:
                 filename=exact_filename,
                 matched_count=len(exact_rows),
             )
-            exact_selection = self._exact_filename_selection(
-                exact_rows,
-                question=normalized_question,
+            exact_selection = (
+                None
+                if confirmed_document_scope
+                else self._exact_filename_selection(
+                    exact_rows,
+                    question=normalized_question,
+                )
             )
             if exact_selection is not None:
                 return exact_selection
@@ -1537,6 +1592,7 @@ class EvidenceAnswerService:
             db=self.db,
             # document_ids 已来自本服务完成授权的当前回答证据范围。
             user_id=None,
+            workspace_id=self.workspace_id,
         ).read(document_ids=document_ids)
         for document in current_classifications:
             for category in document.get("categories", []):

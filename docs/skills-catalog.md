@@ -30,30 +30,29 @@ MVP Skill 只保留业务编排边界。文件读取、表格读取、chunk、em
 
 | Skill | 开源使用方式 | 触发条件 | 可调用 Tool | 主要输出 |
 |---|---|---|---|---|
-| `chat-intake` | 不直接使用开源 Skill；可经 Tool 读取自研索引 | 每次用户发送消息 | `job-status-read`, `document-lineage-read` | intent、slots、附件上下文、候选 Skill |
-| `file-ingest` | 使用开源 Tool Adapter：Unstructured、Haystack、LlamaIndex、LangChain、Docling、openpyxl | 用户上传文件或要求读取/处理文件 | `document-register-upload`, `security-scan`, `document-convert`, `table-extract`, `artifact-write`, `metadata-extract`, `chunk-build`, `embedding-generate` | Document、Version、Artifact、pages/chunks、metadata、read_profile、read_quality、初始 ChangeSet |
-| `document-classification` | 分类编排自研；证据召回可使用 LangChain/LlamaIndex/pgvector adapter；可参考文件整理类 Skill 的“先建议、后确认”模式 | 文档完成解析和索引；或存在 `PATH_AS_CATEGORY` 受管目录可作为动态分类来源 | `multi-label-classify`, `hybrid-search`, `document-lineage-read` | document_categories、动态目录分类建议、置信度、证据、NEEDS_REVIEW 原因 |
-| `file-search` | 使用开源检索 adapter：LangChain、LlamaIndex、pgvector | 用户请求查找文件或材料 | `hybrid-search`, `document-lineage-read` | 分层检索结果、推荐理由 |
+| `chat-intake` | 不直接使用开源 Skill；只记录受控意图摘要 | 每次用户发送消息 | `intent-summary` | intent、slots、附件上下文、候选 Skill |
+| `file-ingest` | 使用 Docling、格式专用解析器和持久化索引服务 | 用户上传文件或要求读取/处理文件 | `extract-document-text`, `read-original-file`, `read-document-insights`, `chunk-build` | Document、Version、pages/chunks、metadata、read_profile、read_quality、初始 ChangeSet |
+| `document-classification` | 分类编排自研；证据来自当前版本完整正文 | 文档完成解析和索引；或存在动态目录候选 | `extract-document-text`, `read-document-classifications`, `read-classification-taxonomy`, `classification-decision` | 多标签建议、置信度、证据、NEEDS_REVIEW 原因 |
+| `file-search` | 使用 Jieba + PostgreSQL FTS/GIN + pg_trgm 两阶段检索 | 用户请求查找文件或材料 | `hybrid-search` | 分层检索结果、推荐理由 |
 | `managed-file-query` | 不直接使用开源 Skill；自研受管目录元数据查询编排 | 用户请求列出、查看或搜索服务器受管目录文件 | `managed-file-list`, `managed-file-search`, `feedback-record` | 受管目录文件清单、元数据过滤条件、解析反馈样本 |
-| `managed-file-classification` | 分类编排自研；正文解析使用现有 adapter，图谱增强可使用 Neo4j/neo4j-graphrag-python | 用户要求对受管目录范围内的文件分类或重新分类 | `classify-managed-files`, `job-status-read`, `feedback-record` | 同步逐文件多标签结果或异步 Job、分类建议、证据、ChangeSet |
+| `managed-file-classification` | 分类编排自研；正文解析使用现有 adapter，图谱增强可使用 Neo4j/neo4j-graphrag-python | 用户要求对受管目录范围内的文件分类或重新分类 | `classify-managed-files`, `managed-root-scan` | 同步逐文件多标签结果或异步 Job、分类建议、证据、ChangeSet |
 | `file-rename` | 参考 tfeldmann/organize 的规则化命名与预览思想；工作副本执行器自研 | 用户要求按年份、文号和正文标题生成工作副本改名建议 | `generate-rename-suggestions`, `confirmed-file-action` | 字段证据、`RENAME_WORKING_COPIES` OperationPlan、工作副本路径记录、确认后的 ChangeSet |
-| `spreadsheet-workbench` | 使用 openpyxl、pandas 和可选 LibreOffice adapter | 用户请求表格 Profile、统计、校验、编辑、重算或格式转换 | `profile-spreadsheet`, `analyze-spreadsheet`, `validate-spreadsheet`, `operation-plan-create`；后续 `edit-spreadsheet`, `recalculate-spreadsheet` | 表结构、只读分析结果、校验报告、待确认编辑计划 |
+| `spreadsheet-workbench` | 使用 openpyxl、pandas 和可选 LibreOffice adapter | 用户请求表格 Profile、统计或校验 | `profile-spreadsheet`, `analyze-spreadsheet`, `validate-spreadsheet` | 表结构、只读分析结果、校验报告 |
 | `evidence-answer` | 使用 LangGraph 编排和结构化输出；活动版本、Evidence、引用与支持性校验自研 | 用户提出正文事实、总结、比较或解释请求 | `evidence-answer`；表格聚合继续使用 `analyze-spreadsheet` | 经校验回答、去重文件框、引用、限制、回收站或同名选择结果 |
-| `change-report` | 不直接使用开源 Skill；自研审计输出 | Tool 执行后需要回执 | `change-report` | ChangeSet 摘要、逐文件明细 |
-| `operation-plan` | 不直接使用开源 Skill；自研高风险操作规划 | 用户请求改名、移动、复制、删除、导出、外发 | `operation-plan-create` | PLANNED OperationPlan |
-| `confirmed-file-action` | 不直接使用开源 Skill；底层文件操作通过自研受控 Tool | 用户确认 OperationPlan | `confirmed-file-action`, `change-report` | 执行结果、ChangeSet |
-| `feedback-and-memory` | 不直接使用开源 Skill；自研反馈和偏好存储 | 用户提交纠错，或明确要求记住/忘记偏好 | `feedback-record`, `operation-plan-create` | feedback、user_preferences、后续处理建议 |
+| `change-report` | 不直接使用开源 Skill；由 Graph 结果聚合节点生成用户回执 | Tool 执行后需要回执 | 无独立 Tool | ChangeSet 摘要、逐文件明细 |
+| `operation-plan` | 不直接使用开源 Skill；自研高风险操作规划 | 用户请求改名、移动、复制、删除、导出、外发 | `working-copy-action-plan-create` | PLANNED OperationPlan |
+| `confirmed-file-action` | 不直接使用开源 Skill；底层文件操作通过自研受控 Tool | 用户确认 OperationPlan | `confirmed-file-action` | 执行结果、ChangeSet |
+| `feedback-and-memory` | 不直接使用开源 Skill；自研反馈和偏好存储 | 用户提交纠错 | `feedback-record` | feedback、后续处理建议 |
 
 被替换为 Tool Adapter 的旧底层 Skill：
 
 ```text
-file-upload -> file-ingest + document-register-upload tool
-document-router -> file-ingest + document-convert/document-router adapter
-document-read -> file-ingest + document-convert adapter
-spreadsheet-read -> file-ingest + table-extract adapter
-metadata-extract -> file-ingest + metadata-extract tool
-chunk-and-embed -> file-ingest + chunk-build/embedding-generate tools
-multi-label-classify -> document-classification
+file-upload -> 上传生命周期服务
+document-router/document-read -> file-ingest + extract-document-text
+spreadsheet-read -> spreadsheet-workbench
+metadata-extract -> 持久化摘要与 document insights
+chunk-and-embed -> file-ingest + chunk-build；通用向量 Provider 尚未注册为 Tool
+multi-label-classify -> DocumentClassificationService + document-classification
 classification-evidence-check -> document-classification
 personalized-search -> file-search
 feedback-learning + user-memory -> feedback-and-memory
@@ -84,14 +83,11 @@ feedback-learning + user-memory -> feedback-and-memory
 
 | Adapter Tool | 首选开源实现 | 开源地址 | 备选/补充 | 替代的旧底层 Skill |
 |---|---|---|---|---|
-| `document-convert` | Unstructured partitioning | https://github.com/Unstructured-IO/unstructured | Haystack `MultiFileConverter`、Docling、LlamaIndex Readers、LangChain document loaders | `document-router`, `document-read` |
-| `table-extract` | Haystack `XLSXToDocument` 或 openpyxl adapter | https://github.com/deepset-ai/haystack, https://foss.heptapod.net/openpyxl/openpyxl | Unstructured / LlamaIndex reader | `spreadsheet-read` |
+| `extract-document-text` | Docling 与格式专用解析器 | https://github.com/docling-project/docling | python-docx、PyMuPDF、openpyxl、LibreOffice | `document-router`, `document-read` |
+| `profile/analyze/validate-spreadsheet` | openpyxl、pandas | https://foss.heptapod.net/openpyxl/openpyxl | LibreOffice 受控转换 | `spreadsheet-read` |
 | `chunk-build` | LangChain text splitters 或 LlamaIndex node parsers | https://github.com/langchain-ai/langchain, https://github.com/run-llama/llama_index | 自定义 evidence-aware chunker | `chunk-and-embed` 的 chunk 部分 |
-| `embedding-generate` | OpenAI-compatible embedding client；必要时用 LangChain embedding interface 包装 | https://github.com/langchain-ai/langchain | 直接调用兼容 OpenAI 的 embedding API | `chunk-and-embed` 的 embedding 部分 |
 | `hybrid-search` | LangChain retriever tool / pgvector retriever adapter | https://github.com/langchain-ai/langchain, https://github.com/pgvector/pgvector | LlamaIndex QueryEngineTool： https://github.com/run-llama/llama_index | `personalized-search` 底层检索 |
-| `document-lineage-read` | 自研轻量 SQL adapter | 无 | 后续 Neo4j graph adapter： https://github.com/neo4j/neo4j | 无 |
 | `evidence-answer` | LangGraph node + structured output parser | https://github.com/langchain-ai/langgraph, https://github.com/langchain-ai/langchain | LangChain tool/function calling | 无 |
-| `security-scan` | 可选 ClamAV adapter | https://github.com/Cisco-Talos/clamav | MVP 可先做扩展名、MIME、大小和宏风险检查 | 无 |
 
 可选补充库：
 
@@ -133,7 +129,7 @@ feedback-learning + user-memory -> feedback-and-memory
 | `SpillwaveSolutions/mastering-langgraph-agent-skill` | https://github.com/SpillwaveSolutions/mastering-langgraph-agent-skill | LangGraph 学习/开发 Skill | LangGraph 状态图、Tool、HITL、部署指导 | 可作为 LangGraph 实现参考，不替换业务 Skill |
 | LangChain / LangGraph Tools | https://github.com/langchain-ai/langchain, https://github.com/langchain-ai/langgraph | Tool 框架 | Tool schema、retriever tool、graph orchestration | 适合实现 `ToolRegistry` 和 `tool-dispatch` |
 | LlamaIndex Readers / Tools | https://github.com/run-llama/llama_index | 数据连接器和查询工具 | PDF、文档 reader、query engine tool、多文档 agent 思路 | 可替换或补充部分 Tool，不替换 Skill |
-| Unstructured | https://github.com/Unstructured-IO/unstructured | 文档解析组件 | 文件 partition、元素化解析 | 可用于 `document-convert` 的底层实现 |
+| Unstructured | https://github.com/Unstructured-IO/unstructured | 文档解析组件 | 文件 partition、元素化解析 | 可作为 `extract-document-text` 的受控回退适配器 |
 | Semantic Kernel Plugins | https://github.com/microsoft/semantic-kernel | Plugin/Skill 概念 | Plugin 分组、函数暴露、自动调用 | 概念可参考；Python/FastAPI/LangGraph 主线下不优先采用 |
 
 采纳策略：

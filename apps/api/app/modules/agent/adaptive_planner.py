@@ -30,6 +30,10 @@ ADAPTIVE_PLANNER_SYSTEM_PROMPT = """你是 File Agent 的 Adaptive Planner。
 hybrid-search 属于发现型 Tool：首次计划只执行检索，观察命中数量、实际条件和受控 document_ids 后，
 再决定 FINISH、调整检索条件，或调用 evidence-answer/read-document-classifications。
 重新检索必须改变 query、match_mode 或 phrases，不能重复相同输入。
+当前消息包含完整文件名时，该名称是不能放宽的文件范围；不得借用上一轮 search_context 扩大范围。
+询问“分类为何成立、为什么归到某类”时读取 read-document-classifications；询问正文与某主题的关系、
+文件内容、总结或具体事实时使用 evidence-answer。需要先确定文件时先 hybrid-search，观察真实
+document_ids 后再选择上述读取 Tool。
 现有 Catalog 确实无法完成明确用户目标时，可以输出 capability_suggestions，但建议不能进入当前 ToolPlan，
 不能生成 handler 代码，也不能声称能力已经存在、已经执行或已经成功保存建议。"""
 
@@ -96,6 +100,7 @@ def validate_and_convert_decision(
     attachments: list[dict[str, Any]],
     context_documents: list[dict[str, Any]],
     observed_document_ids: list[str] | None = None,
+    has_tool_observation: bool = False,
 ) -> tuple[PlannerOutput, dict[str, Any]]:
     """把 Adaptive 决策转换为现有执行计划，并以后端 Catalog 强制风险边界。"""
 
@@ -131,6 +136,33 @@ def validate_and_convert_decision(
         authorized_document_ids=authorized_document_ids,
         source="Planner scope",
     )
+    if decision.decision_type == "DIRECT_RESPONSE":
+        safe_direct_intents = {
+            "GENERAL_CHAT",
+            "CHAT",
+            "UNKNOWN",
+            "UNSPECIFIED",
+            "CAPABILITY_UNAVAILABLE",
+            "UNSUPPORTED_REQUEST",
+        }
+        if (
+            str(decision.intent or "").upper() not in safe_direct_intents
+            or bool(decision.scope.document_ids)
+            or bool(decision.scope.requires_backend_resolution)
+            or bool(attachments)
+            or bool(context_documents)
+        ):
+            # 文件事实必须回退到 Legacy 或重新生成 ToolPlan，不能把非法直接回复
+            # 悄悄改造成 intent-summary 后返回“我已收到”。
+            raise LLMResponseError(
+                "Adaptive Planner 不能通过 DIRECT_RESPONSE 回答文件事实"
+            )
+    if decision.decision_type == "FINISH" and not has_tool_observation:
+        # FINISH 只能结束已经有受控 Tool 事实的循环；第一轮直接 FINISH 会让后端
+        # 在没有任何业务结果时生成空泛回复。
+        raise LLMResponseError(
+            "Adaptive Planner 的 FINISH 缺少 Tool 观察"
+        )
     user_intent_plan = {
         "decision_type": decision.decision_type,
         "direct_response": decision.direct_response,

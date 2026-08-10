@@ -1,8 +1,12 @@
 // 阶段五回答只展示最终结论、必要限制和可预览文件框，不展示 Tool、Chunk 或原文定位。
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { FileText, Tag } from 'lucide-react';
 
-import { resolveFileSearchClarification } from '../../api/client';
+import {
+  ApiError,
+  getFileSearchClarification,
+  resolveFileSearchClarification,
+} from '../../api/client';
 import { formatError } from '../../api/errors';
 import type {
   EvidenceAnswerResult,
@@ -94,7 +98,26 @@ export function FileSelectionReceipt({
 }) {
   const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [currentStatus, setCurrentStatus] = useState('WAITING_SELECTION');
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    // 历史同名文件卡可能已在另一轮请求或标签页中处理；展示前读取持久化状态，
+    // 避免让用户再次提交已经失效的 option_id。
+    void getFileSearchClarification(token, result.clarification_id)
+      .then((latest) => {
+        if (active) {
+          setCurrentStatus(latest.status);
+        }
+      })
+      .catch(() => {
+        // 状态刷新失败不阻断历史回执；提交时后端仍会再次校验权限和有效期。
+      });
+    return () => {
+      active = false;
+    };
+  }, [result.clarification_id, token]);
 
   async function submitSelection() {
     if (selectedOptionIds.length === 0) {
@@ -109,12 +132,44 @@ export function FileSelectionReceipt({
         result.clarification_id,
         { option_ids: selectedOptionIds, custom_phrase: null },
       );
+      setCurrentStatus('RESOLVED');
       onResolved?.(response);
     } catch (err) {
       setError(formatError(err));
+      if (err instanceof ApiError && err.status === 409) {
+        // 409 表示卡片可能已被后续请求替代或已经处理；立即刷新状态并关闭旧入口，
+        // 不能继续让重复点击制造无意义冲突。
+        void getFileSearchClarification(token, result.clarification_id)
+          .then((latest) => setCurrentStatus(latest.status))
+          .catch(() => {
+            // 保留后端原始业务错误；即使刷新失败也不把它误报成注册冲突。
+          });
+      }
     } finally {
       setSubmitting(false);
     }
+  }
+
+  if (currentStatus === 'RESOLVED') {
+    return (
+      <section className="file-search-clarification-card is-resolved">
+        <FileText size={18} aria-hidden />
+        <span>该文件选择已处理，后续结果会显示在新的消息回执中。</span>
+      </section>
+    );
+  }
+
+  if (currentStatus === 'SUPERSEDED' || currentStatus === 'EXPIRED') {
+    return (
+      <section className="file-search-clarification-card is-resolved">
+        <FileText size={18} aria-hidden />
+        <span>
+          {currentStatus === 'EXPIRED'
+            ? '该文件选择已过期，请重新描述需要读取的文件。'
+            : '该文件选择已被后续请求替代，请使用最新的选择卡。'}
+        </span>
+      </section>
+    );
   }
 
   return (
@@ -132,7 +187,7 @@ export function FileSelectionReceipt({
           >
             <input
               checked={selectedOptionIds.includes(file.option_id)}
-              disabled={submitting}
+              disabled={submitting || currentStatus !== 'WAITING_SELECTION'}
               name={`file-selection-${result.clarification_id}`}
               onChange={() => setSelectedOptionIds((current) => (
                 current.includes(file.option_id)
@@ -169,7 +224,11 @@ export function FileSelectionReceipt({
       <button
         type="button"
         className="search-results-more"
-        disabled={submitting || selectedOptionIds.length === 0}
+        disabled={
+          submitting
+          || currentStatus !== 'WAITING_SELECTION'
+          || selectedOptionIds.length === 0
+        }
         onClick={() => void submitSelection()}
       >
         {submitting ? '正在继续…' : '使用所选文件继续'}

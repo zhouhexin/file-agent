@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -22,7 +23,7 @@ from app.db.models import (
 )
 from app.modules.chunks.service import DocumentIndexService
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer
-from app.modules.agent.tool_registry import ToolRegistry
+from app.modules.agent.tool_registry import ToolRegistry, UnknownToolError
 from app.modules.retrieval.chunk_lexical_search import DocumentChunkLexicalSearchService
 from app.tests.helpers import clear_overrides, client_with_database
 
@@ -553,18 +554,11 @@ def test_duplicate_paragraphs_on_same_page_remain_separate_valid_chunks():
         db.close()
 
 
-def test_embedding_tool_reports_disabled_instead_of_faking_completion(monkeypatch):
-    """embedding 关闭时 ToolInvocation 必须失败，不能返回伪造的已写入结果。"""
+def test_unimplemented_embedding_tool_is_not_registered():
+    """没有真实 Provider 的 embedding Tool 不得留在白名单中伪装成可执行能力。"""
 
-    monkeypatch.setenv("EMBEDDING_ENABLED", "false")
-    from app.core import config
-
-    config.get_settings.cache_clear()
-    invocation = ToolRegistry().invoke("embedding-generate", {"document_id": "document-1"})
-
-    assert invocation.status == "FAILED"
-    assert invocation.output_json["ok"] is False
-    assert invocation.output_json["error"]["code"] == "EMBEDDING_DISABLED"
+    with pytest.raises(UnknownToolError):
+        ToolRegistry().invoke("embedding-generate", {"document_id": "document-1"})
 
 
 def test_chunks_api_enforces_owner_and_never_returns_text_or_embedding():

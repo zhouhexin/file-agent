@@ -40,7 +40,7 @@
 每个文件结果必须包含解析状态、多个分类建议、置信度、正文证据、复用状态、警告和错误。异步结果必须包含可查询的 `job_id`，完成后回写原 AgentRun。
 
 ## Allowed Tools
-`classify-managed-files`, `job-status-read`, `feedback-record`
+`classify-managed-files`, `managed-root-scan`, `feedback-record`
 
 ## Open Source Backing
 业务编排与分类边界为项目自研。正文解析间接使用 Docling、python-docx、PyMuPDF、openpyxl、LibreOffice 和 OCR adapter；其中 `.xls` 先隔离转换为临时 `.xlsx`，不使用 xlrd。图谱候选增强间接使用 Neo4j 与 `neo4j-graphrag-python`。开源组件只作为受控 Tool/Service adapter，不得直接操作受管源文件。

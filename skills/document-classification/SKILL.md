@@ -10,7 +10,7 @@ Document id, metadata, chunks, taxonomy version, and optional managed-directory 
 Document categories with relation role, confidence, status, evidence.
 
 ## Allowed Tools
-`multi-label-classify`, `hybrid-search`, `document-lineage-read`
+`extract-document-text`, `read-document-classifications`, `read-classification-taxonomy`, `classification-decision`
 
 ## Open Source Backing
 Classification orchestration is project-specific. Evidence retrieval can use open-source-backed `hybrid-search` through LangChain, LlamaIndex, and pgvector adapters.

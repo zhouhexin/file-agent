@@ -252,12 +252,148 @@ def run_filesystem_worker(
             time.sleep(poll_seconds)
             continue
         if processed is None:
+            # 完成事件与 AgentRun 落库之间发生进程重启或事务竞争时，单靠一次性
+            # completion hook 可能遗漏续跑。队列空闲时按数据库终态补偿一次，
+            # 使部署修复后既有的“正在处理”消息也能恢复，而不是只能修复新请求。
+            try:
+                reconciled = reconcile_waiting_search_runs(
+                    session_factory=session_factory,
+                )
+            except Exception as exc:
+                # 补偿扫描属于恢复能力，失败不能让文件 worker 整体退出；服务器日志
+                # 保留堆栈供运维定位，普通用户侧仍只看到原任务状态。
+                log_event(
+                    "retrieval.waiting_run.reconcile_failed",
+                    level="ERROR",
+                    status="FAILED",
+                    error_code=exc.__class__.__name__,
+                    exception_traceback=format_exception_traceback(exc),
+                    message="检索等待链补偿失败，worker 将继续轮询",
+                )
+                _print_worker_status(
+                    "检索等待补偿失败",
+                    message="请查看 JSONL 日志中的 retrieval.waiting_run.reconcile_failed",
+                )
+                time.sleep(poll_seconds)
+                continue
+            if reconciled:
+                continue
             graph_processed = process_next_classification_graph_outbox(
                 session_factory=session_factory
             )
             if graph_processed is not None:
                 continue
             time.sleep(poll_seconds)
+
+
+def reconcile_waiting_search_runs(
+    *,
+    session_factory: Callable[[], Session] = SessionLocal,
+) -> int:
+    """依据文件任务真实终态补偿遗漏的检索续跑事件。
+
+    该补偿只接管带 ``search-readiness`` 来源的等待运行。普通分类等异步 AgentRun
+    不会被修改；完成任务仍复用原 ToolInvocation 输入，失败任务只写脱敏回执。
+    """
+
+    db = session_factory()
+    try:
+        waiting_runs = (
+            db.query(AgentRun)
+            .filter(AgentRun.status == "WAITING_FOR_ASYNC_JOB")
+            .all()
+        )
+        changed_run_ids: set[str] = set()
+        for candidate in waiting_runs:
+            if not _is_search_readiness_run(db=db, run=candidate):
+                continue
+            graph_state = dict(candidate.graph_state_json or {})
+            waiting_ids = [
+                str(value)
+                for value in graph_state.get("async_job_ids", [])
+                if str(value)
+            ]
+            if not waiting_ids:
+                run = _lock_waiting_agent_run(
+                    db=db,
+                    agent_run_id=str(candidate.id),
+                )
+                if run is not None:
+                    _finish_waiting_search_as_failed(
+                        run=run,
+                        graph_state=dict(run.graph_state_json or {}),
+                        message="文件检索等待信息不完整，请重新发起查询。",
+                    )
+                    changed_run_ids.add(str(run.id))
+                continue
+            jobs = {
+                str(job.id): job
+                for job in (
+                    db.query(FilesystemJob)
+                    .filter(FilesystemJob.id.in_(waiting_ids))
+                    .all()
+                )
+            }
+            missing_ids = [value for value in waiting_ids if value not in jobs]
+            failed_jobs = [
+                job
+                for job in jobs.values()
+                if job.status == "FAILED"
+                or (
+                    job.status in {"PENDING", "RUNNING"}
+                    and job.attempt_count >= job.max_attempts
+                )
+            ]
+            if missing_ids or failed_jobs:
+                run = _lock_waiting_agent_run(
+                    db=db,
+                    agent_run_id=str(candidate.id),
+                )
+                if run is not None:
+                    _finish_waiting_search_as_failed(
+                        run=run,
+                        graph_state=dict(run.graph_state_json or {}),
+                        message="部分文件暂时无法处理，请稍后重试或联系管理员。",
+                    )
+                    changed_run_ids.add(str(run.id))
+                continue
+            completed_jobs = [
+                jobs[value]
+                for value in waiting_ids
+                if jobs[value].status == "COMPLETED"
+            ]
+            for completed_job in completed_jobs:
+                before = db.get(AgentRun, candidate.id)
+                before_state = dict(before.graph_state_json or {}) if before else {}
+                before_status = before.status if before else None
+                _advance_waiting_search_runs(
+                    db=db,
+                    completed_job=completed_job,
+                )
+                after = db.get(AgentRun, candidate.id)
+                if after is None:
+                    continue
+                if (
+                    after.status != before_status
+                    or dict(after.graph_state_json or {}) != before_state
+                ):
+                    changed_run_ids.add(str(after.id))
+                if after.status != "WAITING_FOR_ASYNC_JOB":
+                    break
+        db.commit()
+        if changed_run_ids:
+            log_event(
+                "retrieval.waiting_run.reconciled",
+                status="COMPLETED",
+                reconciled_count=len(changed_run_ids),
+                message="已按文件任务终态补偿检索等待链",
+            )
+        return len(changed_run_ids)
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 def process_next_classification_graph_outbox(

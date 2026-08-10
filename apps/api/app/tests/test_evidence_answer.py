@@ -859,6 +859,20 @@ def test_same_name_different_content_persists_selection_before_answering():
     exact_selection = service.answer(question="完整总结申报通知.docx")
     assert exact_selection["kind"] == "file_selection"
     assert len(exact_selection["choices"]) == 2
+    exact_clarification = FileSearchClarificationService(db).resolve(
+        clarification_id=exact_selection["clarification_id"],
+        user_id="user-1",
+        option_id=exact_selection["choices"][0]["option_id"],
+    )
+    exact_plan = FileSearchClarificationPlanner(exact_clarification).plan()
+    assert exact_plan.steps[0].input[
+        "document_selection_clarification_id"
+    ] == exact_selection["clarification_id"]
+
+    # 用户已经选定一份同名文件后，原问题必须直接续跑，不能再次扩张为两个同名候选。
+    resumed = service.answer(**exact_plan.steps[0].input)
+    assert resumed["kind"] == "evidence_answer"
+    assert resumed["status"] != "NEEDS_CLARIFICATION"
 
     selection = service._same_name_ambiguity(
         [(first_copy, db.get(DocumentVersion, "version-1")), (second_copy, second_version)],
@@ -878,6 +892,31 @@ def test_same_name_different_content_persists_selection_before_answering():
     assert plan.intent == "EVIDENCE_ANSWER"
     assert plan.steps[0].tool_name == "evidence-answer"
     assert plan.steps[0].input["document_ids"] == ["document-2"]
+    assert plan.steps[0].input[
+        "document_selection_clarification_id"
+    ] == selection["clarification_id"]
+
+
+def test_evidence_answer_rejects_forged_document_selection_scope():
+    """LLM 或客户端伪造选择凭据时不得把任意文件范围提升为已确认范围。"""
+
+    db = _session()
+    _seed(db)
+    result = EvidenceAnswerService(
+        db=db,
+        user_id="user-1",
+        conversation_id="conversation-1",
+        settings=_settings(),
+        client=FakeEvidenceClient(),
+    ).answer(
+        question="总结申报通知.docx",
+        document_ids=["document-1"],
+        document_selection_clarification_id="forged-clarification",
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "FAILED"
+    assert result["error"]["code"] == "INVALID_DOCUMENT_SELECTION"
 
 
 def test_document_selection_can_resume_original_summary_with_multiple_files():
@@ -918,6 +957,9 @@ def test_document_selection_can_resume_original_summary_with_multiple_files():
     assert plan.steps[0].input["document_ids"] == ["document-1", "document-2"]
     assert plan.steps[0].input["question"] == "总结这些工作总结"
     assert plan.steps[0].input["answer_mode"] == "AUTO"
+    assert plan.steps[0].input[
+        "document_selection_clarification_id"
+    ] == record.id
 
 
 @pytest.mark.parametrize(

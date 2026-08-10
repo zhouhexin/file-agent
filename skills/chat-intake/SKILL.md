@@ -10,7 +10,7 @@ User message, conversation id, attachment document ids, recent conversation cont
 Intent, slots, attachment context, candidate skills.
 
 ## Allowed Tools
-`job-status-read`, `document-lineage-read`
+`intent-summary`
 
 ## Open Source Backing
 No direct open-source Skill dependency. Runtime orchestration is expected to run inside the project's LangGraph Agent Runtime.

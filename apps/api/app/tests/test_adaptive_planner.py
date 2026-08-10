@@ -18,10 +18,12 @@ from app.db.models import (
     Document,
     DocumentCategorySuggestion,
     DocumentClassificationRun,
+    DocumentInsight,
     DocumentVersion,
     Message,
     PlannerShadowComparison,
     User,
+    WorkingCopy,
 )
 from app.modules.agent.binding_resolver import (
     MAX_BOUND_ARRAY_ITEMS,
@@ -57,6 +59,7 @@ from app.db.models import utcnow
 from app.modules.classification.evidence_reader import (
     CurrentClassificationEvidenceReader,
 )
+from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -80,7 +83,9 @@ def test_dynamic_catalog_loads_manifests_and_hides_internal_tool():
     assert len(snapshot["enabled_skill_ids"]) == 13
     assert "evidence-answer" in snapshot["enabled_skill_ids"]
     assert "capability-suggestion-record" not in snapshot["enabled_tool_names"]
-    assert "document-convert" not in snapshot["enabled_tool_names"]
+    assert "document-convert" not in {
+        item["name"] for item in ToolRegistry().list_tools(planner_only=False)
+    }
     assert "extract-document-text" in snapshot["enabled_tool_names"]
     evidence_tool = next(
         item
@@ -198,6 +203,53 @@ def test_adaptive_scope_rejects_document_ids_outside_backend_context():
             catalog_snapshot=snapshot,
             attachments=[],
             context_documents=[],
+        )
+
+
+def test_adaptive_direct_response_rejects_authorized_file_fact():
+    """即使文件 ID 已授权，模型也不能用 DIRECT_RESPONSE 绕过证据 Tool。"""
+
+    registry = ToolRegistry()
+    snapshot = AgentCatalogService(registry=registry).build_snapshot()
+    decision = PlannerDecision(
+        decision_type="DIRECT_RESPONSE",
+        intent="EVIDENCE_ANSWER",
+        user_goal="说明附件的主要内容",
+        scope=PlannerScope(document_ids=["doc-authorized"]),
+        direct_response="附件主要介绍了学生工作。",
+    )
+
+    with pytest.raises(LLMResponseError, match="不能通过 DIRECT_RESPONSE 回答文件事实"):
+        validate_and_convert_decision(
+            decision=decision,
+            registry=registry,
+            catalog_snapshot=snapshot,
+            attachments=[{"document_id": "doc-authorized"}],
+            context_documents=[],
+        )
+
+
+def test_adaptive_finish_requires_prior_tool_observation():
+    """第一轮不得直接 FINISH，否则自然语言任务会在没有业务结果时结束。"""
+
+    registry = ToolRegistry()
+    snapshot = AgentCatalogService(registry=registry).build_snapshot()
+    decision = PlannerDecision(
+        decision_type="FINISH",
+        intent="SEARCH_FILES",
+        user_goal="查找未来五年规划",
+        selected_skill_ids=["file-search"],
+        scope=PlannerScope(source="tool_observation"),
+    )
+
+    with pytest.raises(LLMResponseError, match="FINISH 缺少 Tool 观察"):
+        validate_and_convert_decision(
+            decision=decision,
+            registry=registry,
+            catalog_snapshot=snapshot,
+            attachments=[],
+            context_documents=[],
+            has_tool_observation=False,
         )
 
 
@@ -1451,6 +1503,207 @@ def test_classification_evidence_reader_ignores_historical_version():
         assert result[0]["document_version_id"] == current_version.id
         assert [item["name"] for item in result[0]["categories"]] == ["学生工作"]
         assert result[0]["categories"][0]["evidence_items"][0]["page_number"] == 1
+    finally:
+        db.close()
+
+
+def test_read_tools_can_use_shared_active_working_copy_from_another_importer():
+    """检索命中的共享文件必须可继续读取概览和分类，不能按导入者再次隔离。"""
+
+    db = _db_session()
+    try:
+        requester = User(
+            id="shared-read-requester",
+            username="shared-read-requester",
+            password_hash="hash",
+            display_name="请求用户",
+        )
+        importer = User(
+            id="shared-read-importer",
+            username="shared-read-importer",
+            password_hash="hash",
+            display_name="导入用户",
+        )
+        document = Document(
+            id="shared-read-document",
+            user_id=importer.id,
+            original_filename="导入时名称.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=100,
+            sha256="c" * 64,
+            ingest_status="READY",
+        )
+        version = DocumentVersion(
+            id="shared-read-version",
+            document_id=document.id,
+            version_number=1,
+            storage_path="working/shared-read.docx",
+            filename="学生工作实施建议.docx",
+            size_bytes=100,
+            sha256=document.sha256,
+        )
+        unrelated_version = DocumentVersion(
+            id="shared-read-unrelated-version",
+            document_id=document.id,
+            version_number=2,
+            storage_path="legacy/unrelated.docx",
+            filename="其他工作区旧副本.docx",
+            size_bytes=100,
+            sha256="e" * 64,
+        )
+        working_copy = WorkingCopy(
+            id="shared-read-working-copy",
+            working_copy_root_id="shared-read-root",
+            workspace_id=get_shared_workspace_id(db),
+            managed_file_id="shared-read-managed-file",
+            document_id=document.id,
+            current_version_id=version.id,
+            relative_path="学生工作实施建议.docx",
+            relative_path_hash="d" * 64,
+            filename="学生工作实施建议.docx",
+            extension=".docx",
+            size_bytes=100,
+            content_sha256=document.sha256,
+            imported_source_sha256=document.sha256,
+            status="ACTIVE",
+        )
+        unrelated_working_copy = WorkingCopy(
+            id="shared-read-unrelated-working-copy",
+            working_copy_root_id="shared-read-unrelated-root",
+            workspace_id="legacy-user-workspace",
+            managed_file_id="shared-read-unrelated-managed-file",
+            document_id=document.id,
+            current_version_id=unrelated_version.id,
+            relative_path="其他工作区旧副本.docx",
+            relative_path_hash="f" * 64,
+            filename="其他工作区旧副本.docx",
+            extension=".docx",
+            size_bytes=100,
+            content_sha256=unrelated_version.sha256,
+            imported_source_sha256=unrelated_version.sha256,
+            status="ACTIVE",
+            updated_at=utcnow() + timedelta(days=1),
+        )
+        run = DocumentClassificationRun(
+            id="shared-read-classification-run",
+            document_id=document.id,
+            agent_run_id="shared-read-agent-run",
+            taxonomy_key="school",
+            taxonomy_version="2",
+            classifier_version="test",
+            status="COMPLETED",
+        )
+        suggestion = DocumentCategorySuggestion(
+            classification_run_id=run.id,
+            document_id=document.id,
+            document_version_id=version.id,
+            category_id="student-work",
+            category_name="学生工作",
+            category_path_json=["学校", "学生工作"],
+            taxonomy_key="school",
+            taxonomy_version="2",
+            confidence=0.91,
+            status="SUGGESTED",
+            evidence_json=[
+                {
+                    "type": "text_quote",
+                    "page_number": 2,
+                    "quote": "完善学生教育管理与服务保障机制。",
+                    "signals": ["学生教育管理"],
+                    "source": "document_pages",
+                }
+            ],
+            rank=1,
+        )
+        insight = DocumentInsight(
+            document_id=document.id,
+            summary="文件说明学生教育管理工作安排。",
+            keywords_json=["学生教育", "管理"],
+            labels_json=["学生工作"],
+        )
+        owned_document = Document(
+            id="shared-read-owned-document",
+            user_id=requester.id,
+            original_filename="本人上传材料.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size_bytes=80,
+            sha256="1" * 64,
+            ingest_status="READY",
+        )
+        owned_version = DocumentVersion(
+            id="shared-read-owned-version",
+            document_id=owned_document.id,
+            version_number=1,
+            storage_path="uploads/owned.docx",
+            filename=owned_document.original_filename,
+            size_bytes=80,
+            sha256=owned_document.sha256,
+        )
+        owned_run = DocumentClassificationRun(
+            id="shared-read-owned-run",
+            document_id=owned_document.id,
+            agent_run_id="shared-read-agent-run",
+            taxonomy_key="school",
+            taxonomy_version="2",
+            classifier_version="test",
+            status="COMPLETED",
+        )
+        owned_suggestion = DocumentCategorySuggestion(
+            classification_run_id=owned_run.id,
+            document_id=owned_document.id,
+            document_version_id=owned_version.id,
+            category_id="teaching",
+            category_name="教学",
+            category_path_json=["学校", "教学"],
+            taxonomy_key="school",
+            taxonomy_version="2",
+            confidence=0.88,
+            status="SUGGESTED",
+            evidence_json=[],
+            rank=1,
+        )
+        db.add_all(
+            [
+                requester,
+                importer,
+                document,
+                version,
+                unrelated_version,
+                working_copy,
+                unrelated_working_copy,
+                run,
+                suggestion,
+                insight,
+                owned_document,
+                owned_version,
+                owned_run,
+                owned_suggestion,
+            ]
+        )
+        db.flush()
+
+        registry = ToolRegistry(db=db, user_id=requester.id)
+        classifications = registry.invoke(
+            "read-document-classifications",
+            {"document_ids": [document.id, owned_document.id]},
+        ).output_json
+        insights = registry.invoke(
+            "read-document-insights",
+            {"document_ids": [document.id]},
+        ).output_json
+
+        assert classifications["documents"][0]["filename"] == "学生工作实施建议.docx"
+        assert classifications["documents"][0]["categories"][0]["name"] == "学生工作"
+        assert classifications["documents"][1]["filename"] == "本人上传材料.docx"
+        assert classifications["documents"][1]["categories"][0]["name"] == "教学"
+        assert (
+            classifications["documents"][0]["categories"][0]["evidence_items"][0][
+                "page_number"
+            ]
+            == 2
+        )
+        assert insights["documents"][0]["filename"] == "学生工作实施建议.docx"
+        assert insights["documents"][0]["summary"] == "文件说明学生教育管理工作安排。"
     finally:
         db.close()
 

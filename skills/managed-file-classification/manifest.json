@@ -4,7 +4,7 @@
   "status": "ACTIVE",
   "description": "对受管目录范围内文件提交异步分类任务。",
   "trigger_hints": ["受管目录分类", "重新分类目录"],
-  "allowed_tools": ["classify-managed-files", "managed-root-scan", "job-status-read"],
+  "allowed_tools": ["classify-managed-files", "managed-root-scan"],
   "required_capabilities": ["managed_file_classification"],
   "risk_ceiling": "medium"
 }

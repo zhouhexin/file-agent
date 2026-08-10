@@ -55,10 +55,21 @@ MVP 可以直接返回业务 JSON，不强制包裹 `code/data`。错误统一�
 {
   "error": {
     "code": "BAD_REQUEST",
-    "message": "Invalid request"
+    "message": "Invalid request",
+    "details": null,
+    "request_id": "request-uuid"
   }
 }
 ```
+
+约束：
+
+- `code` 是稳定的机器可读错误码；普通 HTTPException 未声明业务码时使用下方通用码。
+- `message` 是可以展示给用户的安全信息，不得包含堆栈、服务器绝对路径、密钥或文件正文。
+- `details` 可选，只保存字段校验或业务选择所需的结构化信息。
+- `request_id` 与 `X-Request-ID` 响应头一致，供 admin/ops 关联 JSONL 日志。
+- FastAPI 参数校验、认证失败、业务 HTTPException 和未捕获异常都必须使用该 Envelope，不再返回
+  顶层 `detail`。前端滚动升级期间可以兼容旧 `detail`，完成部署后应移除兼容分支。
 
 ### 1.5 Common Error Codes
 
@@ -620,8 +631,8 @@ Response:
 {
   "tools": [
     {
-      "name": "document-convert",
-      "description": "用 Unstructured/Haystack/LlamaIndex/LangChain adapter 抽取文档文本和结构",
+      "name": "extract-document-text",
+      "description": "解析文件并持久化当前版本页面文本和结构",
       "side_effects": true,
       "requires_confirmation": false,
       "allowed_roles": ["user", "ops", "admin"],
@@ -642,26 +653,18 @@ Response:
 MVP Tool names:
 
 ```text
-document-register-upload
-security-scan
-document-convert
-table-extract
-artifact-write
 chunk-build
-embedding-generate
-metadata-extract
-multi-label-classify
 read-document-insights
+read-document-classifications
 read-original-file
 extract-document-text
 hybrid-search
 evidence-answer
-change-report
-operation-plan-create
+classification-decision
+working-copy-action-plan-create
 confirmed-file-action
 feedback-record
-job-status-read
-document-lineage-read
+managed-root-scan
 ```
 
 ### 6.3 List Tool Invocations
@@ -677,7 +680,7 @@ Response:
   "tool_invocations": [
     {
       "id": "tool-invocation-uuid",
-      "tool_name": "document-convert",
+      "tool_name": "extract-document-text",
       "status": "COMPLETED",
       "input_json": {
         "document_id": "document-uuid"

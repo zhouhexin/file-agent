@@ -473,7 +473,7 @@ class DeterministicPlanner:
                     {
                         "step_id": "step-unsafe",
                         "skill": "file-ingest",
-                        "tool_name": "document-convert",
+                        "tool_name": "extract-document-text",
                         "input": {"document_id": document_id, "path": "/tmp/unsafe"},
                         "requires_confirmation": False,
                         "risk_level": "high",
@@ -3082,6 +3082,20 @@ def _has_explicit_filename_content_intent(*, message: str, lowered: str) -> bool
         _has_plain_document_summary_intent(message=message, lowered=lowered)
         or _has_answer_intent(message=message, lowered=lowered)
         or _should_extract_text(message=message, lowered=lowered)
+    )
+
+
+def has_explicit_filename_content_request(message: str) -> bool:
+    """判断请求是否用完整文件名限定了正文任务。
+
+    该判断只负责固定文件范围边界，不推断业务主题。LangGraph 可在调用 LLM 前据此
+    保留 ``evidence-answer`` 的精确文件名解析，避免模型把明确的单文件问题扩大成
+    全工作区模糊检索。
+    """
+
+    return _has_supported_full_filename(message) and _has_explicit_filename_content_intent(
+        message=message,
+        lowered=message.lower(),
     )
 
 

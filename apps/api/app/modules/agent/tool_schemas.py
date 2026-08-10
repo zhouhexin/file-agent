@@ -138,11 +138,21 @@ class SearchToolInput(StrictToolInput):
 
 
 class EvidenceAnswerInput(StrictToolInput):
-    """基于证据生成回答的 Tool 输入。"""
+    """基于证据生成回答的 Tool 输入。
+
+    ``document_selection_clarification_id`` 只用于后端续跑已解决的文件选择。
+    EvidenceAnswerService 仍会回查持久化记录并校验用户、会话和文件集合，因此即使
+    LLM 生成该字段，也不能自行把普通候选范围提升为用户已确认范围。
+    """
 
     question: str = Field(min_length=1, max_length=4000)
     document_ids: List[str] = Field(default_factory=list, max_length=50)
     answer_mode: Literal["AUTO", "FOCUSED", "FULL_SUMMARY"] = "AUTO"
+    document_selection_clarification_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=36,
+    )
 
 
 class DocumentInsightsReadInput(StrictToolInput):
@@ -210,12 +220,6 @@ class FeedbackRecordInput(StrictToolInput):
     feedback_type: str = Field(min_length=1)
     comment: str = ""
     context_json: Dict[str, Any] = Field(default_factory=dict)
-
-
-class JobStatusReadInput(StrictToolInput):
-    """读取异步任务状态的输入。"""
-
-    job_id: str = Field(min_length=1)
 
 
 class ManagedRootListInput(StrictToolInput):
@@ -491,9 +495,3 @@ class MCPFilesystemInfoInput(StrictToolInput):
         if normalized is None:
             raise ValueError("path must identify a file or directory")
         return normalized
-
-
-class DocumentLineageReadInput(StrictToolInput):
-    """读取文档版本关系和派生件的输入。"""
-
-    document_id: str = Field(min_length=1)

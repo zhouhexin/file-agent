@@ -27,6 +27,7 @@ from app.modules.managed_files.worker import (
     _advance_waiting_search_runs,
     _public_job_error_message,
     process_next_filesystem_job,
+    reconcile_waiting_search_runs,
 )
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.scanner import ManagedFileScanner
@@ -170,6 +171,109 @@ def test_completed_preparation_job_resumes_original_search_without_new_message(
     finally:
         db.close()
         clear_overrides()
+
+
+def test_idle_worker_reconciles_search_run_after_completed_event_was_missed(
+    monkeypatch,
+):
+    """worker 重启后应按数据库终态续跑旧查询，不能让消息永久显示正在处理。"""
+
+    client, SessionLocal = client_with_database()
+    registered = client.post(
+        "/api/auth/register",
+        json={
+            "username": "search-reconcile-user",
+            "password": "password123",
+            "display_name": "search-reconcile-user",
+        },
+    )
+    with SessionLocal() as db:
+        user = db.get(User, registered.json()["id"])
+        conversation = Conversation(
+            id="search-reconcile-conversation",
+            user_id=user.id,
+            title="检索补偿测试",
+        )
+        message = Message(
+            id="search-reconcile-message",
+            conversation_id=conversation.id,
+            user_id=user.id,
+            role="user",
+            content="找未来五年规划",
+            attachments_json=[],
+        )
+        job = FilesystemJob(
+            id="search-reconcile-job",
+            job_type="ANALYZE_DOCUMENT_VERSION",
+            queue_name="ANALYSIS",
+            status="COMPLETED",
+            payload_json={},
+            result_json={},
+        )
+        db.add_all([conversation, message, job])
+        db.flush()
+        run = AgentRun(
+            id="search-reconcile-run",
+            conversation_id=conversation.id,
+            message_id=message.id,
+            user_id=user.id,
+            intent="SEARCH_FILES",
+            status="WAITING_FOR_ASYNC_JOB",
+            graph_state_json={
+                "status": "WAITING_FOR_ASYNC_JOB",
+                "async_job_ids": [job.id],
+                "result_summary": {
+                    "filesystem_job": {"source": "search-readiness"}
+                },
+            },
+        )
+        db.add(run)
+        db.flush()
+        db.add(
+            ToolInvocation(
+                agent_run_id=run.id,
+                tool_name="hybrid-search",
+                input_json={"query": "找未来五年规划", "document_ids": []},
+                output_json={
+                    "kind": "filesystem_job",
+                    "source": "search-readiness",
+                    "job_id": job.id,
+                },
+                status="PENDING",
+            )
+        )
+        db.commit()
+
+    def fake_invoke(_registry, name, input_json):
+        """补偿续跑使用原检索输入，并返回稳定文件结果。"""
+
+        return ToolInvocationRecord(
+            tool_name=name,
+            input_json=input_json,
+            output_json={
+                "kind": "workspace_file_search",
+                "ok": True,
+                "query": input_json["query"],
+                "total_returned": 1,
+                "results": [{"filename": "未来五年规划.docx"}],
+            },
+            status="COMPLETED",
+        )
+
+    monkeypatch.setattr(
+        "app.modules.managed_files.worker.ToolRegistry.invoke",
+        fake_invoke,
+    )
+
+    assert reconcile_waiting_search_runs(session_factory=SessionLocal) == 1
+
+    with SessionLocal() as db:
+        run = db.get(AgentRun, "search-reconcile-run")
+        assert run.status == "COMPLETED"
+        assert run.graph_state_json["async_job_ids"] == []
+        assert "未来五年规划.docx" in run.final_response
+        assert db.query(Message).count() == 1
+    clear_overrides()
 
 
 def test_completed_job_does_not_take_over_unrelated_waiting_agent_run():

@@ -44,7 +44,7 @@ def test_register_creates_user_and_default_workspace():
 
 
 def test_register_rejects_duplicate_username():
-    """重复 username 必须返回 409，避免覆盖已有用户。"""
+    """重复 username 必须通过统一错误 Envelope 返回 409，避免覆盖已有用户。"""
 
     client, _ = client_with_database()
 
@@ -53,6 +53,13 @@ def test_register_rejects_duplicate_username():
     response = client.post("/api/auth/register", json=payload)
 
     assert response.status_code == 409
+    assert response.json() == {
+        "error": {
+            "code": "CONFLICT",
+            "message": "Username already exists",
+            "request_id": response.headers["X-Request-ID"],
+        }
+    }
     clear_overrides()
 
 
@@ -109,4 +116,21 @@ def test_me_requires_token():
     response = client.get("/api/auth/me")
 
     assert response.status_code == 401
+    assert response.json()["error"]["code"] == "UNAUTHORIZED"
+    assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"]
+    clear_overrides()
+
+
+def test_validation_error_uses_unified_envelope():
+    """FastAPI 参数校验失败也必须遵守统一格式，不能继续返回 detail 数组。"""
+
+    client, _ = client_with_database()
+
+    response = client.post("/api/auth/login", json={})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert response.json()["error"]["message"] == "请求参数校验失败。"
+    assert response.json()["error"]["details"]
+    assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"]
     clear_overrides()

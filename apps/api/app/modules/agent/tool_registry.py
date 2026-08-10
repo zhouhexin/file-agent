@@ -51,13 +51,11 @@ from app.modules.agent.tool_schemas import (
     ConfirmedFileActionInput,
     DocumentClassificationsReadInput,
     DocumentInsightsReadInput,
-    DocumentLineageReadInput,
     DocumentToolInput,
     EvidenceAnswerInput,
     FeedbackRecordInput,
     GenerateRenameSuggestionsInput,
     IntentSummaryInput,
-    JobStatusReadInput,
     ManagedFileClassificationInput,
     ManagedFileListInput,
     ManagedFileReadDocumentInput,
@@ -345,25 +343,6 @@ def _tool_input_summary(input_json: Dict[str, Any]) -> Dict[str, Any]:
     return summary
 
 
-def _document_handler(tool_name: str) -> ToolHandler:
-    """为文档范围内的副作用 Tool 创建占位 handler。"""
-
-    def handler(tool_input: BaseModel) -> Dict[str, Any]:
-        """返回结构化占位输出，不触碰真实文件。"""
-
-        document_id = getattr(tool_input, "document_id")
-        return {
-            "ok": True,
-            "tool_name": tool_name,
-            "document_id": document_id,
-            # "changeset_id": f"changeset-{document_id}",
-            "changeset_id": None,
-            "summary": f"{tool_name} completed for {document_id}",
-        }
-
-    return handler
-
-
 def _attach_trash_restore_selection(
     *,
     result: Dict[str, Any],
@@ -412,24 +391,6 @@ def _chunk_build_handler(db: Any, user_id: str | None) -> ToolHandler:
         )
 
     return handler
-
-
-def _embedding_generate_handler(tool_input: BaseModel) -> Dict[str, Any]:
-    """明确拒绝阶段三的真实向量推理，避免占位 Tool 伪造已生成 embedding。"""
-
-    settings = get_settings()
-    code = "EMBEDDING_DISABLED" if not settings.embedding_enabled else "EMBEDDING_PROVIDER_NOT_IMPLEMENTED"
-    message = (
-        "当前部署使用 CPU 词法检索，embedding 已关闭。"
-        if code == "EMBEDDING_DISABLED"
-        else "向量 provider 尚未接入，未写入任何 embedding。"
-    )
-    return {
-        "ok": False,
-        "status": "FAILED",
-        "document_id": str(getattr(tool_input, "document_id")),
-        "error": {"code": code, "message": message},
-    }
 
 
 def _search_handler(
@@ -1655,6 +1616,11 @@ def _evidence_answer_handler(
             question=str(getattr(tool_input, "question")),
             document_ids=list(getattr(tool_input, "document_ids")),
             answer_mode=str(getattr(tool_input, "answer_mode")),
+            document_selection_clarification_id=getattr(
+                tool_input,
+                "document_selection_clarification_id",
+                None,
+            ),
         )
 
     return handler
@@ -1682,14 +1648,14 @@ def _document_insights_handler(db: Any, user_id: str | None) -> ToolHandler:
                 ],
             }
 
-        documents = (
-            db.query(Document)
-            .filter(Document.id.in_(document_ids), Document.user_id == user_id)
-            .all()
-            if document_ids
-            else []
+        documents, shared_copy_by_document_id = _documents_visible_to_file_agent(
+            db=db,
+            user_id=user_id,
+            document_ids=document_ids,
         )
         for document in documents:
+            if document.id in shared_copy_by_document_id:
+                continue
             lifecycle = FileExtractionRepository(db, user_id).resolve_original_file_for_document(document)
             if not lifecycle.get("ok") and (lifecycle.get("error") or {}).get("code") == "FILE_TRASHED":
                 return _attach_trash_restore_selection(
@@ -1717,7 +1683,11 @@ def _document_insights_handler(db: Any, user_id: str | None) -> ToolHandler:
             "documents": [
                 {
                     "document_id": document.id,
-                    "filename": document.original_filename,
+                    "filename": (
+                        shared_copy_by_document_id[document.id].filename
+                        if document.id in shared_copy_by_document_id
+                        else document.original_filename
+                    ),
                     "content_type": document.content_type,
                     "ingest_status": document.ingest_status,
                     "keywords": (insights.get(document.id).keywords_json if insights.get(document.id) else []),
@@ -1741,14 +1711,14 @@ def _document_classifications_handler(db: Any, user_id: str | None) -> ToolHandl
         if db is None or user_id is None:
             return {"ok": True, "documents": []}
 
-        documents = (
-            db.query(Document)
-            .filter(Document.id.in_(document_ids), Document.user_id == user_id)
-            .all()
-            if document_ids
-            else []
+        documents, shared_copy_by_document_id = _documents_visible_to_file_agent(
+            db=db,
+            user_id=user_id,
+            document_ids=document_ids,
         )
         for document in documents:
+            if document.id in shared_copy_by_document_id:
+                continue
             lifecycle = FileExtractionRepository(db, user_id).resolve_original_file_for_document(document)
             if not lifecycle.get("ok") and (lifecycle.get("error") or {}).get("code") == "FILE_TRASHED":
                 return _attach_trash_restore_selection(
@@ -1763,16 +1733,113 @@ def _document_classifications_handler(db: Any, user_id: str | None) -> ToolHandl
                 )
         if not documents:
             return {"ok": True, "documents": []}
+        shared_document_ids = [
+            document.id
+            for document in documents
+            if document.id in shared_copy_by_document_id
+        ]
+        owned_document_ids = [
+            document.id
+            for document in documents
+            if document.id not in shared_copy_by_document_id
+        ]
+        classification_by_document_id: dict[str, dict[str, Any]] = {}
+        if shared_document_ids:
+            shared_workspace_id = shared_copy_by_document_id[
+                shared_document_ids[0]
+            ].workspace_id
+            for item in CurrentClassificationEvidenceReader(
+                db=db,
+                # 共享文件已由 _documents_visible_to_file_agent 按 ACTIVE 工作副本授权；
+                # Reader 只固定唯一共享 workspace，不能按历史导入者再次隔离。
+                user_id=None,
+                workspace_id=shared_workspace_id,
+            ).read(document_ids=shared_document_ids):
+                classification_by_document_id[str(item["document_id"])] = item
+        if owned_document_ids:
+            for item in CurrentClassificationEvidenceReader(
+                db=db,
+                # 用户上传文件继续按 Document.user_id 授权，不能借共享范围放宽所有权。
+                user_id=user_id,
+            ).read(document_ids=owned_document_ids):
+                classification_by_document_id[str(item["document_id"])] = item
         return {
             "ok": True,
             "version_scope": "CURRENT_WORKING_COPY",
-            "documents": CurrentClassificationEvidenceReader(
-                db=db,
-                user_id=user_id,
-            ).read(document_ids=[document.id for document in documents]),
+            # 最终按输入顺序投影，避免混合共享/私有文件时分类卡与文件名错配。
+            "documents": [
+                classification_by_document_id[document.id]
+                for document in documents
+                if document.id in classification_by_document_id
+            ],
         }
 
     return handler
+
+
+def _documents_visible_to_file_agent(
+    *,
+    db: Any,
+    user_id: str,
+    document_ids: list[str],
+) -> tuple[list[Document], dict[str, WorkingCopy]]:
+    """解析只读 Tool 可访问的上传文件与共享活动工作副本。
+
+    用户自己的上传 Document 仍按 ``Document.user_id`` 授权；系统导入后的正式文件
+    则按唯一共享工作区和 ACTIVE 工作副本授权。返回顺序与 Tool 输入一致，避免
+    自然语言多文件回答因数据库查询顺序变化而错配。
+    """
+
+    requested = list(dict.fromkeys(str(value) for value in document_ids if str(value)))
+    if not requested:
+        return [], {}
+    from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
+
+    shared_workspace_id = get_shared_workspace_id(db)
+    shared_copies = (
+        db.query(WorkingCopy)
+        .filter(
+            WorkingCopy.workspace_id == shared_workspace_id,
+            WorkingCopy.status == "ACTIVE",
+            WorkingCopy.document_id.in_(requested),
+        )
+        .order_by(WorkingCopy.updated_at.desc(), WorkingCopy.id.desc())
+        .all()
+    )
+    shared_copy_by_document_id: dict[str, WorkingCopy] = {}
+    for working_copy in shared_copies:
+        shared_copy_by_document_id.setdefault(
+            str(working_copy.document_id),
+            working_copy,
+        )
+    owned_ids = {
+        str(value)
+        for (value,) in (
+            db.query(Document.id)
+            .filter(
+                Document.id.in_(requested),
+                Document.user_id == user_id,
+            )
+            .all()
+        )
+    }
+    authorized_ids = owned_ids | set(shared_copy_by_document_id)
+    documents_by_id = {
+        str(document.id): document
+        for document in (
+            db.query(Document)
+            .filter(Document.id.in_(authorized_ids))
+            .all()
+        )
+    }
+    return (
+        [
+            documents_by_id[document_id]
+            for document_id in requested
+            if document_id in documents_by_id
+        ],
+        shared_copy_by_document_id,
+    )
 
 
 def _intent_summary_handler(tool_input: BaseModel) -> Dict[str, Any]:
@@ -1936,12 +2003,6 @@ def _feedback_handler(user_id: str | None = None) -> ToolHandler:
         }
 
     return handler
-
-
-def _job_status_handler(tool_input: BaseModel) -> Dict[str, Any]:
-    """返回异步任务状态占位结果。"""
-
-    return {"ok": True, "job_id": getattr(tool_input, "job_id"), "status": "PENDING"}
 
 
 def _managed_root_list_handler(db: Any) -> ToolHandler:
@@ -2644,12 +2705,6 @@ def _managed_root_scan_handler(db: Any, user_id: str | None) -> ToolHandler:
     return handler
 
 
-def _lineage_handler(tool_input: BaseModel) -> Dict[str, Any]:
-    """返回文档 lineage 占位结果。"""
-
-    return {"ok": True, "document_id": getattr(tool_input, "document_id"), "lineage": []}
-
-
 def _read_original_file_handler(db: Any, user_id: str | None) -> ToolHandler:
     """创建读取原始文件元信息的 Tool handler。"""
 
@@ -3146,18 +3201,13 @@ def _build_mvp_tools(
     conversation_id_getter: Callable[[], str | None] | None = None,
     agent_run_id_getter: Callable[[], str | None] | None = None,
 ) -> Dict[str, ToolDefinition]:
-    """创建 AGENTS.md 要求的完整 MVP Tool 目录。"""
+    """创建当前已经接入真实业务能力的 Tool 目录。
+
+    历史契约中的无副作用占位 Tool 不再注册，避免 Planner 或维护人员把结构化空结果误认为真实执行。
+    """
 
     tools = [
-        _tool("document-register-upload", "Register uploaded file as a document.", DocumentToolInput, True, False, ["documents", "document_versions"], _document_handler("document-register-upload")),
-        _tool("security-scan", "Scan file metadata and MIME risk.", DocumentToolInput, True, False, ["processing_events"], _document_handler("security-scan")),
-        _tool("document-convert", "Extract document text and structure through adapters.", DocumentToolInput, True, False, ["document_pages", "artifacts", "change_items"], _document_handler("document-convert")),
-        _tool("table-extract", "Extract spreadsheet sheets and cells.", DocumentToolInput, True, False, ["document_pages", "artifacts"], _document_handler("table-extract")),
-        _tool("artifact-write", "Write derivative artifact records.", DocumentToolInput, True, False, ["artifacts"], _document_handler("artifact-write")),
         _tool("chunk-build", "Build chunks and evidence spans.", DocumentToolInput, True, False, ["document_chunks", "evidence_spans"], _chunk_build_handler(db, user_id)),
-        _tool("embedding-generate", "Generate and store embeddings.", DocumentToolInput, True, False, ["document_chunks.embedding"], _embedding_generate_handler),
-        _tool("metadata-extract", "Extract metadata candidates.", DocumentToolInput, True, False, ["documents.metadata"], _document_handler("metadata-extract")),
-        _tool("multi-label-classify", "Generate multi-label classifications with evidence.", DocumentToolInput, True, False, ["document_categories"], _document_handler("multi-label-classify")),
         _tool("read-document-insights", "Read deterministic ingest insights for uploaded documents.", DocumentInsightsReadInput, False, False, [], _document_insights_handler(db, user_id), output_model=DocumentInsightsToolOutput, adaptive_ready=True),
         _tool("read-document-classifications", "Read latest persisted classification suggestions for uploaded documents.", DocumentClassificationsReadInput, False, False, [], _document_classifications_handler(db, user_id), output_model=DocumentClassificationsToolOutput, adaptive_ready=True),
         _tool("read-original-file", "Read safe metadata for an uploaded original file.", DocumentToolInput, False, False, [], _read_original_file_handler(db, user_id)),
@@ -3216,8 +3266,6 @@ def _build_mvp_tools(
         ),
         _tool("confirmed-file-action", "Execute confirmed operation plan.", ConfirmedFileActionInput, True, True, ["change_items"], _confirmed_action_handler(db, user_id)),
         _tool("feedback-record", "Record user feedback.", FeedbackRecordInput, True, False, ["feedback", "skill_feedback_samples"], _feedback_handler(user_id)),
-        _tool("job-status-read", "Read processing job status.", JobStatusReadInput, False, False, [], _job_status_handler),
-        _tool("document-lineage-read", "Read document lineage.", DocumentLineageReadInput, False, False, [], _lineage_handler),
         _tool("managed-root-list", "List server managed logical roots.", ManagedRootListInput, True, False, ["managed_roots"], _managed_root_list_handler(db)),
         _tool("managed-file-list", "List server managed files by logical metadata filters.", ManagedFileListInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_list_handler(db), output_model=ManagedFileCollectionToolOutput, adaptive_ready=True),
         _tool("managed-file-search", "Search server managed files by filename keyword.", ManagedFileSearchInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_search_handler(db), output_model=ManagedFileCollectionToolOutput, adaptive_ready=True),

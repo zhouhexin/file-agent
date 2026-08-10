@@ -10,7 +10,7 @@ Query, conversation id, attachment ids, explicit user preferences.
 Ranked search results, source locations, recommendation reasons.
 
 ## Allowed Tools
-`hybrid-search`, `document-lineage-read`
+`hybrid-search`
 
 ## Open Source Backing
 Uses open-source-backed `hybrid-search` through LangChain retrievers, LlamaIndex QueryEngineTool, and pgvector adapters.
