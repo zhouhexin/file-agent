@@ -112,13 +112,24 @@ class ManagedFileService:
         root = self.repository.get_root(root_id)
         if root is None or not root.enabled:
             raise HTTPException(status_code=404, detail="Managed root not found")
-        job = FilesystemJobQueue(self.db).create_job(
+        queue = FilesystemJobQueue(self.db)
+        queue.create_job(
+            job_type="REPAIR_WORKING_COPY_LAYOUT",
+            queue_name="RECONCILE",
+            root_id=root.id,
+            created_by=current_user.id,
+            deduplication_key=f"repair-working-copy-layout-v2:{root.id}",
+            priority=10,
+            payload={"root_key": root.root_key, "reason": "manual-layout-repair-v2"},
+        )
+        job = queue.create_job(
             job_type="RECONCILE_MANAGED_ROOT",
             queue_name="RECONCILE",
             root_id=root.id,
             created_by=current_user.id,
             deduplication_key=f"reconcile-managed-root:{root.id}",
             reuse_completed=True,
+            priority=50,
             payload={"root_key": root.root_key, "reason": "manual"},
         )
         self.db.commit()

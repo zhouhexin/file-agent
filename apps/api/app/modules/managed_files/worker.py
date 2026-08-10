@@ -49,6 +49,9 @@ from app.modules.file_lifecycle.service import (
     working_copy_search_artifact_status,
 )
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
+from app.modules.knowledge_graph.classification_context import get_graph_repository
+from app.modules.knowledge_graph.managed_path_profile import ManagedPathProfileRegistry
+from app.modules.knowledge_graph.projection_service import GraphProjectionService
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
 from app.modules.managed_files.scanner import ManagedFileScanner
@@ -203,6 +206,18 @@ def process_next_filesystem_job(
                                     error_message=public_error,
                                     event_details=failure_details,
                                 )
+                        elif (
+                            failed_job.job_type == "GRAPH_BOOTSTRAP_PROJECTION"
+                            and failed_job.attempt_count < failed_job.max_attempts
+                        ):
+                            # Neo4j 是可重建投影；短暂不可用时只重试独立 GRAPH 任务，
+                            # 不能让 API、扫描或导入队列承担连接等待。
+                            queue.mark_retry(
+                                job=failed_job,
+                                error_message=public_error,
+                                retry_after_seconds=min(300, 2 ** failed_job.attempt_count),
+                                event_details=failure_details,
+                            )
                         else:
                             queue.mark_failed(
                                 job=failed_job,
@@ -278,11 +293,14 @@ def run_filesystem_worker(
                 continue
             if reconciled:
                 continue
-            graph_processed = process_next_classification_graph_outbox(
-                session_factory=session_factory
-            )
-            if graph_processed is not None:
-                continue
+            # 正式分类图谱投影只能由 GRAPH worker 消费。队列隔离使 Neo4j 超时或
+            # 维护不会占用扫描、导入、分析和文件操作 worker。
+            if queue_names is None or "GRAPH" in queue_names:
+                graph_processed = process_next_classification_graph_outbox(
+                    session_factory=session_factory
+                )
+                if graph_processed is not None:
+                    continue
             time.sleep(poll_seconds)
 
 
@@ -436,6 +454,12 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
     # 不能落入 Planner 或普通受管目录 Tool。
     if FileLifecycleJobProcessor(db).process(job):
         return
+    if job.job_type == "GRAPH_BOOTSTRAP_PROJECTION":
+        _process_graph_bootstrap_projection(db=db, job=job)
+        return
+    if job.job_type == "PROJECT_GRAPH_OUTBOX":
+        _process_graph_outbox(db=db, job=job)
+        return
     if job.job_type == "CLASSIFY_MANAGED_FILES":
         _process_managed_file_classification_job(db=db, job=job)
         return
@@ -519,6 +543,58 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
             "import_job_ids": batch_import_job_ids,
             "batches_committed": batch_number,
         },
+    )
+
+
+def _process_graph_bootstrap_projection(*, db: Session, job: FilesystemJob) -> None:
+    """异步执行一次图谱 bootstrap；Neo4j 失败不得阻塞 API 或文件导入。"""
+
+    settings = get_settings()
+    if not settings.neo4j_sync_enabled or not settings.graph_projection_worker_enabled:
+        FilesystemJobQueue(db).mark_completed(
+            job=job,
+            result={"status": "SKIPPED", "reason": "GRAPH_PROJECTION_DISABLED"},
+        )
+        return
+    try:
+        summary = GraphProjectionService(
+            repository=get_graph_repository(settings),
+            profile_registry=ManagedPathProfileRegistry.load(
+                settings.managed_path_classification_profile_dir
+            ),
+        ).sync_all(db=db)
+    except Exception:
+        # 投影服务已写入脱敏 FAILED 运行记录；先提交该审计事实，再由外层 worker
+        # 把 filesystem job 置为有限重试，Neo4j 故障不能抹掉 PostgreSQL 诊断。
+        db.commit()
+        raise
+    FilesystemJobQueue(db).mark_completed(
+        job=job,
+        result={
+            "status": "COMPLETED",
+            "category_count": summary.category_count,
+            "folder_count": summary.folder_count,
+            "document_version_count": summary.document_version_count,
+        },
+    )
+
+
+def _process_graph_outbox(*, db: Session, job: FilesystemJob) -> None:
+    """有上限地消费正式分类 outbox，保持 PostgreSQL 事实先提交。"""
+
+    settings = get_settings()
+    requested_batch_size = int((job.payload_json or {}).get("batch_size") or 0)
+    batch_size = max(1, min(settings.graph_projection_batch_size, requested_batch_size or 1_000))
+    service = ClassificationGraphOutboxService(db, settings=settings)
+    processed_ids: list[str] = []
+    for _ in range(batch_size):
+        outbox_id = service.process_next()
+        if outbox_id is None:
+            break
+        processed_ids.append(outbox_id)
+    FilesystemJobQueue(db).mark_completed(
+        job=job,
+        result={"status": "COMPLETED", "processed_count": len(processed_ids)},
     )
 
 
@@ -1316,6 +1392,8 @@ def _public_job_error_message(*, job: FilesystemJob, error: Exception) -> str:
         return "受管原始目录扫描失败，原始文件未被修改；请根据 job_id 查看服务器日志。"
     if FileLifecycleJobProcessor.supports(job.job_type):
         return "文件后台处理失败，系统将按策略重试；达到上限后请联系管理员。"
+    if job.job_type in {"GRAPH_BOOTSTRAP_PROJECTION", "PROJECT_GRAPH_OUTBOX"}:
+        return "Neo4j 图谱投影暂不可用；文件导入不受影响，请根据 job_id 查看服务器日志。"
     return str(error)[:2000] or "文件系统任务执行失败。"
 
 

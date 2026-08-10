@@ -55,7 +55,7 @@ python -m pytest
 后端服务数据库必须使用 PostgreSQL；如果未配置 `DATABASE_URL`，或配置为 SQLite，服务会直接启动失败。
 从项目根目录启动后端时必须设置 `PYTHONPATH=apps/api`，否则 Python 无法找到 `apps/api/app` 包。
 如果在项目根目录直接执行 `python -m uvicorn app.main:app ...` 且没有设置 `PYTHONPATH=apps/api`，会报 `ModuleNotFoundError: No module named 'app'`。
-上传文件先保存到 `FILE_STORAGE_ROOT=./storage/uploads` 暂存目录并创建异步查重任务。无重复候选时自动异步归档；发现相同或高度相似文件时，聊天页逐文件要求用户选择“继续上传”“使用已有文件”或“取消上传”。
+上传文件先保存到 `FILE_STORAGE_ROOT=./storage/uploads` 暂存目录并创建异步查重任务。无候选时自动异步归档；发现同名、相同内容或高度相似文件时，聊天页逐文件要求用户选择“继续上传”“使用已有文件”或“取消上传”。
 文件生命周期固定使用三层名词：`受管原始目录`保存不可变原始文件，`工作副本目录`承载 Agent 的增删改查，`回收站目录`保存可恢复的工作副本删除结果。重命名和移动只改变工作副本路径，不新增 `DocumentVersion`；原始文件始终不变。普通用户可以在 `/chat` 通过自然语言处理同名冲突、移入回收站和恢复文件，所有物理动作都必须先展示并确认 OperationPlan。
 所有用户共用唯一物理工作目录：受管资料和上传归档每个文件只导入一份，固定保存于 `shared/<root_key>`，不再按用户 default workspace 复制。所有普通用户可以检索和读取共享 `ACTIVE` 工作副本；用户 default workspace 仍只保存并隔离会话、个人附件上下文、上传来源、反馈和审计。共享目录上的改名、移动、回收站和恢复计划会明确提示其影响范围，仍须由发起用户确认。
 服务端结构化日志默认保存到 `LOG_DIR=./logs`，按天生成 `file-agent-YYYY-MM-DD.log`，启动时会删除超过 `LOG_RETENTION_DAYS=7` 天的日志。
@@ -63,14 +63,14 @@ python -m pytest
 上传采用分块流式写入，`UPLOAD_MAX_FILE_SIZE_MB` 是可按部署容量调整的资源保护上限，默认 1024 MB，并非固定业务限制。当前阶段只执行扩展名、基础 MIME、宏和加密风险检查，不实现、也不宣称已执行病毒扫描。
 PDF、DOCX 默认启用本地 Docling 结构化解析，并把文档元素和位置写入 `document_elements`；Docling 不可用时自动回退现有解析器，扫描件仍由现有 OCR 链路处理。
 文件重命名统一生成 `RENAME_WORKING_COPIES` OperationPlan，确认后由工作副本执行器执行；旧的受管原始文件 Native/F2 执行通道和上传暂存重命名通道不再对 Agent 开放。
-上传附件通过查重后由独立 worker 归档到受管原始目录；`IMPORT` worker 只完成原子复制、`ACTIVE` 工作副本登记和文件名级检索投影，随后由 `ANALYSIS` worker 异步完成正文解析、双摘要、分类和 Chunk 索引。后台双摘要默认使用 CPU-only Jieba + LexRank 抽取原文关键句，即使全局 LLM 已启用也不会自动发送上传正文；只有用户明确要求总结或讲解时才使用独立的聊天摘要 LLM Provider。低置信度命名保留原上传文件名并请求确认；目标名称冲突时先询问是否同时保留，不会自动增加版本后缀或覆盖文件。普通用户只看到整理后的文件名、分类和需要本人决定的事项，不展示内部状态、Skill 或 Tool。对话找文件默认使用 CPU-only 两阶段检索：先按最终文件名、分类、元数据和普通文档摘要召回少量当前工作副本，必要时以原文 Chunk 词法索引补召回，再只在候选版本内定位证据。该流程不调用 embedding、GPU、LLM 或 Graph；用户只看到文件卡、分类、概览、命中原因和位置，并能打开有权限的结果文件。精确问答仍必须回到原文取证。后续重命名、移动和删除计划必须以 `working_copy_id` 为对象，不能再修改受管原始目录。
+上传附件通过查重后由独立 worker 归档到受管原始目录；`IMPORT` worker 以一次源文件读取完成哈希和原子复制，按 `shared/<root_key>/<源相对路径>` 登记 `ACTIVE` 工作副本，随后由 `ANALYSIS` worker 异步完成正文解析、双摘要、分类和 Chunk 索引。同步不会因不同目录中的同名文件停顿，也不会生成“待整理/待确认”物理目录；同名歧义只在上传、查询或实际使用相关文件时提示选择。后台双摘要默认使用 CPU-only Jieba + LexRank。普通用户不展示内部状态、Skill 或 Tool。对话找文件默认使用 CPU-only 两阶段检索，精确问答仍必须回到原文取证。后续重命名、移动和删除计划必须以 `working_copy_id` 为对象，不能再修改受管原始目录。
 每个成功解析的工作副本内容版本会在发布前幂等建立 Chunk/Evidence。当前无 GPU 部署使用 Jieba + PostgreSQL `simple` FTS/GIN + `pg_trgm` 的 CPU 词法索引；`embedding vector(1536)` 只保留空扩展槽，默认 `EMBEDDING_ENABLED=false`，不会下载向量模型或要求应用服务器安装 GPU。后续可接独立 GPU provider 异步回填，不改变已有 Chunk、Evidence 和引用 ID。
 默认不启用真实 LLM 调用；如需让对话阶段使用大模型理解用户需求，请在 `.env` 中配置 `LLM_ENABLED=true`、`LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_CHAT_MODEL`。当前 LLM 客户端使用 OpenAI-compatible Chat Completions 接口。
 LLM 启用后，Adaptive Planner 默认运行在 `ADAPTIVE_PLANNER_MODE=shadow`：Legacy Planner 继续产生用户可见结果，Adaptive Planner 只能引用本次 `CatalogSnapshot` 中已启用的 Tool/Skill 并进行只读对比，不会产生第二次 Tool 调用。当前每次 AgentRun 最多规划 3 轮、实际调用 5 次 Tool；高风险步骤遇到确认边界会暂停而不是跳过。现有 Catalog 无法满足明确目标时，可以生成去重、脱敏的能力建议，由 ops/admin 在 `/admin/capability-suggestions` 评审；建议不会自动创建代码或启用 Tool/Skill。
 Adaptive 灰度启用后，`hybrid-search` 会把结果数量、后端确认的实际查询条件、索引状态和受控文件 ID 交回 Planner，由 Planner 在三轮预算内决定结束、调整查询或继续读取证据。普通用户只看到最终文件结果和“本次查找采用的条件”，不显示 Skill、Tool 或规划预算。ops/admin 可在 `/admin/agent-runs` 查看中文任务诊断时间线；对应接口为 `GET /api/admin/agent-runs` 和 `GET /api/admin/agent-runs/{agent_run_id}/diagnostics`。
 后台普通摘要和分类主题摘要分别由 `DOCUMENT_SUMMARY_PROVIDER=extractive`、`CLASSIFICATION_SUMMARY_PROVIDER=extractive` 控制；这两个默认值不需要 GPU 或模型服务。阶段五的用户问答和完整总结由 `EVIDENCE_ANSWER_PROVIDER=llm` 控制，并且只有 `LLM_ENABLED=true` 时才调用模型；回答必须绑定活动工作副本当前版本的 EvidenceSpan。LLM 关闭或校验失败时只返回带明确限制的原文摘录，不生成猜测答案。表格金额、计数和汇总继续由确定性 `analyze-spreadsheet` 计算。
 分类判定默认仍为 `LLM_CLASSIFICATION_MODE=rule_only`。如需让 LLM 在候选分类内做语义判定，可设置 `LLM_CLASSIFICATION_MODE=hybrid`；如需允许 LLM 自由提出新分类路径，还必须显式设置 `LLM_CLASSIFICATION_ALLOW_FREE_PATHS=true`，该类结果只会以 `NEEDS_REVIEW` 保存，不会自动写入正式分类目录。
-Neo4j 图谱增强分类默认关闭。第二版本支持目录角色 Profile、完整正文本地 Embedding、固定 `VectorCypherRetriever`、`off/shadow/enabled`、投影运行审计和分类反馈样本；无标注阶段只允许小范围展示建议，连接失败会自动回退现有分类。具体步骤见 `docs/runbook.md`。
+Neo4j 图谱和图向量默认以 Shadow 模式开启。API 启动只创建 GRAPH 队列任务；一次性 bootstrap 和后续正式分类 Outbox 增量投影由独立 GRAPH worker 执行，连接失败不会阻塞 API、扫描或文件复制。具体步骤见 `docs/runbook.md`。
 
 消息接口需要先注册、登录并携带 `Authorization: Bearer <access_token>`。示例见 `docs/runbook.md`。
 
@@ -78,8 +78,8 @@ Neo4j 图谱增强分类默认关闭。第二版本支持目录角色 Profile、
 
 Windows CMD 可直接执行 `scripts\start-file-agent-workers.cmd`。脚本会先读取项目根 `.env`，把当前
 Windows 机器的 `MANAGED_ROOT_*` 路径同步到数据库并真实验证目录可读；预检失败时不会启动任何
-worker。预检通过后分别启动 scheduler、扫描 worker、生命周期 worker、两个 `IMPORT` worker 和一个
-`ANALYSIS` worker；增加
+worker。预检通过后分别启动 scheduler、扫描 worker、生命周期 worker、两个 `IMPORT` worker、一个
+`ANALYSIS` worker 和一个 `GRAPH` worker；增加
 `--with-watcher` 才会额外启动 watcher。若 Python 不在 PATH，先设置 `FILE_AGENT_PYTHON` 为解释器
 绝对路径。脚本无论从哪个当前目录调用都会先切换到仓库根，因此相对
 `WORKING_COPY_STORAGE_ROOT=./storage/working-copies` 始终指向仓库内目录。共享开发数据库已有
@@ -94,6 +94,8 @@ PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE \
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=IMPORT \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=ANALYSIS \
+  /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
+PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=GRAPH \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=FILE_OPERATION \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker

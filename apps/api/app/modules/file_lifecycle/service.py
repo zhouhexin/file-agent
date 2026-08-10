@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from dataclasses import dataclass
 from datetime import timedelta, timezone
 from pathlib import Path
@@ -45,6 +46,7 @@ from app.db.models import (
     utcnow,
 )
 from app.modules.file_lifecycle.repository import FileLifecycleRepository
+from app.modules.file_lifecycle.layout_repair import WorkingCopyLayoutRepairService
 from app.modules.file_lifecycle.organizer import (
     InitialOrganizationDecision,
     InitialWorkingCopyOrganizer,
@@ -74,11 +76,15 @@ from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
 @dataclass(slots=True)
 class InitialWorkingPathResolution:
-    """首次导入的安全目标；冲突时只返回待确认位置，不自动生成版本后缀。"""
+    """首次导入的安全目标。
+
+    同名事实只保存到索引并在用户查询、上传或实际使用相关文件时提示；后台同步
+    不得通过“待确认”物理目录向用户提前制造决策任务。
+    """
 
     relative_path: str
     filename: str
-    conflict: dict[str, Any] | None = None
+    storage_collision: bool = False
 
 
 def working_copy_search_artifact_status(
@@ -578,6 +584,7 @@ class FileLifecycleJobProcessor:
             "CLEANUP_UPLOAD_TEMP": self._cleanup_upload_temp,
             "RECONCILE_UPLOAD_ARCHIVES": self._reconcile_upload_archives,
             "RECONCILE_MANAGED_ROOT": self._reconcile_managed_root,
+            "REPAIR_WORKING_COPY_LAYOUT": self._repair_working_copy_layout,
         }
         handler = handlers.get(job.job_type)
         if handler is None:
@@ -597,6 +604,7 @@ class FileLifecycleJobProcessor:
             "CLEANUP_UPLOAD_TEMP",
             "RECONCILE_UPLOAD_ARCHIVES",
             "RECONCILE_MANAGED_ROOT",
+            "REPAIR_WORKING_COPY_LAYOUT",
         }
 
     def record_failure(self, *, job: FilesystemJob, error_message: str, retrying: bool) -> None:
@@ -693,6 +701,16 @@ class FileLifecycleJobProcessor:
         )
         FilesystemJobQueue(self.db).mark_completed(job=job, result={"scan_job_id": child.id})
 
+    def _repair_working_copy_layout(self, job: FilesystemJob) -> None:
+        """迁移旧共享根和历史待整理路径，不触碰受管原始目录。"""
+
+        if not job.root_id:
+            raise RuntimeError("REPAIR_WORKING_COPY_LAYOUT 缺少 root_id")
+        result = WorkingCopyLayoutRepairService(self.db).repair_managed_root(
+            managed_root_id=job.root_id,
+        )
+        FilesystemJobQueue(self.db).mark_completed(job=job, result=result)
+
     def _check_upload_duplicates(self, job: FilesystemJob) -> None:
         """执行完整 SHA-256 查重，并在有候选时创建对话确认。"""
 
@@ -707,6 +725,7 @@ class FileLifecycleJobProcessor:
             upload_document_id=document.id,
             sha256=version.sha256,
             max_candidates=self.settings.upload_duplicate_max_candidates,
+            filename=version.filename,
         )
         candidates.extend(self._append_near_duplicate_candidates(review=review, version=version, exact=candidates))
         if candidates:
@@ -983,7 +1002,7 @@ class FileLifecycleJobProcessor:
             relative_path=managed_file.relative_path,
         )
         source_stat_before = source.stat()
-        source_sha256 = managed_file.content_sha256 or self.storage.sha256_file(source)
+        source_sha256 = managed_file.content_sha256
         staged_relative_path = self.storage.internal_staging_relative_path(
             working_root_relative_path=working_root.relative_storage_path,
             job_id=job.id,
@@ -994,10 +1013,22 @@ class FileLifecycleJobProcessor:
         final_target: Path | None = None
         final_target_created = False
         try:
-            self.storage.import_working_copy(
+            copy_started_at = time.perf_counter()
+            _, copied_sha256 = self.storage.stage_working_copy(
                 source=source,
                 relative_path=staged_relative_path,
                 expected_sha256=source_sha256,
+            )
+            source_sha256 = copied_sha256
+            managed_file.content_sha256 = copied_sha256
+            log_event(
+                "working_copy.import.copy_completed",
+                status="COMPLETED",
+                duration_ms=int((time.perf_counter() - copy_started_at) * 1000),
+                managed_file_id=managed_file.id,
+                root_id=managed_file.root_id,
+                size_bytes=managed_file.size_bytes,
+                message="工作副本暂存复制完成",
             )
             source_stat_after = source.stat()
             if (source_stat_before.st_size, source_stat_before.st_mtime_ns) != (
@@ -1051,10 +1082,21 @@ class FileLifecycleJobProcessor:
             relative_path = path_resolution.relative_path
             filename = path_resolution.filename
             final_storage_relative_path = f"{working_root.relative_storage_path}/{relative_path}"
+            publish_started_at = time.perf_counter()
             final_target, final_target_created = self.storage.publish_working_copy(
                 staged_relative_path=staged_relative_path,
                 target_relative_path=final_storage_relative_path,
                 expected_sha256=source_sha256,
+                staged_hash_verified=True,
+            )
+            log_event(
+                "working_copy.import.publish_completed",
+                document_id=document.id,
+                status="COMPLETED",
+                duration_ms=int((time.perf_counter() - publish_started_at) * 1000),
+                managed_file_id=managed_file.id,
+                root_id=managed_file.root_id,
+                message="工作副本原子发布完成",
             )
 
             document.original_filename = filename
@@ -1086,41 +1128,13 @@ class FileLifecycleJobProcessor:
             working_root.last_imported_at = utcnow()
             DocumentSearchProfileService(db=self.db).upsert_current_profile(working_copy.id)
 
-            pending_decision = (
-                {
-                    **path_resolution.conflict,
-                    "working_copy_id": working_copy.id,
-                    "filename": working_copy.filename,
-                }
-                if path_resolution.conflict is not None
-                else None
-            )
-            graph_document_results = (
-                [
-                    {
-                        "document_id": document.id,
-                        "document_version_id": version.id,
-                        "working_copy_id": working_copy.id,
-                        "filename": filename,
-                        "categories": [],
-                        "pending_decision": pending_decision,
-                    }
-                ]
-                if pending_decision
-                else []
-            )
             changeset, _ = create_lifecycle_audit(
                 db=self.db,
                 user_id=user_id,
                 workspace_id=workspace_id,
                 conversation_id=self._conversation_for_upload(managed_file),
                 tool_name="working-copy-fast-import",
-                message_content=(
-                    f"文件已进入共享工作目录，当前保留为“{filename}”。"
-                    "系统中已有同名但内容不同的文件，请确认覆盖原文件还是同时保留。"
-                    if pending_decision
-                    else f"文件“{filename}”已进入共享工作目录，后台分析任务已排队。"
-                ),
+                message_content=f"文件“{filename}”已进入共享工作目录，后台分析任务已排队。",
                 change_type="WORKING_COPY_IMPORTED",
                 target_type="working_copy",
                 target_id=working_copy.id,
@@ -1131,29 +1145,12 @@ class FileLifecycleJobProcessor:
                     "relative_path": relative_path,
                     "document_version_id": version.id,
                     "analysis_status": "PENDING",
-                    "pending_decision": pending_decision,
+                    "storage_collision": path_resolution.storage_collision,
                     "managed_original_unchanged": True,
                 },
-                graph_document_results=graph_document_results,
-                visible_in_conversation=bool(pending_decision),
+                graph_document_results=[],
+                visible_in_conversation=False,
             )
-            if pending_decision:
-                self.db.add(
-                    FileRenameReviewItem(
-                        conversation_id=changeset.conversation_id,
-                        agent_run_id=changeset.agent_run_id,
-                        user_id=user_id,
-                        managed_file_id=managed_file.id,
-                        document_id=document.id,
-                        root_key=managed_root.root_key,
-                        original_relative_path=managed_file.relative_path,
-                        original_filename=managed_file.filename,
-                        source_sha256=source_sha256,
-                        status="NEEDS_REVIEW",
-                        review_context_json=pending_decision,
-                        decision_json={},
-                    )
-                )
             self.db.add(
                 WorkingCopyPathRecord(
                     working_copy_id=working_copy.id,
@@ -1233,22 +1230,18 @@ class FileLifecycleJobProcessor:
             )
             return
         pending_decision = None
-        category_name = "待整理"
+        category_name = "暂无可靠分类"
         graph_document_results: list[dict[str, Any]] = []
         if isinstance(organization_decision, InitialOrganizationDecision):
             pending_decision = self._initial_organization_pending_decision(
                 decision=organization_decision,
                 working_copy=working_copy,
-                path_resolution=InitialWorkingPathResolution(
-                    relative_path=working_copy.relative_path,
-                    filename=working_copy.filename,
-                ),
             )
             if organization_decision.primary_category is not None:
                 category_name = "/".join(
                     str(item)
                     for item in organization_decision.primary_category.get("category_path", [])
-                ) or "待整理"
+                ) or "暂无可靠分类"
             file_receipt = {
                 **organization_decision.document_result(
                     document_id=document.id,
@@ -1341,450 +1334,6 @@ class FileLifecycleJobProcessor:
                 **result,
             },
         )
-
-    def _legacy_import_working_copy(self, job: FilesystemJob) -> None:
-        """分析原始文件并只以最终名称和分类目录创建工作副本。
-
-        内部临时文件不会形成 WorkingCopy 业务对象；正式文件提交后才写入活动工作副本。
-        """
-
-        payload = dict(job.payload_json or {})
-        managed_file = self.db.get(ManagedFile, str(payload.get("managed_file_id") or ""))
-        # 历史队列可能仍携带用户默认工作区；worker 只能导入唯一共享工作区，
-        # 不信任任务载荷中的物理范围，避免旧任务重新制造按用户副本。
-        workspace_id = get_shared_workspace_id(self.db)
-        user_id = str(payload.get("user_id") or job.created_by or "")
-        if managed_file is None or managed_file.status != "ACTIVE" or not workspace_id or not user_id:
-            raise RuntimeError("IMPORT_WORKING_COPIES 缺少有效原始文件、工作区或用户")
-        managed_root = self.db.get(ManagedRoot, managed_file.root_id)
-        if managed_root is None:
-            raise RuntimeError("原始文件目录不存在")
-        working_root = self.repository.get_or_create_working_root(workspace_id=workspace_id, managed_root=managed_root)
-        existing = self.repository.find_primary_working_copy(
-            working_root_id=working_root.id,
-            managed_file_id=managed_file.id,
-        )
-        if existing is not None:
-            existing_relative_path = (
-                f"{working_root.relative_storage_path}/{existing.relative_path}"
-            )
-            existing_target = self.storage.working_copy_path(existing_relative_path)
-            if existing.status != "ACTIVE":
-                # 回收站中的工作副本只能由确认后的恢复流程处理，后台导入不得复活。
-                FilesystemJobQueue(self.db).mark_completed(
-                    job=job,
-                    result={
-                        "working_copy_id": existing.id,
-                        "idempotent": True,
-                        "skipped_status": existing.status,
-                    },
-                )
-                return
-            if existing_target.is_file():
-                expected_sha256 = (
-                    existing.imported_source_sha256 or existing.content_sha256
-                )
-                if expected_sha256 and self.storage.sha256_file(existing_target) != expected_sha256:
-                    raise RuntimeError("工作副本路径已存在但内容校验失败，禁止自动覆盖")
-                search_repair = self._ensure_existing_working_copy_search_artifacts(
-                    working_copy=existing,
-                    managed_file=managed_file,
-                )
-                FilesystemJobQueue(self.db).mark_completed(
-                    job=job,
-                    result={
-                        "working_copy_id": existing.id,
-                        "idempotent": True,
-                        "search_repair": search_repair,
-                    },
-                )
-                return
-            if existing_target.exists():
-                raise RuntimeError("工作副本目标路径被非文件对象占用，禁止自动覆盖")
-
-            source = resolve_managed_relative_path(
-                root_path=Path(managed_root.container_path),
-                relative_path=managed_file.relative_path,
-            )
-            source_sha256 = managed_file.content_sha256 or self.storage.sha256_file(source)
-            expected_imported_sha256 = (
-                existing.imported_source_sha256 or existing.content_sha256
-            )
-            if expected_imported_sha256 and source_sha256 != expected_imported_sha256:
-                existing.sync_status = "ORIGINAL_CHANGED"
-                raise RuntimeError("原件内容已变化，不能用新内容修复旧版本工作副本")
-            self.storage.import_working_copy(
-                source=source,
-                relative_path=existing_relative_path,
-                expected_sha256=source_sha256,
-            )
-            existing.sync_status = "SYNCED"
-            existing.size_bytes = managed_file.size_bytes
-            existing.content_sha256 = source_sha256
-            existing.imported_source_sha256 = source_sha256
-            existing.updated_at = utcnow()
-            working_root.status = "ACTIVE"
-            working_root.updated_at = utcnow()
-            search_repair = self._ensure_existing_working_copy_search_artifacts(
-                working_copy=existing,
-                managed_file=managed_file,
-            )
-            FilesystemJobQueue(self.db).mark_completed(
-                job=job,
-                result={
-                    "working_copy_id": existing.id,
-                    "idempotent": False,
-                    "physical_copy_repaired": True,
-                    "search_repair": search_repair,
-                },
-            )
-            return
-        source = resolve_managed_relative_path(
-            root_path=Path(managed_root.container_path),
-            relative_path=managed_file.relative_path,
-        )
-        source_stat_before = source.stat()
-        source_sha256 = managed_file.content_sha256 or self.storage.sha256_file(source)
-        # 内部暂存路径只承载任务唯一性；完整 UUID 和用户文件名会放大 Windows 路径长度，
-        # 因而必须由 StorageService 生成固定上界的私有名称。
-        staged_relative_path = self.storage.internal_staging_relative_path(
-            working_root_relative_path=working_root.relative_storage_path,
-            job_id=job.id,
-            managed_file_id=managed_file.id,
-            filename=managed_file.filename,
-        )
-        final_storage_relative_path = ""
-        final_target: Path | None = None
-        final_target_created = False
-        try:
-            self.storage.import_working_copy(
-                source=source,
-                relative_path=staged_relative_path,
-                expected_sha256=source_sha256,
-            )
-            source_stat_after = source.stat()
-            if (source_stat_before.st_size, source_stat_before.st_mtime_ns) != (
-                source_stat_after.st_size,
-                source_stat_after.st_mtime_ns,
-            ):
-                raise RuntimeError("原始文件在导入期间发生变化")
-
-            document = Document(
-                user_id=user_id,
-                workspace_id=workspace_id,
-                original_filename=managed_file.filename,
-                content_type=_guess_content_type(managed_file.extension),
-                size_bytes=managed_file.size_bytes,
-                sha256=source_sha256,
-                status="WORKING_COPY",
-                ingest_status="INGESTING",
-            )
-            self.db.add(document)
-            self.db.flush()
-            file_object = FileObject(
-                document_id=document.id,
-                storage_backend="working_copy_local",
-                storage_path=staged_relative_path,
-                size_bytes=managed_file.size_bytes,
-                sha256=source_sha256,
-            )
-            self.db.add(file_object)
-            version = DocumentVersion(
-                document_id=document.id,
-                version_number=1,
-                working_copy_id=None,
-                storage_tier="WORKING_COPY",
-                storage_path=staged_relative_path,
-                filename=managed_file.filename,
-                content_type=document.content_type,
-                size_bytes=managed_file.size_bytes,
-                sha256=source_sha256,
-                source_type="IMPORT",
-                source_managed_file_id=managed_file.id,
-                created_by=user_id,
-            )
-            self.db.add(version)
-            self.db.flush()
-
-            decision = InitialWorkingCopyOrganizer(
-                db=self.db,
-                user_id=user_id,
-                settings=self.settings,
-            ).decide(document=document, version=version, managed_file=managed_file)
-            extraction_run_id = str((decision.extraction_result or {}).get("extraction_run_id") or "")
-            index_result = (
-                DocumentIndexService(db=self.db, settings=self.settings).build(
-                    document_id=document.id,
-                    document_version_id=version.id,
-                    extraction_run_id=extraction_run_id,
-                )
-                if extraction_run_id
-                else {
-                    "ok": False,
-                    "status": "FAILED",
-                    "chunk_count": 0,
-                    "evidence_count": 0,
-                    "embedding_status": "DISABLED",
-                    "error": {"code": "EXTRACTION_NOT_READY", "message": "正文解析未完成，检索索引尚未建立。"},
-                }
-            )
-            path_resolution = self._working_path_resolution(
-                working_root=working_root,
-                managed_file=managed_file,
-                preferred_relative_path=decision.relative_path,
-            )
-            relative_path = path_resolution.relative_path
-            decision.filename = path_resolution.filename
-            decision.relative_path = relative_path
-            if path_resolution.conflict is not None:
-                decision.rename_status = "NEEDS_REVIEW"
-            final_storage_relative_path = f"{working_root.relative_storage_path}/{relative_path}"
-            final_target, final_target_created = self.storage.publish_working_copy(
-                staged_relative_path=staged_relative_path,
-                target_relative_path=final_storage_relative_path,
-                expected_sha256=source_sha256,
-            )
-
-            document.original_filename = decision.filename
-            document.ingest_status = "INGESTED"
-            version.storage_path = final_storage_relative_path
-            version.filename = decision.filename
-            file_object.storage_path = final_storage_relative_path
-            working_copy = WorkingCopy(
-                working_copy_root_id=working_root.id,
-                workspace_id=workspace_id,
-                managed_file_id=managed_file.id,
-                document_id=document.id,
-                relative_path=relative_path,
-                relative_path_hash=hashlib.sha256(relative_path.encode("utf-8")).hexdigest(),
-                filename=decision.filename,
-                extension=Path(decision.filename).suffix.lower(),
-                size_bytes=managed_file.size_bytes,
-                content_sha256=source_sha256,
-                imported_source_sha256=source_sha256,
-                is_primary_import=True,
-                status="ACTIVE",
-                sync_status="SYNCED",
-            )
-            self.db.add(working_copy)
-            self.db.flush()
-            version.working_copy_id = working_copy.id
-            working_copy.current_version_id = version.id
-            working_root.status = "READY"
-            working_root.last_imported_at = utcnow()
-            # 工作副本成为 ACTIVE 的同一事务内必须创建检索投影；查询请求不能承担回填职责。
-            DocumentSearchProfileService(db=self.db).upsert_current_profile(working_copy.id)
-
-            category_name = (
-                "/".join(str(item) for item in decision.primary_category.get("category_path", []))
-                if decision.primary_category is not None
-                else "待整理"
-            )
-            pending_decision = self._initial_organization_pending_decision(
-                decision=decision,
-                working_copy=working_copy,
-                path_resolution=path_resolution,
-            )
-            extraction_pages = list((decision.extraction_result or {}).get("pages") or [])
-            file_receipt = {
-                **decision.document_result(
-                    document_id=document.id,
-                    document_version_id=version.id,
-                ),
-                "document_version_id": version.id,
-                "working_copy_id": working_copy.id,
-                "filename": decision.filename,
-                "page_count": len(extraction_pages),
-                "char_count": sum(int(item.get("char_count") or 0) for item in extraction_pages),
-                "organization_status": "NEEDS_REVIEW" if pending_decision or not index_result.get("ok") else "READY",
-                "search_status": "READY" if index_result.get("ok") else "NEEDS_REVIEW",
-                "evidence_count": int(index_result.get("evidence_count") or 0),
-                "year": decision.rename_metadata.get("year"),
-                "document_type": decision.summary_metadata.get("document_type"),
-                "keywords": list(decision.summary_metadata.get("keywords") or []),
-                "entities": list(decision.summary_metadata.get("entities") or []),
-                "managed_original_unchanged": True,
-                "risk_warnings": self._risk_warnings_for_managed_file(managed_file),
-                "pending_decision": pending_decision,
-            }
-            message_content = self._initial_organization_message(
-                filename=decision.filename,
-                category_name=category_name,
-                pending_decision=pending_decision,
-            )
-            changeset, _ = create_lifecycle_audit(
-                db=self.db,
-                user_id=user_id,
-                workspace_id=workspace_id,
-                conversation_id=self._conversation_for_upload(managed_file),
-                tool_name="working-copy-initial-organize",
-                message_content=message_content,
-                change_type="WORKING_COPY_IMPORTED",
-                target_type="working_copy",
-                target_id=working_copy.id,
-                target_document_id=document.id,
-                after_value={
-                    "working_copy_id": working_copy.id,
-                    "managed_file_id": managed_file.id,
-                    "relative_path": relative_path,
-                    "document_version_id": version.id,
-                    "document_summary_id": decision.document_summary_id,
-                    "classification_summary_id": decision.classification_summary_id,
-                    "document_index_run_id": index_result.get("index_run_id"),
-                    "search_status": file_receipt["search_status"],
-                    "chunk_count": int(index_result.get("chunk_count") or 0),
-                    "evidence_count": int(index_result.get("evidence_count") or 0),
-                    "embedding_status": index_result.get("embedding_status") or "DISABLED",
-                    "primary_category": category_name,
-                    "rename_status": decision.rename_status,
-                    "organization_status": file_receipt["organization_status"],
-                    "categories": decision.categories,
-                    "year": decision.rename_metadata.get("year"),
-                    "document_type": decision.summary_metadata.get("document_type"),
-                    "keywords": list(decision.summary_metadata.get("keywords") or []),
-                    "entities": list(decision.summary_metadata.get("entities") or []),
-                    "pending_decision": pending_decision,
-                    "managed_original_unchanged": True,
-                },
-                graph_document_results=[file_receipt],
-            )
-            index_error = index_result.get("error") if isinstance(index_result.get("error"), dict) else {}
-            # 即使预校验失败且尚未创建 index_run，也必须以 DocumentVersion 为目标留下失败审计。
-            self.db.add(
-                ChangeItem(
-                    changeset_id=changeset.id,
-                    target_type="document_index_run" if index_result.get("index_run_id") else "document_version",
-                    target_id=str(index_result.get("index_run_id") or version.id),
-                    target_document_id=document.id,
-                    change_type=(
-                        "DOCUMENT_INDEX_CREATED" if index_result.get("ok") else "DOCUMENT_INDEX_FAILED"
-                    ),
-                    before_value_json={},
-                    after_value_json={
-                        "document_version_id": version.id,
-                        "chunk_count": int(index_result.get("chunk_count") or 0),
-                        "evidence_count": int(index_result.get("evidence_count") or 0),
-                        "embedding_status": index_result.get("embedding_status") or "DISABLED",
-                        # 审计只保存安全错误码，不能把内部异常消息或正文写入 ChangeSet。
-                        "error_code": index_error.get("code"),
-                    },
-                    source="document-index-service",
-                    confidence=1.0 if index_result.get("ok") else 0.0,
-                    evidence_json={},
-                    execution_status="COMPLETED" if index_result.get("ok") else "FAILED",
-                )
-            )
-            if pending_decision:
-                # 同名冲突和无建议的低置信度命名需要持久化为待处理事项；普通命名建议
-                # 只展示给用户，不能伪装成已进入执行确认的重命名任务。
-                requires_review_record = pending_decision.get("reason") in {
-                    "FILENAME_CONFLICT",
-                    "LOW_CONFIDENCE_RENAME",
-                }
-                if requires_review_record:
-                    self.db.add(
-                        FileRenameReviewItem(
-                            conversation_id=changeset.conversation_id,
-                            agent_run_id=changeset.agent_run_id,
-                            user_id=user_id,
-                            managed_file_id=managed_file.id,
-                            document_id=document.id,
-                            root_key=managed_root.root_key,
-                            original_relative_path=managed_file.relative_path,
-                            original_filename=managed_file.filename,
-                            source_sha256=source_sha256,
-                            status="NEEDS_REVIEW",
-                            review_context_json=pending_decision,
-                            decision_json={},
-                        )
-                    )
-            persist_document_results_classifications(
-                db=self.db,
-                agent_run_id=changeset.agent_run_id,
-                document_results=[
-                    decision.document_result(
-                        document_id=document.id,
-                        document_version_id=version.id,
-                    )
-                ],
-            )
-            if decision.document_summary_id:
-                self.db.add(
-                    ChangeItem(
-                        changeset_id=changeset.id,
-                        target_type="document_summary",
-                        target_id=decision.document_summary_id,
-                        target_document_id=document.id,
-                        change_type="DOCUMENT_SUMMARY_CREATED",
-                        before_value_json={},
-                        after_value_json={"document_summary_id": decision.document_summary_id},
-                        source="working-copy-initial-organize",
-                        confidence=1.0,
-                        evidence_json={},
-                        execution_status="COMPLETED",
-                    )
-                )
-            if decision.classification_summary_id:
-                self.db.add(
-                    ChangeItem(
-                        changeset_id=changeset.id,
-                        target_type="classification_summary",
-                        target_id=decision.classification_summary_id,
-                        target_document_id=document.id,
-                        change_type="CLASSIFICATION_SUMMARY_CREATED",
-                        before_value_json={},
-                        after_value_json={
-                            "classification_summary_id": decision.classification_summary_id,
-                            "primary_category": category_name,
-                        },
-                        source="working-copy-initial-organize",
-                        confidence=(
-                            float(decision.primary_category.get("confidence") or 0)
-                            if decision.primary_category is not None
-                            else None
-                        ),
-                        evidence_json=(
-                            {"items": list(decision.primary_category.get("evidence_items") or [])}
-                            if decision.primary_category is not None
-                            else {}
-                        ),
-                        execution_status="COMPLETED",
-                    )
-                )
-            self.db.add(
-                WorkingCopyPathRecord(
-                    working_copy_id=working_copy.id,
-                    sequence_number=1,
-                    operation_type="INITIAL_IMPORT",
-                    before_relative_path=managed_file.relative_path,
-                    after_relative_path=relative_path,
-                    before_filename=managed_file.filename,
-                    after_filename=decision.filename,
-                    document_version_id=version.id,
-                    content_sha256=source_sha256,
-                    agent_run_id=changeset.agent_run_id,
-                    changeset_id=changeset.id,
-                    status="COMPLETED",
-                    executed_by=user_id,
-                )
-            )
-            FilesystemJobQueue(self.db).mark_completed(
-                job=job,
-                result={
-                    "working_copy_id": working_copy.id,
-                    "document_id": document.id,
-                    "document_version_id": version.id,
-                    "filename": decision.filename,
-                    "relative_path": relative_path,
-                    "primary_category": category_name,
-                },
-            )
-        except Exception:
-            # 数据库事务失败时清理本任务创建的隐藏临时文件或未登记最终文件，避免孤儿文件。
-            self.storage.working_copy_path(staged_relative_path).unlink(missing_ok=True)
-            if final_target is not None and final_storage_relative_path and final_target_created:
-                final_target.unlink(missing_ok=True)
-            raise
 
     def _ensure_existing_working_copy_search_artifacts(
         self,
@@ -2120,10 +1669,12 @@ class FileLifecycleJobProcessor:
         """在原会话创建脱敏 Agent 消息和审计 ChangeSet。"""
 
         cross_user_only = all(item.match_scope == "CROSS_USER" for item in candidates)
+        same_filename_only = all(item.match_type == "SAME_FILENAME" for item in candidates)
+        match_description = "同名文件" if same_filename_only else "相同或高度相似内容"
         content = (
-            f"系统检测到“{version.filename}”存在相同或高度相似内容。请选择继续上传或取消上传。"
+            f"系统检测到“{version.filename}”存在{match_description}。请选择继续上传或取消上传。"
             if cross_user_only
-            else f"检测到“{version.filename}”已有相同或高度相似文件。请选择继续上传、使用已有文件或取消上传。"
+            else f"检测到“{version.filename}”已有{match_description}。请选择继续上传、使用已有文件或取消上传。"
         )
         changeset, message = create_lifecycle_audit(
             db=self.db,
@@ -2159,71 +1710,29 @@ class FileLifecycleJobProcessor:
         managed_file: ManagedFile,
         preferred_relative_path: str | None = None,
     ) -> InitialWorkingPathResolution:
-        """解析首次目标；不同内容冲突必须进入对话待确认，不能自动追加版本。"""
+        """解析首次目标；后台同步不得因同名事实进入用户可见待确认目录。"""
 
         candidate = preferred_relative_path or managed_file.relative_path
-        path_hash = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
-        conflict = (
-            self.db.query(WorkingCopy)
-            .filter(
-                WorkingCopy.working_copy_root_id == working_root.id,
-                WorkingCopy.relative_path_hash == path_hash,
-                WorkingCopy.status == "ACTIVE",
-            )
-            .first()
-        )
-        filename_conflict = (
-            self.db.query(WorkingCopy)
-            .filter(
-                WorkingCopy.working_copy_root_id == working_root.id,
-                WorkingCopy.filename == Path(candidate).name,
-                WorkingCopy.status == "ACTIVE",
-            )
-            .first()
-        )
-        if (
-            conflict is None
-            and filename_conflict is not None
-            and filename_conflict.content_sha256 != managed_file.content_sha256
-        ):
-            conflict = filename_conflict
         storage_candidate = self.storage.working_copy_path(
             f"{working_root.relative_storage_path}/{candidate}"
         )
-        if conflict is None:
-            if not storage_candidate.exists():
-                return InitialWorkingPathResolution(
-                    relative_path=candidate,
-                    filename=Path(candidate).name,
-                )
-            if (
-                managed_file.content_sha256
-                and self.storage.sha256_file(storage_candidate) == managed_file.content_sha256
-            ):
-                # 上一次尝试可能已提交文件但数据库事务未完成，继续采用同一路径幂等收敛。
-                return InitialWorkingPathResolution(
-                    relative_path=candidate,
-                    filename=Path(candidate).name,
-                )
-        pending_filename = self.storage.sanitize_filename(managed_file.filename)
-        pending_path = f"待确认/{managed_file.id}/{pending_filename}"
+        # 后台同步不按全局文件名制造冲突；不同目录中的同名文件必须直接导入。
+        if not storage_candidate.exists() or (
+            storage_candidate.is_file()
+            and managed_file.content_sha256
+            and self.storage.sha256_file(storage_candidate) == managed_file.content_sha256
+        ):
+            return InitialWorkingPathResolution(
+                relative_path=candidate,
+                filename=Path(candidate).name,
+            )
+        # 只有数据库外文件占用完整目标路径时才进入隐藏隔离位置，不能生成用户可见
+        # 的“待确认”目录或同步期确认卡；相关歧义在查询、上传或使用时再提示。
+        safe_filename = self.storage.sanitize_filename(managed_file.filename)
         return InitialWorkingPathResolution(
-            relative_path=pending_path,
-            filename=pending_filename,
-            conflict={
-                "type": "filename_conflict",
-                "reason": "FILENAME_CONFLICT",
-                "target_filename": Path(candidate).name,
-                "existing_working_copy_ids": [conflict.id] if conflict is not None else [],
-                "existing_filenames": [conflict.filename] if conflict is not None else [Path(candidate).name],
-                "message": "整理后的目标文件名已存在，请确认是否同时保留两个文件。",
-                "allowed_decisions": [
-                    "KEEP_BOTH",
-                    "KEEP_EXISTING",
-                    "REPLACE_EXISTING_WORKING_COPY",
-                    "DELETE_EXISTING_WORKING_COPY",
-                ],
-            },
+            relative_path=f".internal/import-collisions/{managed_file.id}/{safe_filename}",
+            filename=safe_filename,
+            storage_collision=True,
         )
 
     @staticmethod
@@ -2231,20 +1740,13 @@ class FileLifecycleJobProcessor:
         *,
         decision: InitialOrganizationDecision,
         working_copy: WorkingCopy,
-        path_resolution: InitialWorkingPathResolution,
     ) -> dict[str, Any] | None:
-        """把命名建议、低置信度或同名冲突转换为普通用户可理解的待决策项。
+        """把命名建议或低置信度转换为普通用户可理解的待决策项。
 
         命名建议不代表已经创建重命名计划。用户必须在后续对话中明确提出“改名”，
         系统才重新生成建议并展示待确认的 OperationPlan。
         """
 
-        if path_resolution.conflict is not None:
-            return {
-                **path_resolution.conflict,
-                "working_copy_id": working_copy.id,
-                "filename": working_copy.filename,
-            }
         proposed_filename = str(decision.rename_metadata.get("proposed_filename") or "").strip()
         if proposed_filename and proposed_filename != working_copy.filename:
             return {

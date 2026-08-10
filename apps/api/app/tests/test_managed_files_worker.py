@@ -72,6 +72,49 @@ def test_failed_deduplicated_job_is_not_reopened_by_automatic_scan():
         assert same_job.attempt_count == 3
 
 
+def test_graph_bootstrap_failure_retries_only_in_graph_queue(monkeypatch):
+    """Neo4j 暂时不可用时必须保留独立 GRAPH 重试，不能泄漏连接异常。"""
+
+    monkeypatch.setenv("NEO4J_SYNC_ENABLED", "true")
+    monkeypatch.setenv("GRAPH_PROJECTION_WORKER_ENABLED", "true")
+    get_settings.cache_clear()
+    _client, session_factory = client_with_database()
+    with session_factory() as db:
+        job = FilesystemJobQueue(db).create_job(
+            job_type="GRAPH_BOOTSTRAP_PROJECTION",
+            queue_name="GRAPH",
+            root_id=None,
+            created_by=None,
+            payload={"projection_version": "graph-v2"},
+        )
+        db.commit()
+        job_id = job.id
+
+    def fail_projection(*_args, **_kwargs):
+        """模拟 Neo4j 短暂离线，不依赖真实外部图数据库。"""
+
+        raise RuntimeError("bolt://private-host:7687 unavailable")
+
+    monkeypatch.setattr(
+        "app.modules.managed_files.worker.GraphProjectionService.sync_all",
+        fail_projection,
+    )
+    with pytest.raises(RuntimeError):
+        process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="graph-worker-test",
+            queue_names={"GRAPH"},
+        )
+
+    with session_factory() as db:
+        failed = db.get(FilesystemJob, job_id)
+        assert failed.status == "PENDING"
+        assert failed.attempt_count == 1
+        assert "private-host" not in str(failed.error_message)
+        assert "文件导入不受影响" in str(failed.error_message)
+    clear_overrides()
+
+
 def test_completed_preparation_job_resumes_original_search_without_new_message(
     monkeypatch,
 ):

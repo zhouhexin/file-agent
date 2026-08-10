@@ -36,7 +36,6 @@ from app.modules.operations.router import router as operations_router
 from app.modules.retrieval.router import router as retrieval_router
 from app.modules.knowledge_graph.classification_context import close_graph_resources
 from app.modules.knowledge_graph.health import graph_health
-from app.modules.knowledge_graph.projection_service import sync_graph_projection_if_enabled
 
 
 @asynccontextmanager
@@ -61,9 +60,8 @@ async def lifespan(app: FastAPI):
         with SessionLocal() as db:
             enqueue_reconciliation_jobs(db=db)
             db.commit()
-    if settings.neo4j_sync_enabled:
-        with SessionLocal() as db:
-            sync_graph_projection_if_enabled(db=db, settings=settings)
+    # Neo4j 只保存可重建投影。启动钩子不得同步执行全量投影；上方调度器已经把
+    # 一次性 bootstrap 和增量 outbox 消费写入 GRAPH 队列，由独立 worker 执行。
     try:
         yield
     finally:

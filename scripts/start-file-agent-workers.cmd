@@ -62,6 +62,11 @@ set "FILESYSTEM_WORKER_ID=analysis-worker"
 set "FILESYSTEM_WORKER_QUEUES=ANALYSIS"
 start "File Agent - Analysis Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
 
+rem Neo4j bootstrap 和正式分类 outbox 由独立 GRAPH worker 消费，不阻塞 API 启动或文件复制。
+set "FILESYSTEM_WORKER_ID=graph-worker"
+set "FILESYSTEM_WORKER_QUEUES=GRAPH"
+start "File Agent - Graph Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
+
 if /I "%~1"=="--with-watcher" (
     rem watcher 是可选进程；scheduler 轮询已经提供最终一致的目录同步。
     set "FILESYSTEM_WORKER_ID="

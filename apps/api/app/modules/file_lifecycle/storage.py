@@ -73,6 +73,61 @@ class FileLifecycleStorageService:
         target = self.working_copy_path(relative_path)
         return self._atomic_copy(source=source, target=target, expected_sha256=expected_sha256)
 
+    def stage_working_copy(
+        self,
+        *,
+        source: Path,
+        relative_path: str,
+        expected_sha256: str | None,
+    ) -> tuple[Path, str]:
+        """单次读取原件并写入内部暂存文件，同时计算内容哈希。
+
+        首次全量导入不能先扫描整库哈希、再复制、再重复读取暂存文件。该方法在复制
+        数据流中同步计算 SHA-256，并用源文件前后元数据校验防止并发修改；调用方仍须
+        通过 ``publish_working_copy`` 原子发布，不能把暂存文件直接暴露为活动副本。
+        """
+
+        if not source.is_file():
+            raise FileNotFoundError("源文件不存在")
+        target = self.working_copy_path(relative_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            digest = self.sha256_file(target)
+            if expected_sha256 and digest != expected_sha256:
+                raise FileExistsError("暂存目标已存在且内容不同，禁止覆盖")
+            source_digest = self.sha256_file(source)
+            if source_digest != digest:
+                raise ValueError("重试时原始文件与既有暂存副本内容不一致")
+            return target, digest
+        descriptor = -1
+        temporary: Path | None = None
+        digest = hashlib.sha256()
+        try:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".fa-",
+                suffix=".part",
+                dir=target.parent,
+            )
+            temporary = Path(temporary_name)
+            with source.open("rb") as source_handle, os.fdopen(descriptor, "wb") as target_handle:
+                descriptor = -1
+                for chunk in iter(lambda: source_handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    target_handle.write(chunk)
+                target_handle.flush()
+                os.fsync(target_handle.fileno())
+            computed_sha256 = digest.hexdigest()
+            if expected_sha256 and computed_sha256 != expected_sha256:
+                raise ValueError("原始文件内容哈希与扫描索引不一致")
+            os.replace(temporary, target)
+            temporary = None
+            return target, computed_sha256
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
     def internal_staging_relative_path(
         self,
         *,
@@ -104,6 +159,7 @@ class FileLifecycleStorageService:
         staged_relative_path: str,
         target_relative_path: str,
         expected_sha256: str,
+        staged_hash_verified: bool = False,
     ) -> tuple[Path, bool]:
         """把内部临时文件原子提交为首次工作副本。
 
@@ -112,7 +168,9 @@ class FileLifecycleStorageService:
 
         staged = self.working_copy_path(staged_relative_path)
         target = self.working_copy_path(target_relative_path)
-        if not staged.is_file() or self.sha256_file(staged) != expected_sha256:
+        if not staged.is_file() or (
+            not staged_hash_verified and self.sha256_file(staged) != expected_sha256
+        ):
             raise ValueError("内部临时工作副本不存在或哈希不一致")
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():

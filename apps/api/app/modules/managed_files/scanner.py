@@ -14,6 +14,7 @@ from collections.abc import Callable
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.core.logging import log_event
 from app.db.models import FilesystemScanRun, ManagedFile, ManagedRoot, WorkingCopy, utcnow
 from app.modules.managed_files.path_policy import PathPolicyError, resolve_managed_relative_path
 
@@ -42,6 +43,7 @@ class ManagedFileScanner:
         的批次仍能按已有幂等键继续导入，原始文件不会被修改。
         """
 
+        scan_started_at = time.monotonic()
         scan_run = FilesystemScanRun(root_id=root.id, job_id=job_id, status="RUNNING")
         self.db.add(scan_run)
         self.db.flush()
@@ -69,6 +71,8 @@ class ManagedFileScanner:
         files_discovered = 0
         files_updated = 0
         errors = 0
+        hashed_files = 0
+        hash_duration_ms = 0
         # 记录本轮已经处理的真实相对路径，供原件重命名/移动识别使用。该集合必须
         # 在遍历前初始化；否则历史索引存在且路径变化时会触发 NameError，中断启动扫描。
         seen_paths: set[str] = set()
@@ -107,13 +111,19 @@ class ManagedFileScanner:
                     existing = identity_match
             # 全量内容哈希只在异步扫描 worker 中计算；元数据未变化时复用既有哈希，
             # 避免查询请求承担大文件 I/O，同时保证查重不用轻量 fingerprint 冒充内容事实。
-            content_sha256 = (
-                existing.content_sha256
-                if existing is not None
-                and existing.fingerprint == fingerprint
-                and existing.content_sha256
-                else _sha256_file(resolved)
-            )
+            if existing is None:
+                # 首次全量扫描只登记元数据；IMPORT worker 在复制数据流中一次性计算
+                # SHA-256，避免每个新文件在扫描和复制阶段被完整读取两遍。
+                content_sha256 = None
+            elif existing.fingerprint == fingerprint:
+                # 新文件已经登记但仍在等待 IMPORT 时哈希为空；重复扫描必须继续留空，
+                # 不能抢在复制 worker 前重新完整读取同一文件。
+                content_sha256 = existing.content_sha256
+            else:
+                hash_started_at = time.perf_counter()
+                content_sha256 = _sha256_file(resolved)
+                hashed_files += 1
+                hash_duration_ms += int((time.perf_counter() - hash_started_at) * 1000)
             category_path = _category_path_for(root=root, relative_path=relative_path)
             if existing is None:
                 existing = ManagedFile(
@@ -207,6 +217,16 @@ class ManagedFileScanner:
         scan_run.files_missing = int(missing_count or 0)
         scan_run.errors = errors
         scan_run.finished_at = utcnow()
+        log_event(
+            "managed_root.scan.completed",
+            status="COMPLETED",
+            duration_ms=int((time.monotonic() - scan_started_at) * 1000),
+            root_id=root.id,
+            files_discovered=files_discovered,
+            files_hashed=hashed_files,
+            hash_duration_ms=hash_duration_ms,
+            message="受管原始目录扫描完成",
+        )
         root.last_reconciled_at = scan_run.finished_at
         self.db.flush()
         return scan_run
@@ -230,8 +250,11 @@ class ManagedFileScanner:
         if on_batch is not None:
             on_batch(list(files), scan_run)
 
-    def _sync_working_copy_status(self, *, managed_file: ManagedFile, source_sha256: str) -> None:
+    def _sync_working_copy_status(self, *, managed_file: ManagedFile, source_sha256: str | None) -> None:
         """根据原始文件内容变化更新工作副本同步状态，但绝不覆盖工作副本。"""
+
+        if not source_sha256:
+            return
 
         working_copies = (
             self.db.query(WorkingCopy)

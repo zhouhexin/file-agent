@@ -783,8 +783,8 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
 Windows CMD 开发环境可以直接运行 `scripts\start-file-agent-workers.cmd`。脚本会先执行同步预检：
 读取项目根 `.env`，用当前机器的 `MANAGED_ROOT_*` 更新数据库中的运行时目录路径，真实打开每个目录
 验证可读性，并停用旧版本误登记的 `scan_batch_size` 等伪目录。只有预检成功后，才会以独立窗口启动
-scheduler、`RECONCILE,SCAN`、`DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION`、两个 `IMPORT` worker 和
-一个 `ANALYSIS` worker。它适合本地开发
+scheduler、`RECONCILE,SCAN`、`DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION`、两个 `IMPORT` worker、
+一个 `ANALYSIS` worker 和一个 `GRAPH` worker。它适合本地开发
 与烟测；生产环境仍可按以下命令基于容量分别部署更多 worker。
 
 Windows 必须从本机仓库根目录使用 Windows 路径执行，例如：
@@ -824,6 +824,10 @@ PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=analysis-1 \
   FILESYSTEM_WORKER_QUEUES=ANALYSIS \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 
+PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=graph-1 \
+  FILESYSTEM_WORKER_QUEUES=GRAPH \
+  /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
+
 PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=file-operation-1 \
   FILESYSTEM_WORKER_QUEUES=FILE_OPERATION \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
@@ -839,7 +843,27 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
   -m app.modules.file_lifecycle.watcher
 ```
 
-API 启动钩子、scheduler 和 watcher 都只创建 `filesystem_jobs`。实际 SHA-256 查重、归档、扫描、导入和暂存清理由 worker 完成。受管目录扫描按 `MANAGED_ROOT_SCAN_BATCH_SIZE` 或 `MANAGED_ROOT_SCAN_BATCH_MAX_SECONDS` 分批提交；每批立即创建 `IMPORT` 任务，快速生成活动工作副本后再提交 `ANALYSIS` 任务。脚本默认启动两个 `IMPORT` worker 缓解首次全量导入积压。任务通过租约和幂等键恢复，每个任务最多尝试三次；达到上限后保持 `FAILED`，自动扫描不会重新激活。ops/admin 可在 `/admin/failed-files` 查看失败文件，状态接口为：
+API 启动钩子、scheduler 和 watcher 都只创建 `filesystem_jobs`。实际 SHA-256 查重、归档、扫描、导入、布局修复和暂存清理由 worker 完成。受管目录扫描对新增文件不再预先完整哈希；`IMPORT` worker 在单次复制数据流中计算 SHA-256。每批立即创建 `IMPORT` 任务，快速生成活动工作副本后再提交 `ANALYSIS` 任务。`REPAIR_WORKING_COPY_LAYOUT` 会先把旧根前缀以及历史“待整理/待确认”路径迁到 `shared/<root_key>/<源相对路径>`，并写入 `SYSTEM_LAYOUT_REPAIR` 路径记录。GRAPH worker 完成一次性 Neo4j bootstrap 和正式分类 Outbox 增量投影，API 重启不再同步执行 `sync_all()`。任务通过租约和幂等键恢复，每个任务最多尝试三次；达到上限后保持 `FAILED`。ops/admin 可在 `/admin/failed-files` 查看失败文件，状态接口为：
+
+本次布局修复没有新增数据库列或表，不需要新增 Alembic migration；更新代码后必须重启 scheduler、
+`RECONCILE`、`IMPORT`、`ANALYSIS` 和 `GRAPH` worker。不要手工移动 `待整理`、`待确认` 或旧根目录，
+也不要直接修改 `working_copy_roots.relative_storage_path`。迁移任务会同时移动物理文件并更新
+`WorkingCopy`、当前 `DocumentVersion`、`FileObject` 和 `working_copy_path_records`。部署后可用以下
+只读 SQL 核对任务与目标前缀：
+
+```sql
+SELECT job_type, status, result_json, error_message
+FROM filesystem_jobs
+WHERE job_type IN ('REPAIR_WORKING_COPY_LAYOUT', 'GRAPH_BOOTSTRAP_PROJECTION', 'PROJECT_GRAPH_OUTBOX')
+ORDER BY created_at DESC;
+
+SELECT root_key, relative_storage_path, status
+FROM working_copy_roots
+ORDER BY root_key;
+```
+
+共享根应统一为 `shared/<root_key>`；布局任务失败时保留原件不变，并应先根据任务事件修复工作副本目录
+权限或未知占位文件，再由 ops/admin 显式重处理，不能直接删除冲突文件。
 
 ```text
 GET /api/jobs/{job_id}

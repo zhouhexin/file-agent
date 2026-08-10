@@ -1,14 +1,12 @@
-"""工作副本首次创建前的自动整理决策。
+"""工作副本异步分析阶段的自动整理决策。
 
-本模块只生成最终文件名、主分类目录和轻量审计结果，不执行文件系统写入。LLM 不能返回
-目标路径；目录始终由后端根据固定 taxonomy 候选和安全组件规则构造。
+本模块只生成命名建议、分类建议和轻量审计结果，不执行文件系统写入。分类是逻辑标签，
+不得由 LLM 或本模块生成物理目标路径。
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -24,7 +22,6 @@ class InitialOrganizationDecision:
     """一次首次工作副本整理的确定性输出。"""
 
     filename: str
-    relative_path: str
     extraction_result: dict[str, Any] | None
     categories: list[dict[str, Any]]
     primary_category: dict[str, Any] | None
@@ -71,7 +68,7 @@ class InitialOrganizationDecision:
 
 
 class InitialWorkingCopyOrganizer:
-    """在工作副本正式落位前完成解析、双摘要、分类和命名建议。
+    """为已落位工作副本完成解析、双摘要、分类和命名建议。
 
     首次导入只负责创建可追溯的工作副本，不能把系统建议当成用户授权而直接改名。
     无论建议质量如何，工作副本初始文件名都保持上传原名；用户后续明确提出改名时，
@@ -92,17 +89,16 @@ class InitialWorkingCopyOrganizer:
         version: DocumentVersion,
         managed_file: ManagedFile,
     ) -> InitialOrganizationDecision:
-        """生成最终工作副本路径；任何失败都降级到内部待整理目录。
+        """生成不改变物理路径的分类和命名分析结果。
 
-        分类目录可作为首次导入的整理位置，但文件名始终保留上传名。命名建议只进入
-        普通用户回执和审计，不能在未收到用户“改名”请求前产生物理副作用。
+        分类目录只作为逻辑标签和查询证据；同步工作副本已按原始相对路径快速落位，
+        这里不得再次生成“待整理”目录或自动移动文件。
         """
 
         if not self.settings.initial_working_copy_organization_enabled:
             filename = FileLifecycleStorageService.sanitize_filename(managed_file.filename)
             return InitialOrganizationDecision(
                 filename=filename,
-                relative_path=_pending_path(managed_file_id=managed_file.id, filename=filename),
                 extraction_result=None,
                 categories=[],
                 primary_category=None,
@@ -142,14 +138,8 @@ class InitialWorkingCopyOrganizer:
             categories=categories,
             minimum_confidence=self.settings.initial_organization_confidence,
         )
-        relative_path = (
-            _classified_path(category=primary, filename=filename)
-            if primary is not None
-            else _pending_path(managed_file_id=managed_file.id, filename=filename)
-        )
         return InitialOrganizationDecision(
             filename=filename,
-            relative_path=relative_path,
             extraction_result=extraction_result,
             categories=categories,
             primary_category=primary,
@@ -183,34 +173,6 @@ def _select_primary_category(
             continue
         return category
     return None
-
-
-def _classified_path(*, category: dict[str, Any], filename: str) -> str:
-    """根据后端已校验 taxonomy 路径构造工作副本目录，拒绝任意模型路径。"""
-
-    raw_path = category.get("category_path") or [category.get("name") or "其他"]
-    segments: list[str] = []
-    for item in raw_path:
-        for part in re.split(r"[/\\]+", str(item)):
-            safe = _safe_directory_component(part)
-            if safe:
-                segments.append(safe)
-    if not segments:
-        return _pending_path(managed_file_id=str(category.get("category_id") or "unknown"), filename=filename)
-    return PurePosixPath(*segments, filename).as_posix()
-
-
-def _pending_path(*, managed_file_id: str, filename: str) -> str:
-    """无法可靠分类时使用稳定内部目录，不把低置信度结果伪装成正式分类。"""
-
-    return PurePosixPath("待整理", managed_file_id, filename).as_posix()
-
-
-def _safe_directory_component(value: str) -> str:
-    """清理 taxonomy 显示名中的路径控制字符。"""
-
-    cleaned = re.sub(r"[\x00-\x1f<>:\"/\\|?*]", "_", value).strip(" .")
-    return cleaned[:120]
 
 
 def _rename_metadata(suggestion: dict[str, Any]) -> dict[str, Any]:

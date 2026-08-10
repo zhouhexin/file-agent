@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -137,11 +137,12 @@ class FileLifecycleRepository:
         upload_document_id: str,
         sha256: str,
         max_candidates: int,
+        filename: str | None = None,
     ) -> list[UploadDuplicateCandidate]:
-        """从已归档原始文件和工作副本生成精确哈希候选。
+        """生成精确内容和同名上传候选。
 
-        当前实现先保证精确 SHA-256 的确定性边界；近似候选后续由本地指纹服务追加，
-        不能把文件正文发送到外部模型。
+        同步阶段允许所有同名文件进入共享工作目录；用户再次上传同名文件时才在这里
+        提示。精确 SHA-256 仍优先，同一既有文件不会同时返回两张候选卡。
         """
 
         self.db.query(UploadDuplicateCandidate).filter(
@@ -202,6 +203,66 @@ class FileLifecycleRepository:
             )
             self.db.add(candidate)
             candidates.append(candidate)
+        remaining = max(0, max_candidates - len(candidates))
+        exact_managed_ids = {item.candidate_managed_file_id for item in candidates}
+        normalized_filename = str(filename or "").strip().lower()
+        if remaining and normalized_filename:
+            same_name_rows = (
+                self.db.query(ManagedFile, WorkingCopy, Document)
+                .join(WorkingCopy, WorkingCopy.managed_file_id == ManagedFile.id)
+                .join(Document, WorkingCopy.document_id == Document.id)
+                .filter(
+                    ManagedFile.status == "ACTIVE",
+                    WorkingCopy.status == "ACTIVE",
+                    func.lower(WorkingCopy.filename) == normalized_filename,
+                    Document.id != upload_document_id,
+                )
+                .filter(
+                    ~ManagedFile.id.in_(exact_managed_ids)
+                    if exact_managed_ids
+                    else ManagedFile.id != ""
+                )
+                .order_by(WorkingCopy.updated_at.desc())
+                .limit(remaining)
+                .all()
+            )
+            for offset, (managed_file, working_copy, candidate_document) in enumerate(
+                same_name_rows,
+                start=1,
+            ):
+                scope = self._candidate_scope(
+                    review=review,
+                    working_copy=working_copy,
+                    candidate_document=candidate_document,
+                )
+                can_use_existing = bool(
+                    working_copy.workspace_id == get_shared_workspace_id(self.db)
+                    and candidate_document.user_id == review.user_id
+                )
+                summary = (
+                    {"message": "系统检测到同名文件"}
+                    if scope == "CROSS_USER"
+                    else {
+                        "message": "检测到当前账号可访问的同名文件",
+                        "filename": working_copy.filename,
+                        "relative_path": working_copy.relative_path if can_use_existing else None,
+                        "updated_at": working_copy.updated_at.isoformat(),
+                        "file_status": "ACTIVE",
+                    }
+                )
+                candidate = UploadDuplicateCandidate(
+                    duplicate_review_id=review.id,
+                    candidate_managed_file_id=managed_file.id,
+                    candidate_working_copy_id=working_copy.id,
+                    match_type="SAME_FILENAME",
+                    match_scope=scope,
+                    similarity_score=1.0,
+                    match_evidence_json={"filename_equal": True},
+                    user_visible_summary_json=summary,
+                    rank=len(candidates) + offset,
+                )
+                self.db.add(candidate)
+                candidates.append(candidate)
         self.db.flush()
         return candidates
 
@@ -300,16 +361,16 @@ class FileLifecycleRepository:
             )
             .one_or_none()
         )
+        workspace = self.db.get(Workspace, workspace_id)
+        if workspace is None:
+            raise ValueError("工作副本根缺少有效工作区")
+        storage_scope = (
+            SHARED_WORKSPACE_STORAGE_KEY
+            if workspace.workspace_type == SHARED_WORKSPACE_TYPE
+            else workspace.id
+        )
+        relative_storage_path = f"{storage_scope}/{managed_root.root_key}"
         if root is None:
-            workspace = self.db.get(Workspace, workspace_id)
-            if workspace is None:
-                raise ValueError("工作副本根缺少有效工作区")
-            storage_scope = (
-                SHARED_WORKSPACE_STORAGE_KEY
-                if workspace.workspace_type == SHARED_WORKSPACE_TYPE
-                else workspace.id
-            )
-            relative_storage_path = f"{storage_scope}/{managed_root.root_key}"
             root = WorkingCopyRoot(
                 workspace_id=workspace_id,
                 managed_root_id=managed_root.id,
@@ -318,6 +379,21 @@ class FileLifecycleRepository:
                 status="INITIALIZING",
             )
             self.db.add(root)
+            self.db.flush()
+        elif root.relative_storage_path != relative_storage_path:
+            has_copies = (
+                self.db.query(WorkingCopy.id)
+                .filter(WorkingCopy.working_copy_root_id == root.id)
+                .first()
+                is not None
+            )
+            if has_copies:
+                # 不能只改数据库前缀而让既有物理文件失联；启动布局修复任务完成前，
+                # 新导入应重试而不是继续写入旧目录。
+                raise RuntimeError("工作副本根等待异步布局修复")
+            root.relative_storage_path = relative_storage_path
+            root.root_key = managed_root.root_key
+            root.status = "INITIALIZING"
             self.db.flush()
         return root
 

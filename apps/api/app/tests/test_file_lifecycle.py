@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+
+import pytest
+
 from app.core import config
 from app.db.models import (
     AgentRun,
@@ -16,6 +20,7 @@ from app.db.models import (
     DocumentSummary,
     DocumentVersion,
     EvidenceSpan,
+    FileObject,
     FileRenameReviewItem,
     ManagedFile,
     Message,
@@ -28,12 +33,14 @@ from app.db.models import (
     User,
     WorkingCopy,
     WorkingCopyPathRecord,
+    WorkingCopyRoot,
     Workspace,
 )
 from app.modules.classification.loader import load_default_taxonomy
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
 from app.modules.file_lifecycle.risk import inspect_basic_file_risks
+from app.modules.file_lifecycle.layout_repair import WorkingCopyLayoutRepairService
 from app.modules.file_lifecycle.service import working_copy_search_artifact_status
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.managed_files.jobs import FilesystemJobQueue
@@ -1491,177 +1498,110 @@ def test_initial_ready_rename_is_only_suggestion_until_user_requests_rename(monk
         clear_overrides()
 
 
-def test_initial_filename_conflict_waits_for_dialog_without_version_suffix(monkeypatch, tmp_path):
-    """不同内容使用同一上传名时必须等待对话决策，不能自动追加版本后缀。"""
+def test_same_filename_upload_prompts_before_both_files_are_normally_imported(monkeypatch, tmp_path):
+    """同名上传只在上传时提示；用户继续后两个文件都必须正常导入。"""
 
     _configure(monkeypatch, tmp_path)
-    original_suggest = UploadedRenameSuggestionService.suggest_for_initial_import
-
-    def force_same_name(self, *, document):
-        """保留建议生成，验证建议不会参与首次物理命名或制造冲突。"""
-
-        suggestion, extraction = original_suggest(self, document=document)
-        return {
-            **suggestion,
-            "status": "READY",
-            "proposed_filename": "2026_统一材料.txt",
-            "warnings": [],
-            "errors": [],
-        }, extraction
-
-    def force_same_category(self, **_kwargs):
-        """让两个文件落入同一受控 taxonomy 路径以触发真实路径冲突。"""
-
-        return {
-            "status": "COMPLETED",
-            "categories": [
-                {
-                    "name": "奖助学金",
-                    "category_id": "student-affairs.scholarship",
-                    "category_path": ["学生工作", "奖助学金"],
-                    "confidence": 0.95,
-                    "status": "SUGGESTED",
-                    "source": "rule",
-                    "evidence_items": [{"type": "text_quote", "quote": "材料"}],
-                }
-            ],
-            "summary_status": "FULL_TEXT_FALLBACK",
-        }
-
-    monkeypatch.setattr(
-        UploadedRenameSuggestionService,
-        "suggest_for_initial_import",
-        force_same_name,
-    )
-    monkeypatch.setattr(
-        "app.modules.file_lifecycle.organizer.DocumentClassificationService.classify",
-        force_same_category,
-    )
     client, SessionLocal = client_with_database()
-    headers = _auth(client, "filename-conflict-owner")
-    client.post(
-        "/api/files/upload",
-        headers=headers,
-        data={"conversation_id": "filename-conflict-conv"},
-        files={"file": ("同名材料.txt", b"first unique material", "text/plain")},
-    )
+    headers = _auth(client, "same-filename-owner")
+    _upload(client, headers, "同名材料.txt", b"first unique material")
     _drain(SessionLocal)
-    client.post(
-        "/api/files/upload",
-        headers=headers,
-        data={"conversation_id": "filename-conflict-conv"},
-        files={"file": ("同名材料.txt", b"second completely different content", "text/plain")},
+
+    second = _upload(client, headers, "同名材料.txt", b"second completely different content")
+    process_next_filesystem_job(
+        session_factory=SessionLocal,
+        worker_id="same-filename-duplicate-check",
+        queue_names={"DUPLICATE_CHECK"},
     )
+    review_response = client.get(
+        f"/api/uploads/{second['upload_document_version_id']}/duplicate-review",
+        headers=headers,
+    )
+    assert review_response.status_code == 200
+    review = review_response.json()
+    assert review["status"] == "WAITING_CONFIRMATION"
+    assert any(item["match_type"] == "SAME_FILENAME" for item in review["candidates"])
+
+    decision = client.post(
+        f"/api/uploads/{second['upload_document_version_id']}/duplicate-review/decision",
+        headers=headers,
+        json={
+            "duplicate_review_id": review["id"],
+            "decision": "CONTINUE_UPLOAD",
+        },
+    )
+    assert decision.status_code == 202
     _drain(SessionLocal)
 
     copies = client.get("/api/working-copies", headers=headers).json()
-    assert sorted(item["filename"] for item in copies) == ["同名材料.txt", "同名材料.txt"]
-    assert not any("第二版" in item["filename"] for item in copies)
-    history = client.get("/api/conversations/filename-conflict-conv", headers=headers).json()
-    conflict_receipts = [
-        message["task_result"]
-        for message in history["messages"]
-        if message.get("task_result")
-        and message["task_result"].get("pending_decisions")
-        and message["task_result"]["pending_decisions"][0].get("reason") == "FILENAME_CONFLICT"
-    ]
-    assert len(conflict_receipts) == 1
-    pending = conflict_receipts[0]["pending_decisions"][0]
-    assert pending["target_filename"] == "同名材料.txt"
-    assert pending["allowed_decisions"] == [
-        "KEEP_BOTH",
-        "KEEP_EXISTING",
-        "REPLACE_EXISTING_WORKING_COPY",
-        "DELETE_EXISTING_WORKING_COPY",
-    ]
+    same_name_copies = [item for item in copies if item["filename"] == "同名材料.txt"]
+    assert len(same_name_copies) == 2
+    assert all(
+        not item["relative_path"].startswith(("待整理/", "待确认/"))
+        for item in same_name_copies
+    )
+    clear_overrides()
 
-    # 用户通过普通消息选择同时保留时只能生成计划；确认前仍不得分配版本后缀。
-    decision_response = client.post(
-        "/api/conversations/filename-conflict-conv/messages",
-        headers=headers,
-        json={"content": "这两个文件同时保留", "attachments": []},
-    )
-    assert decision_response.status_code == 200
-    decision_receipt = decision_response.json()["task_result"]
-    assert decision_receipt["response_type"] == "operation_plan"
-    assert decision_receipt["operation_plan_id"]
-    before_confirmation = client.get("/api/working-copies", headers=headers).json()
-    assert not any("第二版" in item["filename"] for item in before_confirmation)
-    confirmation = client.post(
-        f"/api/operations/plans/{decision_receipt['operation_plan_id']}/confirm",
-        headers=headers,
-        json={"confirmation": "确认同时保留"},
-    )
-    assert confirmation.status_code == 200
-    assert confirmation.json()["status"] == "EXECUTED"
-    after_confirmation = client.get("/api/working-copies", headers=headers).json()
-    assert sorted(item["filename"] for item in after_confirmation) == [
-        "同名材料.txt",
-        "同名材料_第二版.txt",
-    ]
 
-    # 替换选择必须先把已有工作副本移入可恢复回收站，再提升新副本；原件仍不被覆盖。
-    client.post(
-        "/api/files/upload",
-        headers=headers,
-        data={"conversation_id": "filename-conflict-conv"},
-        files={"file": ("同名材料.txt", b"third replacement material", "text/plain")},
-    )
+@pytest.mark.parametrize("legacy_directory", ["待整理", "待确认"])
+def test_layout_repair_restores_legacy_pending_file_to_shared_source_path(
+    monkeypatch,
+    tmp_path,
+    legacy_directory,
+):
+    """历史系统暂存文件必须迁回共享根和原始相对路径，并追加路径审计。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "layout-repair-owner")
+    _upload(client, headers, "历史材料.txt", b"legacy pending body")
     _drain(SessionLocal)
-    replace_response = client.post(
-        "/api/conversations/filename-conflict-conv/messages",
-        headers=headers,
-        # 只有当前会话存在唯一待决冲突时，短回复“是”才可被解释为覆盖。
-        json={"content": "是", "attachments": []},
-    )
-    assert replace_response.status_code == 200
-    replace_receipt = replace_response.json()["task_result"]
-    assert replace_receipt["task_status"] == "completed"
-    assert replace_receipt["operation_plan_id"] is None
-    assert "旧文件已移入可恢复回收站" in replace_receipt["final_response"]
-    final_copies = client.get("/api/working-copies", headers=headers).json()
-    assert sorted(item["filename"] for item in final_copies if item["status"] == "ACTIVE") == [
-        "同名材料.txt",
-        "同名材料_第二版.txt",
-    ]
-    assert sum(item["status"] == "TRASHED" for item in final_copies) == 1
-    assert len(client.get("/api/trash-entries", headers=headers).json()) == 1
+
     db = SessionLocal()
     try:
-        reviews = [
-            item
-            for item in db.query(FileRenameReviewItem).all()
-            if item.review_context_json.get("reason") == "FILENAME_CONFLICT"
-        ]
-        assert len(reviews) == 2
-        assert all(review.status == "EXECUTED" for review in reviews)
-        replacement_plan = (
-            db.query(OperationPlan)
-            .filter(
-                OperationPlan.operation_type == "RESOLVE_FILENAME_CONFLICT",
-                OperationPlan.status == "EXECUTED",
-            )
-            .order_by(OperationPlan.created_at.desc())
-            .first()
+        working_copy = db.query(WorkingCopy).one()
+        working_root = db.get(WorkingCopyRoot, working_copy.working_copy_root_id)
+        managed_file = db.get(ManagedFile, working_copy.managed_file_id)
+        version = db.get(DocumentVersion, working_copy.current_version_id)
+        file_object = db.query(FileObject).filter_by(document_id=working_copy.document_id).one()
+        original_physical = tmp_path / "working" / version.storage_path
+        legacy_relative = f"{legacy_directory}/{managed_file.id}/{working_copy.filename}"
+        legacy_physical = tmp_path / "working" / legacy_relative
+        legacy_physical.parent.mkdir(parents=True, exist_ok=True)
+        original_physical.replace(legacy_physical)
+        working_root.relative_storage_path = ""
+        working_copy.relative_path = legacy_relative
+        working_copy.relative_path_hash = hashlib.sha256(legacy_relative.encode("utf-8")).hexdigest()
+        version.storage_path = legacy_relative
+        file_object.storage_path = legacy_relative
+        initial_record = db.query(WorkingCopyPathRecord).filter_by(
+            working_copy_id=working_copy.id,
+            operation_type="INITIAL_IMPORT",
+        ).one()
+        initial_record.after_relative_path = legacy_relative
+        db.commit()
+
+        result = WorkingCopyLayoutRepairService(db).repair_managed_root(
+            managed_root_id=managed_file.root_id,
         )
-        assert replacement_plan is not None
-        assert (
-            db.query(OperationConfirmation)
-            .filter(
-                OperationConfirmation.operation_plan_id == replacement_plan.id
-            )
-            .count()
-            == 1
-        )
-        assert (
-            db.query(WorkingCopyPathRecord)
-            .filter(
-                WorkingCopyPathRecord.operation_plan_id == replacement_plan.id,
-                WorkingCopyPathRecord.status == "COMPLETED",
-            )
-            .count()
-            == 1
-        )
+        db.commit()
+        db.refresh(working_root)
+        db.refresh(working_copy)
+        db.refresh(version)
+
+        expected_storage = f"shared/upload_archive/{managed_file.relative_path}"
+        assert result["legacy_paths"] == 1
+        assert working_root.relative_storage_path == "shared/upload_archive"
+        assert working_copy.relative_path == managed_file.relative_path
+        assert version.storage_path == expected_storage
+        assert (tmp_path / "working" / expected_storage).read_bytes() == b"legacy pending body"
+        assert not legacy_physical.exists()
+        repair_record = db.query(WorkingCopyPathRecord).filter_by(
+            working_copy_id=working_copy.id,
+            operation_type="SYSTEM_LAYOUT_REPAIR",
+        ).one()
+        assert repair_record.before_relative_path == legacy_relative
+        assert repair_record.after_relative_path == expected_storage
     finally:
         db.close()
         clear_overrides()
