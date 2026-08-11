@@ -551,6 +551,18 @@ def _search_handler(
         )
         if not settings.two_stage_retrieval_enabled:
             # 紧急回退只更换检索算法，不能退回按导入用户隔离的旧权限模型。
+            from app.modules.chunks.tokenizer import (
+                ChineseLexicalTokenizer,
+                load_default_business_terms,
+            )
+            from app.modules.retrieval.phrase_strategy import (
+                mark_metadata_results_as_possible,
+            )
+            from app.modules.retrieval.query_parser import FileSearchQueryParser
+
+            fallback_parsed = FileSearchQueryParser(
+                tokenizer=ChineseLexicalTokenizer(load_default_business_terms())
+            ).parse(search_query)
             result = WorkingCopySummarySearchService(
                 db=db,
                 user_id=user_id,
@@ -558,6 +570,11 @@ def _search_handler(
             ).search(
                 query=search_query,
                 document_ids=explicit_document_ids,
+            )
+            # 摘要降级不能将“涉及”类查询表述为原文已确认；只保留候选发现能力。
+            result = mark_metadata_results_as_possible(
+                result=result,
+                parsed_query=fallback_parsed,
             )
             log_event(
                 "retrieval.summary_fallback.completed",
@@ -667,6 +684,12 @@ def _search_handler(
             query_term_count=len(parsed.terms),
             exact_short_phrase_mode=exact_short_chinese_phrase(parsed.cleaned) is not None,
             relation_mode=parsed.relation_mode,
+            required_topic_count=len(
+                list(getattr(parsed, "required_topic_terms", []) or [])
+            ),
+            supporting_topic_count=len(
+                list(getattr(parsed, "supporting_topic_terms", []) or [])
+            ),
             year=parsed.year,
             has_year=parsed.year is not None or parsed.relative_year is not None,
             has_doc_number=parsed.doc_number is not None,
@@ -750,6 +773,14 @@ def _search_handler(
                     ).search(
                         query=search_query,
                         document_ids=explicit_document_ids,
+                    )
+                    from app.modules.retrieval.phrase_strategy import (
+                        mark_metadata_results_as_possible,
+                    )
+
+                    result = mark_metadata_results_as_possible(
+                        result=result,
+                        parsed_query=parsed,
                     )
                 result["partial"] = True
                 result["user_message"] = (
@@ -898,6 +929,11 @@ def _with_search_binding_projection(handler: ToolHandler) -> ToolHandler:
         for item in list(result.get("results") or []):
             if not isinstance(item, dict):
                 continue
+            # “可能相关”仅用于用户浏览候选，不能成为多轮 Planner 后续
+            # evidence-answer/read Tool 的授权文件范围；否则摘要或泛词命中会
+            # 被错误提升为可回答的文件事实。
+            if str(item.get("relevance_tier") or "") == "POSSIBLE":
+                continue
             document_id = str(item.get("document_id") or "")
             if document_id and document_id not in seen:
                 seen.add(document_id)
@@ -942,6 +978,14 @@ def _search_result_status(
         code = str(error.get("code") or "SEARCH_FAILED")
         return code, "SEARCH_ENGINE_UNAVAILABLE", ["STOP_WITH_ERROR"]
     if list(result.get("results") or []):
+        if int(result.get("supported_count") or 0) == 0 and int(
+            result.get("possible_count") or 0
+        ) > 0:
+            return (
+                "POSSIBLE_ONLY",
+                "PARTIAL_INDEX" if result.get("partial") else "READY",
+                ["FINISH_WITH_CANDIDATES", "REFINE_SEARCH", "CLARIFY"],
+            )
         return (
             "MATCHED",
             "PARTIAL_INDEX" if result.get("partial") else "READY",
@@ -1296,6 +1340,34 @@ def _execute_controlled_file_search(
     core_phrase = str(parsed.cleaned or "").strip()
     synonym_service = FileSearchSynonymService()
     relation_mode = str(getattr(parsed, "relation_mode", "UNSPECIFIED"))
+    required_topic_terms = list(
+        getattr(parsed, "required_topic_terms", []) or []
+    )
+    supporting_topic_terms = list(
+        getattr(parsed, "supporting_topic_terms", []) or []
+    )
+    if relation_mode == "LITERAL" and required_topic_terms and supporting_topic_terms:
+        # “涉及劳务费发放”一类问题既要求核心业务主题，也包含容易泛化的
+        # 工作动作。由 Tool 用受控正文检索验证两者，不能由 LLM 或文件名
+        # 单独断言“涉及”。
+        log_event(
+            "retrieval.strategy.selected",
+            tool_name="hybrid-search",
+            status="COMPLETED",
+            strategy="topic_tiered_literal_search",
+            relation_mode=relation_mode,
+            required_topic_count=len(required_topic_terms),
+            supporting_topic_count=len(supporting_topic_terms),
+            message="采用核心主题与宽泛动作词的正文分级检索",
+        )
+        return strategy.search_with_topic_tiers(
+            original_query=search_query,
+            parsed_query=parsed,
+            scope=scope,
+            exact_phrase=core_phrase,
+            required_topic_terms=required_topic_terms,
+            supporting_topic_terms=supporting_topic_terms,
+        )
     equivalent_mention = synonym_service.find_equivalent_mention(core_phrase)
     if equivalent_mention is not None:
         group, matched_name = equivalent_mention

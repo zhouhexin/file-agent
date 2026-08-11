@@ -535,11 +535,12 @@ def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
                         "match_reasons",
                         "match_location",
                         "evidence_preview",
+                        "relevance_tier",
                     )
                     if key in item
                 }
             )
-        return {
+        payload = {
             "query": str(output.get("query") or ""),
             "total_returned": int(output.get("total_returned") or 0),
             "partial": bool(output.get("partial", False)),
@@ -547,6 +548,13 @@ def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
             "show_all_results": bool(output.get("show_all_results", False)),
             "files": files,
         }
+        # 只有新版分级检索显式返回数量时才写入回执，确保旧结果仍按原有
+        # “相关文件”口径展示，不能把所有历史结果误显示为零个已验证文件。
+        if output.get("supported_count") is not None:
+            payload["supported_count"] = int(output["supported_count"])
+        if output.get("possible_count") is not None:
+            payload["possible_count"] = int(output["possible_count"])
+        return payload
     return None
 
 
@@ -759,6 +767,8 @@ def _file_selection_result(result: AgentRunResult) -> dict[str, Any] | None:
                         "filename",
                         "size_bytes",
                         "created_at",
+                        "suggested_category_labels",
+                        "directory_path",
                         "option_id",
                     )
                     if key in item

@@ -123,6 +123,9 @@ class WorkspaceFileSearchToolOutput(GenericToolOutput):
     kind: str = "workspace_file_search"
     query: str = ""
     total_returned: int = Field(default=0, ge=0)
+    # 分级数量由受控检索 Tool 计算，前端仅用于分组展示，不能自行重算相关性。
+    supported_count: int | None = Field(default=None, ge=0)
+    possible_count: int | None = Field(default=None, ge=0)
     partial: bool = False
     results: list[dict[str, Any]] = Field(default_factory=list)
     document_ids: list[str] = Field(default_factory=list, max_length=100)

@@ -43,6 +43,13 @@ function SearchResultCard({
             <Tag size={13} aria-hidden />
             <span>{categoryLabel}</span>
           </span>
+          {file.relevance_tier === 'POSSIBLE' ? (
+            <span className="search-result-tier search-result-tier--possible">
+              可能相关
+            </span>
+          ) : file.relevance_tier === 'SUPPORTED' ? (
+            <span className="search-result-tier">已验证相关</span>
+          ) : null}
         </div>
       </div>
 
@@ -86,32 +93,68 @@ export function SearchResultsReceipt({
   }
 
   const showAllResults = Boolean(result.show_all_results);
+  const supportedFiles = result.files.filter(
+    (file) => file.relevance_tier !== 'POSSIBLE'
+  );
+  const possibleFiles = result.files.filter(
+    (file) => file.relevance_tier === 'POSSIBLE'
+  );
   const visibleFiles = showAllResults
     ? result.files
     : result.files.slice(0, visibleCount);
+  const visibleSupportedFiles = visibleFiles.filter(
+    (file) => file.relevance_tier !== 'POSSIBLE'
+  );
+  const visiblePossibleFiles = visibleFiles.filter(
+    (file) => file.relevance_tier === 'POSSIBLE'
+  );
+
+  const renderFiles = (files: FileSearchResultFile[]) =>
+    files.map((file) => (
+      <SearchResultCard
+        key={file.working_copy_id ?? `${file.document_id}-${file.document_version_id}`}
+        file={file}
+        attachment={
+          attachments.find(
+            (attachmentItem) => attachmentItem.document_id === file.document_id
+          ) ?? null
+        }
+        onOpenAttachment={onOpenAttachment}
+        onOpenDocument={onOpenDocument}
+      />
+    ));
 
   return (
     <section className="search-results-receipt">
       <header className="search-results-summary">
-        <strong>找到 {result.total_returned} 个相关文件</strong>
+        <strong>
+          {result.supported_count !== undefined || result.possible_count !== undefined
+            ? `找到 ${result.supported_count ?? supportedFiles.length} 个已验证相关文件${
+                (result.possible_count ?? possibleFiles.length) > 0
+                  ? `，另有 ${result.possible_count ?? possibleFiles.length} 个可能相关文件`
+                  : ''
+              }`
+            : `找到 ${result.total_returned} 个相关文件`}
+        </strong>
       </header>
 
-      <div className="search-results-list">
-        {visibleFiles.map((file) => (
-          <SearchResultCard
-            key={file.document_id}
-            file={file}
-            attachment={
-              attachments.find(
-                (attachmentItem) =>
-                  attachmentItem.document_id === file.document_id
-              ) ?? null
-            }
-            onOpenAttachment={onOpenAttachment}
-            onOpenDocument={onOpenDocument}
-          />
-        ))}
-      </div>
+      {visibleSupportedFiles.length > 0 ? (
+        <div className="search-results-list">
+          {possibleFiles.length > 0 ? (
+            <p className="search-results-group-title">已验证相关</p>
+          ) : null}
+          {renderFiles(visibleSupportedFiles)}
+        </div>
+      ) : null}
+      {visiblePossibleFiles.length > 0 ? (
+        <div className="search-results-list">
+          <p className="search-results-group-title">可能相关</p>
+          <p className="search-results-group-hint">
+            这些文件只命中部分主题线索，尚未作为问题结论的依据。
+          </p>
+          {renderFiles(visiblePossibleFiles)}
+        </div>
+      ) : null}
       {!showAllResults && visibleCount < result.files.length ? (
         <button
           type="button"

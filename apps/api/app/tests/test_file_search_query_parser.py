@@ -93,6 +93,19 @@ def test_removes_question_selectors_and_content_relation_phrases():
         assert result.terms == [expected]
 
 
+def test_list_literal_query_removes_action_and_keeps_topic_constraints():
+    """“列出涉及劳务费发放的文件”必须保留主题并拆出受控分级条件。"""
+
+    parser = _make_parser()
+    result = parser.parse("列出涉及劳务费发放的文件")
+
+    assert result.cleaned == "劳务费发放"
+    assert result.relation_mode == "LITERAL"
+    # Fake tokenizer 不切分中文短语时，解析器仍必须从末尾宽泛动作词中识别核心主题。
+    assert "劳务费" in result.required_topic_terms
+    assert result.supporting_topic_terms == ["发放"]
+
+
 def test_deictic_file_set_selector_matches_plain_file_selector():
     """“这些文件中哪些……”不得残留指代词并改变检索主题。"""
 

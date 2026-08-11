@@ -685,22 +685,18 @@ def build_plan_from_user_intent(
     if (
         _has_file_search_intent(message=message, lowered=lowered)
         and not attachments
-        # 相对时间是结构化主题检索条件，必须压过模型误报的目录列表；其他目录
-        # 浏览、分类目录查询有各自的受控 Tool，不能被本分支截走。
+        # 主题检索应由用户表达的范围决定，不能因为 LLM 请求失败或误判就把
+        # “列出涉及劳务费发放的文件”改走受管目录列表。只有用户文本明确给出
+        # 受管目录/根目录时，才保留目录 Tool 的优先级。
         and (
             _has_relative_time_file_search(message=message, lowered=lowered)
             or (
-                intent_plan.intent
-                not in {
-                    "LIST_MANAGED_FILES",
-                    "SEARCH_MANAGED_FILES",
+                intent_plan.intent not in {
                     "LIST_CLASSIFICATION_TAXONOMY",
                     "LIST_MCP_FILESYSTEM",
                 }
                 and not requested_capabilities.intersection(
-                    MANAGED_FILE_LIST_HINTS
-                    | CLASSIFICATION_TAXONOMY_HINTS
-                    | MCP_FILESYSTEM_HINTS
+                    CLASSIFICATION_TAXONOMY_HINTS | MCP_FILESYSTEM_HINTS
                 )
                 and not _has_classification_taxonomy_intent(message=message, lowered=lowered)
                 and not _has_mcp_filesystem_list_intent(message=message, lowered=lowered)

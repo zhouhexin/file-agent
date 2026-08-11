@@ -147,11 +147,15 @@ export type FileSearchResultFile = {
   match_reasons: string[];
   match_location: FileSearchMatchLocation | null;
   evidence_preview: string;
+  // 后端基于受控索引和正文证据给出的检索分级，不能由前端自行推断。
+  relevance_tier?: 'SUPPORTED' | 'POSSIBLE';
 };
 
 export type FileSearchResult = {
   query: string;
   total_returned: number;
+  supported_count?: number;
+  possible_count?: number;
   partial: boolean;
   user_message: string;
   show_all_results?: boolean;
@@ -251,6 +255,9 @@ export type FileSelectionChoice = {
   filename: string;
   size_bytes: number;
   created_at: string;
+  // 历史消息中的同名选择卡尚未写入这两个字段，前端必须兼容展示。
+  suggested_category_labels?: string[];
+  directory_path?: string;
 };
 
 export type FileSelectionResult = {

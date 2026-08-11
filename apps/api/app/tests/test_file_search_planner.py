@@ -219,6 +219,25 @@ def test_relative_time_search_overrides_llm_directory_list_misclassification():
     assert plan.steps[0].tool_name == "hybrid-search"
 
 
+def test_semantic_topic_search_overrides_llm_directory_list_misclassification():
+    """模型误报目录列表时，普通主题检索仍必须进入 hybrid-search。"""
+
+    plan = build_plan_from_user_intent(
+        intent_plan=UserIntentPlan(
+            intent="LIST_MANAGED_FILES",
+            user_goal="列出涉及劳务费发放的文件",
+            required_capabilities=["managed_file_list"],
+            tool_plan_hint=["managed-file-list"],
+            managed_root_key="wprk_files",
+        ),
+        message="列出涉及劳务费发放的文件",
+        attachments=[],
+    )
+
+    assert plan.intent == "SEARCH_FILES"
+    assert plan.steps[0].tool_name == "hybrid-search"
+
+
 def test_explicit_year_file_search_overrides_llm_summary_misclassification():
     """“找 2025 年计算机学院的工作总结”不能被误当成单文件总结。"""
 

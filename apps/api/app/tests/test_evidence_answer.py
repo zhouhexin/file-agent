@@ -14,6 +14,8 @@ from app.db.base import Base
 from app.db.models import (
     AnswerReference,
     Conversation,
+    DocumentCategorySuggestion,
+    DocumentClassificationRun,
     Document,
     DocumentChunk,
     DocumentExtractionRun,
@@ -681,6 +683,76 @@ def test_unmatched_explicit_filename_returns_similar_selection_without_answering
     assert result["status"] == "NEEDS_CLARIFICATION"
     assert result["answer"] == ""
     assert result["choices"][0]["filename"] == "申报通知.docx"
+
+
+def test_file_selection_includes_current_category_suggestions_and_relative_directory():
+    """同名候选卡只展示当前版本分类与工作副本相对目录，不能混入历史分类或绝对路径。"""
+
+    db = _session()
+    working_copy, version = _seed(db)
+    working_copy.relative_path = "shared/财务处/劳务费发放/申报通知.docx"
+    current_run = DocumentClassificationRun(
+        id="classification-current",
+        document_id="document-1",
+        agent_run_id="classification-agent-run",
+        taxonomy_key="school-file",
+        taxonomy_version="v2",
+        status="COMPLETED",
+    )
+    current_suggestion = DocumentCategorySuggestion(
+        id="suggestion-current",
+        classification_run_id=current_run.id,
+        document_id="document-1",
+        document_version_id=version.id,
+        category_id="finance-labor-payment",
+        category_name="劳务费发放",
+        category_path_json=["学校", "财务", "劳务费发放"],
+        taxonomy_key="school-file",
+        taxonomy_version="v2",
+        status="SUGGESTED",
+        rank=1,
+    )
+    # 即使更晚写入了历史版本建议，当前选择卡也必须按 current_version_id 过滤。
+    stale_run = DocumentClassificationRun(
+        id="classification-stale",
+        document_id="document-1",
+        agent_run_id="classification-agent-run",
+        taxonomy_key="school-file",
+        taxonomy_version="v1",
+        status="COMPLETED",
+    )
+    stale_suggestion = DocumentCategorySuggestion(
+        id="suggestion-stale",
+        classification_run_id=stale_run.id,
+        document_id="document-1",
+        document_version_id="version-history",
+        category_id="stale-category",
+        category_name="历史错误分类",
+        category_path_json=["历史错误分类"],
+        taxonomy_key="school-file",
+        taxonomy_version="v1",
+        status="SUGGESTED",
+        rank=1,
+    )
+    db.add_all([current_run, current_suggestion, stale_run, stale_suggestion])
+    db.flush()
+
+    result = EvidenceAnswerService(
+        db=db,
+        user_id="user-1",
+        conversation_id="conversation-1",
+        settings=_settings(),
+        client=FakeEvidenceClient(),
+    )._create_file_selection(
+        rows=[(working_copy, version)],
+        question="读取申报通知.docx",
+        message="请选择文件。",
+    )
+
+    choice = result["choices"][0]
+    assert choice["suggested_category_labels"] == ["学校 / 财务 / 劳务费发放"]
+    assert choice["directory_path"] == "shared/财务处/劳务费发放"
+    assert "/Users/" not in choice["directory_path"]
 
 
 def test_unmatched_explicit_filename_without_similar_file_requests_reupload():

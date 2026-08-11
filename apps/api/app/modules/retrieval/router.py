@@ -20,6 +20,7 @@ from app.modules.conversations.schemas import MessageAttachment, SendMessageRequ
 from app.modules.conversations.service import ConversationMessageService
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
 from app.modules.retrieval.query_parser import FileSearchQueryParser
+from app.modules.retrieval.phrase_strategy import FileSearchPhraseStrategyService
 from app.modules.retrieval.scope_resolver import (
     ConversationFileSearchContextService,
     FileSearchScopeResolver,
@@ -102,17 +103,43 @@ def search_files(
         explicit_attachment_ids=request.attachment_document_ids,
         conversation_id=request.conversation_id,
     )
-    result = TwoStageFileSearchService(
+    search_service = TwoStageFileSearchService(
         db=db,
         user_id=current_user.id,
         workspace_id=workspace_id,
         config=get_settings(),
         tokenizer=tokenizer,
-    ).search(query=request.query, parsed_query=parsed, scope=scope)
+    )
+    # 兼容 API 与聊天主入口必须使用相同的证据边界。对于“涉及核心主题 +
+    # 宽泛动作词”的请求，不能直接暴露两阶段 OR 召回结果为已验证相关。
+    if (
+        parsed.relation_mode == "LITERAL"
+        and parsed.required_topic_terms
+        and parsed.supporting_topic_terms
+    ):
+        result = FileSearchPhraseStrategyService(
+            search_service=search_service,
+            tokenizer=tokenizer,
+        ).search_with_topic_tiers(
+            original_query=request.query,
+            parsed_query=parsed,
+            scope=scope,
+            exact_phrase=parsed.cleaned,
+            required_topic_terms=parsed.required_topic_terms,
+            supporting_topic_terms=parsed.supporting_topic_terms,
+        )
+    else:
+        result = search_service.search(
+            query=request.query,
+            parsed_query=parsed,
+            scope=scope,
+        )
     files = list(result.get("results") or [])[: request.top_k]
     return {
         "query": result.get("query", request.query),
         "total_returned": int(result.get("total_returned") or 0),
+        "supported_count": result.get("supported_count"),
+        "possible_count": result.get("possible_count"),
         "partial": bool(result.get("partial", False)),
         "user_message": str(result.get("user_message") or ""),
         "files": files,

@@ -936,7 +936,188 @@ NEO4J_SYNC_ENABLED=false
 第二版本仍不启用自动实体构图、自由 Cypher、Text2Cypher 或 GraphRAG 文件问答。`VectorCypherRetriever`
 只使用后端固定遍历模板，普通用户响应不会暴露相似来源文件身份。
 
-## 9. 当前限制
+## 9. 正式上线范围、配置与 Adaptive Planner 灰度
+
+本节定义当前版本可以对普通用户正式提供的功能、部署时应修改的配置，以及 Adaptive Planner 从
+Shadow 到真实执行的反馈闭环。这里的“正式上线”指功能具备明确权限、审计、失败降级和人工处置路径，
+不等同于把所有实验性开关同时设为 `enabled`。
+
+### 9.1 可正式提供的用户能力
+
+普通用户可以正式使用以下能力：
+
+- 登录、聊天会话和带明确文字任务的附件上传。
+- PDF、DOC、DOCX、XLS、XLSX、TXT、MD、CSV 与常见图片的上传、异步查重、归档、工作副本导入、
+  解析、OCR、摘要、Chunk 和 Evidence 建立。
+- 受管原始目录扫描、定时对账，以及部署了 watcher 后的近实时发现；所有普通读写对象均为工作副本，
+  原件不被 Agent 修改。
+- 基于 Jieba、PostgreSQL `simple` FTS/GIN 与 `pg_trgm` 的两阶段文件检索，并区分“已验证相关”与
+  “可能相关”结果。
+- 基于当前活动版本原文 Evidence 的文件解释、总结和问答；证据不足时明确说明不能得出结论。
+- 多标签分类建议，以及用户对分类建议的接受、拒绝和更正。
+- 工作副本的重命名、移动、移入回收站和恢复；高风险动作必须先创建并确认 OperationPlan，路径变化
+  写入 `working_copy_path_records`。
+- 管理员查看 AgentRun、ToolInvocation、ChangeSet、后台文件任务、失败任务和中文诊断时间线。
+
+本次上线不得对外承诺以下能力：通用向量语义检索、图谱结果自动写入正式分类、自动永久删除、
+自动创建或启用 Tool/Skill、以及默认向外部模型发送后台文件摘要。Neo4j 和 Adaptive Planner 可以按本节
+灰度方式作为增强能力上线，但不能绕过原有的确定性检索、分类和确认边界。
+
+### 9.2 生产配置文件与基础配置
+
+Docker Compose 部署时，只创建并维护 `deploy/.env`：它由 `deploy/.env.production.example` 复制生成，
+包含真实密码、受管目录和服务地址，绝不能提交 Git。直接在服务器运行 API 与 worker 时，使用仓库根
+目录的 `.env`；根目录 `.env.example` 仅作字段模板，不填写真实值。
+
+生产部署至少核对以下配置：
+
+```env
+CADDY_SITE_ADDRESS=你的正式域名
+POSTGRES_PASSWORD=随机强密码
+JWT_SECRET_KEY=随机强密钥
+
+LLM_ENABLED=true
+LLM_API_KEY=你的密钥
+LLM_BASE_URL=你的兼容接口地址
+LLM_CHAT_MODEL=你的模型名称
+LLM_TIMEOUT_SECONDS=30
+
+MANAGED_ROOT_WORKDATA=宿主机受管原始目录
+MANAGED_ROOT_WORKDATA_CLASSIFICATION_MODE=NONE
+MANAGED_ROOT_VOLUME_MODE=ro
+
+UPLOAD_MAX_SIZE=按网关和服务器容量设置
+LOG_LEVEL=INFO
+LOG_RETENTION_DAYS=7
+```
+
+以下安全默认值应保持不变：
+
+```env
+DOCUMENT_SUMMARY_PROVIDER=extractive
+CLASSIFICATION_SUMMARY_PROVIDER=extractive
+LLM_CLASSIFICATION_MODE=rule_only
+LLM_CLASSIFICATION_ALLOW_FREE_PATHS=false
+EMBEDDING_ENABLED=false
+EMBEDDING_PROVIDER=disabled
+```
+
+生产 Compose 已将 Web API 固定为同域 `/api`。只有部署为前后端不同域名时，才需要额外修改前端
+`VITE_API_BASE_URL` 和后端 CORS 白名单；这不是普通 `.env` 配置能够单独解决的问题。
+
+首次发布或升级代码后，仍必须执行 Alembic migration 并按第 8 节启动 API、各队列 worker 和 scheduler。
+
+### 9.3 Adaptive Planner 配置与灰度
+
+首次生产发布保持 100% Shadow：
+
+```env
+ADAPTIVE_PLANNER_MODE=shadow
+ADAPTIVE_PLANNER_ROLLOUT_PERCENT=0
+ADAPTIVE_PLANNER_SHADOW_SAMPLE_PERCENT=100
+ADAPTIVE_PLANNER_SCHEMA_VERSION=planner-decision-v1
+```
+
+在 Shadow 模式下，Legacy Planner 产生用户可见结果和真实 Tool 调用；Adaptive Planner 只生成并校验
+`PlannerDecision`，不会执行第二次 Tool。管理员通过以下接口查看当前 Catalog/schema 下的只读对比指标：
+
+```text
+GET /api/admin/planner-shadow/metrics
+GET /api/admin/agent-runs
+GET /api/admin/agent-runs/{agent_run_id}/diagnostics
+```
+
+进入 5% 真实执行灰度时修改为：
+
+```env
+ADAPTIVE_PLANNER_MODE=enabled
+ADAPTIVE_PLANNER_ROLLOUT_PERCENT=5
+```
+
+稳定哈希命中的 5% 用户由 Adaptive Planner 生成实际 Tool 计划；未命中用户仍走 Legacy 可见执行并保留
+Adaptive Shadow 对比。因此剩余用户天然构成对照组，不能为了扩大比例关闭 Shadow 记录。扩大顺序固定为：
+
+```text
+Shadow 100%
+-> enabled 5%
+-> enabled 25%
+-> enabled 50%
+-> enabled 100%
+```
+
+任一安全问题出现时立即回退，不需要回滚数据库：
+
+```env
+ADAPTIVE_PLANNER_MODE=legacy
+```
+
+安全问题包括未知或禁用 Tool、未授权文件范围、跳过 OperationPlan 确认、重复相同 Tool 输入，或把
+“可能相关”候选作为已经证实的文件事实。扩大比例前还应比较 5% 组与 Shadow/Legacy 对照组的完成率、
+失败率、P95 耗时、无意义澄清率、重复调用率和同一问题二次重述率。
+
+### 9.4 Adaptive Planner 的反馈、定位与修复闭环
+
+分类建议已有“接受、拒绝、更正”反馈。普通对话结果还需要增加独立的通用任务反馈闭环，不能把
+分类反馈误作 Planner 质量反馈。后续实现应新增 `agent_run_feedbacks`，至少记录：
+
+```text
+agent_run_id
+user_id
+rating: HELPFUL / NOT_HELPFUL
+issue_type
+comment
+created_at
+resolved_at
+resolution_type
+resolution_note
+```
+
+`issue_type` 固定为以下受控枚举，普通用户只看到中文描述，不能看到 Tool 或 Skill 名称：
+
+```text
+WRONG_FILE_SCOPE
+MISSED_RELEVANT_FILE
+FALSE_RELEVANCE
+WRONG_TOOL_OR_ACTION
+UNNECESSARY_CLARIFY
+REPEATED_ACTION
+UNSAFE_ACTION
+ANSWER_NOT_SUPPORTED
+OTHER
+```
+
+每一条负反馈必须关联原 `agent_run_id`。管理员从诊断页读取原始请求、Planner 模式、Catalog 指纹、
+PlannerDecision、实际 ToolInvocation、文件范围、检索条件、异步任务状态和最终回执，再按根因处理：
+
+| 根因 | 修复位置 |
+|---|---|
+| Planner 选错 Tool 或无意义澄清 | Catalog 描述、PlannerDecision 约束、Prompt、绑定规则 |
+| Tool 正确但找错或漏掉文件 | 查询解析、短语策略、两阶段检索、范围澄清 |
+| 文件范围错误 | 文档选择、同名选择、后端 scope 校验 |
+| 有证据但回答错误 | evidence-answer Prompt、结构校验、引用校验 |
+| Tool 或后台任务失败 | 对应 Tool handler、生命周期任务、存储或索引链路 |
+| 当前 Catalog 缺少能力 | 生成 Capability Suggestion，人工开发、测试、注册后启用 |
+
+用户反馈不得直接修改生产 Prompt、Tool、Skill 或 taxonomy。每个确认的问题都必须脱敏沉淀为回放案例，
+包含用户请求、附件/文件范围、期望 PlannerDecision、期望 Tool 序列、期望安全边界和期望回执类别；
+修复后增加 deterministic fake 回归测试，重新回到 Shadow 验证。只有“回放通过、Shadow 不再复现、
+5% 灰度未出现同类反馈”同时满足，才允许扩大灰度比例。
+
+进入下一档灰度前必须满足：安全问题为零；每条负反馈均能定位到 AgentRun 并有处置结论；修复样本已经
+进入回归测试；并且检索、同名选择、文件解释、总结、分类解释、重命名、删除和恢复等关键场景均有覆盖。
+
+### 9.5 Neo4j 与通用向量检索的上线边界
+
+Neo4j 图谱增强分类先使用 Shadow 配置，详见第 8 节；只有真实 Neo4j smoke、投影重试、故障降级和
+分类反馈评测通过后，才将 `GRAPH_CLASSIFICATION_MODE` 改为 `enabled` 并按
+`GRAPH_CLASSIFICATION_ROLLOUT_PERCENT` 小范围展示分类建议。图谱结果始终先保持 `SUGGESTED` 或
+`NEEDS_REVIEW`，不得自动写入正式分类。
+
+通用向量语义检索目前不是一个可直接开启的生产开关。`EMBEDDING_ENABLED=true` 之前必须完成独立的
+embedding Provider、异步回填、模型版本与维度管理、pgvector 索引、词法与向量混排、权限范围校验、
+故障降级和冻结查询集评测。完成前，正式主检索仍为本地 Jieba + PostgreSQL FTS/GIN + `pg_trgm`。
+
+## 10. 当前限制
 
 - 当前已接入 OpenAI-compatible LLM 意图理解；默认 `LLM_ENABLED=false` 时仍使用 `DeterministicPlanner`。
 - Adaptive Planner 已具备 Catalog 校验、步骤级绑定、3 轮规划预算、Shadow 对比和稳定灰度开关，但尚未达到生产 Shadow 观察期与默认启用门槛；当前默认只读 Shadow，不能直接改为 100% enabled。
@@ -948,7 +1129,7 @@ NEO4J_SYNC_ENABLED=false
 - 当前已有最小 JWT 鉴权，但没有 refresh token、复杂 RBAC、ACL 或 admin 权限体系。
 - 当前前端已有注册、登录、Chat、异步上传状态、逐文件重复确认卡和通用 OperationPlan 确认卡；同名文件处理、移入回收站及恢复均可从对话完成，独立文件管理界面仍待补充。
 
-## 10. 维护规则
+## 11. 维护规则
 
 以下任一内容发生变化时，必须同步更新本文和 `README.md`：
 

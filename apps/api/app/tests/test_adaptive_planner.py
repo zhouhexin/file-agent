@@ -325,6 +325,54 @@ def test_search_projection_exposes_only_deduplicated_document_ids():
     assert projected["document_ids"] == ["doc-1", "doc-2"]
 
 
+def test_search_projection_does_not_authorize_possible_candidates_for_followup_reading():
+    """可能相关只供用户查看，不能绑定给下一轮 evidence-answer。"""
+
+    class EmptyInput(BaseModel):
+        """搜索投影包装器的最小测试输入。"""
+
+        model_config = ConfigDict(extra="forbid")
+
+    projected = _with_search_binding_projection(
+        lambda _input: {
+            "ok": True,
+            "kind": "workspace_file_search",
+            "supported_count": 1,
+            "possible_count": 1,
+            "results": [
+                {"document_id": "doc-supported", "relevance_tier": "SUPPORTED"},
+                {"document_id": "doc-possible", "relevance_tier": "POSSIBLE"},
+            ],
+        }
+    )(EmptyInput())
+
+    assert projected["document_ids"] == ["doc-supported"]
+
+
+def test_search_projection_marks_possible_only_result_as_not_readable_followup_scope():
+    """只有可能相关候选时，Planner 必须得到不允许直接读取的观察状态。"""
+
+    class EmptyInput(BaseModel):
+        """搜索投影包装器的最小测试输入。"""
+
+        model_config = ConfigDict(extra="forbid")
+
+    projected = _with_search_binding_projection(
+        lambda _input: {
+            "ok": True,
+            "kind": "workspace_file_search",
+            "supported_count": 0,
+            "possible_count": 1,
+            "results": [
+                {"document_id": "doc-possible", "relevance_tier": "POSSIBLE"},
+            ],
+        }
+    )(EmptyInput())
+
+    assert projected["document_ids"] == []
+    assert projected["result_status"] == "POSSIBLE_ONLY"
+
+
 def test_search_projection_records_backend_effective_conditions():
     """LLM 解释出的查询条件必须标记实际生效情况，不能伪装成数据库硬过滤。"""
 

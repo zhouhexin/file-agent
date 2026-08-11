@@ -176,49 +176,73 @@ export function FileSelectionReceipt({
     <section className="evidence-answer-receipt">
       <div className="evidence-answer-text">{result.message}</div>
       <div className="search-results-list">
-        {result.choices.map((file, index) => (
-          <article
-            className={
-              selectedOptionIds.includes(file.option_id)
-                ? 'search-result-card is-selected'
-                : 'search-result-card'
-            }
-            key={`${file.working_copy_id}-${index}`}
-          >
-            <input
-              checked={selectedOptionIds.includes(file.option_id)}
-              disabled={submitting || currentStatus !== 'WAITING_SELECTION'}
-              name={`file-selection-${result.clarification_id}`}
-              onChange={() => setSelectedOptionIds((current) => (
-                current.includes(file.option_id)
-                  ? current.filter((item) => item !== file.option_id)
-                  : [...current, file.option_id]
-              ))}
-              type="checkbox"
-            />
-            <span className="search-result-icon">
-              <FileText size={18} aria-hidden />
-            </span>
-            <div className="search-result-main">
-              <span className="search-result-filename">
-                {index + 1}. {file.filename}
+        {result.choices.map((file, index) => {
+          // 历史消息选择卡没有分类与目录字段；缺失时仍应允许用户完成选择。
+          const categoryLabels = Array.isArray(file.suggested_category_labels)
+            ? file.suggested_category_labels
+            : [];
+          return (
+            <article
+              className={
+                selectedOptionIds.includes(file.option_id)
+                  ? 'search-result-card is-selected'
+                  : 'search-result-card'
+              }
+              key={`${file.working_copy_id}-${index}`}
+            >
+              <input
+                checked={selectedOptionIds.includes(file.option_id)}
+                disabled={submitting || currentStatus !== 'WAITING_SELECTION'}
+                name={`file-selection-${result.clarification_id}`}
+                onChange={() => setSelectedOptionIds((current) => (
+                  current.includes(file.option_id)
+                    ? current.filter((item) => item !== file.option_id)
+                    : [...current, file.option_id]
+                ))}
+                type="checkbox"
+              />
+              <span className="search-result-icon">
+                <FileText size={18} aria-hidden />
               </span>
-              <span className="evidence-file-unavailable">
-                {formatFileSize(file.size_bytes)} · 创建于{' '}
-                {new Date(file.created_at).toLocaleString('zh-CN')}
-              </span>
-            </div>
-            {onOpenDocument ? (
-              <button
-                type="button"
-                className="search-result-action"
-                onClick={() => onOpenDocument(file.document_id, file.filename)}
-              >
-                查看文件
-              </button>
-            ) : null}
-          </article>
-        ))}
+              <div className="search-result-main">
+                <span className="search-result-filename">
+                  {index + 1}. {file.filename}
+                </span>
+                <span className="evidence-file-unavailable">
+                  {formatFileSize(file.size_bytes)} · 创建于{' '}
+                  {new Date(file.created_at).toLocaleString('zh-CN')}
+                </span>
+                <span className="file-selection-directory">
+                  所在目录：{file.directory_path || '工作目录根目录'}
+                </span>
+                {categoryLabels.length > 0 ? (
+                  <div className="search-result-tags" aria-label="建议分类">
+                    {categoryLabels.map((label) => (
+                      <span
+                        className="category-chip category-chip--compact search-result-category-tag"
+                        key={label}
+                      >
+                        <Tag size={13} aria-hidden />
+                        <span>{label}</span>
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="file-selection-category-empty">建议分类：暂未生成</span>
+                )}
+              </div>
+              {onOpenDocument ? (
+                <button
+                  type="button"
+                  className="search-result-action"
+                  onClick={() => onOpenDocument(file.document_id, file.filename)}
+                >
+                  查看文件
+                </button>
+              ) : null}
+            </article>
+          );
+        })}
       </div>
       {error ? <div className="field-error">{error}</div> : null}
       <button

@@ -36,6 +36,11 @@ _FILLER_PHRASES = [
     "有没有",
     "有哪些",
     "给我",
+    "列出",
+    "列一下",
+    "罗列",
+    "展示",
+    "显示",
     "相关的",
     "有关的",
     "相关",
@@ -45,6 +50,22 @@ _FILLER_PHRASES = [
     "材料",
     "一下",
 ]
+
+# 这类词常用于描述文件动作、工作流程或目录管理，本身通常不足以证明用户的
+# 具体业务主题。它们只用于把“已验证相关”和“可能相关”分开，不能作为分类或
+# 事实回答的依据。
+_BROAD_ACTION_TERMS = (
+    "发放",
+    "管理",
+    "工作",
+    "处理",
+    "安排",
+    "通知",
+    "申请",
+    "审批",
+    "统计",
+    "汇总",
+)
 
 _YEAR_PATTERN = re.compile(r"(20\d{2})年?")
 _YEAR_SUFFIX_PATTERN = re.compile(r"((?:19|20)\d{2})\s*年(?:度)?")
@@ -93,6 +114,8 @@ class ParsedQuery:
     unit_candidates: list[str] = field(default_factory=list)
     person_candidates: list[str] = field(default_factory=list)
     doc_number: str | None = None
+    required_topic_terms: list[str] = field(default_factory=list)
+    supporting_topic_terms: list[str] = field(default_factory=list)
 
 
 class FileSearchQueryParser:
@@ -156,6 +179,11 @@ class FileSearchQueryParser:
         # 6. 提取 taxonomy 候选（可在后续任务中扩展）
         taxonomy_candidates = self._match_taxonomy_candidates(cleaned, terms)
 
+        required_topic_terms, supporting_topic_terms = _extract_topic_constraints(
+            cleaned=cleaned,
+            terms=terms,
+        )
+
         return ParsedQuery(
             original=query,
             cleaned=cleaned,
@@ -165,6 +193,8 @@ class FileSearchQueryParser:
             relative_year=relative_year,
             doc_number=doc_number,
             taxonomy_candidates=taxonomy_candidates,
+            required_topic_terms=required_topic_terms,
+            supporting_topic_terms=supporting_topic_terms,
         )
 
     def _relation_mode(
@@ -326,3 +356,41 @@ def exact_short_chinese_phrase(text: str) -> str | None:
     if re.fullmatch(r"[\u3400-\u9fff]{2,4}", normalized):
         return normalized
     return None
+
+
+def _extract_topic_constraints(
+    *, cleaned: str, terms: list[str]
+) -> tuple[list[str], list[str]]:
+    """从完整主题中抽取可验证的核心词与宽泛动作词。
+
+    例如“劳务费发放”中的“劳务费”是用户查询的核心业务主题，“发放”是
+    常见业务动作。检索阶段可据此把仅命中“发放”的文件降为可能相关，避免
+    误称其已经涉及劳务费。这里不调用 LLM，也不改变原始查询短语。
+    """
+
+    compact = re.sub(r"\s+", "", str(cleaned or ""))
+    normalized_terms: list[str] = []
+    for value in terms:
+        term = re.sub(r"\s+", "", str(value or ""))
+        if term and term not in normalized_terms:
+            normalized_terms.append(term)
+
+    # 末尾动作词的结构优先级高于分词结果。Jieba 的搜索模式可能同时返回
+    # “劳务费发放”“劳务”“务费”等重叠词；这些片段不能被分别当成多个核心
+    # 条件，否则会放大 SQL 调用并降低“劳务费”这一完整主题的可解释性。
+    for action in _BROAD_ACTION_TERMS:
+        if compact.endswith(action) and len(compact) - len(action) >= 2:
+            return [compact[: -len(action)]], [action]
+
+    supporting = [term for term in normalized_terms if term in _BROAD_ACTION_TERMS]
+    required = [
+        term
+        for term in normalized_terms
+        if term not in _BROAD_ACTION_TERMS and len(term) >= 2
+    ]
+
+    # 只有同时存在核心主题和宽泛动作时才提供分级约束；其它短语继续按完整
+    # 短语检索，避免把“任职通知”等正常业务术语拆得过细。
+    if not required or not supporting:
+        return [], []
+    return required[:4], supporting[:4]

@@ -2066,6 +2066,8 @@ def _workspace_file_search_from_results(tool_results: List[Dict[str, Any]]) -> D
         return {
             "ok": bool(result.get("ok")),
             "query": str(result.get("query") or ""),
+            "supported_count": result.get("supported_count"),
+            "possible_count": result.get("possible_count"),
             "results": [
                 item for item in result.get("results", []) if isinstance(item, dict)
             ],
@@ -2301,7 +2303,21 @@ def _build_workspace_file_search_response(payload: Dict[str, Any]) -> str:
     results = [item for item in payload.get("results", []) if isinstance(item, dict)]
     if not results:
         return "没有找到与这段描述明确相关的已整理文件。你可以补充主题、年份、单位或文件类型后再找。"
-    lines = [f"找到 {len(results)} 个相关文件："]
+    supported_count = int(payload.get("supported_count") or 0)
+    possible_count = int(payload.get("possible_count") or 0)
+    if supported_count or possible_count:
+        if supported_count and possible_count:
+            lines = [
+                f"找到 {supported_count} 个已验证相关文件，另有 {possible_count} 个可能相关文件："
+            ]
+        elif supported_count:
+            lines = [f"找到 {supported_count} 个已验证相关文件："]
+        else:
+            lines = [
+                f"未找到可确认的相关文件，以下 {possible_count} 个仅供继续查看："
+            ]
+    else:
+        lines = [f"找到 {len(results)} 个相关文件："]
     for index, item in enumerate(results, start=1):
         filename = str(item.get("filename") or "未命名文件")
         category_path = "/".join(str(value) for value in item.get("category_path", []) if value)
@@ -2310,6 +2326,8 @@ def _build_workspace_file_search_response(payload: Dict[str, Any]) -> str:
         line = f"{index}. {filename}"
         if category_path:
             line += f"（{category_path}）"
+        if str(item.get("relevance_tier") or "") == "POSSIBLE":
+            line += "【可能相关】"
         lines.append(line)
         if summary:
             lines.append(f"   {summary}")

@@ -13,6 +13,7 @@ import time
 import unicodedata
 from collections import defaultdict
 from difflib import SequenceMatcher
+from pathlib import PurePosixPath
 from typing import Any, Iterable
 
 from pydantic import ValidationError
@@ -54,6 +55,7 @@ from app.modules.retrieval.scope_resolver import (
     FileSearchScopeResolver,
 )
 from app.modules.retrieval.two_stage_search import TwoStageFileSearchService
+from app.modules.retrieval.phrase_strategy import FileSearchPhraseStrategyService
 from app.modules.evidence_answer.policy import EvidenceQuestionPolicy
 from app.modules.evidence_answer.schemas import EvidenceItem, EvidencePackage, StructuredAnswer
 
@@ -810,21 +812,42 @@ class EvidenceAnswerService:
             explicit_attachment_ids=[],
             conversation_id=self.conversation_id,
         )
-        result = TwoStageFileSearchService(
+        search_service = TwoStageFileSearchService(
             db=self.db,
             user_id=self.user_id,
             workspace_id=self.workspace_id,
             config=self.settings,
             tokenizer=self.tokenizer,
-        ).search(
-            query=question,
-            parsed_query=parsed,
-            scope=scope,
         )
+        if (
+            parsed.relation_mode == "LITERAL"
+            and parsed.required_topic_terms
+            and parsed.supporting_topic_terms
+        ):
+            # 未指定文件范围时，证据回答只能从“已验证相关”文件中选择。
+            # 可能相关候选仍可在检索回执中展示，但不能被提升为事实回答来源。
+            result = FileSearchPhraseStrategyService(
+                search_service=search_service,
+                tokenizer=self.tokenizer,
+            ).search_with_topic_tiers(
+                original_query=question,
+                parsed_query=parsed,
+                scope=scope,
+                exact_phrase=parsed.cleaned,
+                required_topic_terms=parsed.required_topic_terms,
+                supporting_topic_terms=parsed.supporting_topic_terms,
+            )
+        else:
+            result = search_service.search(
+                query=question,
+                parsed_query=parsed,
+                scope=scope,
+            )
         version_ids = [
             str(item.get("document_version_id") or "")
-            for item in result.get("results", [])[: self.settings.evidence_answer_max_documents]
-        ]
+            for item in result.get("results", [])
+            if str(item.get("relevance_tier") or "") != "POSSIBLE"
+        ][: self.settings.evidence_answer_max_documents]
         if not version_ids:
             return []
         rows = (
@@ -925,7 +948,14 @@ class EvidenceAnswerService:
         question: str,
         message: str,
     ) -> dict[str, Any]:
-        """持久化文件选择上下文，续跑时只能使用用户选择的 document_id。"""
+        """持久化文件选择上下文，续跑时只能使用用户选择的 document_id。
+
+        同名文件的文件名本身不足以帮助用户辨别来源。这里额外投影当前内容版本的
+        分类建议和工作副本相对目录；它们仅用于本次选择展示，不能替代稳定 ID，也
+        不能使用历史版本分类或服务器绝对路径。
+        """
+
+        metadata_by_copy_id = self._file_selection_metadata(rows=rows)
 
         choices = [
             {
@@ -936,6 +966,12 @@ class EvidenceAnswerService:
                 "filename": working_copy.filename,
                 "size_bytes": working_copy.size_bytes,
                 "created_at": working_copy.created_at.isoformat(),
+                "suggested_category_labels": metadata_by_copy_id.get(
+                    working_copy.id, {}
+                ).get("suggested_category_labels", []),
+                "directory_path": metadata_by_copy_id.get(working_copy.id, {}).get(
+                    "directory_path", "工作目录根目录"
+                ),
             }
             for position, (working_copy, version) in enumerate(rows, start=1)
         ]
@@ -956,6 +992,10 @@ class EvidenceAnswerService:
                     "document_id": item["document_id"],
                     "examples": [],
                     "estimated_count": None,
+                    # 选择凭据由后端保存；同时保留展示元数据，使审计记录能解释用户
+                    # 当时看到的候选差异，但 resolve 仍只信任 document_id 与 option_id。
+                    "suggested_category_labels": item["suggested_category_labels"],
+                    "directory_path": item["directory_path"],
                 }
                 for item in choices
             ],
@@ -970,6 +1010,70 @@ class EvidenceAnswerService:
             "answer": "",
             "references": [],
         }
+
+    def _file_selection_metadata(
+        self,
+        *,
+        rows: list[tuple[WorkingCopy, DocumentVersion]],
+    ) -> dict[str, dict[str, Any]]:
+        """读取候选当前版本分类并生成不含绝对路径的目录显示信息。"""
+
+        document_ids = [working_copy.document_id for working_copy, _ in rows]
+        classifications = CurrentClassificationEvidenceReader(
+            db=self.db,
+            # 候选已由共享活动工作区查询并固定；这里不能按上传者过滤，否则共享
+            # 工作目录中的受管文件会错误显示为“未分类”。
+            user_id=None,
+            workspace_id=self.workspace_id,
+        ).read(document_ids=document_ids)
+        categories_by_document_version: dict[tuple[str, str], list[str]] = {}
+        for classification in classifications:
+            document_id = str(classification.get("document_id") or "")
+            document_version_id = str(classification.get("document_version_id") or "")
+            labels: list[str] = []
+            for category in classification.get("categories", []):
+                if not isinstance(category, dict):
+                    continue
+                path = [
+                    str(part).strip()
+                    for part in category.get("category_path", [])
+                    if str(part).strip()
+                ]
+                label = " / ".join(path) or str(category.get("name") or "").strip()
+                if label and label not in labels and len(labels) < 3:
+                    labels.append(label)
+            if document_id and document_version_id:
+                categories_by_document_version[(document_id, document_version_id)] = (
+                    labels
+                )
+
+        return {
+            working_copy.id: {
+                "suggested_category_labels": categories_by_document_version.get(
+                    (working_copy.document_id, version.id), []
+                ),
+                "directory_path": self._working_copy_directory_label(working_copy),
+            }
+            for working_copy, version in rows
+        }
+
+    @staticmethod
+    def _working_copy_directory_label(working_copy: WorkingCopy) -> str:
+        """将工作副本相对路径转成用户可读目录，禁止透传服务器存储路径。"""
+
+        normalized = (
+            str(working_copy.relative_path or "").replace("\\", "/").strip("/")
+        )
+        if not normalized:
+            return "工作目录根目录"
+        parts = [
+            part
+            for part in PurePosixPath(normalized).parts
+            if part not in {".", "..", "/"}
+        ]
+        if len(parts) <= 1:
+            return "工作目录根目录"
+        return "/".join(parts[:-1])
 
     def _expand_same_name_rows(
         self,
