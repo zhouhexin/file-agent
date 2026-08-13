@@ -912,6 +912,46 @@
   font-size: 0.82rem;
 }
 
+/* 证据片段仅来自后端已验证的 AnswerReference，默认展开以便用户直接核对结论依据。 */
+.evidence-reference-details {
+  margin-top: 9px;
+}
+
+.evidence-reference-details summary {
+  color: var(--primary);
+  cursor: pointer;
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.evidence-reference-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.evidence-reference-item {
+  margin: 0;
+  border-left: 3px solid #b9d4ff;
+  border-radius: 0 7px 7px 0;
+  background: #f7fbff;
+  padding: 7px 9px;
+}
+
+.evidence-reference-item figcaption {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.evidence-reference-item blockquote {
+  margin: 5px 0 0;
+  color: #344154;
+  font-size: 0.84rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
 .search-result-action.is-disabled {
   cursor: default;
   opacity: 0.65;
@@ -934,6 +974,27 @@
   min-height: 24px;
   color: #1f2933;
   font-size: 15px;
+}
+
+/* “已找全”只能由后端覆盖评估确认；用中性提示说明范围与索引缺口，避免把候选数误当总数。 */
+.search-completeness {
+  margin: 7px 0 2px;
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.search-completeness--complete {
+  background: #effaf2;
+  color: #1f6a37;
+}
+
+.search-completeness--processing,
+.search-completeness--partial,
+.search-completeness--unverifiable {
+  background: #fff8e8;
+  color: #7a4d00;
 }
 
 .search-results-list {

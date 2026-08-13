@@ -158,8 +158,22 @@ export type FileSearchResult = {
   possible_count?: number;
   partial: boolean;
   user_message: string;
+  // 后端基于真实范围和索引状态生成的覆盖结论，前端只负责展示，不能自行判定“找全”。
+  search_completeness?: SearchCompleteness;
   show_all_results?: boolean;
   files: FileSearchResultFile[];
+};
+
+export type SearchCompleteness = {
+  status: 'COMPLETE' | 'PROCESSING' | 'PARTIAL' | 'UNVERIFIABLE';
+  can_claim_complete: boolean;
+  scope_label: string;
+  eligible_file_count: number;
+  ready_file_count: number;
+  pending_file_count: number;
+  failed_file_count: number;
+  candidate_limit_reached: boolean;
+  message: string;
 };
 
 export type TrashRestoreCandidate = {
@@ -236,6 +250,16 @@ export type EvidenceAnswerFile = {
   can_open?: boolean;
   can_restore?: boolean;
   reference_indexes: number[];
+  // 已由后端限制长度并完成权限校验的原文片段；不含 Evidence/Chunk 等内部标识。
+  // 历史消息尚未保存该字段，前端读取时必须按空数组兼容。
+  evidence_items?: EvidenceAnswerEvidenceItem[];
+};
+
+export type EvidenceAnswerEvidenceItem = {
+  quote: string;
+  page_number: number | null;
+  sheet_name: string | null;
+  cell_range: string | null;
 };
 
 export type EvidenceAnswerResult = {

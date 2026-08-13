@@ -81,6 +81,10 @@ export function SearchResultsReceipt({
 }: SearchResultsReceiptProps) {
   // 前端只控制展示批次；后端仍负责总数、权限和结果上限。
   const [visibleCount, setVisibleCount] = useState(10);
+  const completeness = result.search_completeness;
+  const completenessClassName = completeness
+    ? `search-completeness search-completeness--${completeness.status.toLowerCase()}`
+    : '';
   if (result.files.length === 0) {
     return (
       <section className="search-results-receipt">
@@ -88,6 +92,9 @@ export function SearchResultsReceipt({
           {result.user_message ||
             '未找到相关文件。请尝试补充主题、年份、单位或文档类型。'}
         </div>
+        {completeness ? (
+          <p className={completenessClassName}>{completeness.message}</p>
+        ) : null}
       </section>
     );
   }
@@ -137,6 +144,11 @@ export function SearchResultsReceipt({
             : `找到 ${result.total_returned} 个相关文件`}
         </strong>
       </header>
+      {completeness ? (
+        <p className={completenessClassName}>
+          {completeness.message}
+        </p>
+      ) : null}
 
       {visibleSupportedFiles.length > 0 ? (
         <div className="search-results-list">

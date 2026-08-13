@@ -559,6 +559,26 @@ def _search_handler(
                 mark_metadata_results_as_possible,
             )
             from app.modules.retrieval.query_parser import FileSearchQueryParser
+            from app.modules.retrieval.scope_resolver import (
+                ConversationFileSearchContextService,
+                FileSearchScopeResolver,
+            )
+            from app.modules.retrieval.completeness import SearchCompletenessService
+
+            # 紧急摘要回退也必须报告真实范围与索引缺口，不能因为换了算法就把
+            # “结果为空”误报为“文件已找全”。
+            fallback_scope = FileSearchScopeResolver(
+                session_file_service=ConversationFileSearchContextService(
+                    db=db,
+                    user_id=user_id,
+                ),
+            ).resolve(
+                query=search_query,
+                explicit_attachment_ids=explicit_document_ids,
+                conversation_id=(
+                    conversation_id_getter() if conversation_id_getter else None
+                ),
+            )
 
             fallback_parsed = FileSearchQueryParser(
                 tokenizer=ChineseLexicalTokenizer(load_default_business_terms())
@@ -630,6 +650,16 @@ def _search_handler(
                 query_fingerprint=query_fingerprint,
                 result_count=len(list(result.get("results") or [])),
                 message="摘要回退文件检索请求完成",
+            )
+            result = SearchCompletenessService(
+                db=db,
+                workspace_id=workspace_id,
+            ).attach(
+                result=result,
+                scope=fallback_scope,
+                unresolved_document_count=len(
+                    canonical_scope.unresolved_document_ids
+                ),
             )
             return {
                 **result,
@@ -849,6 +879,18 @@ def _search_handler(
             ),
         )
         result["kind"] = "workspace_file_search"
+        # “是否找全”只能由活动工作副本及其当前索引版本的真实状态得出，不能交给
+        # Planner 或模型概括。即使检索结果为空，也必须把未就绪和候选上限说明出来。
+        from app.modules.retrieval.completeness import SearchCompletenessService
+
+        result = SearchCompletenessService(
+            db=db,
+            workspace_id=workspace_id,
+        ).attach(
+            result=result,
+            scope=scope,
+            unresolved_document_count=len(canonical_scope.unresolved_document_ids),
+        )
         log_event(
             "retrieval.active_scope.completed",
             level="WARNING" if result.get("partial") else "INFO",
@@ -860,6 +902,11 @@ def _search_handler(
             partial=bool(result.get("partial")),
             clarification_required=bool(result.get("search_clarification")),
             restore_selection_found=bool(result.get("trash_restore_selection")),
+            completeness_status=(
+                (result.get("search_completeness") or {}).get("status")
+                if isinstance(result.get("search_completeness"), dict)
+                else None
+            ),
             message="活动工作副本检索完成",
         )
         # managed_files 只用于内部发现。只有普通工作副本检索确实未命中时才
@@ -1247,6 +1294,10 @@ def _intersect_file_search_results(
         and _metadata_contains_search_phrase(item, topic_phrase)
     )
     partial = bool(entity_result.get("partial") or topic_result.get("partial"))
+    candidate_limit_reached = bool(
+        entity_result.get("candidate_limit_reached")
+        or topic_result.get("candidate_limit_reached")
+    )
     log_event(
         "retrieval.strategy.intersection_completed",
         level="WARNING" if partial or not results else "INFO",
@@ -1264,6 +1315,7 @@ def _intersect_file_search_results(
         "query": original_query,
         "total_returned": len(results),
         "partial": partial,
+        "candidate_limit_reached": candidate_limit_reached,
         "results": results,
         "user_message": (
             f"找到 {len(results)} 个相关文件。"

@@ -987,6 +987,17 @@ Response:
   "query": "贫困生补助怎么申请？",
   "total_returned": 1,
   "partial": false,
+  "search_completeness": {
+    "status": "COMPLETE",
+    "can_claim_complete": true,
+    "scope_label": "当前共享工作区全部活动文件",
+    "eligible_file_count": 36,
+    "ready_file_count": 36,
+    "pending_file_count": 0,
+    "failed_file_count": 0,
+    "candidate_limit_reached": false,
+    "message": "已完成当前共享工作区全部活动文件中 36 份活动文件的检索；当前条件下结果已找全。"
+  },
   "user_message": "",
   "files": [
     {
@@ -1006,6 +1017,11 @@ Response:
 此接口和聊天入口均不调用 embedding、GPU、LLM、Graph 或文件系统扫描；不会返回 Chunk 正文、
 `search_text`、内部路径、SQL 分数或 Tool/Skill 载荷。`attachment_document_ids` 仅作为后端再次
 鉴权的稳定 ID 输入，`top_k` 范围为 1–20。
+
+`search_completeness` 由后端根据实际检索范围和当前索引状态计算，前端不得根据返回文件数量自行
+推断“已找全”。`COMPLETE` 只表示当前唯一范围、检索条件和索引能力下不存在已知缺口；`PROCESSING`
+表示有活动文件尚在准备检索，`PARTIAL` 表示索引降级、失败或候选上限导致结果可能不完整，
+`UNVERIFIABLE` 表示附件或查找范围尚未被唯一确认。它不代表系统能够证明所有业务语义上的相关文件。
 
 ### 8.2 File Search Clarification
 
@@ -1045,7 +1061,7 @@ call chat model using evidence-answer Skill
 save qa_answers
 save answer_references
 reuse the AgentRun user-task projection instead of inserting a duplicate assistant message
-return answer and compact file references
+return answer, compact file references, and safe excerpts of the evidence actually cited by the final answer
 ```
 
 Response:
@@ -1061,11 +1077,11 @@ Response:
     "task_id": "agent-run-uuid",
     "task_status": "completed",
     "response_type": "evidence_answer",
-    "final_response": "申请流程包括提交申请表、学院审核和学校复核。[1]",
+    "final_response": "申请流程包括提交申请表、学院审核和学校复核。",
     "evidence_answer_result": {
       "answer_id": "answer-uuid",
       "status": "COMPLETED",
-      "answer": "申请流程包括提交申请表、学院审核和学校复核。[1]",
+      "answer": "申请流程包括提交申请表、学院审核和学校复核。",
       "files": [
         {
           "document_id": "document-uuid",
@@ -1077,7 +1093,15 @@ Response:
           "availability": "AVAILABLE",
           "availability_message": "文件可用",
           "can_open": true,
-          "can_restore": false
+          "can_restore": false,
+          "evidence_items": [
+            {
+              "quote": "申请人应提交国家励志奖学金申请表，并由学院审核后报送学校。",
+              "page_number": 2,
+              "sheet_name": null,
+              "cell_range": null
+            }
+          ]
         }
       ],
       "limitations": [],
@@ -1087,8 +1111,12 @@ Response:
 }
 ```
 
-完整 Evidence quote、Chunk ID、页码和单元格定位保存在数据库引用与文件预览中，不在普通聊天消息
-载荷重复返回。精确文件名命中回收站时返回 `trash_restore_selection`；同名不同内容候选返回
+`evidence_items` 只包含本次最终结论已经写入 `answer_references` 的受限原文片段，供普通用户
+核对答案。每项最多 320 个字符；只允许返回 `quote`、`page_number`、`sheet_name` 和 `cell_range`，
+不得返回 EvidenceSpan/Chunk ID、内部检索分数、文件系统路径或未被最终结论引用的召回正文。
+
+完整 Evidence quote、Chunk ID、内部检索分数和完整正文保存在数据库引用与文件预览中，不在普通聊天
+消息载荷重复返回；普通回执只返回受限片段及必要的页码、工作表或单元格定位。精确文件名命中回收站时返回 `trash_restore_selection`；同名不同内容候选返回
 持久化 `file_selection`，用户提交后端签发的 `option_id` 后才继续回答。加载历史会话时后端重新
 投影引用文件当前状态；已进入回收站的文件返回 `availability=TRASHED`、`can_open=false`，前端不得
 继续打开旧正文。

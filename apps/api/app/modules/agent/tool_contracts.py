@@ -136,6 +136,8 @@ class WorkspaceFileSearchToolOutput(GenericToolOutput):
     index_status: str = "READY"
     result_status: str = "ZERO_RESULTS"
     available_next_actions: list[str] = Field(default_factory=list, max_length=10)
+    # 完整性由后端只读汇总，不允许 Planner 或 LLM 自行生成“已找全”结论。
+    search_completeness: dict[str, Any] | None = None
     user_message: str = ""
     search_clarification: dict[str, Any] | None = None
     trash_restore_selection: dict[str, Any] | None = None

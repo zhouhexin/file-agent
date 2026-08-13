@@ -118,6 +118,42 @@ def test_new_search_result_handles_empty_results():
     assert receipt.response_type == "file_search_results"
 
 
+def test_search_receipt_forwards_backend_completeness_without_internal_ids():
+    """覆盖结论必须原样来自后端，前端不能根据返回文件数量自行推断“找全”。"""
+
+    invocation = ToolInvocationRecord(
+        tool_name="hybrid-search",
+        input_json={"query": "奖学金"},
+        output_json={
+            "kind": "workspace_file_search",
+            "ok": True,
+            "query": "奖学金",
+            "total_returned": 1,
+            "partial": False,
+            "results": [],
+            "search_completeness": {
+                "status": "PROCESSING",
+                "can_claim_complete": False,
+                "scope_label": "当前共享工作区全部活动文件",
+                "eligible_file_count": 8,
+                "ready_file_count": 7,
+                "pending_file_count": 1,
+                "failed_file_count": 0,
+                "candidate_limit_reached": False,
+                "message": "暂时不能确认结果已找全。",
+            },
+        },
+        status="COMPLETED",
+    )
+    receipt = build_user_task_receipt(_make_result(tool_invocations=[invocation]))
+
+    assert receipt.file_search_result is not None
+    completeness = receipt.file_search_result["search_completeness"]
+    assert completeness["status"] == "PROCESSING"
+    assert completeness["can_claim_complete"] is False
+    assert "document_ids" not in completeness
+
+
 def test_non_search_tool_not_activating_search_field():
     """非 hybrid-search tool 不应激活 file_search_result。"""
 

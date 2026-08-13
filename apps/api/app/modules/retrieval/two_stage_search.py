@@ -177,6 +177,9 @@ class TwoStageFileSearchService:
 
         # 必要时补召回
         candidate_limit = min(int(self.config.retrieval_document_candidate_limit), 50)
+        # 候选达到保护上限时，系统无法证明是否仍有未进入精查阶段的匹配文件。
+        # 该事实必须显式传给完整性回执，不能只作为内部性能参数静默丢弃。
+        candidate_limit_reached = len(stage1_candidates) >= candidate_limit
         chunk_degraded = False
         fallback_count = 0
         if exact_phrase or len(stage1_candidates) < candidate_limit:
@@ -444,6 +447,7 @@ class TwoStageFileSearchService:
             evidence_count=len(evidence_map),
             result_count=len(fused),
             partial=partial,
+            candidate_limit_reached=candidate_limit_reached,
             message="两阶段文件检索完成",
         )
         return {
@@ -452,6 +456,7 @@ class TwoStageFileSearchService:
             "query": query,
             "total_returned": len(fused),
             "partial": partial,
+            "candidate_limit_reached": candidate_limit_reached,
             "results": fused,
             "user_message": self._build_user_message(fused, partial),
         }

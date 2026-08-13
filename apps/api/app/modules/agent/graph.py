@@ -2068,6 +2068,11 @@ def _workspace_file_search_from_results(tool_results: List[Dict[str, Any]]) -> D
             "query": str(result.get("query") or ""),
             "supported_count": result.get("supported_count"),
             "possible_count": result.get("possible_count"),
+            "search_completeness": (
+                result.get("search_completeness")
+                if isinstance(result.get("search_completeness"), dict)
+                else {}
+            ),
             "results": [
                 item for item in result.get("results", []) if isinstance(item, dict)
             ],
@@ -2301,8 +2306,15 @@ def _build_workspace_file_search_response(payload: Dict[str, Any]) -> str:
             or "这个查找条件存在不同范围，请选择后继续。"
         )
     results = [item for item in payload.get("results", []) if isinstance(item, dict)]
+    completeness = payload.get("search_completeness")
+    completeness_message = (
+        str(completeness.get("message") or "")
+        if isinstance(completeness, dict)
+        else ""
+    )
     if not results:
-        return "没有找到与这段描述明确相关的已整理文件。你可以补充主题、年份、单位或文件类型后再找。"
+        base_message = "没有找到与这段描述明确相关的已整理文件。你可以补充主题、年份、单位或文件类型后再找。"
+        return "\n".join(item for item in (base_message, completeness_message) if item)
     supported_count = int(payload.get("supported_count") or 0)
     possible_count = int(payload.get("possible_count") or 0)
     if supported_count or possible_count:
@@ -2333,6 +2345,8 @@ def _build_workspace_file_search_response(payload: Dict[str, Any]) -> str:
             lines.append(f"   {summary}")
         if reasons:
             lines.append(f"   推荐依据：{reasons[0]}")
+    if completeness_message:
+        lines.append(completeness_message)
     return "\n".join(lines)
 
 

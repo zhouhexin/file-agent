@@ -1,4 +1,4 @@
-// 阶段五回答只展示最终结论、必要限制和可预览文件框，不展示 Tool、Chunk 或原文定位。
+// 阶段五回答展示最终结论、受限原文依据和可预览文件框，不展示 Tool、Chunk 或内部标识。
 import { useEffect, useState } from 'react';
 import { FileText, Tag } from 'lucide-react';
 
@@ -9,6 +9,7 @@ import {
 } from '../../api/client';
 import { formatError } from '../../api/errors';
 import type {
+  EvidenceAnswerEvidenceItem,
   EvidenceAnswerResult,
   FileSelectionResult,
   SendMessageResponse,
@@ -24,6 +25,15 @@ export function EvidenceAnswerReceipt({
   result,
   onOpenDocument,
 }: EvidenceAnswerReceiptProps) {
+  /** 将页码、工作表和单元格转换为普通用户可核对的来源位置。 */
+  function formatEvidenceLocation(item: EvidenceAnswerEvidenceItem) {
+    const locations: string[] = [];
+    if (item.page_number) locations.push(`第 ${item.page_number} 页`);
+    if (item.sheet_name) locations.push(`工作表：${item.sheet_name}`);
+    if (item.cell_range) locations.push(`单元格：${item.cell_range}`);
+    return locations.length > 0 ? locations.join(' · ') : '原文片段';
+  }
+
   return (
     <section className="evidence-answer-receipt">
       {/* 回答正文不显示 [1] 等内部引用索引；可追溯文件统一由下方文件卡承载。 */}
@@ -36,7 +46,10 @@ export function EvidenceAnswerReceipt({
         </div>
       ) : null}
       <div className="search-results-list">
-        {result.files.map((file) => (
+        {result.files.map((file) => {
+          // 兼容本次改造前保存的历史证据回答，旧回执不存在 evidence_items 字段。
+          const evidenceItems = file.evidence_items ?? [];
+          return (
           <article className="search-result-card" key={file.document_id}>
             <span className="search-result-icon">
               <FileText size={18} aria-hidden />
@@ -63,6 +76,19 @@ export function EvidenceAnswerReceipt({
                   ))}
                 </div>
               ) : null}
+              {evidenceItems.length > 0 ? (
+                <details className="evidence-reference-details" open>
+                  <summary>原文依据（{evidenceItems.length} 条）</summary>
+                  <div className="evidence-reference-list">
+                    {evidenceItems.map((item, index) => (
+                      <figure className="evidence-reference-item" key={`${item.quote}-${index}`}>
+                        <figcaption>{formatEvidenceLocation(item)}</figcaption>
+                        <blockquote>{item.quote}</blockquote>
+                      </figure>
+                    ))}
+                  </div>
+                </details>
+              ) : null}
             </div>
             {onOpenDocument && file.can_open !== false ? (
               <button
@@ -78,7 +104,8 @@ export function EvidenceAnswerReceipt({
               </span>
             )}
           </article>
-        ))}
+          );
+        })}
       </div>
     </section>
   );

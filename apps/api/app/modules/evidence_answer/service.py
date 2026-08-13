@@ -92,6 +92,8 @@ _FULL_SUMMARY_MODEL_QUESTION = (
     "主要事项或章节、关键要求或结论，以及附件或表格要点（如原文存在）。"
     "不要逐段照抄，不要编造原文没有的背景、关系或结论。"
 )
+# 普通聊天回执只需要让用户核对结论，不应把完整 EvidenceSpan 正文或内部 ID 回传。
+_PUBLIC_EVIDENCE_QUOTE_MAX_CHARS = 320
 
 
 class EvidenceAnswerService:
@@ -1687,10 +1689,30 @@ class EvidenceAnswerService:
         limitations: list[str],
         cached: bool,
     ) -> dict[str, Any]:
-        """生成普通回执投影，不返回 quote、页码、单元格或内部检索轨迹。"""
+        """生成普通回执投影，只返回最终结论实际引用的受限原文依据。
+
+        数据库中的 ``AnswerReference`` 是完整审计事实；普通用户只需要查看可核对的
+        原文片段和页码、工作表或单元格定位。因此这里不能把本轮所有召回证据、内部
+        evidence ID、Chunk ID 或检索轨迹直接输出，也不能把未被最终结论使用的召回
+        内容误展示为回答依据。
+        """
 
         cards: dict[str, dict[str, Any]] = {}
-        document_ids = list(dict.fromkeys(item.document_id for item in items))
+        items_by_evidence_id = {item.evidence_id: item for item in items}
+        answer_references = (
+            self.db.query(AnswerReference)
+            .filter(AnswerReference.qa_answer_id == record.id)
+            .order_by(AnswerReference.reference_index.asc())
+            .all()
+        )
+        # 只有可追溯到已持久化 AnswerReference 的原文，才进入普通用户回执。
+        referenced_items = [
+            item
+            for reference in answer_references
+            if (item := items_by_evidence_id.get(reference.evidence_span_id)) is not None
+            and item.document_id == reference.document_id
+        ]
+        document_ids = list(dict.fromkeys(item.document_id for item in referenced_items))
         category_labels: dict[str, list[str]] = defaultdict(list)
         current_classifications = CurrentClassificationEvidenceReader(
             db=self.db,
@@ -1714,17 +1736,14 @@ class EvidenceAnswerService:
                 ):
                     category_labels[document_id].append(label)
         reference_indexes_by_document: dict[str, list[int]] = defaultdict(list)
-        for reference in (
-            self.db.query(AnswerReference)
-            .filter(AnswerReference.qa_answer_id == record.id)
-            .order_by(AnswerReference.reference_index.asc())
-            .all()
-        ):
-            reference_indexes_by_document[reference.document_id].append(
-                reference.reference_index
-            )
-        for item in items:
-            cards.setdefault(
+        for reference in answer_references:
+            item = items_by_evidence_id.get(reference.evidence_span_id)
+            if item is None or item.document_id != reference.document_id:
+                # 正常情况下不会发生；出现时宁可隐藏无法与当前活动证据对应的内容，
+                # 也不能把旧版本或未授权原文作为本轮证据展示。
+                continue
+            reference_indexes_by_document[item.document_id].append(reference.reference_index)
+            card = cards.setdefault(
                 item.document_id,
                 {
                     "document_id": item.document_id,
@@ -1736,10 +1755,19 @@ class EvidenceAnswerService:
                     "availability_message": "文件可用",
                     "can_open": True,
                     "can_restore": False,
-                    "reference_indexes": reference_indexes_by_document.get(
-                        item.document_id, []
-                    ),
+                    "reference_indexes": [],
+                    "evidence_items": [],
                 },
+            )
+            card["reference_indexes"].append(reference.reference_index)
+            # 只投影受限文本与可读定位；不把 evidence ID、Chunk ID 或文件系统路径交给前端。
+            card["evidence_items"].append(
+                {
+                    "quote": _public_evidence_quote(item.quote),
+                    "page_number": item.page_number,
+                    "sheet_name": item.sheet_name,
+                    "cell_range": item.cell_range,
+                }
             )
         return {
             "ok": True,
@@ -2043,3 +2071,12 @@ def _strip_legacy_inline_reference_indexes(
 
     # 只移除确实对应 AnswerReference 的历史编号，避免误删法规年份等普通正文内容。
     return re.sub(r"\[(\d+)\]", replace, str(value or ""))
+
+
+def _public_evidence_quote(value: str) -> str:
+    """把授权 EvidenceSpan 规范化为普通回执可展示的受限原文片段。"""
+
+    normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(normalized) <= _PUBLIC_EVIDENCE_QUOTE_MAX_CHARS:
+        return normalized
+    return f"{normalized[:_PUBLIC_EVIDENCE_QUOTE_MAX_CHARS].rstrip()}…"

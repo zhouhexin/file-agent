@@ -51,6 +51,7 @@ class FileSearchPhraseStrategyService:
         )
         merged: dict[str, dict[str, Any]] = {}
         partial = False
+        candidate_limit_reached = False
         successful_phrase_count = 0
         last_error: SQLAlchemyError | None = None
         for phrase in unique_phrases:
@@ -94,6 +95,9 @@ class FileSearchPhraseStrategyService:
                 continue
             successful_phrase_count += 1
             partial = partial or bool(payload.get("partial"))
+            candidate_limit_reached = candidate_limit_reached or bool(
+                payload.get("candidate_limit_reached")
+            )
             raw_result_count = len(
                 [item for item in payload.get("results", []) if isinstance(item, dict)]
             )
@@ -165,6 +169,7 @@ class FileSearchPhraseStrategyService:
             "query": original_query,
             "total_returned": len(results),
             "partial": partial,
+            "candidate_limit_reached": candidate_limit_reached,
             "results": results,
             "user_message": _user_message(results, partial),
         }
@@ -276,6 +281,15 @@ class FileSearchPhraseStrategyService:
                 possible_result,
             )
         )
+        candidate_limit_reached = any(
+            bool(result.get("candidate_limit_reached"))
+            for result in (
+                exact_result,
+                required_result,
+                supporting_result,
+                possible_result,
+            )
+        )
         log_event(
             "retrieval.phrase_strategy.topic_tiers_completed",
             level="WARNING" if partial else "INFO",
@@ -295,6 +309,7 @@ class FileSearchPhraseStrategyService:
             "supported_count": len(supported),
             "possible_count": len(possible),
             "partial": partial,
+            "candidate_limit_reached": candidate_limit_reached,
             "results": results,
             "user_message": _tiered_user_message(
                 supported_count=len(supported),

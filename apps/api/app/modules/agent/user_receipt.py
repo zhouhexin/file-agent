@@ -554,6 +554,9 @@ def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
             payload["supported_count"] = int(output["supported_count"])
         if output.get("possible_count") is not None:
             payload["possible_count"] = int(output["possible_count"])
+        if isinstance(output.get("search_completeness"), dict):
+            # 完整性字段来自后端只读评估，不含路径、任务或文件 ID，前端无需自行计算。
+            payload["search_completeness"] = output["search_completeness"]
         return payload
     return None
 
@@ -696,7 +699,11 @@ def _trash_restore_result(result: AgentRunResult) -> dict[str, Any] | None:
 
 
 def _evidence_answer_result(result: AgentRunResult) -> dict[str, Any] | None:
-    """投影阶段五回答和去重文件框，不暴露证据正文或内部定位。"""
+    """投影阶段五回答、文件框和已引用的受限原文依据。
+
+    Tool 输出即使已经过服务层校验，本层仍只允许有限长度的原文片段和可读定位通过，
+    防止后续 Tool 改动把 Evidence ID、Chunk ID、路径或完整正文意外暴露到聊天接口。
+    """
 
     # Planner 在检索后可能继续读取文件，以最后一次证据回答为准。
     for invocation in reversed(result.tool_invocations):
@@ -712,24 +719,26 @@ def _evidence_answer_result(result: AgentRunResult) -> dict[str, Any] | None:
             if not document_id or document_id in seen_documents:
                 continue
             seen_documents.add(document_id)
-            references.append(
-                {
-                    key: item.get(key)
-                    for key in (
-                        "document_id",
-                        "document_version_id",
-                        "working_copy_id",
-                        "filename",
-                        "category_labels",
-                        "availability",
-                        "availability_message",
-                        "can_open",
-                        "can_restore",
-                        "reference_indexes",
-                    )
-                    if key in item
-                }
+            projected = {
+                key: item.get(key)
+                for key in (
+                    "document_id",
+                    "document_version_id",
+                    "working_copy_id",
+                    "filename",
+                    "category_labels",
+                    "availability",
+                    "availability_message",
+                    "can_open",
+                    "can_restore",
+                    "reference_indexes",
+                )
+                if key in item
+            }
+            projected["evidence_items"] = _safe_evidence_answer_items(
+                item.get("evidence_items")
             )
+            references.append(projected)
         return {
             "answer_id": output.get("answer_id"),
             "status": str(output.get("status") or ""),
@@ -741,6 +750,31 @@ def _evidence_answer_result(result: AgentRunResult) -> dict[str, Any] | None:
             "cached": bool(output.get("cached", False)),
         }
     return None
+
+
+def _safe_evidence_answer_items(value: Any) -> list[dict[str, Any]]:
+    """过滤证据回答的原文依据，保留定位但不允许内部标识进入普通回执。"""
+
+    items: list[dict[str, Any]] = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        quote = " ".join(str(item.get("quote") or "").split()).strip()
+        if not quote:
+            continue
+        # 与 Evidence Answer Service 的限制保持一致，形成服务层与回执层双重保护。
+        if len(quote) > 320:
+            quote = f"{quote[:320].rstrip()}…"
+        page_number = item.get("page_number")
+        items.append(
+            {
+                "quote": quote,
+                "page_number": page_number if isinstance(page_number, int) and page_number > 0 else None,
+                "sheet_name": str(item.get("sheet_name") or "")[:255] or None,
+                "cell_range": str(item.get("cell_range") or "")[:80] or None,
+            }
+        )
+    return items
 
 
 def _file_selection_result(result: AgentRunResult) -> dict[str, Any] | None:

@@ -26,6 +26,8 @@ from app.modules.retrieval.scope_resolver import (
     FileSearchScopeResolver,
 )
 from app.modules.retrieval.two_stage_search import TwoStageFileSearchService
+from app.modules.retrieval.completeness import SearchCompletenessService
+from app.modules.retrieval.readiness import WorkingCopySearchReadinessService
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.modules.retrieval.clarification_service import (
     FileSearchClarificationError,
@@ -93,6 +95,13 @@ def search_files(
     workspace_id = get_shared_workspace_id(db)
     tokenizer = ChineseLexicalTokenizer(load_default_business_terms())
     parsed = FileSearchQueryParser(tokenizer=tokenizer).parse(request.query)
+    # 兼容 API 与聊天 Tool 一样先把上传附件映射为活动工作副本，避免严格范围下
+    # 因临时上传 Document ID 而错误报告“没有文件”或“已找全”。
+    canonical_scope = WorkingCopySearchReadinessService(
+        db=db,
+        user_id=current_user.id,
+        workspace_id=workspace_id,
+    ).canonicalize_document_ids(request.attachment_document_ids)
     scope = FileSearchScopeResolver(
         session_file_service=ConversationFileSearchContextService(
             db=db,
@@ -100,7 +109,7 @@ def search_files(
         )
     ).resolve(
         query=request.query,
-        explicit_attachment_ids=request.attachment_document_ids,
+        explicit_attachment_ids=canonical_scope.document_ids,
         conversation_id=request.conversation_id,
     )
     search_service = TwoStageFileSearchService(
@@ -134,6 +143,14 @@ def search_files(
             parsed_query=parsed,
             scope=scope,
         )
+    result = SearchCompletenessService(
+        db=db,
+        workspace_id=workspace_id,
+    ).attach(
+        result=result,
+        scope=scope,
+        unresolved_document_count=len(canonical_scope.unresolved_document_ids),
+    )
     files = list(result.get("results") or [])[: request.top_k]
     return {
         "query": result.get("query", request.query),
@@ -142,6 +159,7 @@ def search_files(
         "possible_count": result.get("possible_count"),
         "partial": bool(result.get("partial", False)),
         "user_message": str(result.get("user_message") or ""),
+        "search_completeness": result.get("search_completeness"),
         "files": files,
     }
 

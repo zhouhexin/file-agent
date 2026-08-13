@@ -249,7 +249,7 @@ def test_evidence_answer_persists_validated_references_and_reuses_cache():
     )
 
     assert first["status"] == "COMPLETED"
-    # 普通回执不显示内部 [1] 索引，但数据库仍保留 AnswerReference 审计关系。
+    # 普通回执不显示内部 [1] 索引，但必须让用户看到最终结论实际引用的原文与页码。
     assert first["answer"] == "申报截止时间是2026年7月31日。"
     assert first["references"] == [
         {
@@ -263,6 +263,14 @@ def test_evidence_answer_persists_validated_references_and_reuses_cache():
             "can_open": True,
             "can_restore": False,
             "reference_indexes": [1],
+            "evidence_items": [
+                {
+                    "quote": "申报截止时间是2026年7月31日。",
+                    "page_number": 1,
+                    "sheet_name": None,
+                    "cell_range": None,
+                }
+            ],
         }
     ]
     assert second["cached"] is True
