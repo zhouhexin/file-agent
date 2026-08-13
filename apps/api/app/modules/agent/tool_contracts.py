@@ -84,6 +84,20 @@ class DocumentExtractionToolOutput(GenericToolOutput):
     pages: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class OriginalFileMetadataToolOutput(GenericToolOutput):
+    """已通过权限校验的原始文件元信息输出契约。"""
+
+    # 失败分支只返回统一 error；成功分支由 handler 填充全部字段并在聚合前再次检查 kind/ok。
+    kind: str | None = None
+    document_id: str | None = None
+    filename: str | None = None
+    content_type: str | None = None
+    size_bytes: int | None = Field(default=None, ge=0)
+    sha256: str | None = None
+    storage_backend: str | None = None
+    exists: bool | None = None
+
+
 class DocumentClassificationsToolOutput(GenericToolOutput):
     """当前版本分类证据读取 Tool 的业务输出契约。"""
 
@@ -158,6 +172,37 @@ class ManagedFileCollectionToolOutput(GenericToolOutput):
     files: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class ManagedFileReadToolOutput(GenericToolOutput):
+    """受管文件读取和批量分类 Tool 的结构化输出契约。"""
+
+    matched_count: int | None = Field(default=None, ge=0)
+    completed_count: int | None = Field(default=None, ge=0)
+    failed_count: int | None = Field(default=None, ge=0)
+    extraction_results: list[dict[str, Any]] = Field(default_factory=list)
+    classification_requested: bool = False
+    document_id: str | None = None
+    extraction_run_id: str | None = None
+    extractor: str | None = None
+    pages: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class OperationPlanToolOutput(GenericToolOutput):
+    """重命名与工作副本操作计划的输出契约，仅代表待确认计划。"""
+
+    kind: str | None = None
+    message: str | None = None
+    suggestions: list[dict[str, Any]] = Field(default_factory=list)
+    item_count: int | None = Field(default=None, ge=0)
+
+
+class ClassificationDecisionToolOutput(GenericToolOutput):
+    """用户分类确认或更正 Tool 的结构化输出契约。"""
+
+    kind: str | None = None
+    message: str | None = None
+    document_id: str | None = None
+
+
 class SpreadsheetToolOutput(GenericToolOutput):
     """表格分析、Profile 和校验 Tool 的业务输出契约。"""
 
@@ -189,6 +234,45 @@ class ToolResultEnvelope(BaseModel):
     operation_plan_id: str | None = None
     async_job_id: str | None = None
     replan_signal: str | None = None
+
+
+class ExecutionObservation(BaseModel):
+    """交给 Adaptive Planner 的统一脱敏执行观察。
+
+    每个 Tool 都先投影为本模型允许的状态、数量和受控文件范围；正文、原始路径、数据库主键、密钥和
+    任何 handler 私有字段不能进入该观察，避免模型把执行输出当作新的执行指令。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str = Field(min_length=1, max_length=120)
+    observation_kind: str = Field(default="generic", max_length=80)
+    status: str = Field(default="", max_length=80)
+    ok: bool | None = None
+    error_code: str = Field(default="", max_length=120)
+    replan_required: bool = False
+    document_ids: list[str] = Field(default_factory=list, max_length=50)
+    result_count: int | None = Field(default=None, ge=0)
+    completed_count: int | None = Field(default=None, ge=0)
+    failed_count: int | None = Field(default=None, ge=0)
+    evidence_count: int | None = Field(default=None, ge=0)
+    classification_count: int | None = Field(default=None, ge=0)
+    # 检索专有字段同样是后端确认后的摘要；其他 Tool 保持默认空值。
+    query: str = Field(default="", max_length=500)
+    effective_conditions: list[SearchEffectiveCondition] = Field(
+        default_factory=list,
+        max_length=30,
+    )
+    result_status: str = Field(default="", max_length=80)
+    index_status: str = Field(default="", max_length=80)
+    partial: bool = False
+    has_operation_plan: bool = False
+    requires_user_confirmation: bool = False
+    waiting_for_async_job: bool = False
+    available_next_decisions: list[Literal["TOOL_PLAN", "CLARIFY", "FINISH"]] = Field(
+        default_factory=list,
+        max_length=3,
+    )
 
 
 class ToolResultBinding(BaseModel):

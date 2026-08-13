@@ -1,6 +1,6 @@
 # 自适应 Planner 与 LangGraph 规划执行循环实施方案
 
-- 文档状态：开发中（现有循环骨架已落地，阶段 3 搜索观察闭环待完善，阶段 7 保持 Shadow 观察）
+- 文档状态：开发中（成熟 Tool 已纳入统一观察闭环，仍需生产 Shadow/灰度指标后默认启用）
 - 编写日期：2026-07-30
 - 代码审计范围：当前工作树，包含现有 LangGraph 步骤级循环、Adaptive Planner 和 Shadow 链路
 - 上位产品方案：`docs/automatic-organization-conversational-access-implementation-plan.md`
@@ -76,7 +76,7 @@ Catalog、绑定表达式或 Shadow 对比详情。
 | 2 | 定义 PlannerDecision 和 Tool 输出 schema | 部分完成 | 已新增独立 `PlannerDecision`、`ToolPlan`、`ToolStep`、`ToolResultEnvelope`、`ToolError`，Registry 强制校验 input/output model | 部分旧 Tool 仍使用迁移期 `GenericToolOutput`，需按核心 Tool 清单继续收敛严格业务 schema |
 | 3 | 实现动态 Tool/Skill Catalog | 已完成 | 请求级 Registry 动态投影 Tool；13 个 Skill 已有 `manifest.json`；启动与请求时交叉校验；AgentRun 保存版本和指纹 | 后续如增加后台启停，只能通过受审计发布流程 |
 | 4 | 实现 Tool 结果绑定解析器 | 已完成 | 已实现安全点分字段绑定、成功来源校验、受信任字段保护、数组上限和绑定后 Tool 输入二次 schema 校验 | 后续可按具体 Tool 补充更细类型提示 |
-| 5 | 完善 LangGraph 规划执行循环 | 已完成 | 已存在 `planning -> tool_dispatch -> observe_tool_result` 循环；Dispatcher 每次只执行一个步骤；`hybrid-search` 使用 `PLANNER_AFTER_EXECUTION`，安全观察包含命中数量、受控文件 ID、实际条件、索引状态和允许动作；支持结束、改查、继续读证据、最多 3 轮规划、5 次调用、重复拒绝和确认暂停 | 继续在真实生产模型上观察不必要改查与预算耗尽率 |
+| 5 | 完善 LangGraph 规划执行循环 | 已完成 | 已存在 `planning -> tool_dispatch -> observe_tool_result` 循环；Dispatcher 每次只执行一个步骤；检索、读取、分类和计划 Tool 使用 `PLANNER_AFTER_EXECUTION`，统一安全观察包含受控范围、结果状态和允许决策；支持结束、换 Tool、澄清、最多 3 轮规划、5 次调用、重复拒绝和确认暂停 | 继续在真实生产模型上观察不必要改查与预算耗尽率 |
 | 6 | 接入 DIRECT_RESPONSE 和 CLARIFY | 已完成 | 三分支已进入独立 PlannerDecision；文件事实不能通过 DIRECT_RESPONSE 绕过 Tool；缺少唯一范围进入 CLARIFY | 继续用回放集监测不必要澄清 |
 | 7 | 实现分类证据读取能力 | 部分完成 | 已新增当前版本 EvidenceReader；优先共享活动工作副本当前版本，只取最新成功运行；EvidenceAnswer 复用该服务；检索命中的跨导入者共享文件可继续读取分类，普通回复展示置信度与页码/Sheet 原文依据 | 仍需补齐失败运行、回收站、同名文件和无 quote 的完整测试矩阵，并收敛严格 output model |
 | 8 | 缩减确定性关键词路由 | 部分完成 | 正常 LLM 主路径只保留重命名、确认、分类等安全 preflight；普通搜索、总结、解释、能力咨询和表格语义交给 Catalog Planner | Legacy/故障降级仍保留 `_has_*`，需在 Shadow 回放达标后再删除重叠规则 |
@@ -106,12 +106,27 @@ planning
 当前语义闭环已经形成：
 
 1. `ToolDefinition.observation_policy` 由后端决定是否需要重新进入 Planner。
-2. `hybrid-search` 使用 `PLANNER_AFTER_EXECUTION`，不依赖 Tool 自报 `replan_required`。
-3. 安全观察包含命中数量、实际条件、受控文件 ID、索引状态和允许的下一步，不包含正文和内部路径。
-4. Planner 可以选择 `FINISH`、改变语义查询再次检索、调用 `evidence-answer`、
-   `read-document-classifications`，或在范围不唯一时请求澄清。
+2. `hybrid-search`、文件读取、正文解析、分类读取/确认、受管文件读取/分类、重命名计划和工作副本
+   删除/恢复/移动计划均使用 `PLANNER_AFTER_EXECUTION`，不依赖 Tool 自报 `replan_required`。
+3. 每类 Tool 统一投影为 `ExecutionObservation`：只包含成功状态、后端已授权 document_ids、数量、
+   证据或分类数量、是否生成计划、是否等待异步任务以及允许的下一种决策；不包含正文、OCR、文件名、
+   相对/绝对路径、OperationPlan ID、数据库 ID、密钥或 handler 私有字段。
+4. Planner 可以在预算内选择 `FINISH`、继续或切换 Catalog 中的另一个 Tool、或 `CLARIFY`。当观察表明
+   已创建 OperationPlan 或异步任务时，后端禁止继续副作用循环；确认执行只能由确认 API 驱动的
+   `confirmed-file-action` 调用，后者不进入 Adaptive Catalog。
+   `available_next_decisions` 不只是给模型看的提示：后端会再次计算交集并拒绝不在允许集合中的决策。
+   只读 Tool 失败时可以在预算内换 Tool 或澄清；写入长期事实、创建计划或其他有副作用 Tool 失败时
+   只能结束或澄清，不允许模型盲目改用另一个副作用 Tool。重规划阶段模型或 schema 异常时，系统基于
+   已验证结果关闭式结束，不再回退 Legacy 重放原请求。
 5. 多轮检索最终采用最后一次有效结果，并在回执中保留后端确认的条件与各轮结果数量。
 6. 已建立自然语言回归矩阵，覆盖“检索后回答正文”“检索后解释分类”“零结果后调整条件再查”。
+
+最终 `response` 节点在普通业务回执上增加统一 LLM 表述层：该层仅接收后端验证后的结果类型、是否有
+证据、是否有待确认计划、是否有异步任务和错误状态，不能接收原文或具体事实；随后仍把文件数量、文件名、
+路径变更、证据页码/Sheet/单元格及 OperationPlan 明细由确定性回执和现有前端卡片展示。证据回答本身
+已经由证据 LLM 与引用校验生成，不经过第二次改写，以保持回答和引用的对应关系。
+工作副本删除、恢复和移动计划会被结果聚合器识别为 `WAITING_FOR_CONFIRMATION`，而不是只有计划卡但正文
+落入通用兜底；`read-original-file` 也有独立严格输出 schema 和确定性元信息回执。
 
 当前剩余工作不是重新修改 LangGraph 主体，而是完成真实生产模型的 Shadow 指标观察和分阶段灰度。
 `ADAPTIVE_PLANNER_MODE=shadow` 时 Adaptive Planner 仍只做只读对比，这是上线安全策略，不是循环缺失；
@@ -134,6 +149,8 @@ planning
 11. 后台摘要默认保持本地 CPU-only `Jieba + LexRank`，不能因 Planner 或全局 LLM 开关而隐式外发。
 12. 普通用户回复不暴露内部 Skill、Tool、调用预算或 Shadow 对比信息。
 13. CapabilitySuggestion 只是待评审建议，不能自动注册 Tool、启用 Skill、生成代码或扩大权限。
+14. 通用最终回执 LLM 只负责非事实性表述；数字、文件名、路径、分类、证据定位和操作结果只能由已经
+    校验的 Tool 投影提供。证据回答不得被通用回执 LLM 二次改写。
 
 ### 4.1 检索候选与事实证据边界（2026-08-10 补充）
 

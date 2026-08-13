@@ -34,7 +34,7 @@ from app.modules.agent.planner_contracts import (
 )
 from app.modules.agent.runtime import AgentRuntimeContext
 from app.modules.agent.state import AgentGraphState, ToolInvocationRecord
-from app.modules.agent.tool_contracts import ToolOutputValidationError
+from app.modules.agent.tool_contracts import ExecutionObservation, ToolOutputValidationError
 from app.modules.agent.tool_registry import UnknownToolError
 from app.modules.agent.tool_schemas import ToolInputValidationError
 from app.modules.classification.result_builder import build_document_results_from_extraction_results
@@ -246,6 +246,17 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
             if planning_round == 1
             else None
         )
+        if (
+            preflight_plan is not None
+            and runtime.context.adaptive_planner_mode == "enabled"
+            and not (
+                preflight_plan.intent == "EVIDENCE_ANSWER"
+                and has_explicit_filename_content_request(state["message"])
+            )
+        ):
+            # enabled 模式由 Catalog Planner 选择成熟 Tool；只有完整文件名构成后端已验证的硬对象范围，
+            # 不能让模型改写为全库检索。其余旧关键词预检只保留给 Legacy/Shadow 与故障降级。
+            preflight_plan = None
         if preflight_plan is not None:
             update = _planner_state_update(
                 plan=preflight_plan,
@@ -277,6 +288,7 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                         "observed_document_ids", []
                     ),
                     has_tool_observation=bool(state.get("observation")),
+                    observation=state.get("observation") or None,
                 )
             else:
                 plan, user_intent_plan = _run_legacy_llm_planner(
@@ -301,13 +313,26 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                 error_code=exc.__class__.__name__,
                 message=str(exc),
             )
-            plan, user_intent_plan = _fallback_planner(
-                state=state,
-                runtime=runtime,
-                attachments=planning_attachments,
-                planning_round=planning_round,
-                adaptive_error=exc,
-            )
+            if (
+                runtime.context.adaptive_planner_mode == "enabled"
+                and state.get("observation")
+            ):
+                # 已经执行过 Tool 后，Adaptive 输出异常或网关失败时只能基于现有验证结果结束。
+                # 重新交给 Legacy 解释原请求可能再次创建不同的副作用计划，违反“不盲目重试”边界。
+                plan, user_intent_plan = _finish_after_observation_failure(
+                    state=state,
+                    runtime=runtime,
+                    attachments=planning_attachments,
+                    adaptive_error=exc,
+                )
+            else:
+                plan, user_intent_plan = _fallback_planner(
+                    state=state,
+                    runtime=runtime,
+                    attachments=planning_attachments,
+                    planning_round=planning_round,
+                    adaptive_error=exc,
+                )
     else:
         plan = runtime.context.planner.plan(
             conversation_id=state["conversation_id"],
@@ -376,6 +401,50 @@ def _fallback_planner(
         "error_code": adaptive_error.__class__.__name__,
         "message": str(adaptive_error),
     }
+
+
+def _finish_after_observation_failure(
+    *,
+    state: AgentGraphState,
+    runtime: Runtime[AgentRuntimeContext],
+    attachments: List[Dict[str, Any]],
+    adaptive_error: LLMResponseError,
+):
+    """重规划异常时关闭式结束，保留已验证结果且不重复执行任何 Tool。"""
+
+    existing_slots = dict(state.get("slots", {}))
+    document_ids = list(
+        dict.fromkeys(
+            [
+                *list(existing_slots.get("document_ids", [])),
+                *list(state.get("observed_document_ids", [])),
+            ]
+        )
+    )
+    decision = PlannerDecision(
+        decision_type="FINISH",
+        intent=str(state.get("intent") or "TOOL_RESULT_AVAILABLE"),
+        user_goal=str(state.get("message") or "完成当前文件任务"),
+        selected_skill_ids=list(state.get("selected_skills") or ["chat-intake"]),
+        scope=PlannerScope(
+            document_ids=document_ids,
+            source="tool_observation",
+        ),
+    )
+    plan, intent_plan = validate_and_convert_decision(
+        decision=decision,
+        registry=runtime.context.registry,
+        catalog_snapshot=runtime.context.catalog_snapshot,
+        attachments=attachments,
+        context_documents=state.get("context_documents", []),
+        observed_document_ids=state.get("observed_document_ids", []),
+        has_tool_observation=True,
+        observation=state.get("observation") or None,
+    )
+    plan = plan.model_copy(update={"slots": existing_slots})
+    intent_plan["fallback_reason"] = "ADAPTIVE_REPLAN_FAILED_AFTER_TOOL"
+    intent_plan["adaptive_error_code"] = adaptive_error.__class__.__name__
+    return plan, intent_plan
 
 
 def _run_legacy_llm_planner(
@@ -485,6 +554,7 @@ def _run_shadow_planner(
             context_documents=state.get("context_documents", []),
             observed_document_ids=state.get("observed_document_ids", []),
             has_tool_observation=bool(state.get("observation")),
+            observation=state.get("observation") or None,
         )
         return {
             "validation_status": "COMPLETED",
@@ -1190,6 +1260,19 @@ def observe_tool_result(
         or isinstance(item.get("trash_restore_selection"), dict)
         for item in last_results
     )
+    # 计划创建结果是确认边界：Planner 可以在此前编排读取/分类/计划 Tool，但一旦存在待确认计划，
+    # 不得继续生成新的动作计划或尝试 confirmed-file-action。后端确认 API 才能启动执行链路。
+    has_pending_confirmation = any(
+        item.get("has_operation_plan") is True
+        for item in observation_items
+    )
+    # 完整文件名的正文请求在首轮已经由后端固化为硬对象范围。证据回答完成后直接进入回执，
+    # 避免模型在后续观察中把该单文件请求重新扩张为搜索或重复读取。
+    has_completed_hard_filename_answer = (
+        tool_name == "evidence-answer"
+        and str(state.get("intent") or "") == "EVIDENCE_ANSWER"
+        and has_explicit_filename_content_request(state.get("message") or "")
+    )
     explicit_replan = any(item.get("replan_required") is True for item in last_results)
     observation_policy = _tool_observation_policy(
         registry=runtime.context.registry,
@@ -1199,11 +1282,25 @@ def observe_tool_result(
         observation_policy == "PLANNER_AFTER_EXECUTION"
         and state.get("adaptive_planner_mode") == "enabled"
     )
+    failed_result_can_replan = (
+        has_failed_result
+        and planner_after_execution
+        and not _tool_has_side_effects(
+            registry=runtime.context.registry,
+            tool_name=tool_name,
+        )
+    )
+    if has_failed_result and not failed_result_can_replan:
+        # 写入型 Tool 失败后不能让模型继续创建其他副作用；观察仍可供审计，但下一步只允许结束或澄清。
+        for observation_item in observation_items:
+            observation_item["available_next_decisions"] = ["FINISH", "CLARIFY"]
     can_replan = (
         (explicit_replan or planner_after_execution)
-        and not has_failed_result
+        and (not has_failed_result or failed_result_can_replan)
         and not has_waiting_result
         and not has_user_decision
+        and not has_pending_confirmation
+        and not has_completed_hard_filename_answer
         and int(state.get("planning_round", 0)) < MAX_PLANNING_ROUNDS
         and int(state.get("tool_call_count", 0)) < MAX_TOOL_CALLS
     )
@@ -1262,16 +1359,45 @@ def _safe_tool_observation(
     """只保留重规划必需的 Tool 状态，避免正文和内部路径进入 LLM 输入。"""
 
     error = result.get("error") if isinstance(result.get("error"), dict) else {}
-    observation = {
+    status = str(result.get("status") or "")
+    nested_extractions = [
+        item for item in list(result.get("extraction_results") or []) if isinstance(item, dict)
+    ]
+    document_ids = _observation_document_ids(result, nested_extractions)
+    operation_plan_present = bool(result.get("operation_plan_id"))
+    waiting_for_async_job = (
+        result.get("kind") == "filesystem_job"
+        or status.upper() in {"PENDING", "PROCESSING", "WAITING_FOR_ASYNC_JOB"}
+        or str(result.get("result_status") or "") == "INDEX_PENDING"
+    )
+    requires_user_confirmation = operation_plan_present or status.upper() in {
+        "WAITING_FOR_CONFIRMATION",
+        "WAITING_SELECTION",
+    }
+    base = {
         "tool_name": tool_name,
-        "kind": str(result.get("kind") or ""),
-        "status": str(result.get("status") or ""),
+        "observation_kind": str(result.get("kind") or "generic"),
+        "status": status,
         "ok": result.get("ok"),
         "error_code": str(error.get("code") or ""),
         "replan_required": result.get("replan_required") is True,
+        "document_ids": document_ids,
+        "result_count": _observation_result_count(result, nested_extractions),
+        "completed_count": _safe_nonnegative_int(result.get("completed_count")),
+        "failed_count": _safe_nonnegative_int(result.get("failed_count")),
+        "evidence_count": _observation_evidence_count(result),
+        "classification_count": _observation_classification_count(result),
+        "has_operation_plan": operation_plan_present,
+        "requires_user_confirmation": requires_user_confirmation,
+        "waiting_for_async_job": waiting_for_async_job,
     }
     if tool_name != "hybrid-search":
-        return observation
+        base["available_next_decisions"] = (
+            ["FINISH", "CLARIFY"]
+            if requires_user_confirmation or waiting_for_async_job
+            else ["TOOL_PLAN", "CLARIFY", "FINISH"]
+        )
+        return ExecutionObservation.model_validate(base).model_dump()
     document_ids = [
         str(value)
         for value in list(result.get("document_ids") or [])
@@ -1290,8 +1416,8 @@ def _safe_tool_observation(
         for item in list(result.get("effective_conditions") or [])
         if isinstance(item, dict)
     ][:30]
-    return {
-        **observation,
+    return ExecutionObservation.model_validate({
+        **base,
         "query": str(result.get("query") or "")[:500],
         "result_count": int(
             result.get("total_returned")
@@ -1303,12 +1429,68 @@ def _safe_tool_observation(
         "result_status": str(result.get("result_status") or ""),
         "index_status": str(result.get("index_status") or ""),
         "partial": bool(result.get("partial", False)),
-        "available_next_actions": [
-            str(value)
-            for value in list(result.get("available_next_actions") or [])
-            if str(value)
-        ][:10],
-    }
+        "available_next_decisions": (
+            ["FINISH", "CLARIFY"]
+            if waiting_for_async_job
+            else ["TOOL_PLAN", "CLARIFY", "FINISH"]
+        ),
+    }).model_dump()
+
+
+def _observation_document_ids(
+    result: Dict[str, Any], nested_extractions: List[Dict[str, Any]],
+) -> List[str]:
+    """只从后端 Tool 已返回的受控 document_id 投影下一轮可用范围。"""
+
+    values = [*list(result.get("document_ids") or [])]
+    if result.get("document_id"):
+        values.append(result["document_id"])
+    values.extend(item.get("document_id") for item in nested_extractions)
+    return list(dict.fromkeys(str(value) for value in values if str(value)))[:50]
+
+
+def _safe_nonnegative_int(value: Any) -> int | None:
+    """将 Tool 计数安全投影为观察字段，非法值不交给 Planner。"""
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _observation_result_count(result: Dict[str, Any], nested_extractions: List[Dict[str, Any]]) -> int | None:
+    """抽取已验证结果的数量，不让模型从正文或路径自行推断数量。"""
+
+    explicit = result.get("total_returned", result.get("matched_count"))
+    parsed = _safe_nonnegative_int(explicit)
+    if parsed is not None:
+        return parsed
+    for key in ("files", "documents", "results", "suggestions"):
+        if isinstance(result.get(key), list):
+            return len(result[key])
+    return len(nested_extractions) if nested_extractions else None
+
+
+def _observation_evidence_count(result: Dict[str, Any]) -> int | None:
+    """只传递证据条目数量，不把原文摘录放入规划输入。"""
+
+    if isinstance(result.get("references"), list):
+        return len(result["references"])
+    return _safe_nonnegative_int(result.get("evidence_count"))
+
+
+def _observation_classification_count(result: Dict[str, Any]) -> int | None:
+    """汇总已有分类建议数量，不向 Planner 暴露分类证据全文。"""
+
+    documents = result.get("documents")
+    if isinstance(documents, list):
+        return sum(
+            len(item.get("categories") or [])
+            for item in documents
+            if isinstance(item, dict)
+        )
+    return _safe_nonnegative_int(result.get("classification_count"))
 
 
 def _tool_observation_policy(*, registry: Any, tool_name: str) -> str:
@@ -1320,6 +1502,17 @@ def _tool_observation_policy(*, registry: Any, tool_name: str) -> str:
         return str(registry.get(tool_name).observation_policy)
     except Exception:
         return "PLANNER_ON_SIGNAL"
+
+
+def _tool_has_side_effects(*, registry: Any, tool_name: str) -> bool:
+    """读取 Registry 的副作用声明；未知 Tool 按有副作用处理，保持关闭式安全。"""
+
+    if not tool_name or not hasattr(registry, "get"):
+        return True
+    try:
+        return bool(registry.get(tool_name).side_effects)
+    except Exception:
+        return True
 
 
 def route_after_observation(state: AgentGraphState) -> str:
@@ -1449,6 +1642,10 @@ def _aggregate_tool_results(
         "capability_catalog": _capability_catalog_from_results(tool_results),
         "classification_taxonomy": _classification_taxonomy_from_results(tool_results),
         "classification_decision": _classification_decision_from_results(tool_results),
+        "original_file_metadata": _original_file_metadata_from_results(tool_results),
+        "working_copy_operation_plan": _working_copy_operation_plan_from_results(
+            tool_results
+        ),
         "working_copy_operation": _working_copy_operation_from_results(tool_results),
         "managed_file_list": _managed_file_list_from_results(tool_results),
         "workspace_file_search": _workspace_file_search_from_results(tool_results),
@@ -1556,6 +1753,96 @@ def _spreadsheet_workbench_results_from_results(
 
 
 def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> Dict[str, Any]:
+    """生成最终回执，并可附加不承载事实的 LLM 自然语言说明。
+
+    业务事实先由确定性分支生成；LLM 只能为同一份已验证结果补充任务语气，不能改写数值、路径、证据
+    定位或 OperationPlan。这样不改变现有前端回答卡片的数据结构和视觉样式。
+    """
+
+    deterministic_result = _deterministic_response(state, runtime)
+    # 证据回答本身已经由 EvidenceAnswerService 使用原文证据和引用约束生成；再由通用回执模型改写会
+    # 损失“回答—引用”对应关系，因此它是统一回执节点的受控例外。
+    if state.get("result_summary", {}).get("evidence_answer"):
+        return deterministic_result
+    final_response = deterministic_result.get("final_response")
+    if not final_response or runtime is None:
+        return deterministic_result
+    summary_service = getattr(runtime.context, "receipt_summary_service", None)
+    if summary_service is None:
+        return deterministic_result
+    safe_input = _build_receipt_summary_input(
+        state=state,
+        result_summary=state.get("result_summary", {}),
+        status=str(deterministic_result.get("status") or "COMPLETED"),
+    )
+    try:
+        natural_summary = summary_service.summarize_receipt(
+            verified_summary=safe_input
+        )
+    except Exception as exc:
+        # 回执表述层不是事实生成器；任何异常都必须保留确定性结果，不能使成功任务失败。
+        log_event(
+            "agent.receipt_summary.failed",
+            level="WARNING",
+            status="DEGRADED",
+            error_code=exc.__class__.__name__,
+            message="最终回执 LLM 表述不可用，已保留确定性回执",
+        )
+        return deterministic_result
+    if not natural_summary:
+        return deterministic_result
+    log_event(
+        "agent.receipt_summary.completed",
+        status="COMPLETED",
+        message="最终回执已使用验证摘要生成自然语言说明",
+    )
+    return {
+        **deterministic_result,
+        "final_response": f"{natural_summary}\n\n{final_response}",
+    }
+
+
+def _build_receipt_summary_input(
+    *,
+    state: AgentGraphState,
+    result_summary: Dict[str, Any],
+    status: str,
+) -> Dict[str, Any]:
+    """构造最终 LLM 可读取的脱敏事实摘要。
+
+    这里只允许结果类型、是否有证据/待确认项和已由后端汇总的文件状态数量。具体文件名、路径、数值、
+    quote、页码和 Tool 原始输出继续只由确定性回执及前端卡片展示。
+    """
+
+    document_results = [
+        item
+        for item in list(result_summary.get("document_results") or [])
+        if isinstance(item, dict)
+    ]
+    evidence_answer = result_summary.get("evidence_answer")
+    return {
+        "intent": str(state.get("intent") or ""),
+        "status": status,
+        "has_document_results": bool(document_results),
+        "has_evidence_answer": isinstance(evidence_answer, dict),
+        "has_classification_result": bool(result_summary.get("classification_documents")),
+        "has_operation_plan": bool(
+            state.get("operation_plan_id")
+            or result_summary.get("rename_plan")
+            or result_summary.get("working_copy_operation")
+        ),
+        "requires_confirmation": status == "WAITING_FOR_CONFIRMATION" or bool(
+            result_summary.get("rename_plan")
+        ),
+        "has_async_work": bool(result_summary.get("filesystem_job")),
+        "has_errors": bool(result_summary.get("tool_errors")),
+    }
+
+
+def _deterministic_response(
+    state: AgentGraphState,
+    runtime: Runtime[AgentRuntimeContext] | None,
+) -> Dict[str, Any]:
     """生成面向用户的最终运行摘要。"""
 
     if state.get("waiting_for_confirmation"):
@@ -1613,6 +1900,18 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                     if waiting
                     else "分类决定已保存，文件位置未改变。"
                 )
+            ),
+        }
+
+    working_copy_operation_plan = result_summary.get(
+        "working_copy_operation_plan", {}
+    )
+    if working_copy_operation_plan:
+        return {
+            "status": "WAITING_FOR_CONFIRMATION",
+            "final_response": str(
+                working_copy_operation_plan.get("message")
+                or "文件操作计划已生成，请核对后确认执行。"
             ),
         }
 
@@ -1728,6 +2027,22 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
         return {
             "status": "COMPLETED",
             "final_response": _build_extraction_response(extraction_results),
+        }
+
+    original_file_metadata = result_summary.get("original_file_metadata", {})
+    if original_file_metadata:
+        filename = str(original_file_metadata.get("filename") or "当前文件")
+        size_bytes = int(original_file_metadata.get("size_bytes") or 0)
+        availability = (
+            "原始文件可用"
+            if original_file_metadata.get("exists") is True
+            else "原始文件当前不可用"
+        )
+        return {
+            "status": "COMPLETED",
+            "final_response": (
+                f"已读取文件信息：{filename}，大小 {size_bytes} 字节，{availability}。"
+            ),
         }
 
     insight_documents = result_summary.get("insight_documents", [])
@@ -2020,6 +2335,37 @@ def _classification_decision_from_results(
             "classification_decision",
             "classification_clarification",
         }:
+            return result
+    return {}
+
+
+def _original_file_metadata_from_results(
+    tool_results: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """提取已通过权限校验的原始文件元信息，不投影存储路径或内容哈希。"""
+
+    for result in reversed(tool_results):
+        if result.get("kind") != "original_file_metadata" or not result.get("ok"):
+            continue
+        return {
+            "filename": result.get("filename"),
+            "content_type": result.get("content_type"),
+            "size_bytes": result.get("size_bytes"),
+            "exists": result.get("exists"),
+        }
+    return {}
+
+
+def _working_copy_operation_plan_from_results(
+    tool_results: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """提取尚未执行的工作副本 OperationPlan，供回执进入等待确认状态。"""
+
+    for result in reversed(tool_results):
+        if (
+            result.get("kind") == "working_copy_operation_plan"
+            and result.get("operation_plan_id")
+        ):
             return result
     return {}
 

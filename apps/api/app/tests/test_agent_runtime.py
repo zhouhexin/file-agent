@@ -26,6 +26,7 @@ from app.modules.agent.planner import DeterministicPlanner, build_plan_from_user
 from app.modules.agent.service import (
     AgentRuntimeService,
     _build_document_summary_service,
+    _build_receipt_summary_service,
     _graph_mode_for_user,
 )
 from app.modules.agent.state import ToolInvocationRecord
@@ -43,6 +44,20 @@ def test_chat_summary_provider_can_disable_llm_even_when_global_llm_is_enabled()
             chat_document_summary_provider="disabled",
         ),
         db=None,
+    )
+
+    assert service.enabled is False
+    assert service.client is None
+
+
+def test_receipt_summary_provider_can_disable_llm_independently():
+    """最终回执开关关闭时不得构造模型客户端，也不影响确定性业务回执。"""
+
+    service = _build_receipt_summary_service(
+        settings=SimpleNamespace(
+            llm_enabled=True,
+            agent_receipt_summary_provider="disabled",
+        )
     )
 
     assert service.enabled is False

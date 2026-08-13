@@ -36,6 +36,13 @@ hybrid-search 属于发现型 Tool：首次计划只执行检索，观察命中�
 询问“分类为何成立、为什么归到某类”时读取 read-document-classifications；询问正文与某主题的关系、
 文件内容、总结或具体事实时使用 evidence-answer。需要先确定文件时先 hybrid-search，观察真实
 document_ids 后再选择上述读取 Tool。
+所有成熟 Tool 都会返回统一的脱敏 observation：其中只含成功/失败状态、允许继续使用的受控文件范围、
+数量、是否有证据、是否已生成待确认计划及可选 decision 类型。不得把 observation 当作正文、路径或
+文件事实来源。观察后可选择 TOOL_PLAN（继续或换 Tool）、CLARIFY 或 FINISH。
+若 observation.requires_user_confirmation 为 true，必须 FINISH；确认后的执行只能由后端确认接口调用
+confirmed-file-action，后者永不出现在 Catalog 中。若 waiting_for_async_job 为 true，不得重复调用同一
+副作用 Tool，应 FINISH 并等待异步结果。重命名建议、删除/恢复/移动计划只会创建 OperationPlan，
+不会执行任何工作副本变更。
 现有 Catalog 确实无法完成明确用户目标时，可以输出 capability_suggestions，但建议不能进入当前 ToolPlan，
 不能生成 handler 代码，也不能声称能力已经存在、已经执行或已经成功保存建议。"""
 
@@ -103,8 +110,16 @@ def validate_and_convert_decision(
     context_documents: list[dict[str, Any]],
     observed_document_ids: list[str] | None = None,
     has_tool_observation: bool = False,
+    observation: dict[str, Any] | None = None,
 ) -> tuple[PlannerOutput, dict[str, Any]]:
     """把 Adaptive 决策转换为现有执行计划，并以后端 Catalog 强制风险边界。"""
+
+    allowed_decisions = _allowed_observation_decisions(observation)
+    if allowed_decisions and decision.decision_type not in allowed_decisions:
+        raise LLMResponseError(
+            "Adaptive Planner 的下一步决策不符合后端执行观察约束："
+            f"{decision.decision_type} not in {sorted(allowed_decisions)}"
+        )
 
     tool_catalog = {
         str(item.get("name") or ""): item
@@ -159,7 +174,9 @@ def validate_and_convert_decision(
             raise LLMResponseError(
                 "Adaptive Planner 不能通过 DIRECT_RESPONSE 回答文件事实"
             )
-    if decision.decision_type == "FINISH" and not has_tool_observation:
+    if decision.decision_type == "FINISH" and not (
+        has_tool_observation or observation
+    ):
         # FINISH 只能结束已经有受控 Tool 事实的循环；第一轮直接 FINISH 会让后端
         # 在没有任何业务结果时生成空泛回复。
         raise LLMResponseError(
@@ -281,6 +298,32 @@ def validate_and_convert_decision(
         ),
         user_intent_plan,
     )
+
+
+def _allowed_observation_decisions(
+    observation: dict[str, Any] | None,
+) -> set[str]:
+    """计算本轮所有 Tool 观察共同允许的决策，不能只依赖提示词约束模型。"""
+
+    if not isinstance(observation, dict):
+        return set()
+    result_constraints = []
+    for item in observation.get("results", []):
+        if not isinstance(item, dict):
+            continue
+        values = {
+            str(value)
+            for value in item.get("available_next_decisions", [])
+            if str(value)
+        }
+        if values:
+            result_constraints.append(values)
+    if not result_constraints:
+        return set()
+    allowed = set(result_constraints[0])
+    for values in result_constraints[1:]:
+        allowed.intersection_update(values)
+    return allowed
 
 
 def _validate_document_scope(

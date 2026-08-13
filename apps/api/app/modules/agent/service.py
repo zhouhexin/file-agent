@@ -31,6 +31,7 @@ from app.modules.classification.classifier_service import DocumentClassification
 from app.modules.classification.llm_judge import LLMClassificationJudge
 from app.modules.llm.client import OpenAICompatibleLLMClient
 from app.modules.llm.document_summary import LLMDocumentSummaryService
+from app.modules.llm.receipt_summary import LLMReceiptSummaryService
 from app.modules.llm.service import LLMIntentService
 from app.modules.knowledge_graph.classification_context import (
     build_graph_classification_context,
@@ -49,13 +50,15 @@ class AgentRuntimeService:
         registry_factory: Optional[Callable[[Session | None, str], ToolRegistry]] = None,
         llm_intent_service: Any = None,
         document_summary_service: Any = None,
+        receipt_summary_service: Any = None,
         adaptive_planner_service: Any = None,
     ) -> None:
-        """注入 Registry、Legacy/Adaptive Planner 和文档总结服务。"""
+        """注入 Registry、Planner、文档总结与最终回执服务。"""
 
         self.registry_factory = registry_factory or _default_registry_factory
         self.llm_intent_service = llm_intent_service or LLMIntentService()
         self.document_summary_service = document_summary_service
+        self.receipt_summary_service = receipt_summary_service
         self.adaptive_planner_service = adaptive_planner_service
         self.graph = build_agent_graph()
 
@@ -255,6 +258,8 @@ class AgentRuntimeService:
             adaptive_planner_schema_version=(
                 settings.adaptive_planner_schema_version
             ),
+            receipt_summary_service=self.receipt_summary_service
+            or _build_receipt_summary_service(settings=settings),
         )
 
     def _build_initial_state(
@@ -429,3 +434,17 @@ def _build_document_summary_service(*, settings, db: Session | None) -> LLMDocum
         timeout_seconds=settings.llm_timeout_seconds,
     )
     return LLMDocumentSummaryService(db=db, client=client, enabled=True)
+
+
+def _build_receipt_summary_service(*, settings) -> LLMReceiptSummaryService:
+    """构造最终回执 LLM 服务，不影响后台摘要和证据回答的独立 Provider。"""
+
+    if not settings.llm_enabled or settings.agent_receipt_summary_provider != "llm":
+        return LLMReceiptSummaryService(enabled=False)
+    client = OpenAICompatibleLLMClient(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+        model=settings.llm_chat_model,
+        timeout_seconds=settings.llm_timeout_seconds,
+    )
+    return LLMReceiptSummaryService(client=client, enabled=True)

@@ -133,6 +133,7 @@ def test_settings_defaults_background_summaries_to_local_extractive_provider(mon
     assert settings.document_summary_provider == "extractive"
     assert settings.classification_summary_provider == "extractive"
     assert settings.chat_document_summary_provider == "llm"
+    assert settings.agent_receipt_summary_provider == "llm"
 
 
 def test_settings_accepts_explicit_llm_summary_providers(monkeypatch, tmp_path):
@@ -143,6 +144,7 @@ def test_settings_accepts_explicit_llm_summary_providers(monkeypatch, tmp_path):
     monkeypatch.setenv("DOCUMENT_SUMMARY_PROVIDER", "llm")
     monkeypatch.setenv("CLASSIFICATION_SUMMARY_PROVIDER", "openai_compatible")
     monkeypatch.setenv("CHAT_DOCUMENT_SUMMARY_PROVIDER", "disabled")
+    monkeypatch.setenv("AGENT_RECEIPT_SUMMARY_PROVIDER", "disabled")
     _reset_settings_cache()
 
     settings = config.get_settings()
@@ -150,6 +152,7 @@ def test_settings_accepts_explicit_llm_summary_providers(monkeypatch, tmp_path):
     assert settings.document_summary_provider == "llm"
     assert settings.classification_summary_provider == "llm"
     assert settings.chat_document_summary_provider == "disabled"
+    assert settings.agent_receipt_summary_provider == "disabled"
 
 
 def test_settings_defaults_adaptive_planner_to_safe_shadow(monkeypatch, tmp_path):

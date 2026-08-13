@@ -237,6 +237,8 @@ LLM_CLASSIFICATION_ALLOW_FREE_PATHS=false
 DOCUMENT_SUMMARY_PROVIDER=extractive
 CLASSIFICATION_SUMMARY_PROVIDER=extractive
 CHAT_DOCUMENT_SUMMARY_PROVIDER=llm
+# 最终回执 LLM 只使用后端已验证的摘要，设为 disabled 时仍展示完整确定性回执。
+AGENT_RECEIPT_SUMMARY_PROVIDER=llm
 EVIDENCE_ANSWER_ENABLED=true
 EVIDENCE_ANSWER_PROVIDER=llm
 EVIDENCE_ANSWER_PROMPT_VERSION=evidence-answer-v1
@@ -306,11 +308,21 @@ GET /api/admin/agent-runs
 GET /api/admin/agent-runs/{agent_run_id}/diagnostics
 ```
 
-当自然语言检索启用 Adaptive 灰度时，`hybrid-search` 执行后会把结果数量、实际生效条件、索引状态和
-受控文件 ID 交回 Planner。Planner 在最多 3 轮规划、5 次 Tool 调用预算内决定结束、调整查询或继续
-读取证据；相同 Tool 输入不会重复执行。普通用户回执只展示后端确认的查询条件和各轮结果数量，不展示
-Planner、Skill、Tool 或内部任务 ID。当前消息包含完整文件名时，该文件名直接构成硬范围，不依赖上一轮
-搜索上下文。
+当自然语言任务启用 Adaptive 灰度时，Catalog 内的成熟检索、文件读取、分类、重命名计划和工作副本
+删除/恢复/移动计划 Tool 执行后，都会把统一脱敏观察交回 Planner。观察只包含状态、数量、后端授权的
+文件范围、证据/分类数量及确认或异步状态，不包含正文、文件名、路径和内部 ID。Planner 在最多 3 轮
+规划、5 次 Tool 调用预算内决定结束、继续/切换 Tool 或澄清；相同 Tool 输入不会重复执行。生成
+OperationPlan 或异步任务后，后端停止本轮副作用循环；`confirmed-file-action` 不在 Catalog 中，只能由
+用户确认后的后端 API 调用。普通用户仍只看到现有任务回执、证据和计划卡片，不展示 Planner、Skill、Tool
+或内部任务 ID。当前消息包含完整文件名时，该文件名直接构成硬范围，不依赖上一轮搜索上下文。
+观察中的允许决策由后端强制校验，不能只依赖模型遵守 Prompt。只读 Tool 失败可在预算内换 Tool 或请求
+澄清；有副作用 Tool 失败以及已生成 OperationPlan 的场景只允许结束或澄清。模型在重规划阶段异常时，
+系统保留已有验证结果并结束，不会通过 Legacy Planner 重新执行原始副作用请求。
+
+`AGENT_RECEIPT_SUMMARY_PROVIDER=llm` 会在最终回执节点增加一段自然语言说明，但该调用仅收到后端验证的
+结果类型和状态。文件名、数量、相对路径、页码、工作表、单元格、OperationPlan 明细仍由确定性 Tool
+结果与现有聊天卡片展示；证据回答不会被该通用回执模型二次改写。设为 `disabled` 时只保留确定性回执，
+无需执行数据库迁移。
 
 上传导入和分类阶段的持久化双摘要默认使用 `extractive` Provider：本地 Jieba 分词后以有候选上限的
 LexRank 选择可定位原文句子，不下载模型、不要求 GPU，也不会因为 `LLM_ENABLED=true` 自动外发正文。

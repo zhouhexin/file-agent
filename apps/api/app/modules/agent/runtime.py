@@ -43,6 +43,13 @@ class AdaptivePlannerProtocol(Protocol):
         """生成不产生副作用的 PlannerDecision。"""
 
 
+class ReceiptSummaryServiceProtocol(Protocol):
+    """最终回执的受控自然语言表述接口。"""
+
+    def summarize_receipt(self, **kwargs: Any) -> str | None:
+        """只能根据后端验证后的安全摘要生成简短说明。"""
+
+
 @dataclass(slots=True)
 class AgentRuntimeContext:
     """一次 AgentRun 所需的运行依赖。
@@ -60,3 +67,5 @@ class AgentRuntimeContext:
     adaptive_planner_service: AdaptivePlannerProtocol
     adaptive_planner_mode: str
     adaptive_planner_schema_version: str
+    # 仅属于单次运行依赖，绝不可写入 AgentGraphState 或 checkpoint。
+    receipt_summary_service: ReceiptSummaryServiceProtocol | None = None

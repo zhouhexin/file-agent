@@ -39,7 +39,11 @@ from app.modules.agent.tool_contracts import (
     EvidenceAnswerToolOutput,
     GenericToolOutput,
     IntentSummaryToolOutput,
+    ClassificationDecisionToolOutput,
     ManagedFileCollectionToolOutput,
+    ManagedFileReadToolOutput,
+    OperationPlanToolOutput,
+    OriginalFileMetadataToolOutput,
     SpreadsheetToolOutput,
     ToolOutputValidationError,
     WorkspaceFileSearchToolOutput,
@@ -2837,7 +2841,12 @@ def _read_original_file_handler(db: Any, user_id: str | None) -> ToolHandler:
 
         if db is None:
             return {"ok": False, "error": {"code": "DB_REQUIRED", "message": "读取原始文件需要数据库会话。"}}
-        return FileExtractionRepository(db, user_id).get_original_file_metadata(getattr(tool_input, "document_id"))
+        result = FileExtractionRepository(db, user_id).get_original_file_metadata(
+            getattr(tool_input, "document_id")
+        )
+        if result.get("ok"):
+            result["kind"] = "original_file_metadata"
+        return result
 
     return handler
 
@@ -3332,10 +3341,10 @@ def _build_mvp_tools(
 
     tools = [
         _tool("chunk-build", "Build chunks and evidence spans.", DocumentToolInput, True, False, ["document_chunks", "evidence_spans"], _chunk_build_handler(db, user_id)),
-        _tool("read-document-insights", "Read deterministic ingest insights for uploaded documents.", DocumentInsightsReadInput, False, False, [], _document_insights_handler(db, user_id), output_model=DocumentInsightsToolOutput, adaptive_ready=True),
-        _tool("read-document-classifications", "Read latest persisted classification suggestions for uploaded documents.", DocumentClassificationsReadInput, False, False, [], _document_classifications_handler(db, user_id), output_model=DocumentClassificationsToolOutput, adaptive_ready=True),
-        _tool("read-original-file", "Read safe metadata for an uploaded original file.", DocumentToolInput, False, False, [], _read_original_file_handler(db, user_id)),
-        _tool("extract-document-text", "Extract text from uploaded files and persist document pages.", DocumentToolInput, True, False, ["document_extraction_runs", "document_pages"], _extract_document_text_handler(db, user_id), output_model=DocumentExtractionToolOutput, adaptive_ready=True),
+        _tool("read-document-insights", "Read deterministic ingest insights for uploaded documents.", DocumentInsightsReadInput, False, False, [], _document_insights_handler(db, user_id), output_model=DocumentInsightsToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
+        _tool("read-document-classifications", "Read latest persisted classification suggestions for uploaded documents.", DocumentClassificationsReadInput, False, False, [], _document_classifications_handler(db, user_id), output_model=DocumentClassificationsToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
+        _tool("read-original-file", "Read safe metadata for an uploaded original file.", DocumentToolInput, False, False, [], _read_original_file_handler(db, user_id), output_model=OriginalFileMetadataToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
+        _tool("extract-document-text", "Extract text from uploaded files and persist document pages.", DocumentToolInput, True, False, ["document_extraction_runs", "document_pages"], _extract_document_text_handler(db, user_id), output_model=DocumentExtractionToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
         _tool("intent-summary", "Record LLM-understood user intent without side effects.", IntentSummaryInput, False, False, [], _intent_summary_handler, output_model=IntentSummaryToolOutput, adaptive_ready=True),
         _tool(
             "capability-suggestion-record",
@@ -3387,18 +3396,19 @@ def _build_mvp_tools(
             ),
             output_model=EvidenceAnswerToolOutput,
             adaptive_ready=True,
+            observation_policy="PLANNER_AFTER_EXECUTION",
         ),
         _tool("confirmed-file-action", "Execute confirmed operation plan.", ConfirmedFileActionInput, True, True, ["change_items"], _confirmed_action_handler(db, user_id)),
         _tool("feedback-record", "Record user feedback.", FeedbackRecordInput, True, False, ["feedback", "skill_feedback_samples"], _feedback_handler(user_id)),
         _tool("managed-root-list", "List server managed logical roots.", ManagedRootListInput, True, False, ["managed_roots"], _managed_root_list_handler(db)),
-        _tool("managed-file-list", "List server managed files by logical metadata filters.", ManagedFileListInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_list_handler(db), output_model=ManagedFileCollectionToolOutput, adaptive_ready=True),
-        _tool("managed-file-search", "Search server managed files by filename keyword.", ManagedFileSearchInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_search_handler(db), output_model=ManagedFileCollectionToolOutput, adaptive_ready=True),
-        _tool("managed-file-read-document", "Read one server managed file by logical filters, snapshot it as a document, and extract text.", ManagedFileReadDocumentInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages"], _managed_file_read_document_handler(db, user_id)),
-        _tool("classify-managed-files", "Snapshot, extract and classify files selected from a server managed directory.", ManagedFileClassificationInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages", "document_classification_runs", "document_category_suggestions", "change_sets", "change_items"], _managed_file_classification_handler(db, user_id)),
-        _tool("generate-rename-suggestions", "Resolve uploaded attachments or managed-original scope to working copies, then persist controlled rename suggestions without changing original files.", GenerateRenameSuggestionsInput, True, False, ["document_pages", "operation_plans"], _generate_rename_suggestions_handler(db, user_id)),
+        _tool("managed-file-list", "List server managed files by logical metadata filters.", ManagedFileListInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_list_handler(db), output_model=ManagedFileCollectionToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
+        _tool("managed-file-search", "Search server managed files by filename keyword.", ManagedFileSearchInput, True, False, ["managed_roots", "managed_files", "filesystem_scan_runs"], _managed_file_search_handler(db), output_model=ManagedFileCollectionToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
+        _tool("managed-file-read-document", "Read one server managed file by logical filters, snapshot it as a document, and extract text.", ManagedFileReadDocumentInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages"], _managed_file_read_document_handler(db, user_id), output_model=ManagedFileReadToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
+        _tool("classify-managed-files", "Snapshot, extract and classify files selected from a server managed directory.", ManagedFileClassificationInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages", "document_classification_runs", "document_category_suggestions", "change_sets", "change_items"], _managed_file_classification_handler(db, user_id), output_model=ManagedFileReadToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
+        _tool("generate-rename-suggestions", "Resolve uploaded attachments or managed-original scope to working copies, then persist controlled rename suggestions without changing original files.", GenerateRenameSuggestionsInput, True, False, ["document_pages", "operation_plans"], _generate_rename_suggestions_handler(db, user_id), output_model=OperationPlanToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
         _tool("resolve-rename-reviews", "Resolve pending rename reviews from explicit user corrections and immediately execute a confirmed OperationPlan.", ResolveRenameReviewsInput, True, False, ["operation_plans", "operation_confirmations", "change_sets", "change_items"], _resolve_rename_reviews_handler(db, user_id)),
-        _tool("classification-decision", "Accept, reject, or correct one backend-resolved classification suggestion and persist the formal shared-file relation.", ClassificationDecisionInput, True, False, ["document_category_feedback", "document_categories", "document_category_confirmation_sources", "change_sets", "change_items", "classification_graph_outbox"], _classification_decision_handler(db, user_id)),
-        _tool("working-copy-action-plan-create", "Create a controlled working-copy OperationPlan from conversation context without executing it.", WorkingCopyActionPlanInput, True, False, ["operation_plans", "working_copy_path_records"], _working_copy_action_plan_handler(db, user_id)),
+        _tool("classification-decision", "Accept, reject, or correct one backend-resolved classification suggestion and persist the formal shared-file relation.", ClassificationDecisionInput, True, False, ["document_category_feedback", "document_categories", "document_category_confirmation_sources", "change_sets", "change_items", "classification_graph_outbox"], _classification_decision_handler(db, user_id), output_model=ClassificationDecisionToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
+        _tool("working-copy-action-plan-create", "Create a controlled working-copy OperationPlan from conversation context without executing it.", WorkingCopyActionPlanInput, True, False, ["operation_plans", "working_copy_path_records"], _working_copy_action_plan_handler(db, user_id), output_model=OperationPlanToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
         _tool("managed-root-scan", "Create an async scan job for a managed logical root.", ManagedRootScanInput, True, False, ["filesystem_jobs", "filesystem_job_events"], _managed_root_scan_handler(db, user_id)),
         _tool("mcp-filesystem-list", "List files and directories in the server managed filesystem root without database scan.", MCPFilesystemListInput, False, False, [], _mcp_filesystem_list_handler()),
         _tool("mcp-filesystem-search", "Search files and directories in the server managed filesystem root without database scan.", MCPFilesystemSearchInput, False, False, [], _mcp_filesystem_search_handler()),

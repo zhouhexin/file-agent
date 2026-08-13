@@ -70,6 +70,7 @@ DEFAULT_DOCUMENT_INDEX_MAX_CHUNKS = 50_000
 DEFAULT_DOCUMENT_SUMMARY_PROVIDER = "extractive"
 DEFAULT_CLASSIFICATION_SUMMARY_PROVIDER = "extractive"
 DEFAULT_CHAT_DOCUMENT_SUMMARY_PROVIDER = "llm"
+DEFAULT_AGENT_RECEIPT_SUMMARY_PROVIDER = "llm"
 DEFAULT_EVIDENCE_ANSWER_PROVIDER = "llm"
 DEFAULT_EVIDENCE_ANSWER_PROMPT_VERSION = "evidence-answer-v1"
 DEFAULT_EVIDENCE_ANSWER_SCHEMA_VERSION = "evidence-answer-schema-v1"
@@ -129,6 +130,8 @@ class Settings(BaseModel):
     llm_classification_summary_prompt_version: str = "classification-topic-summary-v1"
     classification_summary_schema_version: str = "classification-topic-summary-schema-v1"
     chat_document_summary_provider: str = DEFAULT_CHAT_DOCUMENT_SUMMARY_PROVIDER
+    # 对话最终回执与后台导入摘要隔离；该 Provider 只读取后端验证后的业务摘要。
+    agent_receipt_summary_provider: str = DEFAULT_AGENT_RECEIPT_SUMMARY_PROVIDER
     evidence_answer_enabled: bool = True
     evidence_answer_provider: str = DEFAULT_EVIDENCE_ANSWER_PROVIDER
     evidence_answer_prompt_version: str = DEFAULT_EVIDENCE_ANSWER_PROMPT_VERSION
@@ -412,6 +415,12 @@ def get_settings() -> Settings:
         ).strip() or "classification-topic-summary-schema-v1",
         chat_document_summary_provider=_normalize_chat_summary_provider(
             os.getenv("CHAT_DOCUMENT_SUMMARY_PROVIDER", DEFAULT_CHAT_DOCUMENT_SUMMARY_PROVIDER)
+        ),
+        agent_receipt_summary_provider=_normalize_chat_summary_provider(
+            os.getenv(
+                "AGENT_RECEIPT_SUMMARY_PROVIDER",
+                DEFAULT_AGENT_RECEIPT_SUMMARY_PROVIDER,
+            )
         ),
         evidence_answer_enabled=os.getenv("EVIDENCE_ANSWER_ENABLED", "true").lower() == "true",
         evidence_answer_provider=_normalize_evidence_answer_provider(

@@ -97,6 +97,16 @@ def test_natural_language_search_can_continue_to_evidence_answer(
                     query="未来五年规划 重点任务",
                     step_id="search-planning-files",
                 )
+            # 所有成熟 Tool 都会产生一次脱敏观察；证据回答完成后必须由 Planner 明确结束，
+            # 不能因为旧测试 fake 继续生成同一读取 Tool 而触发重复调用保护。
+            if observation["results"][0]["tool_name"] == "evidence-answer":
+                return PlannerDecision(
+                    decision_type="FINISH",
+                    intent="EVIDENCE_ANSWER",
+                    user_goal=kwargs["message"],
+                    selected_skill_ids=["evidence-answer"],
+                    scope=PlannerScope(source="tool_observation"),
+                )
             document_ids = observation["results"][0]["document_ids"]
             return PlannerDecision(
                 decision_type="TOOL_PLAN",
@@ -204,7 +214,8 @@ def test_natural_language_search_can_continue_to_evidence_answer(
         "evidence-answer",
     ]
     assert registry.calls[1][1]["document_ids"] == ["doc-five-year-plan"]
-    assert len(planner.observations) == 2
+    # 检索和证据读取都属于成熟 Tool，因此各自完成后都会进入一次观察。
+    assert len(planner.observations) == 3
     assert "规划重点包括" in (result.final_response or "")
     assert result.search_context["attempts"][0]["result_count"] == 1
 
@@ -228,6 +239,15 @@ def test_natural_language_search_can_continue_to_classification_evidence(
                     message=kwargs["message"],
                     query="学生工作实施建议",
                     step_id="search-classified-file",
+                )
+            # 分类证据读取完成后，Planner 只能结束或澄清，不能重复读取同一范围。
+            if observation["results"][0]["tool_name"] == "read-document-classifications":
+                return PlannerDecision(
+                    decision_type="FINISH",
+                    intent="SUMMARIZE_CLASSIFICATIONS",
+                    user_goal=kwargs["message"],
+                    selected_skill_ids=["document-classification"],
+                    scope=PlannerScope(source="tool_observation"),
                 )
             document_ids = observation["results"][0]["document_ids"]
             return PlannerDecision(

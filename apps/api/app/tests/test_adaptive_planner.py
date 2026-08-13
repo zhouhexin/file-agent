@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
@@ -61,6 +62,267 @@ from app.modules.classification.evidence_reader import (
 )
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.tests.helpers import clear_overrides, client_with_database
+
+
+def test_adaptive_catalog_includes_mature_plan_tools_but_hides_confirmed_execution():
+    """Adaptive Catalog 可编排读取、分类和计划 Tool，但确认执行必须保持后端专属。"""
+
+    snapshot = AgentCatalogService(registry=ToolRegistry()).build_snapshot()
+
+    expected = {
+        "read-original-file",
+        "read-document-insights",
+        "read-document-classifications",
+        "extract-document-text",
+        "managed-file-read-document",
+        "classify-managed-files",
+        "generate-rename-suggestions",
+        "classification-decision",
+        "working-copy-action-plan-create",
+    }
+    assert expected <= set(snapshot["enabled_tool_names"])
+    assert "confirmed-file-action" not in snapshot["enabled_tool_names"]
+
+
+def test_execution_observation_is_sanitized_for_plan_tool():
+    """计划 Tool 的观察只能包含状态和计数，不能把路径、文件名或证据原文传给 LLM。"""
+
+    from app.modules.agent.graph import _safe_tool_observation
+
+    observation = _safe_tool_observation(
+        {
+            "kind": "rename_plan",
+            "ok": True,
+            "status": "PLANNED",
+            "operation_plan_id": "internal-plan-id",
+            "suggestions": [
+                {
+                    "old_path": "shared/secret/原文件.docx",
+                    "new_path": "shared/secret/新文件.docx",
+                    "quote": "不得进入观察的原文",
+                }
+            ],
+        },
+        tool_name="generate-rename-suggestions",
+    )
+
+    assert observation["has_operation_plan"] is True
+    assert observation["requires_user_confirmation"] is True
+    assert observation["available_next_decisions"] == ["FINISH", "CLARIFY"]
+    assert "old_path" not in observation
+    assert "quote" not in observation
+    assert "internal-plan-id" not in str(observation)
+
+
+def test_observation_decision_limit_is_enforced_by_backend():
+    """待确认计划之后即使模型再次生成 ToolPlan，后端也必须拒绝而不能只依赖 Prompt。"""
+
+    registry = ToolRegistry()
+    snapshot = AgentCatalogService(registry=registry).build_snapshot()
+    decision = PlannerDecision(
+        decision_type="TOOL_PLAN",
+        intent="PREPARE_WORKING_COPY_ACTION",
+        user_goal="继续删除文件",
+        selected_skill_ids=["operation-plan"],
+        scope=PlannerScope(source="tool_observation"),
+        tool_plan=ToolPlan(
+            plan_id="invalid-followup",
+            steps=[
+                ToolStep(
+                    step_id="duplicate-plan",
+                    skill_id="operation-plan",
+                    tool_name="working-copy-action-plan-create",
+                    literal_input={
+                        "action": "TRASH",
+                        "message": "继续删除文件",
+                        "document_ids": [],
+                    },
+                )
+            ],
+        ),
+    )
+
+    with pytest.raises(LLMResponseError, match="执行观察约束"):
+        validate_and_convert_decision(
+            decision=decision,
+            registry=registry,
+            catalog_snapshot=snapshot,
+            attachments=[],
+            context_documents=[],
+            has_tool_observation=True,
+            observation={
+                "results": [
+                    {
+                        "available_next_decisions": ["FINISH", "CLARIFY"],
+                    }
+                ]
+            },
+        )
+
+
+def test_working_copy_plan_response_waits_for_confirmation():
+    """删除、恢复或移动计划必须形成明确回执并保持等待确认，不能落入空泛兜底。"""
+
+    from app.modules.agent.graph import evidence_or_change, response
+
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(
+            classification_service=None,
+            receipt_summary_service=None,
+            document_summary_service=None,
+        )
+    )
+    state = {
+        "operation_plan_id": "plan-working-copy",
+        "tool_results": [
+            {
+                "ok": True,
+                "kind": "working_copy_operation_plan",
+                "status": "WAITING_CONFIRMATION",
+                "operation_plan_id": "plan-working-copy",
+                "message": "文件移入回收站计划已生成，请确认。",
+            }
+        ],
+        "tool_invocations": [],
+        "context_documents": [],
+        "slots": {},
+        "intent": "PREPARE_WORKING_COPY_ACTION",
+    }
+
+    aggregated = evidence_or_change(state, runtime)
+    result = response({**state, **aggregated}, runtime)
+
+    assert result["status"] == "WAITING_FOR_CONFIRMATION"
+    assert result["final_response"] == "文件移入回收站计划已生成，请确认。"
+
+
+def test_read_only_tool_failure_can_replan_but_side_effect_failure_stops():
+    """只读失败可换 Tool，写入失败必须停止，不能由模型盲目重试副作用。"""
+
+    from app.modules.agent.graph import observe_tool_result
+
+    class _Definition:
+        """提供观察策略和副作用标记的最小 Tool 定义。"""
+
+        observation_policy = "PLANNER_AFTER_EXECUTION"
+
+        def __init__(self, *, side_effects: bool) -> None:
+            """保存 Tool 是否写入长期事实。"""
+
+            self.side_effects = side_effects
+
+    class _Registry:
+        """按 Tool 名返回测试定义。"""
+
+        def get(self, tool_name):
+            """模拟一个只读 Tool 和一个写入 Tool。"""
+
+            return _Definition(side_effects=tool_name == "write-tool")
+
+    runtime = SimpleNamespace(context=SimpleNamespace(registry=_Registry()))
+    base_state = {
+        "planning_round": 1,
+        "tool_call_count": 1,
+        "adaptive_planner_mode": "enabled",
+        "last_dispatch_results": [
+            {
+                "ok": False,
+                "status": "FAILED",
+                "error": {"code": "TEMPORARY_FAILURE", "message": "暂时不可用"},
+            }
+        ],
+        "search_attempts": [],
+        "observed_document_ids": [],
+        "effective_conditions": [],
+        "message": "读取文件",
+        "intent": "READ_FILE",
+    }
+
+    read_result = observe_tool_result(
+        {**base_state, "last_dispatch_tool_name": "read-tool"},
+        runtime,
+    )
+    write_result = observe_tool_result(
+        {**base_state, "last_dispatch_tool_name": "write-tool"},
+        runtime,
+    )
+
+    assert read_result["replan_requested"] is True
+    assert read_result["observation"]["results"][0][
+        "available_next_decisions"
+    ] == ["TOOL_PLAN", "CLARIFY", "FINISH"]
+    assert write_result["replan_requested"] is False
+    assert write_result["observation"]["results"][0][
+        "available_next_decisions"
+    ] == ["FINISH", "CLARIFY"]
+
+
+def test_enabled_adaptive_planner_keeps_exact_filename_as_backend_hard_scope(
+    monkeypatch,
+    tmp_path,
+):
+    """完整文件名正文请求不能被 Adaptive Planner 改写成全工作区检索。"""
+
+    from app.core import config
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent",
+    )
+    monkeypatch.setenv("ADAPTIVE_PLANNER_MODE", "enabled")
+    monkeypatch.setenv("ADAPTIVE_PLANNER_ROLLOUT_PERCENT", "100")
+    config.get_settings.cache_clear()
+
+    class MustNotRunAdaptive:
+        """硬范围由后端预检固定，不应请求模型重新解释。"""
+
+        enabled = True
+
+        def decide(self, **_kwargs):
+            """若被调用说明文件名硬范围被错误放开。"""
+
+            raise AssertionError("完整文件名硬范围不得交给 Adaptive Planner 改写")
+
+    class EvidenceRegistry(ToolRegistry):
+        """只记录后端固定的证据 Tool。"""
+
+        def __init__(self):
+            """初始化生产 Tool 定义和调用审计。"""
+
+            super().__init__()
+            self.calls: list[str] = []
+
+        def invoke(self, name, input_json):
+            """返回最小证据回答结果，不访问真实数据库。"""
+
+            self.calls.append(name)
+            return ToolInvocationRecord(
+                tool_name=name,
+                input_json=input_json,
+                output_json={
+                    "kind": "evidence_answer",
+                    "ok": True,
+                    "status": "COMPLETED",
+                    "answer": "已按完整文件名读取。",
+                    "references": [],
+                },
+                status="COMPLETED",
+            )
+
+    registry = EvidenceRegistry()
+    result = AgentRuntimeService(
+        registry_factory=lambda _db, _user_id: registry,
+        adaptive_planner_service=MustNotRunAdaptive(),
+    ).run_message(
+        conversation_id="conv-exact-name",
+        user_id="user-exact-name",
+        message_id="message-exact-name",
+        message="为什么 示例文件.docx 涉及学生工作",
+    )
+
+    assert registry.calls == ["evidence-answer"]
+    assert result.final_response == "已按完整文件名读取。"
 
 
 def _db_session():
@@ -571,6 +833,128 @@ def test_enabled_adaptive_search_observes_result_then_finishes(
     ]
     assert result.status == "COMPLETED"
     assert result.search_context["attempts"][0]["result_count"] == 1
+
+
+def test_adaptive_replan_failure_keeps_verified_result_without_legacy_replay(
+    monkeypatch,
+    tmp_path,
+):
+    """Tool 成功后的重规划异常必须保留结果结束，不能让 Legacy 重放原任务。"""
+
+    from app.core import config
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent",
+    )
+    monkeypatch.setenv("ADAPTIVE_PLANNER_MODE", "enabled")
+    monkeypatch.setenv("ADAPTIVE_PLANNER_ROLLOUT_PERCENT", "100")
+    config.get_settings.cache_clear()
+
+    class LegacyMustNotReplay:
+        """记录 Legacy 调用；观察阶段失败后它不应执行。"""
+
+        enabled = True
+        call_count = 0
+
+        def understand_user_request(self, **_kwargs):
+            """若被调用说明已有 Tool 结果被错误地重新解释。"""
+
+            self.call_count += 1
+            raise AssertionError("已有 Tool 结果后不得回放 Legacy Planner")
+
+    class SearchThenFailPlanner:
+        """第一轮执行检索，第二轮模拟模型网关错误。"""
+
+        enabled = True
+
+        def __init__(self):
+            """记录规划调用次数。"""
+
+            self.call_count = 0
+
+        def decide(self, **kwargs):
+            """仅第一轮返回合法计划，观察轮抛出可降级错误。"""
+
+            self.call_count += 1
+            if kwargs["observation"] is not None:
+                raise LLMResponseError("replan gateway unavailable")
+            return PlannerDecision(
+                decision_type="TOOL_PLAN",
+                intent="SEARCH_FILES",
+                user_goal=kwargs["message"],
+                selected_skill_ids=["file-search"],
+                scope=PlannerScope(source="workspace"),
+                tool_plan=ToolPlan(
+                    plan_id="search-before-failure",
+                    steps=[
+                        ToolStep(
+                            step_id="search",
+                            skill_id="file-search",
+                            tool_name="hybrid-search",
+                            literal_input={"query": "已有验证结果"},
+                        )
+                    ],
+                ),
+            )
+
+    class VerifiedSearchRegistry(ToolRegistry):
+        """返回一个可直接形成用户搜索回执的验证结果。"""
+
+        def __init__(self):
+            """初始化真实 Catalog 元数据并记录调用。"""
+
+            super().__init__()
+            self.call_count = 0
+
+        def invoke(self, name, input_json):
+            """返回严格搜索结果，不访问数据库。"""
+
+            self.call_count += 1
+            return ToolInvocationRecord(
+                tool_name=name,
+                input_json=input_json,
+                output_json={
+                    "kind": "workspace_file_search",
+                    "ok": True,
+                    "status": "COMPLETED",
+                    "query": input_json["query"],
+                    "total_returned": 1,
+                    "results": [
+                        {
+                            "document_id": "doc-verified",
+                            "filename": "验证结果.docx",
+                            "relevance_tier": "SUPPORTED",
+                        }
+                    ],
+                    "document_ids": ["doc-verified"],
+                    "effective_conditions": [],
+                    "index_status": "READY",
+                    "result_status": "MATCHED",
+                },
+                status="COMPLETED",
+            )
+
+    legacy = LegacyMustNotReplay()
+    adaptive = SearchThenFailPlanner()
+    registry = VerifiedSearchRegistry()
+    result = AgentRuntimeService(
+        registry_factory=lambda _db, _user_id: registry,
+        llm_intent_service=legacy,
+        adaptive_planner_service=adaptive,
+    ).run_message(
+        conversation_id="conv-replan-failure",
+        user_id="user-replan-failure",
+        message_id="msg-replan-failure",
+        message="查找已有验证结果",
+    )
+
+    assert adaptive.call_count == 2
+    assert legacy.call_count == 0
+    assert registry.call_count == 1
+    assert result.status == "COMPLETED"
+    assert "验证结果.docx" in (result.final_response or "")
 
 
 def test_binding_resolver_rejects_oversized_array():

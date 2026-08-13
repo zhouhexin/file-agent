@@ -187,6 +187,7 @@ def test_read_original_file_returns_metadata_for_owner(monkeypatch, tmp_path):
         assert result.output_json["document_id"] == document_id
         assert result.output_json["filename"] == "notes.txt"
         assert result.output_json["storage_backend"] == "local"
+        assert result.output_json["kind"] == "original_file_metadata"
         assert "storage_path" not in result.output_json
     finally:
         db.close()
