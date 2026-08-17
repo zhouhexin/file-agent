@@ -50,7 +50,7 @@ export function EvidenceAnswerReceipt({
           // 兼容本次改造前保存的历史证据回答，旧回执不存在 evidence_items 字段。
           const evidenceItems = file.evidence_items ?? [];
           return (
-          <article className="search-result-card" key={file.document_id}>
+          <article className="search-result-card" key={`${file.document_id}-${file.working_copy_id || 'managed-source'}`}>
             <span className="search-result-icon">
               <FileText size={18} aria-hidden />
             </span>
@@ -100,7 +100,7 @@ export function EvidenceAnswerReceipt({
               </button>
             ) : (
               <span className="search-result-action is-disabled">
-                {file.availability === 'TRASHED' ? '文件已删除' : '暂不可查看'}
+                {file.availability === 'TRASHED' ? '文件已删除' : '工作副本正在生成'}
               </span>
             )}
           </article>

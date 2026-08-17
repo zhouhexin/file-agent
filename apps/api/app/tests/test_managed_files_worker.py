@@ -424,7 +424,9 @@ def test_worker_processes_scan_job_and_persists_files(tmp_path: Path, capsys):
         assert "任务完成" in console_output
         assert "job_type=SCAN_MANAGED_ROOT" in console_output
         assert "files_discovered=1" in console_output
-        assert "import_jobs=" in console_output
+        # 源侧索引优先模式只入队只读分析，初始化扫描不能再暗示创建全量工作副本。
+        assert "source_analysis_jobs=" in console_output
+        assert "import_jobs=" not in console_output
         assert str(managed_dir) not in console_output
     finally:
         db.close()
@@ -471,8 +473,8 @@ def test_scan_job_error_message_distinguishes_path_failure_from_internal_failure
     assert "secret internal detail" not in internal
 
 
-def test_scan_publishes_import_jobs_by_batch_before_full_root_completion(monkeypatch, tmp_path: Path, capsys):
-    """大目录扫描必须按批提交 IMPORT 任务，不能等整轮扫描完成后才统一入队。"""
+def test_scan_publishes_source_analysis_jobs_by_batch_before_full_root_completion(monkeypatch, tmp_path: Path, capsys):
+    """大目录扫描必须按批提交源侧分析，不能在初始化阶段创建全量工作副本。"""
 
     managed_dir = tmp_path / "incremental-root"
     managed_dir.mkdir()
@@ -521,16 +523,25 @@ def test_scan_publishes_import_jobs_by_batch_before_full_root_completion(monkeyp
 
         with session_factory() as db:
             completed_scan = db.get(FilesystemJob, job_id)
-            import_jobs = (
+            source_analysis_jobs = (
                 db.query(FilesystemJob)
-                .filter(FilesystemJob.job_type == "IMPORT_WORKING_COPIES")
+                .filter(FilesystemJob.job_type == "ANALYZE_MANAGED_FILE_REVISION")
                 .order_by(FilesystemJob.created_at.asc())
                 .all()
             )
             assert completed_scan is not None
             assert completed_scan.result_json["batches_committed"] == 3
-            assert len(import_jobs) == 3
-            assert all(item.queue_name == "IMPORT" and item.status == "PENDING" for item in import_jobs)
+            assert len(source_analysis_jobs) == 3
+            assert all(
+                item.queue_name == "SOURCE_ANALYSIS" and item.status == "PENDING"
+                for item in source_analysis_jobs
+            )
+            assert (
+                db.query(FilesystemJob)
+                .filter(FilesystemJob.job_type == "IMPORT_WORKING_COPIES")
+                .count()
+                == 0
+            )
 
         console_output = capsys.readouterr().out
         assert console_output.count("扫描批次已提交") == 3
@@ -539,11 +550,11 @@ def test_scan_publishes_import_jobs_by_batch_before_full_root_completion(monkeyp
         clear_overrides()
 
 
-def test_scan_requeues_completed_import_when_local_working_copy_is_missing(
+def test_scan_does_not_eagerly_import_working_copy_before_relevant_file_set(
     monkeypatch,
     tmp_path: Path,
 ):
-    """共享开发库已有记录但本机文件缺失时，扫描必须重新物化同一工作副本。"""
+    """源目录初始化只提交分析任务，工作副本必须等相关文件集合触发物化。"""
 
     managed_dir = tmp_path / "managed"
     managed_dir.mkdir()
@@ -591,50 +602,21 @@ def test_scan_requeues_completed_import_when_local_working_copy_is_missing(
             worker_id="repair-scan-worker",
             queue_names={"SCAN"},
         )
-        first_import_job_id = process_next_filesystem_job(
-            session_factory=session_factory,
-            worker_id="repair-import-worker",
-            queue_names={"IMPORT"},
-        )
-        assert first_import_job_id is not None
-
         with session_factory() as db:
-            working_copy = db.query(WorkingCopy).one()
-            working_root = db.get(WorkingCopyRoot, working_copy.working_copy_root_id)
-            assert working_root is not None
-            physical_path = working_dir / working_root.relative_storage_path / working_copy.relative_path
-            assert physical_path.read_text(encoding="utf-8") == "科研项目材料提交要求"
-            physical_path.unlink()
-            second_scan = FilesystemJob(
-                job_type="SCAN_MANAGED_ROOT",
-                queue_name="SCAN",
-                root_id=root_id,
-                status="PENDING",
-                payload_json={"root_key": "school_files", "reason": "repair-test"},
-                result_json={},
+            source_jobs = (
+                db.query(FilesystemJob)
+                .filter(FilesystemJob.job_type == "ANALYZE_MANAGED_FILE_REVISION")
+                .all()
             )
-            db.add(second_scan)
-            db.commit()
-
-        assert process_next_filesystem_job(
-            session_factory=session_factory,
-            worker_id="repair-scan-worker",
-            queue_names={"SCAN"},
-        )
-        repaired_job_id = process_next_filesystem_job(
-            session_factory=session_factory,
-            worker_id="repair-import-worker",
-            queue_names={"IMPORT"},
-        )
-
-        assert repaired_job_id == first_import_job_id
-        assert physical_path.read_text(encoding="utf-8") == "科研项目材料提交要求"
-        with session_factory() as db:
-            repaired_job = db.get(FilesystemJob, repaired_job_id)
-            assert repaired_job is not None
-            assert repaired_job.status == "COMPLETED"
-            assert repaired_job.result_json["physical_copy_repaired"] is True
-            assert db.query(WorkingCopy).count() == 1
+            assert len(source_jobs) == 1
+            assert source_jobs[0].queue_name == "SOURCE_ANALYSIS"
+            assert db.query(WorkingCopy).count() == 0
+            assert (
+                db.query(FilesystemJob)
+                .filter(FilesystemJob.job_type == "IMPORT_WORKING_COPIES")
+                .count()
+                == 0
+            )
     finally:
         get_settings.cache_clear()
         clear_overrides()

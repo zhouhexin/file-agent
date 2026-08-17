@@ -66,6 +66,9 @@ def test_new_search_result_activates_file_search_field():
                     "document_id": "d-1",
                     "document_version_id": "v-1",
                     "filename": "奖学金.docx",
+                    # 逻辑相对路径用于区分同名文件，不能被分类标签替代。
+                    "root_key": "school-archive",
+                    "relative_path": "资助/2025/奖学金.docx",
                     "category_path": ["奖助学金"],
                     "year": 2025,
                     "overview": "奖学金材料",
@@ -88,9 +91,49 @@ def test_new_search_result_activates_file_search_field():
 
     file_item = receipt.file_search_result["files"][0]
     assert file_item["filename"] == "奖学金.docx"
+    assert file_item["root_key"] == "school-archive"
+    assert file_item["relative_path"] == "资助/2025/奖学金.docx"
     # 内部 _score 等字段应被过滤
     assert "_score" not in file_item
     assert "_hit_source" not in file_item
+
+
+def test_source_search_receipt_keeps_logical_path_and_disables_opening():
+    """未物化的源文件必须保留逻辑路径，并禁止前端误当作可打开副本。"""
+
+    invocation = ToolInvocationRecord(
+        tool_name="hybrid-search",
+        input_json={"query": "劳务费"},
+        output_json={
+            "kind": "workspace_file_search",
+            "ok": True,
+            "query": "劳务费",
+            "total_returned": 1,
+            "results": [
+                {
+                    "resource_type": "MANAGED_SOURCE",
+                    "working_copy_id": None,
+                    "document_id": "source-document-1",
+                    "document_version_id": "source-version-1",
+                    "filename": "发放办法.doc",
+                    "root_key": "school-archive",
+                    "relative_path": "学院/财务/发放办法.doc",
+                    "category_path": ["学院", "行政管理"],
+                    "can_open": False,
+                    "availability_message": "已从受管原始文件检索到，工作副本正在后台生成",
+                }
+            ],
+        },
+        status="COMPLETED",
+    )
+
+    receipt = build_user_task_receipt(_make_result(tool_invocations=[invocation]))
+
+    assert receipt.file_search_result is not None
+    file_item = receipt.file_search_result["files"][0]
+    assert file_item["relative_path"] == "学院/财务/发放办法.doc"
+    assert file_item["can_open"] is False
+    assert "正在后台生成" in file_item["availability_message"]
 
 
 def test_new_search_result_handles_empty_results():

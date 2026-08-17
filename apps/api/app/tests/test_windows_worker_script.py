@@ -14,7 +14,8 @@ def test_windows_worker_launcher_starts_required_isolated_processes():
     content = script.read_text(encoding="utf-8")
     assert 'FILESYSTEM_WORKER_QUEUES=RECONCILE,SCAN' in content
     assert 'FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION' in content
-    assert content.count('FILESYSTEM_WORKER_QUEUES=IMPORT') == 2
+    assert 'FILESYSTEM_WORKER_QUEUES=SOURCE_ANALYSIS' in content
+    assert content.count('FILESYSTEM_WORKER_QUEUES=MATERIALIZE,IMPORT') == 2
     assert 'FILESYSTEM_WORKER_QUEUES=ANALYSIS' in content
     assert 'FILESYSTEM_WORKER_QUEUES=GRAPH' in content
     assert 'app.modules.managed_files.worker' in content
@@ -22,8 +23,9 @@ def test_windows_worker_launcher_starts_required_isolated_processes():
     assert 'app.modules.file_lifecycle.startup_preflight' in content
     assert 'start "File Agent - Scan Worker"' in content
     assert 'start "File Agent - Lifecycle Worker"' in content
-    assert 'start "File Agent - Import Worker 1"' in content
-    assert 'start "File Agent - Import Worker 2"' in content
+    assert 'start "File Agent - Source Analysis Worker"' in content
+    assert 'start "File Agent - Materialize Worker 1"' in content
+    assert 'start "File Agent - Materialize Worker 2"' in content
     assert 'start "File Agent - Analysis Worker"' in content
     assert 'start "File Agent - Graph Worker"' in content
     assert "if errorlevel 1" in content

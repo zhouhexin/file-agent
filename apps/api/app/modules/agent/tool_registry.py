@@ -895,6 +895,22 @@ def _search_handler(
             scope=scope,
             unresolved_document_count=len(canonical_scope.unresolved_document_ids),
         )
+        # 只有最终已返回的相关文件才进入集合；它们的源侧物化完全异步，不能推迟
+        # 本次搜索回执。用户可见的“可能相关”同样属于最终结果，会被一并物化，
+        # 但内部扩大召回候选从未进入此处，不能触发批量复制。
+        if result.get("ok") and list(result.get("results") or []):
+            from app.modules.retrieval.relevant_file_sets import RelevantFileSetService
+
+            materialization = RelevantFileSetService(db=db, settings=settings).persist_and_enqueue(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                agent_run_id=(agent_run_id_getter() if agent_run_id_getter else None),
+                query=search_query,
+                results=list(result.get("results") or []),
+            )
+            if materialization is not None:
+                result["relevant_file_set_id"] = materialization["relevant_file_set_id"]
         log_event(
             "retrieval.active_scope.completed",
             level="WARNING" if result.get("partial") else "INFO",
@@ -1263,6 +1279,7 @@ def _intersect_file_search_results(
     entity_by_id = {
         str(
             item.get("working_copy_id")
+            or item.get("managed_file_revision_id")
             or item.get("document_version_id")
             or item.get("document_id")
             or ""
@@ -1696,6 +1713,7 @@ def _search_result_ids(payload: Dict[str, Any]) -> set[str]:
     return {
         str(
             item.get("working_copy_id")
+            or item.get("managed_file_revision_id")
             or item.get("document_version_id")
             or item.get("document_id")
             or ""
@@ -1704,6 +1722,7 @@ def _search_result_ids(payload: Dict[str, Any]) -> set[str]:
         if isinstance(item, dict)
         and (
             item.get("working_copy_id")
+            or item.get("managed_file_revision_id")
             or item.get("document_version_id")
             or item.get("document_id")
         )

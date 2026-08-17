@@ -1,6 +1,6 @@
 """三层文件生命周期的启动与定时同步入队器。
 
-该模块只写持久化任务，绝不在 API 启动钩子中扫描目录或复制文件。
+该模块只写持久化任务，绝不在 API 启动钩子中扫描目录、分析原始文件或复制工作副本。
 """
 
 from __future__ import annotations
@@ -93,7 +93,7 @@ def enqueue_reconciliation_jobs(*, db: Session, created_by: str | None = None) -
 
 
 def run_reconciliation_scheduler(*, interval_seconds: int | None = None) -> None:
-    """独立定时进程周期性入队；不扫描目录、不复制文件。"""
+    """独立定时进程周期性入队；不扫描目录、不分析原件、不复制文件。"""
 
     settings = get_settings()
     interval = max(30, interval_seconds or settings.managed_root_reconcile_interval_seconds)

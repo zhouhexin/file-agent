@@ -24,6 +24,7 @@ from app.modules.retrieval.chunk_lexical_search import DocumentChunkLexicalSearc
 from app.modules.retrieval.evidence_projector import SearchEvidenceProjector
 from app.modules.retrieval.query_parser import exact_short_chinese_phrase
 from app.modules.retrieval.stage1_document_recall import Stage1DocumentRecallService
+from app.modules.retrieval.managed_source_search import ManagedSourceSearchService
 
 
 class _DefaultConfig:
@@ -77,6 +78,9 @@ class TwoStageFileSearchService:
         )
         self.evidence = SearchEvidenceProjector(
             db=db, user_id=user_id, workspace_id=workspace_id,
+        )
+        self.managed_source = ManagedSourceSearchService(
+            db=db, workspace_id=workspace_id, tokenizer=tokenizer,
         )
 
     def search(
@@ -421,6 +425,51 @@ class TwoStageFileSearchService:
             scope=scope,
             year_match_version_ids=year_match_version_ids,
         )
+        # 源侧分支只补充当前未被同修订工作副本覆盖的记录。两边均已完成
+        # 相关性校验后才合并，不能把扩大召回候选误放入用户最终列表。
+        source_state = {"results": [], "pending_count": 0, "failed_count": 0, "eligible_count": 0}
+        if bool(getattr(self.config, "managed_source_search_enabled", True)):
+            try:
+                # 源侧搜索只是双范围补充分支。其索引异常不能回滚已经成功的
+                # 工作副本检索，也不能让用户误以为工作副本结果不存在。
+                with self.db.begin_nested():
+                    source_state = self.managed_source.search(
+                        parsed_query=parsed_query,
+                        scope=scope,
+                        limit=candidate_limit,
+                        # 短语策略需要源侧同样提供连续正文命中，不能只让工作
+                        # 副本分支执行该约束，否则双范围结果会出现分级不一致。
+                        exact_phrase=exact_phrase,
+                    )
+            except Exception as exc:
+                source_state = {
+                    "results": [],
+                    "pending_count": 0,
+                    "failed_count": 0,
+                    "eligible_count": 0,
+                    "degraded": True,
+                }
+                log_event(
+                    "retrieval.managed_source.failed",
+                    level="ERROR",
+                    tool_name="hybrid-search",
+                    status="DEGRADED",
+                    workspace_id=self.workspace_id,
+                    query_fingerprint=query_fingerprint,
+                    error_code=exc.__class__.__name__,
+                    message="受管原始文件检索分支失败，保留工作副本检索结果",
+                )
+            source_results = list(source_state.get("results") or [])
+            # 源侧服务已经按“内容一致的活动工作副本”完成去重。此处不能再按
+            # ``managed_file_id`` 排除，否则源文件出现新修订而旧工作副本仍存在时，
+            # 新修订会被静默遗漏。
+            fused.extend(source_results)
+            fused.sort(
+                key=lambda item: (
+                    -float(item.get("_score") or 0.0),
+                    str(item.get("working_copy_id") or item.get("managed_file_revision_id") or ""),
+                )
+            )
         if require_body_evidence:
             # “正文提到/包含/出现”是事实约束；没有 Chunk 连续命中的文件即使文件名或摘要相关，
             # 也不能作为正文命中返回给用户。
@@ -431,7 +480,11 @@ class TwoStageFileSearchService:
             for item in fused:
                 item.pop("_body_phrase_hit", None)
 
-        partial = chunk_degraded
+        partial = chunk_degraded or bool(
+            source_state.get("pending_count")
+            or source_state.get("failed_count")
+            or source_state.get("degraded")
+        )
         log_event(
             "retrieval.search.completed",
             level="WARNING" if partial or not fused else "INFO",
@@ -445,6 +498,9 @@ class TwoStageFileSearchService:
             detail_version_count=len(version_ids),
             chunk_result_count=len(chunk_results),
             evidence_count=len(evidence_map),
+            source_result_count=len(source_state.get("results") or []),
+            source_pending_count=int(source_state.get("pending_count") or 0),
+            source_failed_count=int(source_state.get("failed_count") or 0),
             result_count=len(fused),
             partial=partial,
             candidate_limit_reached=candidate_limit_reached,
@@ -457,6 +513,11 @@ class TwoStageFileSearchService:
             "total_returned": len(fused),
             "partial": partial,
             "candidate_limit_reached": candidate_limit_reached,
+            "managed_source_coverage": {
+                "eligible_file_count": int(source_state.get("eligible_count") or 0),
+                "pending_file_count": int(source_state.get("pending_count") or 0),
+                "failed_file_count": int(source_state.get("failed_count") or 0),
+            },
             "results": fused,
             "user_message": self._build_user_message(fused, partial),
         }
@@ -609,9 +670,14 @@ class TwoStageFileSearchService:
             results.append(
                 {
                     "working_copy_id": wc_id,
+                    "resource_type": "WORKING_COPY",
+                    "managed_file_id": c.get("managed_file_id"),
                     "document_id": c.get("document_id"),
                     "document_version_id": vid,
                     "filename": c.get("filename", ""),
+                    # 逻辑路径只用于用户区分同名文件，绝不能替换为容器绝对路径。
+                    "root_key": c.get("root_key"),
+                    "relative_path": c.get("relative_path"),
                     "category_path": c.get("category_path", []),
                     "year": c.get("year"),
                     "overview": c.get("summary", "")[:500],
@@ -620,6 +686,9 @@ class TwoStageFileSearchService:
                     "evidence_preview": evidence_preview,
                     "_body_phrase_hit": chunk_score > 0,
                     "_score": fused_score,
+                    # 普通检索的基础词法结果仍需上层策略完成相关性分级；不应
+                    # 因为有文件名或摘要命中就自动触发批量工作副本物化。
+                    "relevance_tier": "RELATED" if c.get("_hit_source") == "exact_filename" else "POSSIBLE",
                 }
             )
 

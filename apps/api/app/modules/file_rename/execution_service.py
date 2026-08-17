@@ -377,6 +377,7 @@ class ConfirmedRenameService:
         managed_file.size_bytes = stat.st_size
         managed_file.modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
         managed_file.fingerprint = _fingerprint(
+            file_identity=managed_file.file_identity,
             relative_path=prepared.batch_item.after_relative_path,
             size_bytes=stat.st_size,
             modified_at=stat.st_mtime,
@@ -541,8 +542,11 @@ def _path_hash(relative_path: str) -> str:
     return hashlib.sha256(relative_path.encode("utf-8")).hexdigest()
 
 
-def _fingerprint(*, relative_path: str, size_bytes: int, modified_at: float) -> str:
-    """生成与扫描器一致的轻量指纹。"""
+def _fingerprint(
+    *, file_identity: str | None, relative_path: str, size_bytes: int, modified_at: float
+) -> str:
+    """生成与扫描器一致的轻量指纹，改名不能误判原始内容变化。"""
 
-    payload = f"{relative_path}\0{size_bytes}\0{int(modified_at)}"
+    stable_identity = file_identity or f"path:{relative_path}"
+    payload = f"{stable_identity}\0{size_bytes}\0{int(modified_at * 1000)}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

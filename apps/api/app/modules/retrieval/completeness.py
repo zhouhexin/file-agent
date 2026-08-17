@@ -1,8 +1,9 @@
 """文件检索完整性评估服务。
 
-本模块只基于活动工作副本及其可重建检索派生数据给出确定性覆盖结论。它不会根据
-LLM 推测“业务文件是否全部相关”，也不会读取文件正文或修改任何业务事实；因此
-“已找全”仅表示当前唯一确定的范围、检索条件和索引能力下没有已知缺口。
+本模块基于活动工作副本和当前受管原始文件修订的可重建检索资料给出确定性覆盖
+结论。它不会根据 LLM 推测“业务文件是否全部相关”，也不会读取文件正文或修改
+任何业务事实；因此“已找全”仅表示当前唯一确定的范围、检索条件和索引能力下
+没有已知缺口。
 """
 
 from __future__ import annotations
@@ -17,6 +18,10 @@ from app.db.models import (
     DocumentIndexRun,
     DocumentSearchProfile,
     WorkingCopy,
+    ManagedFile,
+    ManagedFileRevision,
+    ManagedFileSearchProfile,
+    ManagedRoot,
 )
 from app.modules.chunks.service import INDEX_VERSION
 
@@ -193,7 +198,62 @@ class SearchCompletenessService:
             ):
                 failed_file_count += 1
 
-        eligible_file_count = len(copies)
+        # 全局检索同时覆盖工作副本和当前源侧修订。严格附件范围仍只以用户已
+        # 确认的工作副本为准，不能把附件外的原始文件引入完整性承诺。
+        source_eligible = 0
+        source_ready = 0
+        source_pending = 0
+        source_failed = 0
+        if scope_mode != "strict":
+            # 新受管根在首次命中前不会创建 ``WorkingCopyRoot``；完整性统计同样
+            # 必须覆盖这些只读源文件，不能以工作副本映射是否存在作为可检索前提。
+            source_rows = (
+                self.db.query(ManagedFileRevision, ManagedFile, ManagedFileSearchProfile)
+                .join(ManagedFile, ManagedFile.id == ManagedFileRevision.managed_file_id)
+                .join(ManagedRoot, ManagedRoot.id == ManagedFile.root_id)
+                .outerjoin(
+                    ManagedFileSearchProfile,
+                    ManagedFileSearchProfile.managed_file_revision_id == ManagedFileRevision.id,
+                )
+                .filter(
+                    ManagedFile.status == "ACTIVE",
+                    ManagedRoot.enabled.is_(True),
+                    ManagedFileRevision.is_current.is_(True),
+                )
+                .all()
+            )
+            source_file_ids = [str(managed_file.id) for _revision, managed_file, _profile in source_rows]
+            covered_pairs = {
+                (str(managed_file_id), str(content_sha256 or ""))
+                for managed_file_id, content_sha256 in self.db.query(
+                    WorkingCopy.managed_file_id,
+                    WorkingCopy.imported_source_sha256,
+                )
+                .filter(
+                    WorkingCopy.workspace_id == self.workspace_id,
+                    WorkingCopy.status == "ACTIVE",
+                    WorkingCopy.managed_file_id.in_(source_file_ids or ["__none__"]),
+                )
+                .all()
+            }
+            for revision, managed_file, source_profile in source_rows:
+                # 当前修订已有内容一致活动副本时由工作副本计数，不重复计数。
+                if (str(managed_file.id), str(revision.content_sha256 or "")) in covered_pairs:
+                    continue
+                source_eligible += 1
+                profile_ready = bool(
+                    source_profile is not None and source_profile.status == "ACTIVE"
+                )
+                if revision.status == "READY" and profile_ready:
+                    source_ready += 1
+                elif revision.status == "FAILED":
+                    source_failed += 1
+                else:
+                    source_pending += 1
+
+        eligible_file_count = len(copies) + source_eligible
+        ready_file_count += source_ready
+        failed_file_count += source_failed
         pending_file_count = max(
             0,
             eligible_file_count - ready_file_count - failed_file_count,

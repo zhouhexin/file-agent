@@ -3,15 +3,15 @@
 from types import SimpleNamespace
 
 from app.core.config import get_settings
-from app.db.models import FilesystemJob, ManagedFile, ManagedRoot
+from app.db.models import FilesystemJob, ManagedFile, ManagedFileRevision, ManagedRoot
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.modules.retrieval.readiness import WorkingCopySearchReadinessService
 from app.tests.helpers import clear_overrides, client_with_database
 
 
-def test_managed_only_match_queues_internal_import_without_public_candidate():
-    """只有受管元数据命中时应静默入队，不能伪装成已找到文件。"""
+def test_managed_only_match_queues_source_analysis_without_public_candidate():
+    """只有受管元数据命中时应优先分析源文件，不能抢先复制工作副本。"""
 
     client, SessionLocal = client_with_database()
     registered = client.post(
@@ -87,17 +87,18 @@ def test_managed_only_match_queues_internal_import_without_public_candidate():
         assert "managed_file" not in result
         job = db.get(FilesystemJob, result["job_id"])
         assert job is not None
-        assert job.job_type == "IMPORT_WORKING_COPIES"
-        assert job.queue_name == "IMPORT"
+        assert job.job_type == "ANALYZE_MANAGED_FILE_REVISION"
+        assert job.queue_name == "SOURCE_ANALYSIS"
         assert job.priority == 10
         assert job.max_attempts == 3
         assert job.attempt_count == 0
         assert (
             db.query(FilesystemJob)
-            .filter(FilesystemJob.job_type == "IMPORT_WORKING_COPIES")
-            .count()
-            == 1
-        )
+                .filter(FilesystemJob.job_type == "ANALYZE_MANAGED_FILE_REVISION")
+                .count()
+                == 1
+            )
+        assert db.query(ManagedFileRevision).count() == 1
     finally:
         db.close()
         clear_overrides()
@@ -165,18 +166,18 @@ def test_school_possessive_readiness_prepares_only_topic_matches():
         assert result is not None
         jobs = (
             db.query(FilesystemJob)
-            .filter(FilesystemJob.job_type == "IMPORT_WORKING_COPIES")
+            .filter(FilesystemJob.job_type == "ANALYZE_MANAGED_FILE_REVISION")
             .all()
         )
         assert len(jobs) == 1
-        assert jobs[0].payload_json["managed_file_id"]
+        assert jobs[0].payload_json["managed_file_revision_id"]
     finally:
         db.close()
         clear_overrides()
 
 
-def test_terminal_failed_import_is_not_reopened_by_search():
-    """用户重复检索不能重新激活已达到终态的失败导入。"""
+def test_terminal_failed_source_analysis_is_not_reopened_by_search():
+    """用户重复检索不能重新激活已达到终态的源侧分析。"""
 
     client, SessionLocal = client_with_database()
     registered = client.post(
@@ -209,13 +210,24 @@ def test_terminal_failed_import_is_not_reopened_by_search():
         db.add(managed_file)
         db.flush()
         workspace_id = get_shared_workspace_id(db)
+        revision = ManagedFileRevision(
+            managed_file_id=managed_file.id,
+            revision_number=1,
+            size_bytes=10,
+            quick_fingerprint=managed_file.fingerprint,
+            status="FAILED",
+            analysis_status="FAILED",
+            is_current=True,
+        )
+        db.add(revision)
+        db.flush()
         failed = FilesystemJob(
-            job_type="IMPORT_WORKING_COPIES",
-            queue_name="IMPORT",
+            job_type="ANALYZE_MANAGED_FILE_REVISION",
+            queue_name="SOURCE_ANALYSIS",
             root_id=root.id,
             created_by=registered.json()["id"],
             deduplication_key=(
-                f"working-copy-import:{workspace_id}:{managed_file.id}"
+                f"managed-source-analysis:{revision.id}"
             ),
             status="FAILED",
             priority=100,
@@ -247,10 +259,10 @@ def test_terminal_failed_import_is_not_reopened_by_search():
         clear_overrides()
 
 
-def test_hybrid_search_returns_only_internal_processing_receipt_on_managed_match(
+def test_hybrid_search_returns_only_internal_source_analysis_receipt_on_unanalyzed_managed_match(
     monkeypatch,
 ):
-    """受管元数据命中不得直接出现在文件结果中，只能进入通用异步回执。"""
+    """尚未源侧分析的受管文件不得伪装成结果，只能进入通用异步回执。"""
 
     monkeypatch.setenv("TWO_STAGE_RETRIEVAL_ENABLED", "false")
     get_settings.cache_clear()

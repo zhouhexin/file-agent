@@ -526,9 +526,14 @@ def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
                     key: item.get(key)
                     for key in (
                         "working_copy_id",
+                        "resource_type",
                         "document_id",
                         "document_version_id",
                         "filename",
+                        # root_key + relative_path 是受控逻辑定位符，可供用户区分
+                        # 同名文件；容器绝对路径、存储路径和哈希仍不可进入回执。
+                        "root_key",
+                        "relative_path",
                         "category_path",
                         "year",
                         "overview",
@@ -536,6 +541,8 @@ def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
                         "match_location",
                         "evidence_preview",
                         "relevance_tier",
+                        "can_open",
+                        "availability_message",
                     )
                     if key in item
                 }

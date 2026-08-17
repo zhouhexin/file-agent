@@ -1,7 +1,7 @@
 """受管目录异步 worker。
 
-该模块负责消费 filesystem_jobs 中的只读扫描任务，
-避免聊天请求线程直接遍历服务器目录。
+该模块消费扫描、源侧只读分析、按需工作副本物化等 filesystem_jobs，避免聊天
+请求线程直接遍历原始目录、复制文件或启动 LibreOffice。
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from app.db.models import (
     AgentRun,
     FilesystemJob,
     ManagedFile,
+    ManagedFileRevision,
     ManagedRoot,
     ToolInvocation,
     User,
@@ -55,6 +56,11 @@ from app.modules.knowledge_graph.projection_service import GraphProjectionServic
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
 from app.modules.managed_files.scanner import ManagedFileScanner
+from app.modules.managed_files.source_analysis import (
+    ManagedFileRevisionService,
+    ManagedSourceAnalysisService,
+    SourceAnalysisBusinessError,
+)
 
 
 def _print_worker_status(
@@ -99,12 +105,16 @@ def _job_completion_summary(job: FilesystemJob) -> str | None:
         return (
             f"files_discovered={result.get('files_discovered', 0)} "
             f"files_updated={result.get('files_updated', 0)} "
-            f"import_jobs={len(result.get('import_job_ids') or [])}"
+            f"source_analysis_jobs={len(result.get('source_analysis_job_ids') or [])}"
         )
     if job.job_type == "RECONCILE_MANAGED_ROOT":
         scan_job_id = result.get("scan_job_id")
         return f"scan_job_id={scan_job_id}" if scan_job_id else None
     if job.job_type == "IMPORT_WORKING_COPIES":
+        return f"working_copy_created={not bool(result.get('idempotent'))}"
+    if job.job_type == "ANALYZE_MANAGED_FILE_REVISION":
+        return f"source_revision_ready={result.get('status') == 'READY'}"
+    if job.job_type == "MATERIALIZE_WORKING_COPY":
         return f"working_copy_created={not bool(result.get('idempotent'))}"
     return None
 
@@ -454,6 +464,29 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
     # 不能落入 Planner 或普通受管目录 Tool。
     if FileLifecycleJobProcessor(db).process(job):
         return
+    if job.job_type == "ANALYZE_MANAGED_FILE_REVISION":
+        revision_id = str((job.payload_json or {}).get("managed_file_revision_id") or "")
+        if not revision_id:
+            raise ValueError("ANALYZE_MANAGED_FILE_REVISION 缺少 managed_file_revision_id")
+        try:
+            # 单个 SOURCE_ANALYSIS worker 串行处理任务。部署者如需提高普通格式
+            # 吞吐可增加 worker；含 LibreOffice 的旧 Office 文件仍应保持一个此类
+            # worker，避免多个 soffice 子进程相互抢占配置与内存。
+            result = ManagedSourceAnalysisService(db=db).analyze(
+                revision_id=revision_id,
+                user_id=str((job.payload_json or {}).get("user_id") or job.created_by or "") or None,
+            )
+        except SourceAnalysisBusinessError as exc:
+            # 不支持格式、空解析和分析中检测到的原件变化是已经落库的业务终态。
+            # 自动重试无法改变结果；只有后续扫描生成新修订或管理员重处理才可重开。
+            result = {
+                "status": "FAILED",
+                "revision_id": revision_id,
+                "error_code": exc.code,
+                "error_message": exc.message,
+            }
+        FilesystemJobQueue(db).mark_completed(job=job, result=result)
+        return
     if job.job_type == "GRAPH_BOOTSTRAP_PROJECTION":
         _process_graph_bootstrap_projection(db=db, job=job)
         return
@@ -470,16 +503,62 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
     root = ManagedFileRepository(db).get_root(job.root_id)
     if root is None or not root.enabled:
         raise ValueError("Managed root not found")
-    batch_import_job_ids: list[str] = []
+    batch_source_analysis_job_ids: list[str] = []
     batch_number = 0
 
-    def publish_import_batch(files: list[ManagedFile], scan_run) -> None:
-        """为已提交扫描元数据立即创建导入任务，并释放事务给 import worker。"""
+    def publish_source_analysis_batch(files: list[ManagedFile], scan_run) -> None:
+        """为扫描批次创建当前修订的只读分析任务，不复制全部工作副本。"""
 
         nonlocal batch_number
         batch_number += 1
-        import_job_ids = _enqueue_import_jobs_for_files(db=db, root_id=root.id, files=files)
-        batch_import_job_ids.extend(import_job_ids)
+        settings = get_settings()
+        revisions = [
+            ManagedFileRevisionService(db=db).ensure_current_revision(managed_file=item)
+            for item in files
+            if item.status == "ACTIVE"
+        ]
+        if (
+            settings.managed_file_initialization_mode == "source_index_first"
+            and settings.managed_source_analysis_enabled
+        ):
+            # 历史或上传归档已经拥有活动工作副本时，仍需沿用原有“缺少 Chunk/
+            # Profile 即补建”的修复链。源侧优先只禁止为没有副本的新文件批量导入，
+            # 不能让扫描失去工作副本一致性修复能力。
+            active_copy_file_ids = {
+                str(managed_file_id)
+                for (managed_file_id,) in db.query(WorkingCopy.managed_file_id)
+                .filter(
+                    WorkingCopy.managed_file_id.in_([item.id for item in files] or ["__none__"]),
+                    WorkingCopy.status == "ACTIVE",
+                )
+                .all()
+            }
+            existing_copy_files = [
+                item for item in files if str(item.id) in active_copy_file_ids
+            ]
+            source_only_revisions = [
+                revision
+                for revision in revisions
+                if str(revision.managed_file_id) not in active_copy_file_ids
+            ]
+            source_job_ids = _enqueue_source_analysis_jobs_for_revisions(
+                db=db,
+                root_id=root.id,
+                revisions=source_only_revisions,
+            )
+            repair_job_ids = _enqueue_import_jobs_for_files(
+                db=db,
+                root_id=root.id,
+                files=existing_copy_files,
+            )
+            source_job_ids.extend(repair_job_ids)
+        else:
+            source_job_ids = _enqueue_import_jobs_for_files(
+                db=db,
+                root_id=root.id,
+                files=files,
+            )
+        batch_source_analysis_job_ids.extend(source_job_ids)
         job.progress_current = scan_run.files_discovered
         # 总文件数在遍历完成前未知；只报告已经扫描的进度，不能伪造百分比。
         job.progress_total = 0
@@ -489,28 +568,28 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
             "batches_committed": batch_number,
             "files_discovered": scan_run.files_discovered,
             "files_updated": scan_run.files_updated,
-            "import_jobs_created": len(batch_import_job_ids),
+            "source_analysis_jobs_created": len(batch_source_analysis_job_ids),
         }
         FilesystemJobRepository(db).create_event(
             job_id=job.id,
             level="INFO",
-            message="扫描批次已提交导入任务",
+            message="扫描批次已提交源侧分析任务",
             details={
                 "batch_number": batch_number,
                 "batch_file_count": len(files),
                 "files_discovered": scan_run.files_discovered,
-                "import_job_count": len(import_job_ids),
+                "source_analysis_job_count": len(source_job_ids),
             },
         )
-        # 关键边界：必须在整轮扫描结束前提交本批 ManagedFile 和 IMPORT 任务。
-        # 另一独立 worker 才能看到任务并复制工作副本；提交不涉及任何原件写入。
+        # 必须在整轮扫描结束前提交本批修订和 SOURCE_ANALYSIS 任务；工作副本仅在
+        # 相关文件集合命中后才由 MATERIALIZE 队列创建，提交不涉及原件写入。
         db.commit()
         _print_worker_status(
             "扫描批次已提交",
             job=job,
             message=(
                 f"batch={batch_number} files_discovered={scan_run.files_discovered} "
-                f"import_jobs={len(import_job_ids)}"
+                f"source_analysis_jobs={len(source_job_ids)}"
             ),
         )
 
@@ -518,9 +597,21 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
     scan_run = ManagedFileScanner(db).scan_root(
         root,
         job_id=job.id,
-        batch_size=settings.managed_root_scan_batch_size,
+        # 源侧分析的批次上限独立于遍历受管目录的资源预算，避免一次扫描事务
+        # 为大量慢速 Office 文件创建过多待执行任务；禁用源侧模式时保留旧扫描上限。
+        batch_size=(
+            min(
+                settings.managed_root_scan_batch_size,
+                settings.managed_source_analysis_batch_size,
+            )
+            if (
+                settings.managed_file_initialization_mode == "source_index_first"
+                and settings.managed_source_analysis_enabled
+            )
+            else settings.managed_root_scan_batch_size
+        ),
         batch_max_seconds=settings.managed_root_scan_batch_max_seconds,
-        on_batch=publish_import_batch,
+        on_batch=publish_source_analysis_batch,
     )
     # watcher 只记录轻量事件；完成全量扫描后统一标记为已处理，事件本身仍永久保留用于审计。
     from app.db.models import ManagedFileEvent
@@ -540,7 +631,7 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
             "files_updated": scan_run.files_updated,
             "files_missing": scan_run.files_missing,
             "errors": scan_run.errors,
-            "import_job_ids": batch_import_job_ids,
+            "source_analysis_job_ids": batch_source_analysis_job_ids,
             "batches_committed": batch_number,
         },
     )
@@ -734,6 +825,55 @@ def _enqueue_import_jobs_for_files(*, db: Session, root_id: str, files: list[Man
             },
         )
         job_ids.append(import_job.id)
+    return job_ids
+
+
+def _enqueue_source_analysis_jobs_for_revisions(
+    *,
+    db: Session,
+    root_id: str,
+    revisions: list[ManagedFileRevision],
+) -> list[str]:
+    """为当前原始文件修订创建低优先级只读分析任务。
+
+    此入口只由扫描 worker 使用。它不创建 IMPORT 工作副本任务，避免新受管目录
+    在服务启动时被复制和 LibreOffice 转换拖慢；上传归档仍走既有即时导入链路。
+    """
+
+    settings = get_settings()
+    if not settings.managed_source_analysis_enabled:
+        return []
+    root = db.get(ManagedRoot, root_id)
+    fallback_user = (
+        str(root.created_by)
+        if root is not None and root.created_by
+        else str(db.query(User.id).order_by(User.created_at.asc()).scalar() or "")
+    )
+    if not fallback_user:
+        return []
+    queue = FilesystemJobQueue(db)
+    job_ids: list[str] = []
+    for revision in revisions:
+        if not revision.is_current or revision.status == "READY":
+            continue
+        job = queue.create_job(
+            job_type="ANALYZE_MANAGED_FILE_REVISION",
+            queue_name="SOURCE_ANALYSIS",
+            root_id=root_id,
+            created_by=fallback_user,
+            priority=settings.managed_source_analysis_background_priority,
+            deduplication_key=f"managed-source-analysis:{revision.id}",
+            payload={"managed_file_revision_id": revision.id, "user_id": fallback_user},
+        )
+        job_ids.append(job.id)
+        log_event(
+            "managed_source.analysis.queued",
+            status="PENDING",
+            managed_file_revision_id=revision.id,
+            root_id=root_id,
+            filesystem_job_id=job.id,
+            message="已提交原始文件低优先级只读分析任务",
+        )
     return job_ids
 
 
@@ -1390,6 +1530,10 @@ def _public_job_error_message(*, job: FilesystemJob, error: Exception) -> str:
         # 扫描器内部异常不能伪装成路径配置问题；普通响应不暴露异常正文和绝对路径，
         # 运维人员可通过同一 job_id 在 JSONL 日志中读取 error_code。
         return "受管原始目录扫描失败，原始文件未被修改；请根据 job_id 查看服务器日志。"
+    if job.job_type == "ANALYZE_MANAGED_FILE_REVISION":
+        # 解析器或 LibreOffice 的原始异常可能包含本地绝对路径；普通用户只需要
+        # 知道该文件暂时不可检索，运维人员可通过同一 job_id 查看受限 JSONL 日志。
+        return "受管原始文件分析失败，暂时不能用于检索或回答；请根据 job_id 查看服务器日志。"
     if FileLifecycleJobProcessor.supports(job.job_type):
         return "文件后台处理失败，系统将按策略重试；达到上限后请联系管理员。"
     if job.job_type in {"GRAPH_BOOTSTRAP_PROJECTION", "PROJECT_GRAPH_OUTBOX"}:
@@ -1414,12 +1558,12 @@ def main() -> None:
             f"poll_seconds={poll_seconds:g}"
         ),
     )
-    if {"SCAN", "IMPORT"}.issubset(configured_queues):
-        # 单进程虽然能正确处理任务，但长时间扫描期间不会返回主循环领取 IMPORT；
-        # 明确提示部署者启动第二个 worker，避免误以为已获得并行导入能力。
+    if {"SCAN", "SOURCE_ANALYSIS"}.issubset(configured_queues):
+        # 单进程虽然能正确处理任务，但长时间扫描期间不会返回主循环领取源侧分析；
+        # 明确提示部署者启动第二个 worker，避免误以为已经获得初始化并行能力。
         _print_worker_status(
-            "并行导入提示",
-            message="当前进程同时领取 SCAN 与 IMPORT；请另启一个 IMPORT worker 以实现扫描与导入并行",
+            "并行源侧分析提示",
+            message="当前进程同时领取 SCAN 与 SOURCE_ANALYSIS；请另启一个 SOURCE_ANALYSIS worker 以实现扫描与分析并行",
         )
     run_filesystem_worker(
         worker_id=worker_id,

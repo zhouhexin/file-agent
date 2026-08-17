@@ -155,6 +155,7 @@ class WorkspaceFileSearchToolOutput(GenericToolOutput):
     user_message: str = ""
     search_clarification: dict[str, Any] | None = None
     trash_restore_selection: dict[str, Any] | None = None
+    relevant_file_set_id: str | None = None
 
 
 class EvidenceAnswerToolOutput(GenericToolOutput):

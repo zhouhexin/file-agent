@@ -1060,6 +1060,17 @@
   white-space: nowrap;
 }
 
+.search-result-relative-path {
+  color: var(--text-tertiary, #6b7280);
+  display: block;
+  font-size: 12px;
+  line-height: 1.35;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .search-result-tags {
   display: flex;
   flex-wrap: wrap;

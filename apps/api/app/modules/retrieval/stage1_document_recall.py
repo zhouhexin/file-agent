@@ -22,6 +22,8 @@ from app.db.models import (
     DocumentCategorySuggestion,
     DocumentSearchProfile,
     DocumentSummary,
+    ManagedFile,
+    ManagedRoot,
     WorkingCopy,
 )
 from app.modules.retrieval.query_parser import exact_short_chinese_phrase
@@ -558,8 +560,12 @@ class Stage1DocumentRecallService:
         # 显示字段分三次有界批量读取。不能把多条摘要和多条分类建议同时
         # LEFT JOIN，否则两组一对多记录会相乘，候选很少也可能超过 SQL 超时。
         base_rows = (
-            self.db.query(WorkingCopy, Document)
+            self.db.query(WorkingCopy, Document, ManagedFile, ManagedRoot)
             .join(Document, Document.id == WorkingCopy.document_id)
+            # 逻辑原始路径用于让同名文件可区分；外连接兼容历史工作副本和
+            # SQLite 测试数据中尚未补齐 ManagedFile 的记录，绝不因此丢失结果。
+            .outerjoin(ManagedFile, ManagedFile.id == WorkingCopy.managed_file_id)
+            .outerjoin(ManagedRoot, ManagedRoot.id == ManagedFile.root_id)
             .filter(
                 WorkingCopy.id.in_(wc_ids),
                 WorkingCopy.workspace_id == self.workspace_id,
@@ -570,7 +576,7 @@ class Stage1DocumentRecallService:
         version_pairs = list(
             dict.fromkeys(
                 (str(document.id), str(working_copy.current_version_id))
-                for working_copy, document in base_rows
+                for working_copy, document, _managed_file, _root in base_rows
                 if working_copy.current_version_id
             )
         )
@@ -627,15 +633,25 @@ class Stage1DocumentRecallService:
 
         # 按 working_copy_id 聚合
         enrich_map: dict[str, dict] = {}
-        for wc, doc in base_rows:
+        for wc, doc, managed_file, root in base_rows:
             version_key = (str(doc.id), str(wc.current_version_id or ""))
             summary = summary_by_version.get(version_key)
             sug = suggestion_by_version.get(version_key)
             enrich_map[wc.id] = {
+                "resource_type": "WORKING_COPY",
                 "working_copy_id": wc.id,
+                "managed_file_id": wc.managed_file_id,
                 "document_id": doc.id,
                 "document_version_id": wc.current_version_id or "",
                 "filename": wc.filename,
+                # 仅投影 root_key + 相对路径，帮助用户区分同名文件；容器绝对
+                # 路径始终不进入检索结果或聊天回执。
+                "root_key": root.root_key if root is not None else None,
+                "relative_path": (
+                    managed_file.relative_path
+                    if managed_file is not None
+                    else wc.relative_path
+                ),
                 "category_path": [],
                 "summary": "",
                 "year": None,

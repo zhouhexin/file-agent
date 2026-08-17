@@ -1,6 +1,7 @@
 """三层文件生命周期业务服务。
 
-HTTP 请求只创建状态和持久化任务；查重、归档、导入和清理均由 worker 调用本模块的处理方法。
+HTTP 请求只创建状态和持久化任务；查重、归档、按需物化、导入和清理均由 worker
+调用本模块的处理方法，API 与 Agent 不得直接执行文件 I/O。
 """
 
 from __future__ import annotations
@@ -32,8 +33,10 @@ from app.db.models import (
     FileRenameReviewItem,
     FilesystemJob,
     ManagedFile,
+    ManagedFileRevision,
     ManagedRoot,
     Message,
+    RelevantFileSetItem,
     ToolInvocation,
     UploadArchiveRecord,
     UploadDuplicateCandidate,
@@ -580,6 +583,7 @@ class FileLifecycleJobProcessor:
             "CHECK_UPLOAD_DUPLICATES": self._check_upload_duplicates,
             "ARCHIVE_UPLOAD_TO_MANAGED_ROOT": self._archive_upload,
             "IMPORT_WORKING_COPIES": self._import_working_copy,
+            "MATERIALIZE_WORKING_COPY": self._materialize_working_copy,
             "ANALYZE_DOCUMENT_VERSION": self._analyze_document_version,
             "CLEANUP_UPLOAD_TEMP": self._cleanup_upload_temp,
             "RECONCILE_UPLOAD_ARCHIVES": self._reconcile_upload_archives,
@@ -600,6 +604,7 @@ class FileLifecycleJobProcessor:
             "CHECK_UPLOAD_DUPLICATES",
             "ARCHIVE_UPLOAD_TO_MANAGED_ROOT",
             "IMPORT_WORKING_COPIES",
+            "MATERIALIZE_WORKING_COPY",
             "ANALYZE_DOCUMENT_VERSION",
             "CLEANUP_UPLOAD_TEMP",
             "RECONCILE_UPLOAD_ARCHIVES",
@@ -626,6 +631,19 @@ class FileLifecycleJobProcessor:
             )
         if review is not None and job.job_type == "CHECK_UPLOAD_DUPLICATES":
             review.status = "CHECKING" if retrying else "FAILED"
+        if job.job_type == "MATERIALIZE_WORKING_COPY":
+            # 相关文件集合是“本轮最终相关范围”的审计事实。物化失败不能只留在
+            # FilesystemJob 中，否则管理员无法区分“尚未消费”和“副本创建失败”。
+            revision_id = str((job.payload_json or {}).get("managed_file_revision_id") or "")
+            relevant_set_id = str((job.payload_json or {}).get("relevant_file_set_id") or "")
+            if revision_id and relevant_set_id:
+                self.db.query(RelevantFileSetItem).filter(
+                    RelevantFileSetItem.relevant_file_set_id == relevant_set_id,
+                    RelevantFileSetItem.managed_file_revision_id == revision_id,
+                ).update(
+                    {"status": "RETRY_WAIT" if retrying else "FAILED"},
+                    synchronize_session=False,
+                )
         self.db.flush()
 
     def _reconcile_upload_archives(self, job: FilesystemJob) -> None:
@@ -976,13 +994,17 @@ class FileLifecycleJobProcessor:
                 existing.updated_at = utcnow()
                 physical_copy_repaired = True
             DocumentSearchProfileService(db=self.db).upsert_current_profile(existing.id)
-            analysis_job = self._enqueue_document_analysis(
-                job=job,
-                managed_file=managed_file,
-                working_copy=existing,
-                document=document,
-                version=version,
-                user_id=user_id,
+            analysis_job = (
+                None
+                if bool(payload.get("skip_document_analysis"))
+                else self._enqueue_document_analysis(
+                    job=job,
+                    managed_file=managed_file,
+                    working_copy=existing,
+                    document=document,
+                    version=version,
+                    user_id=user_id,
+                )
             )
             FilesystemJobQueue(self.db).mark_completed(
                 job=job,
@@ -990,7 +1012,7 @@ class FileLifecycleJobProcessor:
                     "working_copy_id": existing.id,
                     "document_id": document.id,
                     "document_version_id": version.id,
-                    "analysis_job_id": analysis_job.id,
+                    "analysis_job_id": analysis_job.id if analysis_job is not None else None,
                     "idempotent": True,
                     "physical_copy_repaired": physical_copy_repaired,
                 },
@@ -1069,6 +1091,8 @@ class FileLifecycleJobProcessor:
                 sha256=source_sha256,
                 source_type="IMPORT",
                 source_managed_file_id=managed_file.id,
+                source_managed_file_revision_id=str(payload.get("source_managed_file_revision_id") or "") or None,
+                source_analysis_run_id=str(payload.get("source_analysis_run_id") or "") or None,
                 created_by=user_id,
             )
             self.db.add(version)
@@ -1168,13 +1192,17 @@ class FileLifecycleJobProcessor:
                     executed_by=user_id,
                 )
             )
-            analysis_job = self._enqueue_document_analysis(
-                job=job,
-                managed_file=managed_file,
-                working_copy=working_copy,
-                document=document,
-                version=version,
-                user_id=user_id,
+            analysis_job = (
+                None
+                if bool(payload.get("skip_document_analysis"))
+                else self._enqueue_document_analysis(
+                    job=job,
+                    managed_file=managed_file,
+                    working_copy=working_copy,
+                    document=document,
+                    version=version,
+                    user_id=user_id,
+                )
             )
             FilesystemJobQueue(self.db).mark_completed(
                 job=job,
@@ -1184,7 +1212,7 @@ class FileLifecycleJobProcessor:
                     "document_version_id": version.id,
                     "filename": filename,
                     "relative_path": relative_path,
-                    "analysis_job_id": analysis_job.id,
+                    "analysis_job_id": analysis_job.id if analysis_job is not None else None,
                 },
             )
         except Exception:
@@ -1192,6 +1220,267 @@ class FileLifecycleJobProcessor:
             if final_target is not None and final_storage_relative_path and final_target_created:
                 final_target.unlink(missing_ok=True)
             raise
+
+    def _materialize_working_copy(self, job: FilesystemJob) -> None:
+        """按需把已分析原始文件修订物化为工作副本。
+
+        物化允许复制只读原件，但绝不改变它。成功后把源侧页面、摘要与 Chunk 复用到
+        新工作副本，避免旧版 Office 文件再次触发 LibreOffice 全文转换。
+        """
+
+        payload = dict(job.payload_json or {})
+        revision = self.db.get(
+            ManagedFileRevision,
+            str(payload.get("managed_file_revision_id") or ""),
+        )
+        if revision is None or not revision.is_current or revision.status != "READY":
+            raise RuntimeError("MATERIALIZE_WORKING_COPY 缺少已完成分析的当前原始文件修订")
+        if not revision.analysis_document_id or not revision.analysis_document_version_id:
+            raise RuntimeError("当前原始文件修订缺少可复用分析结果")
+        managed_file = self.db.get(ManagedFile, revision.managed_file_id)
+        if managed_file is None or managed_file.status != "ACTIVE":
+            raise RuntimeError("当前原始文件已不存在，不能物化工作副本")
+        existing_copy = (
+            self.db.query(WorkingCopy)
+            .filter(
+                WorkingCopy.workspace_id == get_shared_workspace_id(self.db),
+                WorkingCopy.managed_file_id == managed_file.id,
+                WorkingCopy.status == "ACTIVE",
+            )
+            .one_or_none()
+        )
+        if (
+            existing_copy is not None
+            and existing_copy.imported_source_sha256
+            and existing_copy.imported_source_sha256 != revision.content_sha256
+        ):
+            # 工作副本可能已经被用户改名、移动或作为后续操作对象。新原始修订绝不
+            # 自动覆盖它，也不能伪造“该副本来自新修订”的来源关系。
+            self._mark_relevant_file_set_item(
+                payload=payload,
+                status="SOURCE_CHANGED",
+            )
+            FilesystemJobQueue(self.db).mark_completed(
+                job=job,
+                result={
+                    "status": "SOURCE_CHANGED",
+                    "working_copy_id": existing_copy.id,
+                    "managed_file_revision_id": revision.id,
+                    "message": "已有工作副本与当前原始文件内容不同，未自动覆盖。",
+                },
+            )
+            log_event(
+                "working_copy.materialization.source_changed",
+                level="WARNING",
+                status="SOURCE_CHANGED",
+                working_copy_id=existing_copy.id,
+                managed_file_id=managed_file.id,
+                managed_file_revision_id=revision.id,
+                message="原始文件已变化，保护现有工作副本不被自动覆盖",
+            )
+            return
+        # 复用既有导入的安全复制、路径审计与 ChangeSet 流程；额外来源字段使后续
+        # 不再把同一内容送入 ANALYZE_DOCUMENT_VERSION。
+        payload.update(
+            {
+                "managed_file_id": managed_file.id,
+                "source_managed_file_revision_id": revision.id,
+                "source_analysis_run_id": self._latest_source_analysis_run_id(revision.id),
+                "skip_document_analysis": True,
+            }
+        )
+        job.payload_json = payload
+        self._import_working_copy(job)
+        result = dict(job.result_json or {})
+        working_copy_id = str(result.get("working_copy_id") or "")
+        if working_copy_id:
+            self._reuse_source_analysis_into_working_copy(
+                revision=revision,
+                working_copy_id=working_copy_id,
+            )
+            result["source_analysis_reused"] = True
+            result["source_managed_file_revision_id"] = revision.id
+            # ``_import_working_copy`` 已经以同一任务写入一次完成事件。此处只补充
+            # 源侧复用审计，避免同一物化任务产生两条“完成”事件。
+            job.result_json = result
+            job.updated_at = utcnow()
+            self._mark_relevant_file_set_item(payload=payload, status="MATERIALIZED")
+            self.db.flush()
+            log_event(
+                "working_copy.materialization.analysis_reused",
+                status="COMPLETED",
+                working_copy_id=working_copy_id,
+                managed_file_id=managed_file.id,
+                managed_file_revision_id=revision.id,
+                message="工作副本已复用原始文件分析结果",
+            )
+        else:
+            # IMPORT 的幂等分支也应明确结束 MATERIALIZE 任务，避免异常数据让
+            # worker 将一个没有目标副本的任务误显示为成功。
+            raise RuntimeError("工作副本物化未返回活动副本标识")
+
+    def _mark_relevant_file_set_item(self, *, payload: dict[str, Any], status: str) -> None:
+        """同步相关文件集合项的物化状态，不把队列状态当作业务审计替代品。"""
+
+        relevant_set_id = str(payload.get("relevant_file_set_id") or "")
+        revision_id = str(payload.get("managed_file_revision_id") or "")
+        if not relevant_set_id or not revision_id:
+            return
+        self.db.query(RelevantFileSetItem).filter(
+            RelevantFileSetItem.relevant_file_set_id == relevant_set_id,
+            RelevantFileSetItem.managed_file_revision_id == revision_id,
+        ).update({"status": status}, synchronize_session=False)
+
+    def _latest_source_analysis_run_id(self, revision_id: str) -> str | None:
+        """读取当前修订最新完成分析运行，用于双重来源审计。"""
+
+        from app.db.models import ManagedFileAnalysisRun
+
+        row = (
+            self.db.query(ManagedFileAnalysisRun)
+            .filter(
+                ManagedFileAnalysisRun.managed_file_revision_id == revision_id,
+                ManagedFileAnalysisRun.status == "COMPLETED",
+            )
+            .order_by(ManagedFileAnalysisRun.finished_at.desc())
+            .first()
+        )
+        return row.id if row is not None else None
+
+    def _reuse_source_analysis_into_working_copy(
+        self,
+        *,
+        revision: ManagedFileRevision,
+        working_copy_id: str,
+    ) -> None:
+        """复制源侧持久化派生事实到工作副本版本，不重新读取或转换原始文件。"""
+
+        from app.db.models import (
+            DocumentClassificationSummary,
+            DocumentElement,
+            DocumentSummary,
+        )
+
+        target_copy = self.db.get(WorkingCopy, working_copy_id)
+        source_document = self.db.get(Document, revision.analysis_document_id)
+        source_version = self.db.get(DocumentVersion, revision.analysis_document_version_id)
+        target_document = self.db.get(Document, target_copy.document_id) if target_copy else None
+        target_version = self.db.get(DocumentVersion, target_copy.current_version_id) if target_copy else None
+        if not all([target_copy, source_document, source_version, target_document, target_version]):
+            raise RuntimeError("工作副本或源侧分析谱系缺失，不能复用分析结果")
+        if self.db.query(DocumentIndexRun.id).filter(
+            DocumentIndexRun.document_version_id == target_version.id,
+            DocumentIndexRun.status == "COMPLETED",
+        ).first():
+            # 幂等物化即使遇到已准备完成的旧工作副本，也必须补上来源关系；
+            # 否则双范围去重无法判断它是否覆盖当前原始文件修订。
+            target_version.source_managed_file_revision_id = revision.id
+            target_version.source_analysis_run_id = self._latest_source_analysis_run_id(revision.id)
+            self.db.flush()
+            return
+        source_run = (
+            self.db.query(DocumentExtractionRun)
+            .filter(
+                DocumentExtractionRun.document_id == source_document.id,
+                DocumentExtractionRun.document_version_id == source_version.id,
+                DocumentExtractionRun.status == "COMPLETED",
+            )
+            .order_by(DocumentExtractionRun.updated_at.desc())
+            .first()
+        )
+        if source_run is None:
+            raise RuntimeError("源侧成功解析运行不存在，不能复用分析结果")
+        clone_run = DocumentExtractionRun(
+            document_id=target_document.id,
+            document_version_id=target_version.id,
+            status="COMPLETED",
+            extractor=source_run.extractor,
+            parser_name=source_run.parser_name,
+            parser_version=source_run.parser_version,
+            parser_config_hash=source_run.parser_config_hash,
+        )
+        self.db.add(clone_run)
+        self.db.flush()
+        for page in self.db.query(DocumentPage).filter(DocumentPage.extraction_run_id == source_run.id).all():
+            self.db.add(
+                DocumentPage(
+                    document_id=target_document.id,
+                    extraction_run_id=clone_run.id,
+                    page_number=page.page_number,
+                    sheet_name=page.sheet_name,
+                    text_content=page.text_content,
+                    metadata_json=dict(page.metadata_json or {}),
+                )
+            )
+        for element in self.db.query(DocumentElement).filter(DocumentElement.extraction_run_id == source_run.id).all():
+            self.db.add(
+                DocumentElement(
+                    document_id=target_document.id,
+                    extraction_run_id=clone_run.id,
+                    element_index=element.element_index,
+                    label=element.label,
+                    text_content=element.text_content,
+                    page_number=element.page_number,
+                    bbox_json=dict(element.bbox_json or {}),
+                    content_layer=element.content_layer,
+                    parent_ref=element.parent_ref,
+                    metadata_json=dict(element.metadata_json or {}),
+                )
+            )
+        self.db.flush()
+        # 建索引只读取已克隆页面，因此不会再次调用 LibreOffice 或文件解析器。
+        index_result = DocumentIndexService(db=self.db, settings=self.settings).build(
+            document_id=target_document.id,
+            document_version_id=target_version.id,
+            extraction_run_id=clone_run.id,
+        )
+        if not index_result.get("ok"):
+            raise RuntimeError("工作副本复用源侧页面后建立索引失败")
+        for source_summary in self.db.query(DocumentSummary).filter(
+            DocumentSummary.document_id == source_document.id,
+            DocumentSummary.document_version_id == source_version.id,
+            DocumentSummary.status == "COMPLETED",
+        ).all():
+            self.db.add(
+                DocumentSummary(
+                    document_id=target_document.id,
+                    document_version_id=target_version.id,
+                    extraction_run_id=clone_run.id,
+                    input_sha256=target_version.sha256,
+                    summary_text=source_summary.summary_text,
+                    summary_json=dict(source_summary.summary_json or {}),
+                    coverage_json=dict(source_summary.coverage_json or {}),
+                    model_provider=source_summary.model_provider,
+                    model_name=source_summary.model_name,
+                    prompt_version=source_summary.prompt_version,
+                    schema_version=source_summary.schema_version,
+                    status="COMPLETED",
+                )
+            )
+        for source_summary in self.db.query(DocumentClassificationSummary).filter(
+            DocumentClassificationSummary.document_id == source_document.id,
+            DocumentClassificationSummary.document_version_id == source_version.id,
+            DocumentClassificationSummary.status == "COMPLETED",
+        ).all():
+            self.db.add(
+                DocumentClassificationSummary(
+                    document_id=target_document.id,
+                    document_version_id=target_version.id,
+                    extraction_run_id=clone_run.id,
+                    input_sha256=target_version.sha256,
+                    summary_json=dict(source_summary.summary_json or {}),
+                    model_provider=source_summary.model_provider,
+                    model_name=source_summary.model_name,
+                    prompt_version=source_summary.prompt_version,
+                    schema_version=source_summary.schema_version,
+                    status="COMPLETED",
+                )
+            )
+        target_version.source_managed_file_revision_id = revision.id
+        target_version.source_analysis_run_id = self._latest_source_analysis_run_id(revision.id)
+        target_document.ingest_status = "INDEXED"
+        self.db.flush()
+        DocumentSearchProfileService(db=self.db).upsert_current_profile(target_copy.id)
 
     def _analyze_document_version(self, job: FilesystemJob) -> None:
         """在 ANALYSIS 队列补齐正文解析、摘要、分类和检索索引。"""

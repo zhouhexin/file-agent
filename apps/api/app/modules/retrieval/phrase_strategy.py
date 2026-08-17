@@ -112,6 +112,7 @@ class FileSearchPhraseStrategyService:
                     continue
                 key = str(
                     item.get("working_copy_id")
+                    or item.get("managed_file_revision_id")
                     or item.get("document_version_id")
                     or item.get("document_id")
                     or ""
@@ -152,6 +153,9 @@ class FileSearchPhraseStrategyService:
             )
         )
         for item in results:
+            # 完整短语已经通过文件名、摘要或正文的受控连续匹配；它可作为
+            # 最终相关结果进入 RelevantFileSet。正文要求仍由调用方单独决定。
+            item["relevance_tier"] = "SUPPORTED"
             item.pop("_body_phrase_hit", None)
         log_event(
             "retrieval.phrase_strategy.completed",
@@ -344,6 +348,7 @@ def _result_id(item: dict[str, Any]) -> str:
 
     return str(
         item.get("working_copy_id")
+        or item.get("managed_file_revision_id")
         or item.get("document_version_id")
         or item.get("document_id")
         or ""

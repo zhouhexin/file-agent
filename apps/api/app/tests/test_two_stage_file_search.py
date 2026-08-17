@@ -214,6 +214,9 @@ def test_end_to_end_search_returns_results():
         assert result["ok"] is True
         assert len(result["results"]) >= 1
         assert result["results"][0]["filename"] == "国家励志奖学金申请.docx"
+        # 即使历史数据尚未关联 ManagedFile，搜索结果也必须提供工作副本相对路径，
+        # 让前端可以区分同名文件而不暴露任何存储绝对路径。
+        assert result["results"][0]["relative_path"] == "国家励志奖学金申请.docx"
     finally:
         db.close()
 
