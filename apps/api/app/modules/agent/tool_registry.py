@@ -1359,8 +1359,8 @@ def _execute_controlled_file_search(
         FileSearchPhraseStrategyService,
     )
     from app.modules.retrieval.synonym_service import (
-        WORKSPACE_SCOPE_ENTITIES,
         FileSearchSynonymService,
+        expand_scope_entity_phrases,
         split_entity_topic_phrase,
     )
 
@@ -1491,17 +1491,13 @@ def _execute_controlled_file_search(
     entity_topic = split_entity_topic_phrase(core_phrase)
     if entity_topic is not None and relation_mode != "LITERAL":
         entity_phrase, topic_phrase = entity_topic
-        workspace_scope_entity = entity_phrase in WORKSPACE_SCOPE_ENTITIES
         log_event(
             "retrieval.strategy.selected",
             tool_name="hybrid-search",
             status="COMPLETED",
-            strategy=(
-                "workspace_topic"
-                if workspace_scope_entity
-                else "generic_entity_topic_intersection"
-            ),
+            strategy="entity_topic_intersection",
             relation_mode=relation_mode,
+            entity_phrase_count=len(expand_scope_entity_phrases(entity_phrase)),
             has_topic_phrase=True,
             message="采用机构范围与文件主题组合检索",
         )
@@ -1512,13 +1508,13 @@ def _execute_controlled_file_search(
             phrases=[topic_phrase],
             require_body_evidence=False,
         )
-        if workspace_scope_entity:
-            return topic_result
         entity_result = strategy.search(
             original_query=search_query,
             parsed_query=parsed,
             scope=scope,
-            phrases=[entity_phrase],
+            # 范围词和主题均需命中同一文件。“学校”不能再因 workspace 已限定
+            # 而被丢弃，否则学校级查询会混入任意学院的同主题文件。
+            phrases=list(expand_scope_entity_phrases(entity_phrase)),
             require_body_evidence=False,
         )
         return _intersect_file_search_results(

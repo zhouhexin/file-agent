@@ -1,7 +1,8 @@
-"""文件检索受控同义短语服务。
+"""文件检索受控同义短语与范围实体服务。
 
 正式同义词只来自项目内版本化配置。服务不调用 LLM，也不把单个复合短语自动拆成 OR；
-任何宽泛主题都只能作为待用户选择的候选范围。
+任何宽泛主题都只能作为待用户选择的候选范围。学校、学院等机构词是可验证的
+文件范围条件，绝不能被静默降级为“当前工作区”的无条件检索。
 """
 
 from __future__ import annotations
@@ -15,7 +16,13 @@ from pathlib import Path
 
 MAX_SYNONYM_PHRASES = 8
 MAX_PHRASE_CHARS = 30
-WORKSPACE_SCOPE_ENTITIES = frozenset({"学校", "本校", "全校"})
+# “学校/本校/全校”是同一个业务范围的不同说法。它们必须用于匹配文件的
+# 文件名、摘要、分类或正文证据；不能因为当前用户已在学校工作区就直接丢弃。
+_SCOPE_ENTITY_VARIANTS = {
+    "学校": ("学校", "本校", "全校"),
+    "本校": ("学校", "本校", "全校"),
+    "全校": ("学校", "本校", "全校"),
+}
 ENTITY_TOPIC_SUFFIXES = (
     "学校",
     "学院",
@@ -127,23 +134,53 @@ class FileSearchSynonymService:
 
 
 def split_entity_topic_phrase(phrase: str) -> tuple[str, str] | None:
-    """把确定的“机构的文件主题”拆成实体与主题，不拆普通业务短语。
+    """把确定的“范围实体 + 文件主题”拆成两个必须同时满足的条件。
 
     该规则只接受具有明确学校机构后缀的左侧实体，避免把任意含“的”的自然语言
-    都扩大成两个独立检索条件。
+    都扩大成两个独立检索条件。无“的”的常见紧凑表达（如“学校工作总结”）也
+    支持解析；范围实体与主题始终保留为独立条件，不能把范围实体默默当作工作区。
     """
 
     cleaned = _clean_public_phrase(phrase)
-    if not cleaned or cleaned.count("的") != 1:
+    if not cleaned:
         return None
-    entity, topic = (value.strip() for value in cleaned.split("的", 1))
-    if len(entity) < 1 or len(topic) < 2:
+    if cleaned.count("的") == 1:
+        entity, topic = (value.strip() for value in cleaned.split("的", 1))
+        if _is_scope_entity(entity) and len(topic) >= 2:
+            return entity, topic
         return None
-    if entity not in WORKSPACE_SCOPE_ENTITIES and not entity.endswith(
-        ENTITY_TOPIC_SUFFIXES
-    ):
-        return None
-    return entity, topic
+
+    # “学校工作总结”“计算机学院工作总结”等紧凑表达没有连接词。只接受受控
+    # 范围词或明确机构后缀，避免把普通复合业务词错误拆开。
+    for entity in sorted(_SCOPE_ENTITY_VARIANTS, key=len, reverse=True):
+        if cleaned.startswith(entity) and len(cleaned[len(entity) :].strip()) >= 2:
+            return entity, cleaned[len(entity) :].strip()
+    suffix_pattern = "|".join(
+        re.escape(value) for value in sorted(ENTITY_TOPIC_SUFFIXES, key=len, reverse=True)
+    )
+    match = re.match(rf"^(.+?(?:{suffix_pattern}))(.{{2,}})$", cleaned)
+    if match and _is_scope_entity(match.group(1)):
+        return match.group(1), match.group(2)
+    return None
+
+
+def expand_scope_entity_phrases(entity: str) -> tuple[str, ...]:
+    """返回范围实体可用于证据匹配的受控等价说法。
+
+    这不是自由同义扩展：目前仅覆盖“学校/本校/全校”这组产品定义的范围词；
+    其他学院、部门等实体保持用户原词，后续可通过版本化实体词典扩展。
+    """
+
+    cleaned = _clean_public_phrase(entity)
+    if not cleaned:
+        return ()
+    return _SCOPE_ENTITY_VARIANTS.get(cleaned, (cleaned,))
+
+
+def _is_scope_entity(value: str) -> bool:
+    """判断词语是否具有可验证的机构范围语义。"""
+
+    return value in _SCOPE_ENTITY_VARIANTS or value.endswith(ENTITY_TOPIC_SUFFIXES)
 
 
 @lru_cache(maxsize=1)

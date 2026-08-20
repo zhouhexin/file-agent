@@ -103,8 +103,8 @@ def test_managed_only_match_queues_internal_import_without_public_candidate():
         clear_overrides()
 
 
-def test_school_possessive_readiness_prepares_only_topic_matches():
-    """学校表示共享范围，静默准备只能按“工作总结”主题筛选。"""
+def test_school_possessive_readiness_requires_school_scope_and_topic():
+    """学校范围与工作总结主题都命中时，才允许静默准备源文件。"""
 
     client, SessionLocal = client_with_database()
     registered = client.post(
@@ -128,9 +128,9 @@ def test_school_possessive_readiness_prepares_only_topic_matches():
             [
                 ManagedFile(
                     root_id=root.id,
-                    relative_path="总结/计算机学院2025年工作总结.docx",
+                    relative_path="总结/学校2025年工作总结.docx",
                     relative_path_hash="readiness-school-summary",
-                    filename="计算机学院2025年工作总结.docx",
+                    filename="学校2025年工作总结.docx",
                     extension=".docx",
                     size_bytes=10,
                     fingerprint="readiness-school-summary-fingerprint",

@@ -26,7 +26,11 @@ from app.modules.retrieval.clarification_planner import (
 )
 from app.modules.retrieval.phrase_strategy import FileSearchPhraseStrategyService
 from app.modules.retrieval.query_parser import FileSearchQueryParser
-from app.modules.retrieval.synonym_service import FileSearchSynonymService
+from app.modules.retrieval.synonym_service import (
+    FileSearchSynonymService,
+    expand_scope_entity_phrases,
+    split_entity_topic_phrase,
+)
 from app.modules.agent.tool_registry import (
     _execute_controlled_file_search,
     _intersect_file_search_results,
@@ -184,28 +188,55 @@ class _FakePartialCollegeAliasSearch(_FakeCollegeAliasSearch):
         return super().search(exact_phrase=exact_phrase, **kwargs)
 
 
-class _FakeWorkspaceTopicSearch:
-    """记录共享工作区主题查询，确保不再搜索连续的“学校的主题”。"""
+class _FakeSchoolScopeSearch:
+    """模拟学校范围与主题分别命中，验证最终只保留二者交集。"""
 
     def __init__(self) -> None:
         self.phrases: list[str] = []
 
     def search(self, *, exact_phrase: str, **_kwargs):
         self.phrases.append(exact_phrase)
-        if exact_phrase != "工作总结":
-            return {"partial": False, "results": []}
+        target = {
+            "working_copy_id": "wc-school-summary",
+            "document_id": "doc-school-summary",
+            "filename": "学校2025年度工作总结.docx",
+            "overview": "学校年度工作总结",
+            "category_path": [],
+            "_body_phrase_hit": True,
+        }
+        if exact_phrase in {"学校", "本校", "全校"}:
+            return {
+                "partial": False,
+                "results": [
+                    target,
+                    {
+                        "working_copy_id": "wc-school-notice",
+                        "document_id": "doc-school-notice",
+                        "filename": "学校会议通知.docx",
+                        "overview": "",
+                        "category_path": [],
+                        "_body_phrase_hit": True,
+                    },
+                ],
+            }
+        if exact_phrase == "工作总结":
+            return {
+                "partial": False,
+                "results": [
+                    target,
+                    {
+                        "working_copy_id": "wc-college-summary",
+                        "document_id": "doc-college-summary",
+                        "filename": "学院2025年度工作总结.docx",
+                        "overview": "",
+                        "category_path": [],
+                        "_body_phrase_hit": True,
+                    },
+                ],
+            }
         return {
             "partial": False,
-            "results": [
-                {
-                    "working_copy_id": "wc-school-summary",
-                    "document_id": "doc-school-summary",
-                    "filename": "2025年度工作总结.docx",
-                    "overview": "",
-                    "category_path": [],
-                    "_body_phrase_hit": True,
-                }
-            ],
+            "results": [],
         }
 
 
@@ -285,6 +316,28 @@ def test_synonym_service_returns_complete_phrases_and_broad_topics_separately():
     assert group.broad_topics == ("任职", "通知")
 
 
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("学校的工作总结", ("学校", "工作总结")),
+        ("本校的工作总结", ("本校", "工作总结")),
+        ("全校工作总结", ("全校", "工作总结")),
+        ("计算机学院工作总结", ("计算机学院", "工作总结")),
+    ],
+)
+def test_scope_entity_and_topic_are_parsed_as_two_constraints(query, expected):
+    """机构范围词必须保留为检索条件，含“的”和紧凑表达都不能退化为全局主题。"""
+
+    assert split_entity_topic_phrase(query) == expected
+
+
+def test_school_scope_variants_are_limited_to_configured_equivalents():
+    """学校范围词只使用受控同义说法，不能让 LLM 或分词结果自由扩张范围。"""
+
+    assert expand_scope_entity_phrases("本校") == ("学校", "本校", "全校")
+    assert expand_scope_entity_phrases("计算机学院") == ("计算机学院",)
+
+
 def test_computer_college_short_name_expands_inside_full_query_without_choice():
     """学院简称等价扩展后应与主题取交集，并允许年份位于两者之间。"""
 
@@ -357,10 +410,10 @@ def test_failed_equivalent_alias_keeps_successful_alias_results():
     assert result["partial"] is True
 
 
-def test_school_possessive_query_uses_workspace_topic_instead_of_exact_phrase():
-    """“学校的工作总结”应把学校解释为共享范围，只检索独立主题。"""
+def test_school_possessive_query_requires_school_scope_and_topic_intersection():
+    """“学校的工作总结”必须同时命中学校范围与工作总结主题。"""
 
-    search = _FakeWorkspaceTopicSearch()
+    search = _FakeSchoolScopeSearch()
     result = _execute_controlled_file_search(
         db=_db(),
         user_id="user-1",
@@ -382,7 +435,7 @@ def test_school_possessive_query_uses_workspace_topic_instead_of_exact_phrase():
         search_service=search,
     )
 
-    assert search.phrases == ["工作总结"]
+    assert search.phrases == ["工作总结", "学校", "本校", "全校"]
     assert [item["document_id"] for item in result["results"]] == [
         "doc-school-summary"
     ]
