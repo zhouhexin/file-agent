@@ -518,17 +518,41 @@ def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
         if isinstance(output.get("trash_restore_selection"), dict):
             return None
         files = []
+        seen_file_identities: set[tuple[str, ...]] = set()
         for item in output.get("results", []):
             if not isinstance(item, dict):
                 continue
+            managed_file_id = str(item.get("managed_file_id") or "")
+            root_key = str(item.get("root_key") or "")
+            relative_path = str(item.get("relative_path") or "")
+            working_copy_id = str(item.get("working_copy_id") or "")
+            document_id = str(item.get("document_id") or "")
+            document_version_id = str(item.get("document_version_id") or "")
+            # 回执是面向用户的最终防线：即使历史 Tool 输出绕过新检索层，仍按
+            # 安全逻辑文件身份去重；同名但位置不同的文件不会使用文件名作为键。
+            identity = (
+                ("managed_file", managed_file_id)
+                if managed_file_id
+                else ("logical_path", root_key, relative_path)
+                if root_key and relative_path
+                else ("working_copy", working_copy_id)
+                if working_copy_id
+                else ("document_version", document_id, document_version_id)
+            )
+            if identity in seen_file_identities:
+                continue
+            seen_file_identities.add(identity)
             files.append(
                 {
                     key: item.get(key)
                     for key in (
                         "working_copy_id",
+                        "managed_file_id",
                         "document_id",
                         "document_version_id",
                         "filename",
+                        "root_key",
+                        "relative_path",
                         "category_path",
                         "year",
                         "overview",
@@ -542,7 +566,8 @@ def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
             )
         payload = {
             "query": str(output.get("query") or ""),
-            "total_returned": int(output.get("total_returned") or 0),
+            # 回执展示数量必须与去重后的实际条目一致，不能继续沿用 Tool 的旧重复计数。
+            "total_returned": len(files),
             "partial": bool(output.get("partial", False)),
             "user_message": str(output.get("user_message") or ""),
             "show_all_results": bool(output.get("show_all_results", False)),
@@ -551,9 +576,15 @@ def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
         # 只有新版分级检索显式返回数量时才写入回执，确保旧结果仍按原有
         # “相关文件”口径展示，不能把所有历史结果误显示为零个已验证文件。
         if output.get("supported_count") is not None:
-            payload["supported_count"] = int(output["supported_count"])
+            # 最终回执已去重，分级统计也必须以同一集合计算，避免标题数量与
+            # 实际卡片数量不一致。
+            payload["supported_count"] = sum(
+                1 for item in files if item.get("relevance_tier") != "POSSIBLE"
+            )
         if output.get("possible_count") is not None:
-            payload["possible_count"] = int(output["possible_count"])
+            payload["possible_count"] = sum(
+                1 for item in files if item.get("relevance_tier") == "POSSIBLE"
+            )
         if isinstance(output.get("search_completeness"), dict):
             # 完整性字段来自后端只读评估，不含路径、任务或文件 ID，前端无需自行计算。
             payload["search_completeness"] = output["search_completeness"]

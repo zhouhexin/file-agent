@@ -1060,6 +1060,13 @@
   white-space: nowrap;
 }
 
+.search-result-relative-path {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .search-result-tags {
   display: flex;
   flex-wrap: wrap;
@@ -1870,10 +1877,22 @@
 
 .file-search-clarification-option {
   display: flex;
+  align-items: flex-start;
   gap: 10px;
   padding: 12px;
   border: 1px solid #dfe6ef;
   border-radius: 10px;
+  cursor: pointer;
+}
+
+.file-search-clarification-option > input[type='radio'],
+.file-search-clarification-option > input[type='checkbox'] {
+  /* 选择控件不能作为 flex 子项被选项卡高度拉伸，否则会显示成异常的大圆。 */
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  accent-color: #2563eb;
   cursor: pointer;
 }
 

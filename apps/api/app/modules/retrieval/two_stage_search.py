@@ -609,9 +609,12 @@ class TwoStageFileSearchService:
             results.append(
                 {
                     "working_copy_id": wc_id,
+                    "managed_file_id": c.get("managed_file_id"),
                     "document_id": c.get("document_id"),
                     "document_version_id": vid,
                     "filename": c.get("filename", ""),
+                    "root_key": c.get("root_key"),
+                    "relative_path": c.get("relative_path"),
                     "category_path": c.get("category_path", []),
                     "year": c.get("year"),
                     "overview": c.get("summary", "")[:500],
@@ -623,12 +626,52 @@ class TwoStageFileSearchService:
                 }
             )
 
-        # 排序：按融合分倒序，并列时用 stable working_copy_id
+        # 排序后按逻辑源文件去重。工作副本 ID 是运行时实现细节；同一受管文件
+        # 因重试或历史数据出现多个活动副本时只能展示一次，而同名不同路径文件
+        # 必须保留为独立结果。
         results.sort(key=lambda r: (-r["_score"], r["working_copy_id"] or ""))
+        results = self._deduplicate_logical_file_results(results)
         # 移除内部 _score
         for r in results:
             del r["_score"]
         return results
+
+
+    @staticmethod
+    def _deduplicate_logical_file_results(
+        results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """按受管文件或逻辑路径对最终检索结果去重。
+
+        已按相关度排序的第一个条目优先保留。优先使用全局稳定的 ``managed_file_id``；
+        历史数据缺少该 ID 时才用 ``root_key + relative_path``，最后回退工作副本 ID。
+        文件名不参与键生成，确保不同目录下的同名文件不会被错误合并。
+        """
+
+        deduplicated: list[dict[str, Any]] = []
+        seen: set[tuple[str, ...]] = set()
+        for item in results:
+            managed_file_id = str(item.get("managed_file_id") or "")
+            root_key = str(item.get("root_key") or "")
+            relative_path = str(item.get("relative_path") or "")
+            working_copy_id = str(item.get("working_copy_id") or "")
+            document_id = str(item.get("document_id") or "")
+            document_version_id = str(item.get("document_version_id") or "")
+            if managed_file_id:
+                identity = ("managed_file", managed_file_id)
+            elif root_key and relative_path:
+                identity = ("logical_path", root_key, relative_path)
+            elif working_copy_id:
+                identity = ("working_copy", working_copy_id)
+            else:
+                # 极旧结果可能没有工作副本字段；仍以文档版本区分，不能把所有
+                # 缺字段记录折叠成一条“空 working_copy”结果。
+                identity = ("document_version", document_id, document_version_id)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            deduplicated.append(item)
+        return deduplicated
 
     @staticmethod
     def _matches_explicit_year(

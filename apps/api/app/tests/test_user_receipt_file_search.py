@@ -63,9 +63,12 @@ def test_new_search_result_activates_file_search_field():
             "results": [
                 {
                     "working_copy_id": "wc-1",
+                    "managed_file_id": "managed-1",
                     "document_id": "d-1",
                     "document_version_id": "v-1",
                     "filename": "奖学金.docx",
+                    "root_key": "school_files",
+                    "relative_path": "奖助学金/奖学金.docx",
                     "category_path": ["奖助学金"],
                     "year": 2025,
                     "overview": "奖学金材料",
@@ -88,9 +91,70 @@ def test_new_search_result_activates_file_search_field():
 
     file_item = receipt.file_search_result["files"][0]
     assert file_item["filename"] == "奖学金.docx"
+    assert file_item["root_key"] == "school_files"
+    assert file_item["relative_path"] == "奖助学金/奖学金.docx"
     # 内部 _score 等字段应被过滤
     assert "_score" not in file_item
     assert "_hit_source" not in file_item
+
+
+def test_search_receipt_deduplicates_same_logical_file_but_keeps_same_name_elsewhere():
+    """回执必须抵御旧 Tool 重复输出，同时保留不同目录下的同名文件。"""
+
+    invocation = ToolInvocationRecord(
+        tool_name="hybrid-search",
+        input_json={"query": "工作总结"},
+        output_json={
+            "kind": "workspace_file_search",
+            "ok": True,
+            "query": "工作总结",
+            "total_returned": 3,
+            "supported_count": 3,
+            "possible_count": 0,
+            "partial": False,
+            "results": [
+                {
+                    "working_copy_id": "wc-1",
+                    "managed_file_id": "managed-1",
+                    "document_id": "d-1",
+                    "document_version_id": "v-1",
+                    "filename": "工作总结.docx",
+                    "root_key": "school_files",
+                    "relative_path": "党办/工作总结.docx",
+                },
+                {
+                    "working_copy_id": "wc-2",
+                    "managed_file_id": "managed-1",
+                    "document_id": "d-2",
+                    "document_version_id": "v-2",
+                    "filename": "工作总结.docx",
+                    "root_key": "school_files",
+                    "relative_path": "党办/工作总结.docx",
+                },
+                {
+                    "working_copy_id": "wc-3",
+                    "managed_file_id": "managed-2",
+                    "document_id": "d-3",
+                    "document_version_id": "v-3",
+                    "filename": "工作总结.docx",
+                    "root_key": "school_files",
+                    "relative_path": "人事处/工作总结.docx",
+                },
+            ],
+        },
+        status="COMPLETED",
+    )
+
+    receipt = build_user_task_receipt(_make_result(tool_invocations=[invocation]))
+
+    assert receipt.file_search_result is not None
+    assert receipt.file_search_result["total_returned"] == 2
+    assert receipt.file_search_result["supported_count"] == 2
+    assert receipt.file_search_result["possible_count"] == 0
+    assert [item["relative_path"] for item in receipt.file_search_result["files"]] == [
+        "党办/工作总结.docx",
+        "人事处/工作总结.docx",
+    ]
 
 
 def test_new_search_result_handles_empty_results():

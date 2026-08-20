@@ -32,7 +32,9 @@ from app.db.models import (
 from app.modules.retrieval.scope_resolver import FileSearchScopeResolver
 from app.modules.retrieval.phrase_strategy import FileSearchPhraseStrategyService
 from app.modules.retrieval.query_parser import FileSearchQueryParser
-from app.modules.retrieval.two_stage_search import TwoStageFileSearchService
+from app.modules.retrieval.two_stage_search import (
+    TwoStageFileSearchService,
+)
 
 
 def _db_session():
@@ -188,6 +190,41 @@ def test_service_importable():
     """TwoStageFileSearchService 可导入。"""
     from app.modules.retrieval.two_stage_search import TwoStageFileSearchService
     assert TwoStageFileSearchService is not None
+
+
+def test_final_results_deduplicate_same_managed_file_but_keep_same_name_in_other_path():
+    """最终结果按逻辑文件去重，不能因同名而合并不同相对路径。"""
+
+    results = TwoStageFileSearchService._deduplicate_logical_file_results(
+        [
+            {
+                "working_copy_id": "wc-first",
+                "managed_file_id": "managed-one",
+                "root_key": "school_files",
+                "relative_path": "党办/工作总结.docx",
+                "filename": "工作总结.docx",
+            },
+            {
+                "working_copy_id": "wc-duplicate",
+                "managed_file_id": "managed-one",
+                "root_key": "school_files",
+                "relative_path": "党办/工作总结.docx",
+                "filename": "工作总结.docx",
+            },
+            {
+                "working_copy_id": "wc-other-path",
+                "managed_file_id": "managed-two",
+                "root_key": "school_files",
+                "relative_path": "人事处/工作总结.docx",
+                "filename": "工作总结.docx",
+            },
+        ]
+    )
+
+    assert [item["working_copy_id"] for item in results] == [
+        "wc-first",
+        "wc-other-path",
+    ]
 
 
 def test_end_to_end_search_returns_results():

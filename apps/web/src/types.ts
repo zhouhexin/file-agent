@@ -138,9 +138,13 @@ export type FileSearchMatchLocation = {
 
 export type FileSearchResultFile = {
   working_copy_id: string | null;
+  managed_file_id?: string | null;
   document_id: string;
   document_version_id: string;
   filename: string;
+  // 仅允许展示受管根键与逻辑相对路径，禁止接收服务器绝对路径。
+  root_key?: string | null;
+  relative_path?: string | null;
   category_path: string[];
   year?: number | null;
   overview?: string;

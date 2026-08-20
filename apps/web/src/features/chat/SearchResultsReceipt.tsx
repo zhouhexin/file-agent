@@ -28,6 +28,10 @@ function SearchResultCard({
     file.category_path && file.category_path.length > 0
       ? file.category_path.join(' / ')
       : '未分类';
+  // root_key 与 relative_path 是后端已校验的逻辑位置；不拼接或推断服务器路径。
+  const logicalPath = [file.root_key, file.relative_path]
+    .filter((value): value is string => Boolean(value))
+    .join(' / ');
 
   return (
     <article className="search-result-card">
@@ -51,6 +55,9 @@ function SearchResultCard({
             <span className="search-result-tier">已验证相关</span>
           ) : null}
         </div>
+        {logicalPath ? (
+          <span className="search-result-relative-path">位置：{logicalPath}</span>
+        ) : null}
       </div>
 
       {((attachment && onOpenAttachment) || onOpenDocument) ? (

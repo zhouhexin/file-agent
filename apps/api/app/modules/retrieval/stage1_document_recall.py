@@ -22,6 +22,8 @@ from app.db.models import (
     DocumentCategorySuggestion,
     DocumentSearchProfile,
     DocumentSummary,
+    ManagedFile,
+    ManagedRoot,
     WorkingCopy,
 )
 from app.modules.retrieval.query_parser import exact_short_chinese_phrase
@@ -557,9 +559,13 @@ class Stage1DocumentRecallService:
 
         # 显示字段分三次有界批量读取。不能把多条摘要和多条分类建议同时
         # LEFT JOIN，否则两组一对多记录会相乘，候选很少也可能超过 SQL 超时。
+        # 受管根和源文件都是一对一关系，可在基础查询中读取安全逻辑位置；
+        # 绝不向检索结果透传容器绝对路径。
         base_rows = (
-            self.db.query(WorkingCopy, Document)
+            self.db.query(WorkingCopy, Document, ManagedFile, ManagedRoot)
             .join(Document, Document.id == WorkingCopy.document_id)
+            .outerjoin(ManagedFile, ManagedFile.id == WorkingCopy.managed_file_id)
+            .outerjoin(ManagedRoot, ManagedRoot.id == ManagedFile.root_id)
             .filter(
                 WorkingCopy.id.in_(wc_ids),
                 WorkingCopy.workspace_id == self.workspace_id,
@@ -570,7 +576,7 @@ class Stage1DocumentRecallService:
         version_pairs = list(
             dict.fromkeys(
                 (str(document.id), str(working_copy.current_version_id))
-                for working_copy, document in base_rows
+                for working_copy, document, _managed_file, _managed_root in base_rows
                 if working_copy.current_version_id
             )
         )
@@ -627,15 +633,22 @@ class Stage1DocumentRecallService:
 
         # 按 working_copy_id 聚合
         enrich_map: dict[str, dict] = {}
-        for wc, doc in base_rows:
+        for wc, doc, managed_file, managed_root in base_rows:
             version_key = (str(doc.id), str(wc.current_version_id or ""))
             summary = summary_by_version.get(version_key)
             sug = suggestion_by_version.get(version_key)
             enrich_map[wc.id] = {
                 "working_copy_id": wc.id,
+                "managed_file_id": managed_file.id if managed_file else wc.managed_file_id,
                 "document_id": doc.id,
                 "document_version_id": wc.current_version_id or "",
                 "filename": wc.filename,
+                "root_key": managed_root.root_key if managed_root else None,
+                # 源文件相对路径是用户可理解的稳定逻辑位置；源记录缺失的历史
+                # 工作副本才回退到自身路径，且仍不暴露服务器存储根。
+                "relative_path": (
+                    managed_file.relative_path if managed_file else wc.relative_path
+                ),
                 "category_path": [],
                 "summary": "",
                 "year": None,
