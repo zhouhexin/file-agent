@@ -49,6 +49,7 @@ def test_managed_file_list_tool_returns_logical_paths_only(monkeypatch, tmp_path
 
         assert result.status == "COMPLETED"
         assert result.output_json["ok"] is True
+        assert result.output_json["query"]["root_display_name"] == "student_affairs"
         assert result.output_json["files"][0]["relative_path"] == "2026/a.pdf"
         assert "container_path" not in result.output_json["files"][0]
     finally:
@@ -64,6 +65,10 @@ def test_managed_file_list_tool_auto_reads_env_root_without_registration(monkeyp
     (managed_root / "a.xlsx").write_text("name,amount\nalice,10\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MANAGED_ROOT_FILE_AGENT_SPREADSHEET_PATCH_FILES", str(managed_root))
+    monkeypatch.setenv(
+        "MANAGED_ROOT_FILE_AGENT_SPREADSHEET_PATCH_FILES_DISPLAY_NAME",
+        "表格补丁资料库",
+    )
     client, SessionLocal = client_with_database()
     db = SessionLocal()
     try:
@@ -74,8 +79,45 @@ def test_managed_file_list_tool_auto_reads_env_root_without_registration(monkeyp
 
         assert result.status == "COMPLETED"
         assert result.output_json["ok"] is True
+        assert result.output_json["query"]["root_display_name"] == "表格补丁资料库"
         assert [file["relative_path"] for file in result.output_json["files"]] == ["a.xlsx"]
-        assert result.output_json["files"][0]["display_name"] == "file_agent_spreadsheet_patch_files"
+        assert result.output_json["files"][0]["display_name"] == "表格补丁资料库"
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_managed_file_list_tool_labels_cross_root_scope_without_using_first_file(
+    monkeypatch,
+    tmp_path,
+):
+    """未指定单一根目录时，Tool 查询条件必须明确表示全部受管目录。"""
+
+    school_root = tmp_path / "school-files"
+    affairs_root = tmp_path / "student-affairs"
+    school_root.mkdir()
+    affairs_root.mkdir()
+    (school_root / "总结.docx").write_text("school", encoding="utf-8")
+    (affairs_root / "名单.xlsx").write_text("affairs", encoding="utf-8")
+    monkeypatch.setenv("MANAGED_ROOT_SCHOOL_FILES", str(school_root))
+    monkeypatch.setenv("MANAGED_ROOT_SCHOOL_FILES_DISPLAY_NAME", "学校文件库")
+    monkeypatch.setenv("MANAGED_ROOT_STUDENT_AFFAIRS", str(affairs_root))
+    monkeypatch.setenv("MANAGED_ROOT_STUDENT_AFFAIRS_DISPLAY_NAME", "学工文件库")
+    client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        result = ToolRegistry(db=db, user_id="user-1").invoke(
+            "managed-file-list",
+            {},
+        )
+
+        assert result.status == "COMPLETED"
+        assert result.output_json["query"]["root_key"] is None
+        assert result.output_json["query"]["root_display_name"] == "全部受管目录"
+        assert {item["display_name"] for item in result.output_json["files"]} == {
+            "学校文件库",
+            "学工文件库",
+        }
     finally:
         db.close()
         clear_overrides()

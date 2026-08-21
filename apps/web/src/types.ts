@@ -94,7 +94,11 @@ export type TaskResult = {
   final_response: string | null;
   processed_count: number;
   document_results: DocumentResult[];
-  managed_file_result: { root_key: string; files: ManagedFileResult[] } | null;
+  managed_file_result: {
+    root_key: string | null;
+    root_display_name: string;
+    files: ManagedFileResult[];
+  } | null;
   rename_plan_result: import('./features/chat/RenameSuggestionReceipt').RenamePlanResult | null;
   file_search_result: FileSearchResult | null;
   search_context: SearchContext | null;
@@ -110,6 +114,85 @@ export type TaskResult = {
   pending_decisions: Array<Record<string, unknown>>;
   references: Array<Record<string, unknown>>;
   suggested_next_actions: string[];
+  presentation: FileTaskPresentation | null;
+};
+
+// 所有文件任务共享的展示外壳只包含后端验证后的业务事实；专用明细继续使用各自 payload。
+export type FileTaskPresentation = {
+  schema_version: 'file-task-receipt.v1';
+  task_kind:
+    | 'INGEST'
+    | 'READ'
+    | 'SUMMARIZE'
+    | 'ANSWER'
+    | 'CLASSIFY'
+    | 'SEARCH'
+    | 'LIST'
+    | 'SPREADSHEET'
+    | 'RENAME_SUGGESTION'
+    | 'OPERATION_PLAN'
+    | 'FILE_OPERATION'
+    | 'CLARIFICATION'
+    | 'FAILURE';
+  title: string;
+  phase: {
+    code:
+      | 'RECEIVED'
+      | 'UNDERSTANDING'
+      | 'PROCESSING'
+      | 'ORGANIZING'
+      | 'WAITING_CONFIRMATION'
+      | 'COMPLETED'
+      | 'NEEDS_ATTENTION'
+      | 'FAILED';
+    label: string;
+  };
+  request: {
+    target_label: string;
+    scope_label: string;
+    action_label: string;
+    conditions: Array<{
+      label: string;
+      value: string;
+      condition_type: string;
+      status: string;
+    }>;
+  };
+  outcome: {
+    headline: string;
+    total_count: number;
+    completed_count: number;
+    failed_count: number;
+    needs_review_count: number;
+    skipped_count: number;
+    completeness: 'COMPLETE' | 'PROCESSING' | 'PARTIAL' | 'UNVERIFIABLE';
+  };
+  change_impact: {
+    originals_changed: boolean | null;
+    working_copies_changed: boolean | null;
+    derivatives_created: number;
+    operation_executed: boolean;
+    message: string;
+  };
+  notices: Array<{
+    level: 'INFO' | 'WARNING' | 'ERROR';
+    message: string;
+  }>;
+  next_actions: FileTaskNextAction[];
+};
+
+export type FileTaskNextAction = {
+  id: string;
+  label: string;
+  action_kind:
+    | 'FILL_PROMPT'
+    | 'OPEN_FILE'
+    | 'RESOLVE_CLARIFICATION'
+    | 'CONFIRM_OPERATION'
+    | 'LOAD_MORE';
+  prompt: string | null;
+  target_ref: string | null;
+  requires_confirmation: boolean;
 };
 
 export type SearchContext = {

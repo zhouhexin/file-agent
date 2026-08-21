@@ -10,6 +10,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.modules.agent.file_task_receipt import (
+    FileTaskPresentation,
+    compose_file_task_presentation,
+)
 from app.modules.agent.state import AgentRunResult
 
 
@@ -60,6 +64,7 @@ class UserTaskReceipt(BaseModel):
     pending_decisions: list[dict[str, Any]] = Field(default_factory=list)
     references: list[dict[str, Any]] = Field(default_factory=list)
     suggested_next_actions: list[str] = Field(default_factory=list)
+    presentation: FileTaskPresentation | None = None
 
 
 def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
@@ -167,6 +172,17 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
     task_status = _task_status(result.status)
     if pending_decisions and task_status == "completed":
         task_status = "needs_attention"
+    # 公共展示外壳只消费上述安全投影；不能把原始 Tool 输出、绝对路径或正文交给前端。
+    presentation = compose_file_task_presentation(
+        result,
+        task_status=task_status,
+        response_type=response_type,
+        document_results=document_results,
+        managed_file_result=managed_file_result,
+        file_search_result=file_search_result,
+        search_context=search_context,
+        evidence_answer_result=evidence_answer_result,
+    )
     return UserTaskReceipt(
         task_id=result.agent_run_id,
         task_status=task_status,
@@ -205,6 +221,7 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         operation_plan_id=result.operation_plan_id,
         pending_decisions=pending_decisions,
         suggested_next_actions=_suggested_next_actions(result=result, response_type=response_type),
+        presentation=presentation,
     )
 
 
@@ -381,6 +398,7 @@ def _managed_file_result(result: AgentRunResult) -> dict[str, Any] | None:
                     for key in (
                         "managed_file_id",
                         "root_key",
+                        "display_name",
                         "relative_path",
                         "filename",
                         "extension",
@@ -390,8 +408,23 @@ def _managed_file_result(result: AgentRunResult) -> dict[str, Any] | None:
                     if key in item
                 }
             )
+        requested_root_key = str(query.get("root_key") or "").strip() or None
+        # 未指定 root_key 代表查询全部受管目录。即使结果恰好只来自第一个目录，也不能把
+        # 第一个文件的位置误报成整个查询范围；逐文件操作仍使用各自的 root_key。
+        root_key = requested_root_key
+        root_display_name = str(
+            query.get("root_display_name")
+            or (
+                files[0].get("display_name")
+                if requested_root_key and files
+                else ""
+            )
+            or requested_root_key
+            or "全部受管目录"
+        )
         return {
-            "root_key": str(query.get("root_key") or (files[0].get("root_key") if files else "") or "受管目录"),
+            "root_key": root_key,
+            "root_display_name": root_display_name,
             "files": files,
         }
     return None
@@ -542,28 +575,7 @@ def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
             if identity in seen_file_identities:
                 continue
             seen_file_identities.add(identity)
-            files.append(
-                {
-                    key: item.get(key)
-                    for key in (
-                        "working_copy_id",
-                        "managed_file_id",
-                        "document_id",
-                        "document_version_id",
-                        "filename",
-                        "root_key",
-                        "relative_path",
-                        "category_path",
-                        "year",
-                        "overview",
-                        "match_reasons",
-                        "match_location",
-                        "evidence_preview",
-                        "relevance_tier",
-                    )
-                    if key in item
-                }
-            )
+            files.append(_safe_file_search_item(item))
         payload = {
             "query": str(output.get("query") or ""),
             # 回执展示数量必须与去重后的实际条目一致，不能继续沿用 Tool 的旧重复计数。
@@ -590,6 +602,54 @@ def _file_search_result(result: AgentRunResult) -> dict[str, Any] | None:
             payload["search_completeness"] = output["search_completeness"]
         return payload
     return None
+
+
+def _safe_file_search_item(item: dict[str, Any]) -> dict[str, Any]:
+    """限制文件搜索依据的字段和长度，避免把正文、评分或内部定位载荷投影到前端。"""
+
+    projected = {
+        key: item.get(key)
+        for key in (
+            "working_copy_id",
+            "managed_file_id",
+            "document_id",
+            "document_version_id",
+            "filename",
+            "root_key",
+            "relative_path",
+            "category_path",
+            "year",
+            "overview",
+            "relevance_tier",
+        )
+        if key in item
+    }
+    projected["match_reasons"] = [
+        str(reason)[:120]
+        for reason in item.get("match_reasons", [])
+        if str(reason).strip()
+    ][:6]
+    location = item.get("match_location")
+    if isinstance(location, dict):
+        page_number = location.get("page_number")
+        projected["match_location"] = {
+            "page_number": page_number
+            if isinstance(page_number, int) and page_number > 0
+            else None,
+            "sheet_name": str(location.get("sheet_name") or "")[:255] or None,
+            "cell_range": str(location.get("cell_range") or "")[:80] or None,
+        }
+    else:
+        projected["match_location"] = None
+    evidence_preview = " ".join(
+        str(item.get("evidence_preview") or "").split()
+    ).strip()
+    projected["evidence_preview"] = (
+        f"{evidence_preview[:240].rstrip()}…"
+        if len(evidence_preview) > 240
+        else evidence_preview
+    )
+    return projected
 
 
 def _classification_decision_results(

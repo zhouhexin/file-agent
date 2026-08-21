@@ -447,10 +447,96 @@ Response:
     "operation_plan_id": null,
     "pending_decisions": [],
     "references": [],
-    "suggested_next_actions": ["继续查找相关文件", "询问文件中的具体内容"]
+    "suggested_next_actions": ["继续查找相关文件", "询问文件中的具体内容"],
+    "presentation": null
   }
 }
 ```
+
+阶段一、阶段二开始，搜索、受管目录列举、文件读取、文件总结、证据回答和表格分析会同时返回
+`presentation`。该字段是版本化的公共展示外壳；专用明细仍由 `file_search_result`、
+`managed_file_result`、`document_results` 或 `evidence_answer_result` 提供，前端不得从
+`presentation` 反推 Tool、物理路径或文件正文。
+
+受管目录列举结果同时返回安全定位键和业务展示名称：
+
+```json
+{
+  "managed_file_result": {
+    "root_key": "school_files",
+    "root_display_name": "学校文件库",
+    "files": []
+  }
+}
+```
+
+`root_key` 仅用于后续受控预览或文件操作定位；普通用户界面的范围和目录标题应优先展示
+`root_display_name`。两者都不得包含服务器物理路径。
+
+未指定单一受管根目录、需要跨根目录列举时，`root_key` 为 `null`，
+`root_display_name` 为“全部受管目录”；每个文件仍携带自己的安全 `root_key + relative_path`。
+
+```json
+{
+  "presentation": {
+    "schema_version": "file-task-receipt.v1",
+    "task_kind": "SEARCH",
+    "title": "文件查找结果",
+    "phase": {
+      "code": "COMPLETED",
+      "label": "处理完成"
+    },
+    "request": {
+      "target_label": "相关文件",
+      "scope_label": "学校",
+      "action_label": "查找相关文件",
+      "conditions": [
+        {
+          "label": "主题",
+          "value": "工作总结",
+          "condition_type": "topic",
+          "status": "APPLIED"
+        }
+      ]
+    },
+    "outcome": {
+      "headline": "找到 8 个明确相关文件，另有 4 个可能相关文件",
+      "total_count": 12,
+      "completed_count": 8,
+      "failed_count": 0,
+      "needs_review_count": 4,
+      "skipped_count": 0,
+      "completeness": "COMPLETE"
+    },
+    "change_impact": {
+      "originals_changed": false,
+      "working_copies_changed": false,
+      "derivatives_created": 0,
+      "operation_executed": false,
+      "message": "本次只进行了文件查找，原文件和工作副本均未改变。"
+    },
+    "notices": [],
+    "next_actions": [
+      {
+        "id": "refine-search",
+        "label": "继续筛选",
+        "action_kind": "FILL_PROMPT",
+        "prompt": "请按年份、单位或文件类型继续筛选这些结果",
+        "target_ref": null,
+        "requires_confirmation": false
+      }
+    ]
+  }
+}
+```
+
+`presentation` 的安全规则：
+
+- 数量、范围、完整性和文件变化状态必须由后端确定性生成，不能由前端或 LLM 猜测。
+- `FILL_PROMPT` 只允许把建议写入输入框，不得自动发送。
+- `OPEN_FILE` 必须继续经过文件预览接口鉴权。
+- 高风险文件动作仍只能由已持久化、已确认归属的 OperationPlan 执行。
+- 没有 `presentation` 的历史消息继续按原有 `response_type` 展示。
 
 When LLM is enabled and the user asks for uploaded-file summary or basic file information, the same endpoint may return:
 

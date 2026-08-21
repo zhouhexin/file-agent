@@ -2183,9 +2183,16 @@ def _managed_file_list_handler(db: Any) -> ToolHandler:
                 limit=int(getattr(tool_input, "limit", 50)),
                 offset=int(getattr(tool_input, "offset", 0)),
             )
+        root_display_name = "全部受管目录" if scope.root_key is None else None
+        if scope.root_key:
+            # root_key 继续承担安全定位职责；普通用户回执优先使用业务展示名称。
+            resolved_root = ManagedFileRepository(db).get_root_by_key(scope.root_key)
+            if resolved_root is not None:
+                root_display_name = resolved_root.display_name
         # 返回查询条件用于空结果回执，避免 response 节点无法说明是哪一个受管目录没有文件。
         query = {
             "root_key": scope.root_key,
+            "root_display_name": root_display_name,
             "path_prefix": scope.path_prefix,
             "requested_root_key": getattr(tool_input, "root_key", None),
             "unresolved_root_key": scope.unresolved_root_key,

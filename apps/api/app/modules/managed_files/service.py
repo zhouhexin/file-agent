@@ -454,8 +454,8 @@ def sync_configured_managed_roots(
 ) -> list[ManagedRoot]:
     """把 env 中声明的受管目录同步到数据库，并按需创建只读扫描任务。
 
-    env 是受管目录的唯一配置入口；数据库只保存运行时索引和扫描结果。
-    因此普通用户查询时也会自动同步，避免必须先由管理员手动登记。
+    env 是受管目录路径和处理模式的配置入口；数据库同时保留管理员确认的业务展示名称。
+    因此普通用户查询时也会自动同步，避免必须先由管理员手动登记，并且不会覆盖已有展示名称。
     """
 
     repository = ManagedFileRepository(db)
@@ -465,16 +465,20 @@ def sync_configured_managed_roots(
         if container_path is None:
             continue
         existing_root = repository.get_root_by_key(configured_root_key)
+        display_name = _configured_display_name(
+            configured_root_key,
+            existing_root=existing_root,
+        )
         config_changed = existing_root is None or _root_config_changed(
             root=existing_root,
-            display_name=configured_root_key,
+            display_name=display_name,
             container_path=container_path,
             classification_mode=_configured_classification_mode(configured_root_key),
             allow_rename=_configured_allow_rename(configured_root_key),
         )
         root = repository.upsert_root(
             root_key=configured_root_key,
-            display_name=configured_root_key,
+            display_name=display_name,
             container_path=container_path,
             classification_mode=_configured_classification_mode(configured_root_key),
             created_by=created_by,
@@ -492,6 +496,30 @@ def sync_configured_managed_roots(
             )
     db.flush()
     return roots
+
+
+def _configured_display_name(
+    root_key: str,
+    *,
+    existing_root: ManagedRoot | None,
+) -> str:
+    """读取受管目录业务名称，并保留管理员已经确认的展示名称。
+
+    部署层可使用 `_DISPLAY_NAME` 或兼容字段 `_NAME` 明确配置；未配置时不能在每次查询同步时
+    把数据库里已有的业务名称重置成技术 root_key。
+    """
+
+    env_prefix = f"MANAGED_ROOT_{root_key.upper()}"
+    configured_name = (
+        os.getenv(f"{env_prefix}_DISPLAY_NAME")
+        or os.getenv(f"{env_prefix}_NAME")
+        or ""
+    ).strip()
+    if configured_name:
+        return configured_name
+    if existing_root is not None and existing_root.display_name.strip():
+        return existing_root.display_name.strip()
+    return root_key
 
 
 def _root_config_changed(

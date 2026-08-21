@@ -87,12 +87,20 @@ def test_new_search_result_activates_file_search_field():
     assert receipt.file_search_result is not None
     assert receipt.response_type == "file_search_results"
     assert receipt.file_search_result["query"] == "奖学金"
-    assert receipt.file_search_result["total_returned"] == 2
+    # 普通回执数量必须按实际安全投影重新计算，不能沿用 Tool 中可能过时的原始计数。
+    assert receipt.file_search_result["total_returned"] == 1
 
     file_item = receipt.file_search_result["files"][0]
     assert file_item["filename"] == "奖学金.docx"
     assert file_item["root_key"] == "school_files"
     assert file_item["relative_path"] == "奖助学金/奖学金.docx"
+    assert file_item["match_reasons"] == ["文件名命中"]
+    assert file_item["match_location"] == {
+        "page_number": 2,
+        "sheet_name": None,
+        "cell_range": None,
+    }
+    assert file_item["evidence_preview"] == "..."
     # 内部 _score 等字段应被过滤
     assert "_score" not in file_item
     assert "_hit_source" not in file_item

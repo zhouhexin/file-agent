@@ -54,6 +54,16 @@ python -m pytest
 环境兼容警告；只要没有失败项，不影响当前自动化验收结论。Windows 无符号链接权限时允许额外跳过
 `test_path_policy_rejects_symlink_escape`，但必须显示明确的权限原因。
 
+前端展示逻辑和正式构建分别执行：
+
+```bash
+cd apps/web
+npm test
+npm run build
+```
+
+`npm test` 使用 Node 原生测试和 Vite SSR 验证统一文件回执的阶段边界与搜索结果逻辑身份，不访问后端或外部服务。
+
 ## 3. 数据库
 
 当前后端已经持久化 user、default workspace、message、AgentRun 和 ToolInvocation。
@@ -995,6 +1005,7 @@ LLM_CHAT_MODEL=你的模型名称
 LLM_TIMEOUT_SECONDS=30
 
 MANAGED_ROOT_WORKDATA=宿主机受管原始目录
+MANAGED_ROOT_WORKDATA_DISPLAY_NAME=工作资料库
 MANAGED_ROOT_WORKDATA_CLASSIFICATION_MODE=NONE
 MANAGED_ROOT_VOLUME_MODE=ro
 

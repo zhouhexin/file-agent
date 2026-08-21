@@ -1,5 +1,5 @@
 // AgentRun 回执组件展示结构化执行结果，文件打开仍交由上层受控回调处理。
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { AlertCircle, CheckCircle2, FileText, Folder } from 'lucide-react';
 
 import { getOperationPlan } from '../../api/client';
@@ -18,6 +18,7 @@ import { FileSearchClarificationCard } from './FileSearchClarificationCard';
 import { EvidenceAnswerReceipt, FileSelectionReceipt } from './EvidenceAnswerReceipt';
 import { ClassificationClarificationCard } from './ClassificationClarificationCard';
 import { FilenameConflictCard } from './FilenameConflictCard';
+import { FileTaskReceiptShell } from './FileTaskReceiptShell';
 import type { ChatAttachment } from './presentation';
 import { findAttachmentByDocumentId, formatFileSize } from './presentation';
 
@@ -33,6 +34,7 @@ type AgentRunReceiptProps = {
   onOpenManagedFile?: (file: ManagedFileResult) => void;
   onFollowupResult?: (response: SendMessageResponse) => void;
   onOperationConfirmed?: () => Promise<void>;
+  onUsePrompt?: (prompt: string) => void;
 };
 
 export function AgentRunReceipt({
@@ -45,6 +47,7 @@ export function AgentRunReceipt({
   onOpenManagedFile,
   onFollowupResult,
   onOperationConfirmed,
+  onUsePrompt,
 }: AgentRunReceiptProps) {
   const [operationPlan, setOperationPlan] = useState<OperationPlanResponse | null>(null);
   const results = taskResult?.document_results ?? [];
@@ -103,9 +106,25 @@ export function AgentRunReceipt({
     return null;
   }
 
+  const presentation = taskResult.presentation;
+  const wrapFileTask = (content?: ReactNode) => (
+    presentation ? (
+      <FileTaskReceiptShell presentation={presentation} onUsePrompt={onUsePrompt}>
+        {content}
+      </FileTaskReceiptShell>
+    ) : content
+  );
+
   // 历史恢复和实时接口都可能直接携带失败状态。不能只依赖 ChatTurn 的本地状态，
   // 否则后端已失败的任务会被渲染成没有任何内容的空白区域。
   if (taskResult.task_status === 'failed') {
+    if (presentation) {
+      return wrapFileTask(
+        taskResult.final_response ? (
+          <p className="agent-chat-response">{taskResult.final_response}</p>
+        ) : undefined,
+      );
+    }
     return (
       <section className="agent-run-receipt">
         <div className="agent-run-summary agent-run-summary--failed">
@@ -126,6 +145,9 @@ export function AgentRunReceipt({
     && !taskResult.file_selection_result
   ) {
     // 异步任务刚入队时尚无最终回执；只展示通用处理状态，不暴露导入、索引或队列细节。
+    if (presentation) {
+      return wrapFileTask();
+    }
     return (
       <section className="agent-run-receipt" aria-live="polite">
         <div className="agent-run-summary">
@@ -218,15 +240,16 @@ export function AgentRunReceipt({
     taskResult.response_type === 'evidence_answer'
     && taskResult.evidence_answer_result
   ) {
-    return (
+    const evidenceDetails = (
       <>
         <EvidenceAnswerReceipt
           result={taskResult.evidence_answer_result}
           onOpenDocument={onOpenDocument}
         />
-        <SearchContextSummary context={taskResult.search_context} />
+        {!presentation ? <SearchContextSummary context={taskResult.search_context} /> : null}
       </>
     );
+    return wrapFileTask(evidenceDetails);
   }
   if (
     taskResult.response_type === 'file_selection'
@@ -246,17 +269,19 @@ export function AgentRunReceipt({
     taskResult.response_type === 'file_search_results' &&
     taskResult.file_search_result
   ) {
-    return (
+    const searchDetails = taskResult.file_search_result.files.length > 0 ? (
       <>
         <SearchResultsReceipt
           result={taskResult.file_search_result}
           attachments={attachments}
+          showSummary={!presentation}
           onOpenAttachment={onOpenAttachment}
           onOpenDocument={onOpenDocument}
         />
-        <SearchContextSummary context={taskResult.search_context} />
+        {!presentation ? <SearchContextSummary context={taskResult.search_context} /> : null}
       </>
-    );
+    ) : undefined;
+    return wrapFileTask(searchDetails);
   }
   if (
     taskResult.response_type === 'file_search_clarification'
@@ -295,20 +320,27 @@ export function AgentRunReceipt({
   }
 
   if (taskResult.response_type === 'text') {
-    return taskResult.final_response ? (
+    const textResult = taskResult.final_response ? (
       <p className="agent-chat-response">{taskResult.final_response}</p>
-    ) : null;
+    ) : undefined;
+    return presentation ? wrapFileTask(textResult) : (textResult ?? null);
   }
 
   if (results.length === 0) {
-    if (managedFileResult && managedFileResult.files.length > 0) {
-      return (
+    if (managedFileResult) {
+      const managedFiles = managedFileResult.files.length > 0 ? (
         <ManagedFileTreeReceipt
           files={managedFileResult.files}
-          rootKey={managedFileResult.root_key}
+          rootLabel={
+            managedFileResult.root_display_name
+            || managedFileResult.root_key
+            || '全部受管目录'
+          }
+          showSummary={!presentation}
           onOpenManagedFile={onOpenManagedFile}
         />
-      );
+      ) : undefined;
+      return wrapFileTask(managedFiles);
     }
     // 纯聊天、分类汇总、历史分类读取等任务没有逐文件处理结果时，只展示 Agent 文本回复。
     return taskResult.final_response ? (
@@ -325,7 +357,32 @@ export function AgentRunReceipt({
   }
 
   return (
-    <section className="agent-run-receipt">
+    presentation ? wrapFileTask(
+      <>
+        {pendingDecisions.length > 0 ? <PendingDecisionList decisions={pendingDecisions} /> : null}
+
+        {taskResult.final_response ? (
+          <p className="agent-final-response">{taskResult.final_response}</p>
+        ) : null}
+
+        {results.length > 0 ? (
+          <div className="document-result-list">
+            {results.map((result, index) => (
+              <DocumentResultCard
+                attachment={findAttachmentByDocumentId(attachments, result.document_id)}
+                index={index + 1}
+                key={`${result.document_id}-${index}`}
+                result={result}
+                token={token}
+                agentRunId={taskResult.task_id}
+                onOpenDocument={onOpenDocument}
+                onOpenFile={onOpenAttachment}
+              />
+            ))}
+          </div>
+        ) : null}
+      </>
+    ) : <section className="agent-run-receipt">
       <div className="agent-run-summary">
         <div>
           <strong>
@@ -453,24 +510,28 @@ type ManagedFileTreeNode = {
 };
 
 type ManagedFileTreeReceiptProps = {
-  // rootKey 是后端授权后的逻辑目录标识，不能被当作本地路径使用。
-  rootKey: string;
+  // 普通用户只看到业务名称；安全定位仍由每个文件的 root_key + relative_path 完成。
+  rootLabel: string;
   files: ManagedFileResult[];
+  showSummary?: boolean;
   onOpenManagedFile?: (file: ManagedFileResult) => void;
 };
 
 function ManagedFileTreeReceipt({
-  rootKey,
+  rootLabel,
   files,
+  showSummary = true,
   onOpenManagedFile,
 }: ManagedFileTreeReceiptProps) {
   // 受管文件结果按目录树展示，点击文件时复用 ChatPage 的 Blob 预览/下载流程。
   const tree = buildManagedFileTree(files);
   return (
     <section className="managed-file-tree-card">
-      <div className="managed-file-tree-summary">
-        <strong>{rootKey} 下共有 {files.length} 个文件</strong>
-      </div>
+      {showSummary ? (
+        <div className="managed-file-tree-summary">
+          <strong>{rootLabel} 下共有 {files.length} 个文件</strong>
+        </div>
+      ) : null}
       <div className="managed-file-tree">
         <ManagedFileTreeNodeView
           depth={0}

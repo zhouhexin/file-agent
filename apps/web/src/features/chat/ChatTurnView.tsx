@@ -16,6 +16,7 @@ type ChatTurnViewProps = {
   onOpenManagedFile: (file: ManagedFileResult) => void;
   onFollowupResult?: (response: SendMessageResponse) => void;
   onOperationConfirmed?: () => Promise<void>;
+  onUsePrompt?: (prompt: string) => void;
 };
 
 export function ChatTurnView({
@@ -27,6 +28,7 @@ export function ChatTurnView({
   onOpenManagedFile,
   onFollowupResult,
   onOperationConfirmed,
+  onUsePrompt,
 }: ChatTurnViewProps) {
   const [resolvedDuplicateHidden, setResolvedDuplicateHidden] = useState(false);
   const hideResolvedDuplicate = useCallback(() => setResolvedDuplicateHidden(true), []);
@@ -56,6 +58,7 @@ export function ChatTurnView({
                 onOpenDocument={onOpenDocument}
                 onFollowupResult={onFollowupResult}
                 onOperationConfirmed={onOperationConfirmed}
+                onUsePrompt={onUsePrompt}
               />
             ) : (
               <p className="agent-chat-response">{turn.userText}</p>
@@ -104,6 +107,7 @@ export function ChatTurnView({
               onOpenManagedFile={onOpenManagedFile}
               onFollowupResult={onFollowupResult}
               onOperationConfirmed={onOperationConfirmed}
+              onUsePrompt={onUsePrompt}
             />
           ) : null}
         </div>

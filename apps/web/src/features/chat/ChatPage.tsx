@@ -856,6 +856,10 @@ export function ChatPage({
                   onOpenDocument={openSearchDocument}
                   onOpenManagedFile={openManagedFile}
                   onOperationConfirmed={refreshHistoricalAttachmentStatuses}
+                  onUsePrompt={(prompt) => {
+                    // 后续建议只填入编辑框，仍由用户检查并主动发送。
+                    setMessage(prompt);
+                  }}
                   onFollowupResult={(response) => {
                     // 选择卡续跑会在后端创建真实消息和 AgentRun；页面直接追加该轮，
                     // 不伪造本地搜索结果，刷新后仍能从同一会话历史恢复。

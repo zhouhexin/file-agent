@@ -39,7 +39,7 @@ cp .env.example .env
 /opt/homebrew/anaconda3/envs/py311/bin/python -m pytest
 /opt/homebrew/anaconda3/envs/py311/bin/python -m alembic -c apps/api/alembic.ini upgrade head
 PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-cd apps/web && npm install && npm run dev
+cd apps/web && npm install && npm test && npm run build && npm run dev
 ```
 
 Windows PowerShell 在仓库根目录使用当前 Python 环境运行后端测试：

@@ -1,14 +1,15 @@
-// 文件搜索结果只展示普通用户需要的文件名、分类标签和打开入口。
-// 推荐原因、摘要预览、索引降级、Skill、Tool、Chunk、SQL 分数和内部路径都不进入聊天页面。
+// 文件搜索结果展示安全逻辑位置、命中原因和可定位证据；Skill、Tool、Chunk、SQL 分数和物理路径不进入聊天页面。
 import { useState } from 'react';
 import { FileText, Tag } from 'lucide-react';
 
 import type { ChatAttachment } from './presentation';
 import type { FileSearchResult, FileSearchResultFile } from '../../types';
+import { fileSearchResultKey } from './fileTaskPresentation';
 
 type SearchResultsReceiptProps = {
   result: FileSearchResult;
   attachments: ChatAttachment[];
+  showSummary?: boolean;
   onOpenAttachment?: (file: ChatAttachment) => void;
   onOpenDocument?: (documentId: string, filename: string) => void;
 };
@@ -32,6 +33,7 @@ function SearchResultCard({
   const logicalPath = [file.root_key, file.relative_path]
     .filter((value): value is string => Boolean(value))
     .join(' / ');
+  const matchLocation = formatMatchLocation(file);
 
   return (
     <article className="search-result-card">
@@ -58,6 +60,19 @@ function SearchResultCard({
         {logicalPath ? (
           <span className="search-result-relative-path">位置：{logicalPath}</span>
         ) : null}
+        {file.match_reasons.length > 0 ? (
+          <span className="search-result-match-reason">
+            匹配依据：{file.match_reasons.join('；')}
+          </span>
+        ) : null}
+        {matchLocation ? (
+          <span className="search-result-match-location">证据位置：{matchLocation}</span>
+        ) : null}
+        {file.evidence_preview ? (
+          <blockquote className="search-result-evidence-preview">
+            {file.evidence_preview}
+          </blockquote>
+        ) : null}
       </div>
 
       {((attachment && onOpenAttachment) || onOpenDocument) ? (
@@ -80,9 +95,21 @@ function SearchResultCard({
   );
 }
 
+/** 把页码、工作表和单元格转换为普通用户可以核对的位置。 */
+function formatMatchLocation(file: FileSearchResultFile): string {
+  const location = file.match_location;
+  if (!location) return '';
+  const parts: string[] = [];
+  if (location.page_number) parts.push(`第 ${location.page_number} 页`);
+  if (location.sheet_name) parts.push(`工作表：${location.sheet_name}`);
+  if (location.cell_range) parts.push(`单元格：${location.cell_range}`);
+  return parts.join(' · ');
+}
+
 export function SearchResultsReceipt({
   result,
   attachments,
+  showSummary = true,
   onOpenAttachment,
   onOpenDocument,
 }: SearchResultsReceiptProps) {
@@ -99,7 +126,7 @@ export function SearchResultsReceipt({
           {result.user_message ||
             '未找到相关文件。请尝试补充主题、年份、单位或文档类型。'}
         </div>
-        {completeness ? (
+        {showSummary && completeness ? (
           <p className={completenessClassName}>{completeness.message}</p>
         ) : null}
       </section>
@@ -126,7 +153,7 @@ export function SearchResultsReceipt({
   const renderFiles = (files: FileSearchResultFile[]) =>
     files.map((file) => (
       <SearchResultCard
-        key={file.working_copy_id ?? `${file.document_id}-${file.document_version_id}`}
+        key={fileSearchResultKey(file)}
         file={file}
         attachment={
           attachments.find(
@@ -140,18 +167,20 @@ export function SearchResultsReceipt({
 
   return (
     <section className="search-results-receipt">
-      <header className="search-results-summary">
-        <strong>
-          {result.supported_count !== undefined || result.possible_count !== undefined
-            ? `找到 ${result.supported_count ?? supportedFiles.length} 个已验证相关文件${
-                (result.possible_count ?? possibleFiles.length) > 0
-                  ? `，另有 ${result.possible_count ?? possibleFiles.length} 个可能相关文件`
-                  : ''
-              }`
-            : `找到 ${result.total_returned} 个相关文件`}
-        </strong>
-      </header>
-      {completeness ? (
+      {showSummary ? (
+        <header className="search-results-summary">
+          <strong>
+            {result.supported_count !== undefined || result.possible_count !== undefined
+              ? `找到 ${result.supported_count ?? supportedFiles.length} 个已验证相关文件${
+                  (result.possible_count ?? possibleFiles.length) > 0
+                    ? `，另有 ${result.possible_count ?? possibleFiles.length} 个可能相关文件`
+                    : ''
+                }`
+              : `找到 ${result.total_returned} 个相关文件`}
+          </strong>
+        </header>
+      ) : null}
+      {showSummary && completeness ? (
         <p className={completenessClassName}>
           {completeness.message}
         </p>

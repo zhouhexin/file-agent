@@ -178,6 +178,14 @@ def test_admin_can_mark_managed_root_as_path_classified(monkeypatch):
     data = response.json()
     assert data["classification_mode"] == "PATH_AS_CATEGORY"
 
+    # 列表接口会执行配置同步；未配置环境展示名时必须保留管理员确认的业务名称。
+    list_response = client.get(
+        "/api/admin/managed-roots",
+        headers=_auth_header(token),
+    )
+    assert list_response.status_code == 200
+    assert list_response.json()[0]["display_name"] == "已分类文件库"
+
     db = SessionLocal()
     try:
         root = db.query(ManagedRoot).one()

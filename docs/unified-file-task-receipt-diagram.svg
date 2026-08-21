@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1120" viewBox="0 0 1600 1120" role="img" aria-labelledby="title description">
+  <title id="title">统一文件任务回答方案</title>
+  <desc id="description">展示从用户文件任务、受控事实处理、统一回执编排到前端六段式回答的完整流程。</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f7faff"/>
+      <stop offset="1" stop-color="#eef4ff"/>
+    </linearGradient>
+    <linearGradient id="primary" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#0f766e"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#19345c" flood-opacity="0.13"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#5b708f"/>
+    </marker>
+    <style>
+      .font { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+      .title { font-size: 38px; font-weight: 750; fill: #10233f; }
+      .subtitle { font-size: 19px; fill: #52657f; }
+      .section-title { font-size: 23px; font-weight: 700; fill: #17345c; }
+      .box-title { font-size: 19px; font-weight: 700; fill: #15335b; }
+      .body { font-size: 16px; fill: #52657f; }
+      .small { font-size: 14px; fill: #667a96; }
+      .white-title { font-size: 20px; font-weight: 700; fill: white; }
+      .white-body { font-size: 15px; fill: #e6f1ff; }
+      .chip { font-size: 14px; font-weight: 650; fill: #1754a6; }
+      .arrow { fill: none; stroke: #5b708f; stroke-width: 2.5; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1120" rx="36" fill="url(#background)"/>
+
+  <text x="80" y="72" class="font title">统一文件任务回答方案</text>
+  <text x="80" y="108" class="font subtitle">所有涉及文件的任务共享同一回答骨架，专用能力保留自己的明细卡和安全边界</text>
+
+  <text x="80" y="164" class="font section-title">一、实现链路</text>
+
+  <g filter="url(#shadow)">
+    <rect x="80" y="195" width="235" height="150" rx="22" fill="#ffffff" stroke="#cad8ed"/>
+    <circle cx="120" cy="235" r="19" fill="#dbeafe"/>
+    <text x="120" y="242" text-anchor="middle" class="font box-title" fill="#2563eb">1</text>
+    <text x="150" y="241" class="font box-title">用户文件任务</text>
+    <text x="105" y="279" class="font body">上传、读取、搜索、分类</text>
+    <text x="105" y="306" class="font body">总结、问答、表格分析</text>
+    <text x="105" y="333" class="font body">改名建议或文件操作</text>
+  </g>
+
+  <path d="M315 270 H365" class="arrow"/>
+
+  <g filter="url(#shadow)">
+    <rect x="370" y="195" width="275" height="150" rx="22" fill="#ffffff" stroke="#a9c7f4"/>
+    <circle cx="410" cy="235" r="19" fill="#dbeafe"/>
+    <text x="410" y="242" text-anchor="middle" class="font box-title" fill="#2563eb">2</text>
+    <text x="440" y="241" class="font box-title">确认任务理解</text>
+    <text x="395" y="279" class="font body">对象 · 范围 · 动作</text>
+    <text x="395" y="306" class="font body">主题组 · AND / OR 关系</text>
+    <text x="395" y="333" class="font body">年份 · 单位 · 文种等条件</text>
+  </g>
+
+  <path d="M645 270 H695" class="arrow"/>
+
+  <g filter="url(#shadow)">
+    <rect x="700" y="195" width="300" height="150" rx="22" fill="#ffffff" stroke="#9ed9cf"/>
+    <circle cx="740" cy="235" r="19" fill="#ccfbf1"/>
+    <text x="740" y="242" text-anchor="middle" class="font box-title" fill="#0f766e">3</text>
+    <text x="770" y="241" class="font box-title">受控能力产生事实</text>
+    <text x="725" y="279" class="font body">解析 / OCR / 检索 / 分类</text>
+    <text x="725" y="306" class="font body">确定性计算 / 证据定位</text>
+    <text x="725" y="333" class="font body">ChangeSet / OperationPlan</text>
+  </g>
+
+  <path d="M1000 270 H1050" class="arrow"/>
+
+  <g filter="url(#shadow)">
+    <rect x="1055" y="185" width="465" height="170" rx="24" fill="url(#primary)"/>
+    <text x="1090" y="227" class="font white-title">4  FileTaskReceiptComposer</text>
+    <text x="1090" y="261" class="font white-body">统一编排已验证事实，不重新执行 Tool，不让 LLM 编造数量、路径或状态</text>
+    <rect x="1090" y="286" width="118" height="34" rx="17" fill="#ffffff" fill-opacity="0.17"/>
+    <text x="1149" y="308" text-anchor="middle" class="font white-body">公共外壳</text>
+    <rect x="1222" y="286" width="118" height="34" rx="17" fill="#ffffff" fill-opacity="0.17"/>
+    <text x="1281" y="308" text-anchor="middle" class="font white-body">安全投影</text>
+    <rect x="1354" y="286" width="132" height="34" rx="17" fill="#ffffff" fill-opacity="0.17"/>
+    <text x="1420" y="308" text-anchor="middle" class="font white-body">历史兼容</text>
+  </g>
+
+  <path d="M1287 355 V402" class="arrow"/>
+
+  <g filter="url(#shadow)">
+    <rect x="990" y="410" width="530" height="125" rx="22" fill="#ffffff" stroke="#a9c7f4"/>
+    <text x="1022" y="449" class="font box-title">5  UserTaskReceipt 安全响应</text>
+    <text x="1022" y="480" class="font body">presentation 公共结构 + 现有专用 payload</text>
+    <text x="1022" y="509" class="font small">不暴露绝对路径、Tool 名、内部评分、全文或异常堆栈</text>
+  </g>
+
+  <path d="M990 472 H915 V590" class="arrow"/>
+
+  <g filter="url(#shadow)">
+    <rect x="80" y="405" width="790" height="130" rx="22" fill="#fffaf0" stroke="#f0c46b"/>
+    <text x="112" y="445" class="font box-title">安全边界</text>
+    <text x="112" y="478" class="font body">LLM 只帮助理解意图或润色无事实引导语；文件名、路径、页码、数量、证据和变化状态必须来自后端事实。</text>
+    <text x="112" y="508" class="font body">高风险操作仍先生成 OperationPlan；建议、计划和已执行结果必须明确区分。</text>
+  </g>
+
+  <text x="80" y="610" class="font section-title">二、用户最终看到的六段式回答</text>
+
+  <g filter="url(#shadow)">
+    <rect x="80" y="640" width="1440" height="390" rx="28" fill="#ffffff" stroke="#cbd9ed"/>
+
+    <rect x="105" y="670" width="425" height="104" rx="18" fill="#eef5ff"/>
+    <circle cx="140" cy="705" r="17" fill="#2563eb"/>
+    <text x="140" y="711" text-anchor="middle" class="font white-body">1</text>
+    <text x="170" y="710" class="font box-title">任务理解</text>
+    <text x="130" y="742" class="font body">处理对象、业务范围、动作和条件关系</text>
+
+    <rect x="555" y="670" width="425" height="104" rx="18" fill="#effcf8"/>
+    <circle cx="590" cy="705" r="17" fill="#0f766e"/>
+    <text x="590" y="711" text-anchor="middle" class="font white-body">2</text>
+    <text x="620" y="710" class="font box-title">关键进度</text>
+    <text x="580" y="742" class="font body">确认范围 → 处理内容 → 整理结果</text>
+
+    <rect x="1005" y="670" width="490" height="104" rx="18" fill="#f4f0ff"/>
+    <circle cx="1040" cy="705" r="17" fill="#7c3aed"/>
+    <text x="1040" y="711" text-anchor="middle" class="font white-body">3</text>
+    <text x="1070" y="710" class="font box-title">结果摘要</text>
+    <text x="1030" y="742" class="font body">完成、失败、待复核数量与结果完整性</text>
+
+    <rect x="105" y="800" width="425" height="104" rx="18" fill="#f8fafc" stroke="#d6e0ed"/>
+    <circle cx="140" cy="835" r="17" fill="#52657f"/>
+    <text x="140" y="841" text-anchor="middle" class="font white-body">4</text>
+    <text x="170" y="840" class="font box-title">逐文件专用明细</text>
+    <text x="130" y="872" class="font body">证据、分类、逻辑路径或 before / after</text>
+
+    <rect x="555" y="800" width="425" height="104" rx="18" fill="#fff8eb"/>
+    <circle cx="590" cy="835" r="17" fill="#d97706"/>
+    <text x="590" y="841" text-anchor="middle" class="font white-body">5</text>
+    <text x="620" y="840" class="font box-title">文件变化</text>
+    <text x="580" y="872" class="font body">分别说明原件、工作副本和派生件</text>
+
+    <rect x="1005" y="800" width="490" height="104" rx="18" fill="#effcf8"/>
+    <circle cx="1040" cy="835" r="17" fill="#0f766e"/>
+    <text x="1040" y="841" text-anchor="middle" class="font white-body">6</text>
+    <text x="1070" y="840" class="font box-title">下一步</text>
+    <text x="1030" y="872" class="font body">查看、筛选、总结、纠正或确认计划</text>
+
+    <path d="M315 774 V798" class="arrow"/>
+    <path d="M765 774 V798" class="arrow"/>
+    <path d="M1250 774 V798" class="arrow"/>
+
+    <rect x="105" y="935" width="1390" height="64" rx="18" fill="#f5f8fc"/>
+    <text x="800" y="974" text-anchor="middle" class="font box-title">公共外壳统一体验；搜索卡、证据卡、分类卡、表格卡和 OperationPlan 卡继续提供各自专业内容</text>
+  </g>
+
+  <text x="80" y="1080" class="font small">实施原则：确定性事实优先 · 专用能力复用 · 历史回执兼容 · 高风险操作必须确认 · 受管原件保护不变</text>
+</svg>
