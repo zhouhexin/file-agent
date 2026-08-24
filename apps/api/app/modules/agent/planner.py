@@ -13,6 +13,10 @@ from typing import Any, Dict, List
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.modules.agent.tool_contracts import ToolResultBinding
+from app.modules.agent.tool_schemas import (
+    StructuredFieldSpec,
+    StructuredImageExtractionInput,
+)
 
 from app.core.logging import log_event
 from app.modules.agent.capability_router import route_user_intent
@@ -219,6 +223,229 @@ class PlannerOutput(BaseModel):
         return self
 
 
+def build_structured_image_extraction_plan(
+    *,
+    user_goal: str,
+    attachments: List[Dict[str, Any]],
+) -> PlannerOutput | None:
+    """把明确的图片字段请求收敛为可校验的专用 Tool 计划。
+
+    该函数不是 OCR 或字段值抽取器，只负责把用户已经写明的字段名、展示方式和
+    后端授权 ``document_id`` 变成严格 Tool 输入。字段值仍由后台 Autonomous
+    Loop 中的 PP-StructureV3 与结构化抽取 LLM Provider 生成。
+    """
+
+    if not is_structured_image_extraction_request(user_goal):
+        return None
+    document_ids = _structured_document_ids(attachments)
+    if not document_ids:
+        return None
+    schema_mode, fields = _structured_field_schema(user_goal)
+    if schema_mode == "EXPLICIT_FIELDS" and not fields:
+        return None
+    presentation = _structured_presentation(user_goal)
+    steps: List[PlannerStep] = []
+    for index, document_id in enumerate(document_ids, start=1):
+        tool_input = StructuredImageExtractionInput(
+            document_id=document_id,
+            schema_mode=schema_mode,
+            record_mode="AUTO",
+            fields=fields,
+            presentation=presentation,
+            retry_strategy="INITIAL",
+            target_field_keys=[],
+        )
+        steps.append(
+            PlannerStep(
+                step_id=f"step-structured-extraction-{index}",
+                skill="image-structured-extraction",
+                tool_name="extract-image-structured-data",
+                input=tool_input.model_dump(),
+                requires_confirmation=False,
+                risk_level="medium",
+                expected_outputs=["structured_records", "evidence", "review_items"],
+                writes=[
+                    "structured_extraction_runs",
+                    "structured_extraction_fields",
+                    "document_extraction_runs",
+                    "document_pages",
+                    "document_elements",
+                    "filesystem_jobs",
+                    "change_sets",
+                    "change_items",
+                ],
+            )
+        )
+    return PlannerOutput(
+        intent="EXTRACT_STRUCTURED_IMAGE_DATA",
+        user_goal=user_goal,
+        slots={
+            "document_ids": document_ids,
+            "requested_outputs": ["structured_data", presentation.lower(), "receipt"],
+            "schema_mode": schema_mode,
+        },
+        selected_skills=["image-structured-extraction", "change-report"],
+        steps=steps,
+        evidence_policy={"require_page_or_cell": True, "allow_no_evidence_answer": False},
+        confirmation_policy={"operation_plan_required": False},
+    )
+
+
+def _structured_field_schema(
+    message: str,
+) -> tuple[str, List[StructuredFieldSpec]]:
+    """只解析用户明示字段；无法可靠拆分时关闭式返回空字段。"""
+
+    normalized = re.sub(r"\s+", "", str(message or ""))
+    if any(
+        marker in normalized
+        for marker in ("全部信息", "所有信息", "全部字段", "所有字段", "完整信息")
+    ):
+        return "AUTO_DISCOVER", []
+
+    action_match = re.search(r"(?:识别|提取|抽取|读取)", normalized)
+    if action_match is None:
+        return "EXPLICIT_FIELDS", []
+    candidate = normalized[action_match.end() :]
+    candidate = re.sub(
+        r"^(?:从)?(?:这张|该张|该|上传的|附件中的)?"
+        r"(?:图片|图中|图里|图像|截图|扫描件|照片|影像)(?:中|里|中的|里的)?",
+        "",
+        candidate,
+    )
+    candidate = re.split(
+        r"(?:，|,|；|;)(?:并|然后)?(?:以|用|按照).{0,16}?"
+        r"(?:表格|JSON|CSV|Excel|结构化|文本)(?:的形式|形式)?(?:展示|显示|输出|返回)?",
+        candidate,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    candidate = re.split(
+        r"(?:，|,)?(?:并)?(?:整理|展示|显示|输出|返回)(?:为|成)?"
+        r"(?:一个|一份)?(?:表格|JSON|CSV|Excel|结构化数据|文本)",
+        candidate,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    candidate = re.sub(r"(?:等)?(?:字段|信息|内容)$", "", candidate)
+    raw_labels = re.split(r"、|，|,|以及|和", candidate)
+    labels: List[str] = []
+    for raw_label in raw_labels:
+        label = raw_label.strip("：:；;。.!！?？")
+        if not label or len(label) > 80 or label in labels:
+            continue
+        labels.append(label)
+    if not labels or len(labels) > 40:
+        return "EXPLICIT_FIELDS", []
+
+    fields: List[StructuredFieldSpec] = []
+    used_keys: set[str] = set()
+    for index, label in enumerate(labels, start=1):
+        base_key = _structured_field_key(label=label, index=index)
+        key = base_key
+        suffix = 2
+        while key in used_keys:
+            key = f"{base_key}_{suffix}"
+            suffix += 1
+        used_keys.add(key)
+        fields.append(
+            StructuredFieldSpec(
+                key=key,
+                label=label,
+                field_type=_structured_field_type(label),
+                required=False,
+            )
+        )
+    return "EXPLICIT_FIELDS", fields
+
+
+def _structured_field_key(*, label: str, index: int) -> str:
+    """为常见字段给出稳定 key，任意业务字段使用安全序号 key。"""
+
+    common = {
+        "申请人": "applicant",
+        "姓名": "name",
+        "资助金额": "funding_amount",
+        "金额": "amount",
+        "申请日期": "application_date",
+        "日期": "date",
+        "项目名称": "project_name",
+        "负责人": "principal",
+        "联系电话": "phone",
+        "电话": "phone",
+    }
+    exact = common.get(label)
+    if exact:
+        return exact
+    if "申请日期" in label:
+        return "application_date"
+    return f"field_{index}"
+
+
+def _structured_field_type(label: str) -> str:
+    """根据字段标签选择确定性规范化类型，不推断任何字段值。"""
+
+    if "身份证" in label or "证件号" in label:
+        return "id_number"
+    if any(marker in label for marker in ("电话", "手机", "联系方式")):
+        return "phone"
+    if any(marker in label for marker in ("日期", "年月日")):
+        return "date"
+    if "时间" in label:
+        return "datetime"
+    if any(marker in label for marker in ("金额", "费用", "总额", "资助")):
+        return "money"
+    if any(marker in label for marker in ("申请人", "姓名", "负责人", "联系人")):
+        return "person_name"
+    if any(marker in label for marker in ("单位", "学校", "学院", "部门", "机构")):
+        return "organization"
+    if any(marker in label for marker in ("数量", "人数", "序号")):
+        return "integer"
+    if label.startswith("是否"):
+        return "boolean"
+    return "string"
+
+
+def _structured_presentation(message: str) -> str:
+    """保留用户明确指定的展示格式。"""
+
+    lowered = str(message or "").lower()
+    for marker, presentation in (
+        ("json", "JSON"),
+        ("csv", "CSV"),
+        ("xlsx", "XLSX"),
+        ("excel", "XLSX"),
+        ("表格", "TABLE"),
+        ("文本", "TEXT"),
+    ):
+        if marker in lowered:
+            return presentation
+    return "AUTO"
+
+
+def _structured_document_ids(attachments: List[Dict[str, Any]]) -> List[str]:
+    """只采用后端上下文确认过的图片或 PDF 附件。"""
+
+    supported_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".pdf"}
+    document_ids: List[str] = []
+    for attachment in attachments:
+        document_id = str(attachment.get("document_id") or "")
+        filename = str(attachment.get("filename") or "")
+        content_type = str(attachment.get("content_type") or "").lower()
+        suffix = Path(filename).suffix.lower()
+        if not document_id:
+            continue
+        if not (
+            content_type.startswith("image/")
+            or content_type == "application/pdf"
+            or suffix in supported_suffixes
+        ):
+            continue
+        if document_id not in document_ids:
+            document_ids.append(document_id)
+    return document_ids
+
+
 class DeterministicPlanner:
     """用于测试和早期框架开发的确定性 Planner。
 
@@ -245,6 +472,13 @@ class DeterministicPlanner:
                 intent="OUTPUT_NOT_VISIBLE_FEEDBACK",
                 user_goal=message,
             )
+
+        structured_plan = build_structured_image_extraction_plan(
+            user_goal=message,
+            attachments=attachments,
+        )
+        if structured_plan is not None:
+            return structured_plan
 
         conflict_action = _filename_conflict_action(message)
         # 识别“覆盖、同时保留、取消”等文件名冲突回复，命中后生成工作副本操作计划。

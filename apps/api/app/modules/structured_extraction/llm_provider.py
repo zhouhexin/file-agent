@@ -220,15 +220,20 @@ def build_structured_extraction_provider(
     settings = settings or get_settings()
     if settings.structured_extraction_llm_provider != "openai_compatible":
         return DeterministicLayoutExtractionProvider()
+    # Provider 必须显式开启；开启后，未单独配置的连接参数可以复用已经启用的
+    # 全局 OpenAI-compatible 网关，避免只设置 Provider 时创建一个必然失败的客户端。
+    api_key = settings.structured_extraction_llm_api_key or settings.llm_api_key
+    base_url = settings.structured_extraction_llm_base_url or settings.llm_base_url
+    model_name = settings.structured_extraction_llm_model or settings.llm_chat_model
     client = OpenAICompatibleLLMClient(
-        api_key=settings.structured_extraction_llm_api_key,
-        base_url=settings.structured_extraction_llm_base_url,
-        model=settings.structured_extraction_llm_model,
+        api_key=api_key,
+        base_url=base_url,
+        model=model_name,
         timeout_seconds=settings.structured_extraction_llm_timeout_seconds,
     )
     return LlmStructuredExtractionProvider(
         client=client,
-        model_name=settings.structured_extraction_llm_model,
+        model_name=model_name,
     )
 
 

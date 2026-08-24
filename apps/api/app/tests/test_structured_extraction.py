@@ -35,7 +35,11 @@ from app.modules.agent.graph import (
     _enforce_structured_extraction_goal,
     _structured_extraction_budget_error,
 )
-from app.modules.agent.planner import PlannerOutput, PlannerStep
+from app.modules.agent.planner import (
+    PlannerOutput,
+    PlannerStep,
+    build_structured_image_extraction_plan,
+)
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.agent.tool_schemas import StructuredFieldSpec, StructuredImageExtractionInput
 from app.modules.agent.user_receipt import build_user_task_receipt
@@ -44,6 +48,10 @@ from app.modules.structured_extraction.autonomous_loop import merge_structured_o
 from app.modules.structured_extraction.evidence import EvidenceElement
 from app.modules.structured_extraction.export import StructuredExtractionExportService
 from app.modules.structured_extraction.normalization import normalize_field_value
+from app.modules.structured_extraction.llm_provider import (
+    LlmStructuredExtractionProvider,
+    build_structured_extraction_provider,
+)
 from app.modules.structured_extraction.pp_structure_provider import PpStructureV3Provider
 from app.modules.structured_extraction.repository import StructuredExtractionRepository
 from app.modules.structured_extraction.schemas import CandidateExtraction, StructuredExtractionResult
@@ -133,6 +141,109 @@ def test_structured_goal_guard_rejects_basic_insight_substitution():
     assert guarded.intent == "STRUCTURED_EXTRACTION_PLANNING_FAILED"
     assert guarded.steps[0].tool_name == "intent-summary"
     assert projection["fallback_reason"] == "PLANNING_FAILED"
+
+
+def test_structured_plan_preserves_requested_fields_and_table_presentation():
+    """显式字段请求可被后端收敛为严格专用 Tool 输入。"""
+
+    plan = build_structured_image_extraction_plan(
+        user_goal="识别图中申请人、资助金额以及使用登记情况中的申请日期，并以表格的形式展示",
+        attachments=[{"document_id": "doc-1", "filename": "form.jpg"}],
+    )
+
+    assert plan is not None
+    assert plan.intent == "EXTRACT_STRUCTURED_IMAGE_DATA"
+    assert [step.tool_name for step in plan.steps] == ["extract-image-structured-data"]
+    tool_input = StructuredImageExtractionInput.model_validate(plan.steps[0].input)
+    assert tool_input.presentation == "TABLE"
+    assert [field.label for field in tool_input.fields] == [
+        "申请人",
+        "资助金额",
+        "使用登记情况中的申请日期",
+    ]
+    assert [field.field_type for field in tool_input.fields] == [
+        "person_name",
+        "money",
+        "date",
+    ]
+
+
+def test_structured_plan_supports_arbitrary_fields_and_rejects_non_image_scope():
+    """未知业务字段使用安全动态 key，非图片/PDF 附件不进入专用 Tool。"""
+
+    plan = build_structured_image_extraction_plan(
+        user_goal="提取图中报到地点、宿舍楼号以及材料齐全状态，并返回 JSON",
+        attachments=[{"document_id": "doc-1", "filename": "notice.png"}],
+    )
+    unsupported = build_structured_image_extraction_plan(
+        user_goal="提取图中报到地点并返回 JSON",
+        attachments=[{"document_id": "doc-2", "filename": "notice.docx"}],
+    )
+
+    assert plan is not None
+    tool_input = StructuredImageExtractionInput.model_validate(plan.steps[0].input)
+    assert [field.label for field in tool_input.fields] == [
+        "报到地点",
+        "宿舍楼号",
+        "材料齐全状态",
+    ]
+    assert [field.key for field in tool_input.fields] == ["field_1", "field_2", "field_3"]
+    assert tool_input.presentation == "JSON"
+    assert unsupported is None
+
+
+def test_structured_goal_guard_repairs_wrong_tool_when_scope_is_authorized():
+    """专用 Tool 已启用且附件明确时，错误 LLM 路由被安全计划替换。"""
+
+    wrong_plan = PlannerOutput(
+        intent="READ_DOCUMENT_INSIGHTS",
+        user_goal="识别图中申请人并以表格展示",
+        slots={"document_ids": ["doc-1"]},
+        selected_skills=["document-insight-read"],
+        steps=[
+            PlannerStep(
+                step_id="step-1",
+                skill="document-insight-read",
+                tool_name="read-document-insights",
+                input={"document_ids": ["doc-1"]},
+            )
+        ],
+        evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
+        confirmation_policy={"operation_plan_required": False},
+    )
+    guarded, projection = _enforce_structured_extraction_goal(
+        state={"message": "识别图中申请人并以表格展示"},
+        plan=wrong_plan,
+        user_intent_plan={"source": "adaptive_planner"},
+        catalog_snapshot={"enabled_tool_names": ["extract-image-structured-data"]},
+        attachments=[{"document_id": "doc-1", "filename": "form.jpg"}],
+    )
+
+    assert guarded.intent == "EXTRACT_STRUCTURED_IMAGE_DATA"
+    assert guarded.steps[0].tool_name == "extract-image-structured-data"
+    assert projection["fallback_reason"] == "STRUCTURED_PLAN_NORMALIZED"
+
+
+def test_structured_llm_provider_inherits_global_gateway_after_explicit_opt_in():
+    """只显式开启专用 Provider 时允许复用现有全局网关连接参数。"""
+
+    provider = build_structured_extraction_provider(
+        settings=SimpleNamespace(
+            structured_extraction_llm_provider="openai_compatible",
+            structured_extraction_llm_api_key="",
+            structured_extraction_llm_base_url="",
+            structured_extraction_llm_model="",
+            structured_extraction_llm_timeout_seconds=120,
+            llm_api_key="global-key",
+            llm_base_url="https://llm.example/v1",
+            llm_chat_model="global-model",
+        )
+    )
+
+    assert isinstance(provider, LlmStructuredExtractionProvider)
+    assert provider.model_name == "global-model"
+    assert provider.client.api_key == "global-key"
+    assert provider.client.base_url == "https://llm.example/v1"
 
 def test_pp_structure_provider_normalizes_page_cells_and_bbox(tmp_path: Path):
     image_path = tmp_path / "form.png"

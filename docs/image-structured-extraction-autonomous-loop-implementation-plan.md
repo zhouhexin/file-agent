@@ -1038,8 +1038,11 @@ HTTP API 始终返回 JSON envelope；`presentation` 表示前端展示方式，
   `extract-image-structured-data` 可以满足目标；`read-document-insights`、普通 OCR 和
   `hybrid-search` 不能被视为等价降级。
 - 专用 Tool 未启用时必须关闭式说明本次没有执行结构化抽取，不能声称已经识别、整理或生成表格。
-- 专用 Tool 已启用但 Planner 生成了其他 Tool 计划时，后端目标守卫必须拒绝替代计划并要求重试，
-  不能让合法但无关的 Tool 输出冒充用户目标。
+- 专用 Tool 已启用但 Planner 生成了其他 Tool 计划时，后端目标守卫不能执行替代 Tool。若当前消息
+  已明确列出字段或明确要求自动发现全部字段，并且附件已经由后端解析为确定的 `document_id`，守卫
+  应只把这些用户明示参数规范化为 `extract-image-structured-data` 计划；无法可靠解析字段或附件范围时
+  仍关闭式结束。该规范化步骤不读取图片、不生成字段值，字段值继续由 PP-StructureV3、结构化抽取
+  LLM Provider 和有预算的 Autonomous Loop 生成。
 - 通用 LLM 回执只能提示用户查看确定性明细，不能自行声明“已识别、已提取、已整理、已生成”等
   执行事实；真正的字段、记录数、复核数和导出件只能来自专用 ToolInvocation。
 - “没有看到你展示的表格/结果”属于上一轮输出反馈，不得因包含“展示 + 表格”扩大为共享工作区
@@ -1078,6 +1081,12 @@ STRUCTURED_EXTRACTION_RETRY_CONFIDENCE=0.65
 配置规则：
 
 - `LLM_ENABLED=true` 不隐式开启 `STRUCTURED_EXTRACTION_LLM_PROVIDER`。
+- 只有显式设置 `STRUCTURED_EXTRACTION_LLM_PROVIDER=openai_compatible` 后，专用 Provider 才允许调用
+  外部模型。此时 `STRUCTURED_EXTRACTION_LLM_BASE_URL`、`STRUCTURED_EXTRACTION_LLM_API_KEY` 和
+  `STRUCTURED_EXTRACTION_LLM_MODEL` 中未单独配置的项复用对应的全局 `LLM_*` 网关参数；专用参数优先。
+- 当前全局 Adaptive Planner 可以保持 `shadow`。明确的图片结构化请求先由后端把用户明示字段与授权
+  附件规范化为严格初始 Tool 计划，后台字段映射与可选一次局部增强仍由 LLM Autonomous Loop 完成，
+  不要求为了单项能力把全局 Planner 切换为 `enabled`。
 - 真实 `.env` 不提交；`.env.example` 只放空密钥。
 - Provider 设置变化必须改变缓存 fingerprint。
 - 配置或依赖缺失时能力清单显示不可用，不能注册空成功 Tool。

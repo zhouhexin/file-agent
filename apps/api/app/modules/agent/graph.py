@@ -22,6 +22,7 @@ from app.modules.agent.binding_resolver import (
     ToolResultBindingResolver,
 )
 from app.modules.agent.planner import (
+    build_structured_image_extraction_plan,
     build_plan_from_user_intent,
     has_explicit_filename_content_request,
     is_missing_generated_output_feedback,
@@ -355,6 +356,7 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
         plan=plan,
         user_intent_plan=user_intent_plan,
         catalog_snapshot=runtime.context.catalog_snapshot,
+        attachments=planning_attachments,
     )
     log_event(
         "agent.planning.final_tool_plan",
@@ -662,8 +664,9 @@ def _enforce_structured_extraction_goal(
     plan: Any,
     user_intent_plan: Dict[str, Any],
     catalog_snapshot: Dict[str, Any],
+    attachments: List[Dict[str, Any]] | None = None,
 ):
-    """图片字段抽取只能由专用 Tool 满足，禁止用基础洞察或文件检索冒充完成。"""
+    """图片字段抽取只能由专用 Tool 满足，并修复可确定的字段计划。"""
 
     if not is_structured_image_extraction_request(state.get("message", "")):
         return plan, user_intent_plan
@@ -673,6 +676,18 @@ def _enforce_structured_extraction_goal(
     ):
         return plan, user_intent_plan
     enabled_tools = set(catalog_snapshot.get("enabled_tool_names", []))
+    if "extract-image-structured-data" in enabled_tools:
+        recovered = build_structured_image_extraction_plan(
+            user_goal=state.get("message", ""),
+            attachments=list(attachments or []),
+        )
+        if recovered is not None:
+            return recovered, {
+                "source": "structured_extraction_goal_guard",
+                "decision_type": "TOOL_PLAN",
+                "fallback_reason": "STRUCTURED_PLAN_NORMALIZED",
+                "original_intent": str(getattr(plan, "intent", "") or ""),
+            }
     reason = (
         "planning_failed"
         if "extract-image-structured-data" in enabled_tools
