@@ -7,6 +7,8 @@
 from app.modules.agent.planner import (
     _has_plain_document_summary_intent,
     _managed_filename_contains_from_list_request,
+    is_missing_generated_output_feedback,
+    is_structured_image_extraction_request,
 )
 from app.modules.agent.planner import DeterministicPlanner, build_plan_from_user_intent
 from app.modules.agent.service import AgentRuntimeService
@@ -32,6 +34,31 @@ def test_deterministic_planner_routes_natural_language_file_search():
         "query": "找我去年活动相关的奖学金材料",
         "document_ids": [],
     }
+
+
+def test_missing_table_feedback_does_not_expand_to_workspace_file_search():
+    """上一轮未展示表格的否定反馈不能因“展示+表格”被当成全局检索。"""
+
+    message = "我没有看到你展示的表格"
+    plan = DeterministicPlanner().plan(
+        conversation_id="conversation-missing-table",
+        user_id="user-missing-table",
+        message_id="message-missing-table",
+        message=message,
+        attachments=[],
+    )
+
+    assert is_missing_generated_output_feedback(message) is True
+    assert plan.intent == "OUTPUT_NOT_VISIBLE_FEEDBACK"
+    assert plan.steps[0].tool_name == "intent-summary"
+
+
+def test_structured_image_request_detector_requires_source_action_and_output():
+    assert is_structured_image_extraction_request(
+        "识别图中申请人、资助金额和申请日期，并以表格形式展示"
+    )
+    assert not is_structured_image_extraction_request("识别图片里的所有文字")
+    assert not is_structured_image_extraction_request("查找工作总结表格")
 
 
 def test_relative_time_work_summary_routes_to_hybrid_search_not_directory_list():

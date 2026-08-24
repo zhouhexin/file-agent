@@ -20,7 +20,7 @@ class _FakeReceiptClient:
         """返回不含事实字段的自然语言说明。"""
 
         self.payloads.append(user_payload)
-        return "任务处理结果已整理，请查看下方明细。"
+        return "请查看下方经后端验证的任务明细。"
 
 
 def test_unified_receipt_summary_only_receives_verified_safe_summary():
@@ -55,11 +55,42 @@ def test_unified_receipt_summary_only_receives_verified_safe_summary():
     result = response(state, runtime)
 
     assert result["status"] == "COMPLETED"
-    assert result["final_response"].startswith("任务处理结果已整理")
+    assert result["final_response"].startswith("请查看下方经后端验证")
     assert len(client.payloads) == 1
     payload_text = str(client.payloads[0])
     assert "不应给模型" not in payload_text
     assert "storage_path" not in payload_text
+
+
+def test_receipt_summary_rejects_model_claim_that_unverified_action_completed():
+    """模型不得把用户目标或错误计划改写成“已经识别完成”的事实。"""
+
+    class ClaimingClient:
+        def complete_text(self, *, system_prompt: str, user_payload: dict) -> str:
+            return "已识别图片内容并整理为表格。"
+
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(
+            receipt_summary_service=LLMReceiptSummaryService(
+                client=ClaimingClient(),
+                enabled=True,
+            ),
+            document_summary_service=None,
+        )
+    )
+    state = {
+        "intent": "READ_DOCUMENT_INSIGHTS",
+        "message": "识别图片字段并用表格展示",
+        "result_summary": {
+            "insight_documents": [{"filename": "image.jpg"}],
+            "document_results": [],
+        },
+    }
+
+    result = response(state, runtime)
+
+    assert result["final_response"] == "已读取 1 个文件的基础洞察：image.jpg。"
+    assert "已识别" not in result["final_response"]
 
 
 def test_evidence_answer_is_not_rewritten_by_receipt_summary_llm():

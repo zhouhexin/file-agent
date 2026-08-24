@@ -1032,6 +1032,19 @@ apps/web/src/features/chat/StructuredExtractionReceipt.tsx
 
 HTTP API 始终返回 JSON envelope；`presentation` 表示前端展示方式，不改变 API Content-Type。
 
+### 19.3 目标满足与回执真实性保护
+
+- 用户明确要求“图片/扫描件字段抽取 + 表格/JSON/CSV/XLSX/结构化展示”时，只有
+  `extract-image-structured-data` 可以满足目标；`read-document-insights`、普通 OCR 和
+  `hybrid-search` 不能被视为等价降级。
+- 专用 Tool 未启用时必须关闭式说明本次没有执行结构化抽取，不能声称已经识别、整理或生成表格。
+- 专用 Tool 已启用但 Planner 生成了其他 Tool 计划时，后端目标守卫必须拒绝替代计划并要求重试，
+  不能让合法但无关的 Tool 输出冒充用户目标。
+- 通用 LLM 回执只能提示用户查看确定性明细，不能自行声明“已识别、已提取、已整理、已生成”等
+  执行事实；真正的字段、记录数、复核数和导出件只能来自专用 ToolInvocation。
+- “没有看到你展示的表格/结果”属于上一轮输出反馈，不得因包含“展示 + 表格”扩大为共享工作区
+  文件检索。
+
 ## 20. 配置
 
 建议新增：
@@ -1099,6 +1112,8 @@ STRUCTURED_EXTRACTION_RETRY_CONFIDENCE=0.65
 | 少量字段低置信度 | `PARTIAL` | 最多一次 `VISION_CROP` |
 | 证据元素不存在 | `NEEDS_REVIEW` | 拒绝高置信度字段并记录冲突 |
 | 外部 Provider 未授权 | `WAITING_FOR_CONFIRMATION` | 创建外发 OperationPlan 或使用本地能力 |
+| 部署未启用结构化抽取 | `UNAVAILABLE` | 明确说明未执行，不回退为基础洞察或全局检索 |
+| Planner 选择了非专用 Tool | `FAILED` | 后端目标守卫关闭式拒绝，不生成虚假完成回执 |
 
 ## 23. 代码目录规划
 
@@ -1244,6 +1259,9 @@ docs/runbook.md
 8. 超出两次结构化抽取调用时关闭式结束。
 9. 异步任务未完成时 Planner 不重复创建任务。
 10. 写入型失败后 Planner 只能 FINISH 或 CLARIFY。
+11. 明确结构化抽取请求不能被 `read-document-insights` 或 `hybrid-search` 满足。
+12. “没有看到表格”反馈不能触发共享工作区文件检索。
+13. 通用回执模型声称“已识别/已整理”时必须被过滤，保留确定性回执。
 
 ### 25.3 API 和前端测试
 

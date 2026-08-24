@@ -31,7 +31,11 @@ from app.db.models import (
 )
 from app.modules.agent.state import AgentRunResult, ToolInvocationRecord
 from app.modules.agent.catalog import AgentCatalogService
-from app.modules.agent.graph import _structured_extraction_budget_error
+from app.modules.agent.graph import (
+    _enforce_structured_extraction_goal,
+    _structured_extraction_budget_error,
+)
+from app.modules.agent.planner import PlannerOutput, PlannerStep
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.agent.tool_schemas import StructuredFieldSpec, StructuredImageExtractionInput
 from app.modules.agent.user_receipt import build_user_task_receipt
@@ -96,6 +100,39 @@ def test_catalog_only_exposes_skill_when_deployment_enables_real_tool(monkeypatc
     assert "image-structured-extraction" in enabled["enabled_skill_ids"]
     assert "extract-image-structured-data" in enabled["enabled_tool_names"]
 
+
+def test_structured_goal_guard_rejects_basic_insight_substitution():
+    """模型即使选择了合法 Tool，也不能用基础洞察冒充图片字段抽取。"""
+
+    wrong_plan = PlannerOutput(
+        intent="READ_DOCUMENT_INSIGHTS",
+        user_goal="识别图片中的申请人并以表格展示",
+        slots={"document_ids": ["doc-1"]},
+        selected_skills=["document-insight-read"],
+        steps=[
+            PlannerStep(
+                step_id="step-1",
+                skill="document-insight-read",
+                tool_name="read-document-insights",
+                input={"document_ids": ["doc-1"]},
+            )
+        ],
+        evidence_policy={
+            "require_page_or_cell": False,
+            "allow_no_evidence_answer": True,
+        },
+        confirmation_policy={"operation_plan_required": False},
+    )
+    guarded, projection = _enforce_structured_extraction_goal(
+        state={"message": "识别图片中的申请人并以表格展示"},
+        plan=wrong_plan,
+        user_intent_plan={"source": "adaptive_planner"},
+        catalog_snapshot={"enabled_tool_names": ["extract-image-structured-data"]},
+    )
+
+    assert guarded.intent == "STRUCTURED_EXTRACTION_PLANNING_FAILED"
+    assert guarded.steps[0].tool_name == "intent-summary"
+    assert projection["fallback_reason"] == "PLANNING_FAILED"
 
 def test_pp_structure_provider_normalizes_page_cells_and_bbox(tmp_path: Path):
     image_path = tmp_path / "form.png"

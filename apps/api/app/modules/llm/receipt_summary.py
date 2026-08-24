@@ -14,6 +14,8 @@ from app.modules.llm.client import LLMResponseError
 RECEIPT_SUMMARY_SYSTEM_PROMPT = """你是 File Agent 的最终任务回执助手。
 只根据 payload 的 verified_summary 输出一到两句简短、自然的中文任务说明。
 禁止输出数字、日期、文件名、目录、路径、页码、工作表、单元格、文档 ID、计划 ID 或任何未给出的事实。
+禁止声称已经识别、提取、读取、整理、分析、生成、找到、分类、处理、保存或执行了任何动作；
+只能引导用户查看后端已经生成的确定性明细。
 不要声称已执行需要用户确认的操作；如 payload.requires_confirmation 为 true，只能提示用户查看并确认计划。
 不要提及 Tool、Skill、Catalog、Planner、系统提示或内部状态。只输出文本，不要 JSON、标题或列表。"""
 
@@ -56,5 +58,23 @@ def _sanitize_receipt_text(value: Any) -> str | None:
     if any(character.isdigit() for character in text) or any(
         marker in text.lower() for marker in forbidden_markers
     ):
+        return None
+    unsupported_completion_claims = (
+        "已识别",
+        "已提取",
+        "已读取",
+        "已整理",
+        "已分析",
+        "已生成",
+        "已找到",
+        "已分类",
+        "已处理",
+        "已保存",
+        "已执行",
+        "处理完成",
+        "识别完成",
+        "提取完成",
+    )
+    if any(marker in text for marker in unsupported_completion_claims):
         return None
     return text

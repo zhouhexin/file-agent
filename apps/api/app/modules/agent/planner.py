@@ -88,6 +88,46 @@ MANAGED_FILE_CLASSIFICATION_HINTS = {
 MCP_FILESYSTEM_HINTS = {"mcp_filesystem_read", "mcp-filesystem-list", "mcp-filesystem-search", "mcp-filesystem-info"}
 FILE_SEARCH_HINTS = {"file_search", "file-search", "hybrid_search", "hybrid-search"}
 SPREADSHEET_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".csv", ".tsv"}
+
+
+def is_missing_generated_output_feedback(message: str) -> bool:
+    """识别“没有看到上一轮表格/结果”反馈，避免把否定反馈当成文件检索。"""
+
+    normalized = re.sub(r"\s+", "", str(message or ""))
+    if not normalized:
+        return False
+    if any(
+        marker in normalized
+        for marker in ("帮我找", "请查找", "重新查找", "重新搜索", "搜索文件", "检索文件")
+    ):
+        return False
+    return bool(
+        re.search(
+            r"(?:没|没有|未)(?:有)?(?:看到|看见|显示|展示|收到|生成|出现)"
+            r"[^，。！？,.!?]{0,16}(?:表格|结果|回执|卡片|数据)",
+            normalized,
+        )
+    )
+
+
+def is_structured_image_extraction_request(message: str) -> bool:
+    """识别明确要求从图片/扫描件抽取字段并结构化展示的请求。"""
+
+    normalized = re.sub(r"\s+", "", str(message or ""))
+    if not normalized:
+        return False
+    has_image_source = any(
+        marker in normalized
+        for marker in ("图片", "图中", "图里", "图像", "截图", "扫描件", "照片", "影像")
+    )
+    has_extraction_action = any(
+        marker in normalized for marker in ("识别", "提取", "抽取", "读取")
+    )
+    has_structured_output = any(
+        marker.lower() in normalized.lower()
+        for marker in ("表格", "字段", "JSON", "CSV", "Excel", "结构化")
+    )
+    return has_image_source and has_extraction_action and has_structured_output
 MANAGED_EXTENSION_ALIASES = {
     "pdf": "pdf",
     ".pdf": "pdf",
@@ -198,6 +238,13 @@ class DeterministicPlanner:
     ) -> PlannerOutput:
         """根据用户消息和附件上下文生成声明式计划。"""
         lowered = message.lower()
+
+        # “没有看到上一轮表格”是对既有输出的反馈，不是要求在共享工作区搜索表格文件。
+        if is_missing_generated_output_feedback(message):
+            return _general_chat_plan(
+                intent="OUTPUT_NOT_VISIBLE_FEEDBACK",
+                user_goal=message,
+            )
 
         conflict_action = _filename_conflict_action(message)
         # 识别“覆盖、同时保留、取消”等文件名冲突回复，命中后生成工作副本操作计划。
@@ -1314,6 +1361,21 @@ def _general_chat_plan(*, intent: str, user_goal: str) -> PlannerOutput:
     )
 
 
+def structured_extraction_unavailable_plan(
+    *,
+    user_goal: str,
+    reason: str,
+) -> PlannerOutput:
+    """关闭式结束无法安全执行的图片结构化抽取，不得回退成基础洞察或全局检索。"""
+
+    intent = (
+        "STRUCTURED_EXTRACTION_UNAVAILABLE"
+        if reason == "deployment_disabled"
+        else "STRUCTURED_EXTRACTION_PLANNING_FAILED"
+    )
+    return _general_chat_plan(intent=intent, user_goal=user_goal)
+
+
 def _file_search_plan(
     *,
     user_goal: str,
@@ -2360,6 +2422,8 @@ def _has_classification_intent(*, message: str, lowered: str) -> bool:
 def _has_file_search_intent(*, message: str, lowered: str) -> bool:
     """识别用户按内容主题查找已整理工作副本的意图。"""
 
+    if is_missing_generated_output_feedback(message):
+        return False
     if any(keyword in message for keyword in ["受管目录", "服务器目录", "服务器工作目录"]):
         return False
     # “文章”也是学校业务中常见的文件称呼；“列出”属于检索展示动作，

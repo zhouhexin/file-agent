@@ -24,6 +24,9 @@ from app.modules.agent.binding_resolver import (
 from app.modules.agent.planner import (
     build_plan_from_user_intent,
     has_explicit_filename_content_request,
+    is_missing_generated_output_feedback,
+    is_structured_image_extraction_request,
+    structured_extraction_unavailable_plan,
 )
 from app.modules.agent.planner_contracts import (
     PlannerClarification,
@@ -249,6 +252,11 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
         if (
             preflight_plan is not None
             and runtime.context.adaptive_planner_mode == "enabled"
+            and preflight_plan.intent
+            not in {
+                "OUTPUT_NOT_VISIBLE_FEEDBACK",
+                "STRUCTURED_EXTRACTION_UNAVAILABLE",
+            }
             and not (
                 preflight_plan.intent == "EVIDENCE_ANSWER"
                 and has_explicit_filename_content_request(state["message"])
@@ -342,6 +350,12 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
             attachments=planning_attachments,
         )
         user_intent_plan = {}
+    plan, user_intent_plan = _enforce_structured_extraction_goal(
+        state=state,
+        plan=plan,
+        user_intent_plan=user_intent_plan,
+        catalog_snapshot=runtime.context.catalog_snapshot,
+    )
     log_event(
         "agent.planning.final_tool_plan",
         status="COMPLETED",
@@ -614,6 +628,17 @@ def _deterministic_preflight_plan(
         message=state["message"],
         attachments=attachments,
     )
+    if (
+        is_structured_image_extraction_request(state["message"])
+        and "extract-image-structured-data"
+        not in set(runtime.context.catalog_snapshot.get("enabled_tool_names", []))
+    ):
+        return structured_extraction_unavailable_plan(
+            user_goal=state["message"],
+            reason="deployment_disabled",
+        )
+    if plan.intent == "OUTPUT_NOT_VISIBLE_FEEDBACK":
+        return plan
     if plan.intent in {
         "SUGGEST_RENAME",
         "CLASSIFY_AND_SUGGEST_RENAME",
@@ -629,6 +654,39 @@ def _deterministic_preflight_plan(
     ):
         return plan
     return None
+
+
+def _enforce_structured_extraction_goal(
+    *,
+    state: AgentGraphState,
+    plan: Any,
+    user_intent_plan: Dict[str, Any],
+    catalog_snapshot: Dict[str, Any],
+):
+    """图片字段抽取只能由专用 Tool 满足，禁止用基础洞察或文件检索冒充完成。"""
+
+    if not is_structured_image_extraction_request(state.get("message", "")):
+        return plan, user_intent_plan
+    if any(
+        str(step.tool_name) == "extract-image-structured-data"
+        for step in list(plan.steps or [])
+    ):
+        return plan, user_intent_plan
+    enabled_tools = set(catalog_snapshot.get("enabled_tool_names", []))
+    reason = (
+        "planning_failed"
+        if "extract-image-structured-data" in enabled_tools
+        else "deployment_disabled"
+    )
+    fallback = structured_extraction_unavailable_plan(
+        user_goal=state.get("message", ""),
+        reason=reason,
+    )
+    return fallback, {
+        "source": "structured_extraction_goal_guard",
+        "decision_type": "TOOL_PLAN",
+        "fallback_reason": reason.upper(),
+    }
 
 
 def _planning_attachments(state: AgentGraphState) -> List[Dict[str, Any]]:
@@ -2908,6 +2966,21 @@ def _build_general_chat_response(intent_summary: Dict[str, Any]) -> str:
     """为普通对话生成自然回复，避免泄露内部 Tool 审计信息。"""
 
     user_goal = str(intent_summary.get("user_goal") or "").strip()
+    if intent_summary.get("intent") == "OUTPUT_NOT_VISIBLE_FEEDBACK":
+        return (
+            "你反馈得对：上一轮没有生成可展示的结构化表格，不能算识别完成。"
+            "请重新提交原识别请求；系统只会在结构化抽取结果真正生成后展示表格。"
+        )
+    if intent_summary.get("intent") == "STRUCTURED_EXTRACTION_UNAVAILABLE":
+        return (
+            "本次没有执行图片结构化抽取：当前部署尚未启用 PP-StructureV3 结构化抽取能力。"
+            "系统不会再用基础洞察冒充识别结果，也不会扩大为全局文件检索。"
+        )
+    if intent_summary.get("intent") == "STRUCTURED_EXTRACTION_PLANNING_FAILED":
+        return (
+            "本次没有执行图片结构化抽取：智能体未生成符合专用 Tool 契约的计划。"
+            "系统已关闭式停止，未使用基础洞察或文件检索代替。请重新提交识别请求。"
+        )
     if intent_summary.get("intent") == "MISSING_FILE_SCOPE":
         if any(keyword in user_goal.lower() for keyword in ["重命名", "改名", "更名", "rename"]):
             return (
