@@ -51,6 +51,7 @@ from app.modules.file_lifecycle.shared_workspace import (
     SHARED_WORKSPACE_SYSTEM_KEY,
     SHARED_WORKSPACE_TYPE,
 )
+from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.retrieval.clarification_planner import FileSearchClarificationPlanner
 from app.modules.retrieval.clarification_service import FileSearchClarificationService
 
@@ -1383,6 +1384,21 @@ def test_ready_managed_source_answers_without_working_copy_and_queues_materializ
     )
     db.flush()
 
+    # 启动全量同步已经创建低优先级任务时，问答必须复用并提升它，不能再创建
+    # 第二个并发复制任务。
+    background_job = FilesystemJobQueue(db).create_job(
+        job_type="MATERIALIZE_WORKING_COPY",
+        queue_name="MATERIALIZE",
+        root_id=None,
+        created_by=user.id,
+        priority=100,
+        deduplication_key=f"working-copy-materialize:{shared.id}:{revision.id}",
+        payload={
+            "managed_file_revision_id": revision.id,
+            "materialization_reason": "startup-full-sync",
+        },
+    )
+
     result = EvidenceAnswerService(
         db=db,
         user_id=user.id,
@@ -1401,5 +1417,9 @@ def test_ready_managed_source_answers_without_working_copy_and_queues_materializ
         FilesystemJob.job_type == "MATERIALIZE_WORKING_COPY"
     ).all()
     assert len(materialization_jobs) == 1
+    assert materialization_jobs[0].id == background_job.id
+    assert materialization_jobs[0].priority == 20
     assert materialization_jobs[0].payload_json["managed_file_revision_id"] == revision.id
+    assert materialization_jobs[0].payload_json["materialization_reason"] == "user-relevant"
+    assert materialization_jobs[0].payload_json["relevant_file_set_id"]
     db.close()

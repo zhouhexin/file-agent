@@ -779,6 +779,10 @@ MANAGED_PATH_DEFAULT_MODE=NONE
 MANAGED_PATH_VECTOR_PILOT_LIMIT=1000
 MANAGED_FILE_CLASSIFICATION_SYNC_LIMIT=20
 MANAGED_FILE_CLASSIFICATION_BATCH_SIZE=20
+MATERIALIZE_ALL_MANAGED_FILES=true
+MATERIALIZE_WORKING_COPY_BACKGROUND_PRIORITY=100
+MATERIALIZE_RELEVANT_FILES_AFTER_RESPONSE=true
+MATERIALIZE_WORKING_COPY_PRIORITY=20
 ```
 
 受管目录文件分类不超过 `MANAGED_FILE_CLASSIFICATION_SYNC_LIMIT` 时在当前 AgentRun
@@ -855,7 +859,10 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
   -m app.modules.file_lifecycle.watcher
 ```
 
-API 启动钩子、scheduler 和 watcher 都只创建 `filesystem_jobs`。实际 SHA-256 查重、归档、扫描、源侧分析、按需物化、布局修复和暂存清理由 worker 完成。受管目录扫描对新增文件不再预先完整哈希；每批立即创建 `SOURCE_ANALYSIS` 任务，源侧分析完成后即可通过摘要和正文索引检索、回答，不会初始化全量工作副本。用户查询、阅读或选择到的全部最终相关源文件才由 `MATERIALIZE` worker 创建工作副本，复用源侧页面和索引而不重复 LibreOffice 转换；上传归档的即时副本仍由 `IMPORT` 兼容处理。`REPAIR_WORKING_COPY_LAYOUT` 会先把旧根前缀以及历史“待整理/待确认”路径迁到 `shared/<root_key>/<源相对路径>`，并写入 `SYSTEM_LAYOUT_REPAIR` 路径记录。GRAPH worker 完成一次性 Neo4j bootstrap 和正式分类 Outbox 增量投影，API 重启不再同步执行 `sync_all()`。任务通过租约和幂等键恢复，每个任务最多尝试三次；达到上限后保持 `FAILED`。ops/admin 可在 `/admin/failed-files` 查看失败文件，状态接口为：
+API 启动钩子、scheduler 和 watcher 都只创建 `filesystem_jobs`。实际 SHA-256 查重、归档、扫描、源侧分析、后台物化、布局修复和暂存清理由 worker 完成。受管目录扫描对新增文件不再预先完整哈希；每批立即创建 `SOURCE_ANALYSIS` 任务，源侧分析完成后即可通过摘要和正文索引检索、回答，并自动创建低优先级 `MATERIALIZE_WORKING_COPY`，逐步把全部受管文件同步到共享工作目录。全量同步未完成期间，检索同时覆盖活动工作副本和未物化但已分析的源文件；用户查询、阅读或选择到的最终相关源文件会复用同一幂等任务并提升优先级，回答不等待物理复制。物化复用源侧页面和索引，不重复 LibreOffice 转换；上传归档的即时副本仍由 `IMPORT` 兼容处理。尚未完成源侧分析的文件只能参与元数据候选，涉及正文或总结时必须先完成分析，不能编造内容结论。`REPAIR_WORKING_COPY_LAYOUT` 会先把旧根前缀以及历史“待整理/待确认”路径迁到 `shared/<root_key>/<源相对路径>`，并写入 `SYSTEM_LAYOUT_REPAIR` 路径记录。GRAPH worker 完成一次性 Neo4j bootstrap 和正式分类 Outbox 增量投影，API 重启不再同步执行 `sync_all()`。任务通过租约和幂等键恢复，每个任务最多尝试三次；达到上限后保持 `FAILED`。ops/admin 可在 `/admin/failed-files` 查看失败文件，状态接口为：
+
+部署本次全量同步逻辑后必须重启 API、scheduler、`RECONCILE,SCAN`、`SOURCE_ANALYSIS`
+和 `MATERIALIZE,IMPORT` worker；只重启 API 会创建扫描任务，但不会实际分析或复制文件。
 
 本次布局修复没有新增数据库列或表，不需要新增 Alembic migration；更新代码后必须重启 scheduler、
 `RECONCILE`、`IMPORT`、`ANALYSIS` 和 `GRAPH` worker。不要手工移动 `待整理`、`待确认` 或旧根目录，

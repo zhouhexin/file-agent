@@ -106,7 +106,7 @@ class ManagedFileService:
         return self.to_job_response(job)
 
     def create_reconcile_job(self, *, root_id: str, current_user: User) -> FilesystemJobResponse:
-        """创建受管原始目录同步任务，HTTP 请求不等待扫描、源侧分析或按需物化。"""
+        """创建受管目录同步任务，HTTP 请求不等待扫描、源侧分析或全量后台物化。"""
 
         _require_role(current_user, {"admin", "ops"})
         root = self.repository.get_root(root_id)

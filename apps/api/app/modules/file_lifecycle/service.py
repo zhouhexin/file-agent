@@ -1,6 +1,6 @@
 """三层文件生命周期业务服务。
 
-HTTP 请求只创建状态和持久化任务；查重、归档、按需物化、导入和清理均由 worker
+HTTP 请求只创建状态和持久化任务；查重、归档、后台物化、导入和清理均由 worker
 调用本模块的处理方法，API 与 Agent 不得直接执行文件 I/O。
 """
 
@@ -634,16 +634,12 @@ class FileLifecycleJobProcessor:
         if job.job_type == "MATERIALIZE_WORKING_COPY":
             # 相关文件集合是“本轮最终相关范围”的审计事实。物化失败不能只留在
             # FilesystemJob 中，否则管理员无法区分“尚未消费”和“副本创建失败”。
-            revision_id = str((job.payload_json or {}).get("managed_file_revision_id") or "")
-            relevant_set_id = str((job.payload_json or {}).get("relevant_file_set_id") or "")
-            if revision_id and relevant_set_id:
-                self.db.query(RelevantFileSetItem).filter(
-                    RelevantFileSetItem.relevant_file_set_id == relevant_set_id,
-                    RelevantFileSetItem.managed_file_revision_id == revision_id,
-                ).update(
-                    {"status": "RETRY_WAIT" if retrying else "FAILED"},
-                    synchronize_session=False,
-                )
+            # 后台任务可能先于用户检索被领取，payload 中没有集合 ID，因此必须按
+            # 稳定 revision_id 回写全部等待集合，不能让它们永久停在 MATERIALIZING。
+            self._mark_relevant_file_set_item(
+                payload=dict(job.payload_json or {}),
+                status="RETRY_WAIT" if retrying else "FAILED",
+            )
         self.db.flush()
 
     def _reconcile_upload_archives(self, job: FilesystemJob) -> None:
@@ -1259,6 +1255,7 @@ class FileLifecycleJobProcessor:
             self._mark_relevant_file_set_item(
                 payload=payload,
                 status="SOURCE_CHANGED",
+                working_copy_id=existing_copy.id,
             )
             FilesystemJobQueue(self.db).mark_completed(
                 job=job,
@@ -1304,7 +1301,11 @@ class FileLifecycleJobProcessor:
             # 源侧复用审计，避免同一物化任务产生两条“完成”事件。
             job.result_json = result
             job.updated_at = utcnow()
-            self._mark_relevant_file_set_item(payload=payload, status="MATERIALIZED")
+            self._mark_relevant_file_set_item(
+                payload=payload,
+                status="MATERIALIZED",
+                working_copy_id=working_copy_id,
+            )
             self.db.flush()
             log_event(
                 "working_copy.materialization.analysis_reused",
@@ -1319,17 +1320,32 @@ class FileLifecycleJobProcessor:
             # worker 将一个没有目标副本的任务误显示为成功。
             raise RuntimeError("工作副本物化未返回活动副本标识")
 
-    def _mark_relevant_file_set_item(self, *, payload: dict[str, Any], status: str) -> None:
-        """同步相关文件集合项的物化状态，不把队列状态当作业务审计替代品。"""
+    def _mark_relevant_file_set_item(
+        self,
+        *,
+        payload: dict[str, Any],
+        status: str,
+        working_copy_id: str | None = None,
+    ) -> None:
+        """按稳定源修订同步全部相关集合项，不依赖可变的任务关联负载。
 
-        relevant_set_id = str(payload.get("relevant_file_set_id") or "")
+        全量后台任务可能在用户检索前已经 RUNNING，不能再安全补写单个
+        ``relevant_file_set_id``。因此完成、失败和源变化均按 revision_id 回写，
+        让同一源修订对应的所有待处理集合收敛到真实终态。
+        """
+
         revision_id = str(payload.get("managed_file_revision_id") or "")
-        if not relevant_set_id or not revision_id:
+        if not revision_id:
             return
+        values: dict[str, Any] = {"status": status}
+        if working_copy_id:
+            values["working_copy_id"] = working_copy_id
         self.db.query(RelevantFileSetItem).filter(
-            RelevantFileSetItem.relevant_file_set_id == relevant_set_id,
             RelevantFileSetItem.managed_file_revision_id == revision_id,
-        ).update({"status": status}, synchronize_session=False)
+            RelevantFileSetItem.status.in_(
+                {"READY", "MATERIALIZING", "RETRY_WAIT"}
+            ),
+        ).update(values, synchronize_session=False)
 
     def _latest_source_analysis_run_id(self, revision_id: str) -> str | None:
         """读取当前修订最新完成分析运行，用于双重来源审计。"""
@@ -1358,6 +1374,7 @@ class FileLifecycleJobProcessor:
         from app.db.models import (
             DocumentClassificationSummary,
             DocumentElement,
+            DocumentPage,
             DocumentSummary,
         )
 

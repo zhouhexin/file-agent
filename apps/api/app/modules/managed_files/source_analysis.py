@@ -1,4 +1,4 @@
-"""受管原始文件的只读修订、分析与按需物化辅助服务。
+"""受管原始文件的只读修订、分析与后续物化辅助服务。
 
 本模块把受管目录的原始文件与可操作工作副本明确隔离：扫描只登记修订，
 SOURCE_ANALYSIS 只通过受控相对路径读取原件并持久化可重建检索资料；它绝不
@@ -485,6 +485,10 @@ class ManagedSourceAnalysisService:
             return False
         if expected_mtime is None:
             return True
+        if expected_mtime.tzinfo is None:
+            # SQLite 测试和部分历史迁移会丢失 timestamptz 的时区标记；数据库值
+            # 仍按项目统一约定表示 UTC，不能让宿主机本地时区把同一文件误判为变化。
+            expected_mtime = expected_mtime.replace(tzinfo=timezone.utc)
         # 秒级比较会漏掉同一秒内的覆盖写入，进而错误发布旧正文索引。扫描与
         # 分析两侧都保存带时区 datetime，使用毫秒级时间戳兼容 SQLite 的精度。
         return int(expected_mtime.timestamp() * 1000) == int(actual_mtime.timestamp() * 1000)

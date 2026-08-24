@@ -2,7 +2,7 @@
 
 双范围检索优先使用已经完成的源侧分析或活动工作副本。本服务只在相关源文件
 尚未分析时提升 ``SOURCE_ANALYSIS``，而不是为一次读取抢先复制工作副本；源侧
-分析完成后可直接回答，工作副本由最终相关文件集合异步物化。
+分析完成后可直接回答，工作副本由全量后台同步创建，最终相关文件会提升同一任务。
 """
 
 from __future__ import annotations
@@ -403,8 +403,8 @@ class WorkingCopySearchReadinessService:
         """保证候选拥有可回答的源侧索引或活动副本，终态失败任务绝不自动重开。
 
         新受管目录的首次访问必须优先等待 ``SOURCE_ANALYSIS``，而不是抢先复制
-        工作副本。待源侧分析完成后，双范围检索会直接使用其证据回答；只有最终
-        相关文件集合才会创建 ``MATERIALIZE_WORKING_COPY``。
+        工作副本。待源侧分析完成后，双范围检索会直接使用其证据回答；全量后台
+        同步会创建 ``MATERIALIZE_WORKING_COPY``，最终相关文件只提升其优先级。
         """
 
         queue = FilesystemJobQueue(self.db)

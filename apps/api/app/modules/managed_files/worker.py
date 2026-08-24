@@ -485,6 +485,19 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
                 "error_code": exc.code,
                 "error_message": exc.message,
             }
+        if result.get("status") == "READY":
+            # 单文件必须先完成源侧正文与证据索引，再允许进入工作副本队列；不同
+            # 文件由 SOURCE_ANALYSIS 与 MATERIALIZE worker 跨文件并行处理。
+            revision = db.get(ManagedFileRevision, revision_id)
+            materialization_ids = _enqueue_background_materialization_jobs_for_revisions(
+                db=db,
+                revisions=[revision] if revision is not None else [],
+                created_by=(
+                    str((job.payload_json or {}).get("user_id") or job.created_by or "")
+                    or None
+                ),
+            )
+            result["materialization_job_ids"] = materialization_ids
         FilesystemJobQueue(db).mark_completed(job=job, result=result)
         return
     if job.job_type == "GRAPH_BOOTSTRAP_PROJECTION":
@@ -504,10 +517,11 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
     if root is None or not root.enabled:
         raise ValueError("Managed root not found")
     batch_source_analysis_job_ids: list[str] = []
+    batch_materialization_job_ids: list[str] = []
     batch_number = 0
 
     def publish_source_analysis_batch(files: list[ManagedFile], scan_run) -> None:
-        """为扫描批次创建当前修订的只读分析任务，不复制全部工作副本。"""
+        """为扫描批次创建只读分析任务，并续接已就绪修订的后台物化任务。"""
 
         nonlocal batch_number
         batch_number += 1
@@ -522,8 +536,8 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
             and settings.managed_source_analysis_enabled
         ):
             # 历史或上传归档已经拥有活动工作副本时，仍需沿用原有“缺少 Chunk/
-            # Profile 即补建”的修复链。源侧优先只禁止为没有副本的新文件批量导入，
-            # 不能让扫描失去工作副本一致性修复能力。
+            # Profile 即补建”的修复链。没有副本的新文件先进入源侧分析，READY
+            # 后再自动物化，不能让扫描失去工作副本一致性修复能力。
             active_copy_file_ids = {
                 str(managed_file_id)
                 for (managed_file_id,) in db.query(WorkingCopy.managed_file_id)
@@ -544,7 +558,18 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
             source_job_ids = _enqueue_source_analysis_jobs_for_revisions(
                 db=db,
                 root_id=root.id,
+                # 已有活动副本继续沿用工作副本分析/显式重处理边界；这里只分析
+                # 尚无副本的源文件，避免确定性失败后被扫描隐式重新处理。
                 revisions=source_only_revisions,
+            )
+            materialization_job_ids = _enqueue_background_materialization_jobs_for_revisions(
+                db=db,
+                revisions=source_only_revisions,
+                created_by=(
+                    str(root.created_by)
+                    if root.created_by
+                    else str(db.query(User.id).order_by(User.created_at.asc()).scalar() or "") or None
+                ),
             )
             repair_job_ids = _enqueue_import_jobs_for_files(
                 db=db,
@@ -558,7 +583,9 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
                 root_id=root.id,
                 files=files,
             )
+            materialization_job_ids = []
         batch_source_analysis_job_ids.extend(source_job_ids)
+        batch_materialization_job_ids.extend(materialization_job_ids)
         job.progress_current = scan_run.files_discovered
         # 总文件数在遍历完成前未知；只报告已经扫描的进度，不能伪造百分比。
         job.progress_total = 0
@@ -569,6 +596,7 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
             "files_discovered": scan_run.files_discovered,
             "files_updated": scan_run.files_updated,
             "source_analysis_jobs_created": len(batch_source_analysis_job_ids),
+            "materialization_jobs_created": len(batch_materialization_job_ids),
         }
         FilesystemJobRepository(db).create_event(
             job_id=job.id,
@@ -579,17 +607,19 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
                 "batch_file_count": len(files),
                 "files_discovered": scan_run.files_discovered,
                 "source_analysis_job_count": len(source_job_ids),
+                "materialization_job_count": len(materialization_job_ids),
             },
         )
-        # 必须在整轮扫描结束前提交本批修订和 SOURCE_ANALYSIS 任务；工作副本仅在
-        # 相关文件集合命中后才由 MATERIALIZE 队列创建，提交不涉及原件写入。
+        # 必须在整轮扫描结束前提交本批任务。新修订先分析再物化；历史 READY
+        # 修订可直接续接低优先级物化，整个过程都不修改受管原件。
         db.commit()
         _print_worker_status(
             "扫描批次已提交",
             job=job,
             message=(
                 f"batch={batch_number} files_discovered={scan_run.files_discovered} "
-                f"source_analysis_jobs={len(source_job_ids)}"
+                f"source_analysis_jobs={len(source_job_ids)} "
+                f"materialization_jobs={len(materialization_job_ids)}"
             ),
         )
 
@@ -632,6 +662,7 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
             "files_missing": scan_run.files_missing,
             "errors": scan_run.errors,
             "source_analysis_job_ids": batch_source_analysis_job_ids,
+            "materialization_job_ids": batch_materialization_job_ids,
             "batches_committed": batch_number,
         },
     )
@@ -836,8 +867,8 @@ def _enqueue_source_analysis_jobs_for_revisions(
 ) -> list[str]:
     """为当前原始文件修订创建低优先级只读分析任务。
 
-    此入口只由扫描 worker 使用。它不创建 IMPORT 工作副本任务，避免新受管目录
-    在服务启动时被复制和 LibreOffice 转换拖慢；上传归档仍走既有即时导入链路。
+    此入口只由扫描 worker 使用。物化任务必须等待本修订分析 READY 后由独立入口
+    创建，避免同一文件一边解析一边复制；上传归档仍走既有即时导入链路。
     """
 
     settings = get_settings()
@@ -873,6 +904,64 @@ def _enqueue_source_analysis_jobs_for_revisions(
             root_id=root_id,
             filesystem_job_id=job.id,
             message="已提交原始文件低优先级只读分析任务",
+        )
+    return job_ids
+
+
+def _enqueue_background_materialization_jobs_for_revisions(
+    *,
+    db: Session,
+    revisions: list[ManagedFileRevision],
+    created_by: str | None,
+) -> list[str]:
+    """为所有已完成源侧分析且尚无副本的修订创建低优先级物化任务。
+
+    全量同步与用户命中同步共用同一幂等键。后续检索若涉及该文件，只提升既有
+    PENDING 任务优先级，不会创建第二个并发复制任务或重复 WorkingCopy。
+    """
+
+    settings = get_settings()
+    if not settings.materialize_all_managed_files:
+        return []
+    workspace_id = get_shared_workspace_id(db)
+    queue = FilesystemJobQueue(db)
+    job_ids: list[str] = []
+    for revision in revisions:
+        if not revision.is_current or revision.status != "READY":
+            continue
+        existing_copy = (
+            db.query(WorkingCopy.id)
+            .filter(
+                WorkingCopy.workspace_id == workspace_id,
+                WorkingCopy.managed_file_id == revision.managed_file_id,
+                WorkingCopy.status == "ACTIVE",
+                WorkingCopy.imported_source_sha256 == revision.content_sha256,
+            )
+            .first()
+        )
+        if existing_copy is not None:
+            continue
+        job = queue.create_job(
+            job_type="MATERIALIZE_WORKING_COPY",
+            queue_name="MATERIALIZE",
+            root_id=None,
+            created_by=created_by,
+            priority=settings.materialize_working_copy_background_priority,
+            deduplication_key=f"working-copy-materialize:{workspace_id}:{revision.id}",
+            reuse_completed=True,
+            payload={
+                "managed_file_revision_id": revision.id,
+                "materialization_reason": "startup-full-sync",
+            },
+        )
+        job_ids.append(str(job.id))
+        log_event(
+            "working_copy.background_materialization.queued",
+            status=job.status,
+            managed_file_revision_id=revision.id,
+            filesystem_job_id=job.id,
+            priority=job.priority,
+            message="源侧分析完成，已提交全量工作副本同步任务",
         )
     return job_ids
 

@@ -63,7 +63,7 @@ python -m pytest
 上传采用分块流式写入，`UPLOAD_MAX_FILE_SIZE_MB` 是可按部署容量调整的资源保护上限，默认 1024 MB，并非固定业务限制。当前阶段只执行扩展名、基础 MIME、宏和加密风险检查，不实现、也不宣称已执行病毒扫描。
 PDF、DOCX 默认启用本地 Docling 结构化解析，并把文档元素和位置写入 `document_elements`；Docling 不可用时自动回退现有解析器，扫描件仍由现有 OCR 链路处理。
 文件重命名统一生成 `RENAME_WORKING_COPIES` OperationPlan，确认后由工作副本执行器执行；旧的受管原始文件 Native/F2 执行通道和上传暂存重命名通道不再对 Agent 开放。
-上传附件通过查重后由独立 worker 归档到受管原始目录；`IMPORT` worker 以一次源文件读取完成哈希和原子复制，按 `shared/<root_key>/<源相对路径>` 登记 `ACTIVE` 工作副本，随后由 `ANALYSIS` worker 异步完成正文解析、双摘要、分类和 Chunk 索引。同步不会因不同目录中的同名文件停顿，也不会生成“待整理/待确认”物理目录；同名歧义只在上传、查询或实际使用相关文件时提示选择。后台双摘要默认使用 CPU-only Jieba + LexRank。普通用户不展示内部状态、Skill 或 Tool。对话找文件默认使用 CPU-only 两阶段检索，精确问答仍必须回到原文取证。后续重命名、移动和删除计划必须以 `working_copy_id` 为对象，不能再修改受管原始目录。
+上传附件通过查重后由独立 worker 归档到受管原始目录；`IMPORT` worker 以一次源文件读取完成哈希和原子复制，按 `shared/<root_key>/<源相对路径>` 登记 `ACTIVE` 工作副本，随后由 `ANALYSIS` worker 异步完成正文解析、双摘要、分类和 Chunk 索引。普通受管目录在启动扫描后先由 `SOURCE_ANALYSIS` 建立只读正文与证据索引，每个修订 READY 后自动创建低优先级 `MATERIALIZE` 任务，最终把全部文件同步到共享工作目录。同步未完成期间，检索合并活动工作副本和未物化源侧索引；用户命中的既有物化任务会被提升优先级，同一文件不并发复制。同步不会因不同目录中的同名文件停顿，也不会生成“待整理/待确认”物理目录；同名歧义只在上传、查询或实际使用相关文件时提示选择。后台双摘要默认使用 CPU-only Jieba + LexRank。普通用户不展示内部状态、Skill 或 Tool。对话找文件默认使用 CPU-only 两阶段检索，精确问答仍必须回到原文取证。后续重命名、移动和删除计划必须以 `working_copy_id` 为对象，不能再修改受管原始目录。
 每个成功解析的工作副本内容版本会在发布前幂等建立 Chunk/Evidence。当前无 GPU 部署使用 Jieba + PostgreSQL `simple` FTS/GIN + `pg_trgm` 的 CPU 词法索引；`embedding vector(1536)` 只保留空扩展槽，默认 `EMBEDDING_ENABLED=false`，不会下载向量模型或要求应用服务器安装 GPU。后续可接独立 GPU provider 异步回填，不改变已有 Chunk、Evidence 和引用 ID。
 默认不启用真实 LLM 调用；如需让对话阶段使用大模型理解用户需求，请在 `.env` 中配置 `LLM_ENABLED=true`、`LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_CHAT_MODEL`。当前 LLM 客户端使用 OpenAI-compatible Chat Completions 接口。
 LLM 启用后，Adaptive Planner 默认运行在 `ADAPTIVE_PLANNER_MODE=shadow`：Legacy Planner 继续产生用户可见结果，Adaptive Planner 只能引用本次 `CatalogSnapshot` 中已启用的 Tool/Skill 并进行只读对比，不会产生第二次 Tool 调用。当前每次 AgentRun 最多规划 3 轮、实际调用 5 次 Tool；高风险步骤遇到确认边界会暂停而不是跳过。现有 Catalog 无法满足明确目标时，可以生成去重、脱敏的能力建议，由 ops/admin 在 `/admin/capability-suggestions` 评审；建议不会自动创建代码或启用 Tool/Skill。
@@ -88,7 +88,7 @@ WorkingCopy 记录但当前机器物理文件缺失时，下一次扫描会重�
 
 ```bash
 # 可在不同进程中分别设置 FILESYSTEM_WORKER_QUEUES。SCAN 每完成一批只提交
-# SOURCE_ANALYSIS；源侧索引完成即可检索和回答，MATERIALIZE 仅在相关文件被使用后创建工作副本。
+# SOURCE_ANALYSIS；源侧索引完成即可检索和回答，随后由 MATERIALIZE 后台完成全量工作副本同步。
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=SOURCE_ANALYSIS \
