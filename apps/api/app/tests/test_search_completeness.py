@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -203,5 +204,44 @@ def test_candidate_limit_or_unresolved_strict_scope_is_not_verifiable():
             unresolved_document_count=1,
         )
         assert unresolved["status"] == "UNVERIFIABLE"
+    finally:
+        db.close()
+
+
+def test_completeness_timeout_keeps_search_results_and_does_not_abort_request():
+    """完整性只读统计超时必须降级，不能丢失命中结果或把请求升级为 500。"""
+
+    class _TimeoutCompletenessService(SearchCompletenessService):
+        """用确定性异常模拟 PostgreSQL statement_timeout。"""
+
+        def assess(self, **kwargs):
+            """在 savepoint 内抛出与生产 QueryCanceled 同族的数据库异常。"""
+
+            raise OperationalError(
+                "SELECT working_copies",
+                {},
+                RuntimeError("statement timeout"),
+            )
+
+    db = _db_session()
+    try:
+        payload = _TimeoutCompletenessService(
+            db=db,
+            workspace_id="workspace-1",
+        ).attach(
+            result={
+                "ok": True,
+                "partial": False,
+                "results": [{"document_id": "doc-found"}],
+            },
+            scope=_Scope(),
+        )
+
+        assert payload["results"] == [{"document_id": "doc-found"}]
+        assert payload["partial"] is True
+        assert payload["search_completeness"]["status"] == "UNVERIFIABLE"
+        assert payload["search_completeness"]["can_claim_complete"] is False
+        # savepoint 已吸收只读统计异常，共享 AgentRun Session 仍可继续执行后续 SQL。
+        assert db.execute(text("SELECT 1")).scalar_one() == 1
     finally:
         db.close()

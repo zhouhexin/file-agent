@@ -89,7 +89,47 @@ class TwoStageFileSearchService:
         require_body_evidence: bool = False,
         include_internal_match_flags: bool = False,
     ) -> dict[str, Any]:
-        """执行两阶段检索，返回确定性融合结果。"""
+        """执行两阶段检索，并在退出前恢复请求事务原有的 SQL 超时。"""
+
+        bounded_query = str(query or "")[: min(int(self.config.retrieval_query_max_chars), 500)]
+        if not bounded_query or not (parsed_query and getattr(parsed_query, "cleaned", "")):
+            # 保持原有空查询行为：参数校验不需要访问数据库，也不应为了设置超时而
+            # 把一个可直接返回的空请求升级为数据库依赖错误。
+            return self._search(
+                query=query,
+                parsed_query=parsed_query,
+                scope=scope,
+                exact_phrase=exact_phrase,
+                require_body_evidence=require_body_evidence,
+                include_internal_match_flags=include_internal_match_flags,
+            )
+        previous_timeout = self._apply_postgresql_statement_timeout()
+        try:
+            return self._search(
+                query=query,
+                parsed_query=parsed_query,
+                scope=scope,
+                exact_phrase=exact_phrase,
+                require_body_evidence=require_body_evidence,
+                include_internal_match_flags=include_internal_match_flags,
+            )
+        finally:
+            # SET LOCAL 的作用域是外层数据库事务而不是 savepoint。文件检索与 Agent
+            # 审计共用 Session，因此无论成功、降级或异常都必须恢复，不能让 2 秒限制
+            # 泄漏到完整性评估、回执持久化或同一 AgentRun 的下一次 Tool 调用。
+            self._restore_postgresql_statement_timeout(previous_timeout)
+
+    def _search(
+        self,
+        *,
+        query: str,
+        parsed_query: Any | None = None,
+        scope: Any | None = None,
+        exact_phrase: str | None = None,
+        require_body_evidence: bool = False,
+        include_internal_match_flags: bool = False,
+    ) -> dict[str, Any]:
+        """在已设置检索专用超时的上下文中执行确定性融合。"""
 
         started_at = time.perf_counter()
         query = str(query or "")[: min(int(self.config.retrieval_query_max_chars), 500)]
@@ -137,11 +177,6 @@ class TwoStageFileSearchService:
                 "results": [],
                 "user_message": "",
             }
-
-        # PostgreSQL 一旦 SQL 失败会把整个事务标记为 aborted。检索与 AgentRun 审计共用
-        # 请求级 Session，因此每段可能降级的只读 SQL 都必须放进独立 savepoint。
-        with self.db.begin_nested():
-            self._apply_postgresql_statement_timeout()
 
         # 一阶段：文档级索引召回
         stage1_started_at = time.perf_counter()
@@ -461,16 +496,47 @@ class TwoStageFileSearchService:
             "user_message": self._build_user_message(fused, partial),
         }
 
-    def _apply_postgresql_statement_timeout(self) -> None:
-        """在当前事务内限定检索 SQL 耗时，不影响连接池的后续业务请求。"""
+    def _apply_postgresql_statement_timeout(self) -> str | None:
+        """保存原超时并设置检索上限；返回值只能交给配对的恢复方法。"""
+
         bind = getattr(self.db, "bind", None)
         if bind is None or bind.dialect.name != "postgresql":
-            return
+            return None
         timeout = min(int(self.config.retrieval_statement_timeout_ms), 2000)
-        self.db.execute(
-            sa.text("SELECT set_config('statement_timeout', :timeout, true)"),
-            {"timeout": f"{max(100, timeout)}ms"},
-        )
+        # PostgreSQL 的 SET LOCAL 会持续到最外层事务结束；begin_nested 仅用于确保这里
+        # 的配置 SQL 失败时不会污染请求事务，不能被误认为超时设置的生命周期边界。
+        with self.db.begin_nested():
+            previous_timeout = str(
+                self.db.execute(sa.text("SHOW statement_timeout")).scalar_one()
+            )
+            self.db.execute(
+                sa.text("SELECT set_config('statement_timeout', :timeout, true)"),
+                {"timeout": f"{max(100, timeout)}ms"},
+            )
+        return previous_timeout
+
+    def _restore_postgresql_statement_timeout(self, previous_timeout: str | None) -> None:
+        """恢复请求事务原有超时，且恢复失败不能掩盖真正的检索异常。"""
+
+        if previous_timeout is None:
+            return
+        try:
+            with self.db.begin_nested():
+                self.db.execute(
+                    sa.text("SELECT set_config('statement_timeout', :timeout, true)"),
+                    {"timeout": previous_timeout},
+                )
+        except Exception as exc:
+            # 这里只记录类型，不记录连接串或 SQL 参数；原始检索结果/异常优先返回。
+            log_event(
+                "retrieval.statement_timeout.restore_failed",
+                level="ERROR",
+                tool_name="hybrid-search",
+                status="DEGRADED",
+                workspace_id=self.workspace_id,
+                error_code=exc.__class__.__name__,
+                message="检索 SQL 超时配置恢复失败",
+            )
 
     def _merge_fallback(
         self,

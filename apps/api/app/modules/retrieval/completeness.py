@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.logging import log_event
@@ -48,12 +49,58 @@ class SearchCompletenessService:
         ``UNVERIFIABLE``，不能把空结果误报为已找全。
         """
 
-        completeness = self.assess(
-            scope=scope,
-            result=result,
-            unresolved_document_count=unresolved_document_count,
-        )
-        return {**result, "search_completeness": completeness}
+        completeness_degraded = False
+        try:
+            # 完整性统计是回执增强能力，不能因为数据库慢查询撤销已经取得的检索结果。
+            # savepoint 保证 PostgreSQL QueryCanceled 只回滚本段只读统计，不把共享的
+            # AgentRun 请求事务置为 aborted。
+            with self.db.begin_nested():
+                completeness = self.assess(
+                    scope=scope,
+                    result=result,
+                    unresolved_document_count=unresolved_document_count,
+                )
+        except SQLAlchemyError as exc:
+            completeness_degraded = True
+            scope_mode = str(getattr(scope, "scope_mode", "global") or "global")
+            strict_document_ids = list(
+                dict.fromkeys(
+                    str(value)
+                    for value in (getattr(scope, "strict_document_ids", ()) or ())
+                    if str(value)
+                )
+            )
+            scope_label = (
+                f"本次确认的 {len(strict_document_ids)} 份文件"
+                if scope_mode == "strict" and strict_document_ids
+                else "当前共享工作区全部活动文件"
+            )
+            completeness = self._payload(
+                status="UNVERIFIABLE",
+                scope_label=scope_label,
+                eligible_file_count=0,
+                ready_file_count=0,
+                pending_file_count=0,
+                failed_file_count=0,
+                candidate_limit_reached=bool(result.get("candidate_limit_reached")),
+                message="完整性统计暂时不可用，已保留本次找到的文件，但暂时无法判断是否找全。",
+            )
+            log_event(
+                "retrieval.completeness.failed",
+                level="ERROR",
+                tool_name="hybrid-search",
+                status="DEGRADED",
+                workspace_id=self.workspace_id,
+                error_code=exc.__class__.__name__,
+                message="检索完整性统计失败，已降级为不可验证",
+            )
+        return {
+            **result,
+            # 范围待澄清本身沿用既有 partial 语义；只有本次统计 SQL 真正失败时，
+            # 才把已取得的检索结果标记为部分结果。
+            "partial": bool(result.get("partial")) or completeness_degraded,
+            "search_completeness": completeness,
+        }
 
     def assess(
         self,
