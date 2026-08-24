@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.config import get_settings
+
 
 DEFAULT_SKILLS_ROOT = Path(__file__).resolve().parents[5] / "skills"
 
@@ -30,6 +32,7 @@ class SkillManifest(BaseModel):
     allowed_tools: list[str] = Field(default_factory=list)
     required_capabilities: list[str] = Field(default_factory=list)
     risk_ceiling: Literal["low", "medium", "high"] = "medium"
+    deployment_gate: Literal["structured_extraction"] | None = None
 
 
 class CatalogValidationError(ValueError):
@@ -104,6 +107,13 @@ class AgentCatalogService:
                 )
             if manifest.status != "ACTIVE":
                 continue
+            if manifest.deployment_gate == "structured_extraction":
+                settings = get_settings()
+                if not (
+                    settings.structured_extraction_enabled
+                    and settings.pp_structure_enabled
+                ):
+                    continue
             unknown_tools = sorted(
                 set(manifest.allowed_tools) - known_tool_names
             )
@@ -111,15 +121,12 @@ class AgentCatalogService:
                 raise CatalogValidationError(
                     f"Skill {manifest.id} 引用了未知 Tool: {unknown_tools}"
                 )
+            adaptive_allowed_tools = [
+                tool_name
+                for tool_name in manifest.allowed_tools
+                if tool_name in adaptive_tool_names
+            ]
             manifests.append(
-                manifest.model_copy(
-                    update={
-                        "allowed_tools": [
-                            tool_name
-                            for tool_name in manifest.allowed_tools
-                            if tool_name in adaptive_tool_names
-                        ]
-                    }
-                )
+                manifest.model_copy(update={"allowed_tools": adaptive_allowed_tools})
             )
         return manifests

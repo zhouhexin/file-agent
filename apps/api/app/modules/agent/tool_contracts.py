@@ -209,6 +209,61 @@ class SpreadsheetToolOutput(GenericToolOutput):
     kind: str = Field(min_length=1)
 
 
+class StructuredExtractionToolOutput(GenericToolOutput):
+    """图片动态结构化抽取 Tool 的严格业务输出。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["filesystem_job", "structured_image_extraction"]
+    ok: bool = True
+    status: Literal[
+        "PENDING",
+        "WAITING_FOR_ASYNC_JOB",
+        "COMPLETED",
+        "PARTIAL",
+        "NEEDS_REVIEW",
+        "FAILED",
+    ]
+    error: ToolError | dict[str, Any] | None = None
+    changeset_id: str | None = None
+    async_job_id: str | None = None
+    replan_required: bool = False
+    document_id: str
+    structured_extraction_run_id: str | None = None
+    schema_mode: Literal["EXPLICIT_FIELDS", "AUTO_DISCOVER"] | None = None
+    record_mode: str | None = None
+    presentation: str | None = None
+    record_count: int = Field(default=0, ge=0)
+    field_count: int = Field(default=0, ge=0)
+    review_count: int = Field(default=0, ge=0)
+    missing_required_field_count: int = Field(default=0, ge=0)
+    quality_band: Literal["HIGH", "MEDIUM", "LOW"] | None = None
+    retryable: bool = False
+    recommended_retry_strategy: Literal["NONE", "REOCR", "VISION_CROP"] = "NONE"
+    low_confidence_field_keys: list[str] = Field(default_factory=list, max_length=20)
+    field_schema: list[dict[str, Any]] = Field(default_factory=list, max_length=40)
+    records: list[dict[str, Any]] = Field(default_factory=list)
+    review_items: list[dict[str, Any]] = Field(default_factory=list)
+    original_unchanged: bool = True
+    export_artifact: dict[str, Any] | None = None
+    reused: bool = False
+
+
+class StructuredExtractionObservation(BaseModel):
+    """供 Planner 重规划的脱敏图片结构化抽取观察。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    record_count: int = Field(ge=0)
+    field_count: int = Field(ge=0)
+    review_count: int = Field(ge=0)
+    missing_required_field_count: int = Field(ge=0)
+    quality_band: Literal["HIGH", "MEDIUM", "LOW"]
+    retryable: bool
+    recommended_retry_strategy: Literal["NONE", "REOCR", "VISION_CROP"]
+    low_confidence_field_keys: list[str] = Field(default_factory=list, max_length=20)
+
+
 class ToolResultEnvelope(BaseModel):
     """LangGraph 步骤级执行保存的统一 Tool 结果外壳。"""
 
@@ -269,6 +324,7 @@ class ExecutionObservation(BaseModel):
     has_operation_plan: bool = False
     requires_user_confirmation: bool = False
     waiting_for_async_job: bool = False
+    structured_extraction: StructuredExtractionObservation | None = None
     available_next_decisions: list[Literal["TOOL_PLAN", "CLARIFY", "FINISH"]] = Field(
         default_factory=list,
         max_length=3,

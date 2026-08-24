@@ -31,7 +31,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [File Agent] Starting scheduler, scan worker, two import workers, and analysis worker...
+echo [File Agent] Starting scheduler and isolated filesystem workers...
 
 rem 预检把本机路径提交到数据库后才能启动 scheduler，避免扫描读取其他机器的旧路径。
 set "FILESYSTEM_WORKER_ID="
@@ -61,6 +61,11 @@ rem 解析、摘要、分类和正文索引在慢队列串行执行，不阻塞�
 set "FILESYSTEM_WORKER_ID=analysis-worker"
 set "FILESYSTEM_WORKER_QUEUES=ANALYSIS"
 start "File Agent - Analysis Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
+
+rem PP-StructureV3 和字段模型使用独立慢队列；未启用功能时该 worker 保持空闲。
+set "FILESYSTEM_WORKER_ID=structured-extraction-worker"
+set "FILESYSTEM_WORKER_QUEUES=STRUCTURED_EXTRACTION"
+start "File Agent - Structured Extraction Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
 
 rem Neo4j bootstrap 和正式分类 outbox 由独立 GRAPH worker 消费，不阻塞 API 启动或文件复制。
 set "FILESYSTEM_WORKER_ID=graph-worker"

@@ -2298,3 +2298,73 @@
     flex: 1 1 10rem;
   }
 }
+.structured-extraction-card {
+  border: 1px solid var(--border-color, #d9dde5);
+  border-radius: 14px;
+  background: var(--surface-color, #fff);
+  overflow: hidden;
+}
+
+.structured-extraction-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border-color, #e4e7ec);
+}
+
+.structured-extraction-card > header div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.structured-quality {
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+  background: #edf2f7;
+}
+
+.structured-quality--high { background: #dcfce7; color: #166534; }
+.structured-quality--medium { background: #fef3c7; color: #92400e; }
+.structured-quality--low { background: #fee2e2; color: #991b1b; }
+
+.structured-extraction-table-wrap { overflow-x: auto; }
+
+.structured-extraction-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 620px;
+}
+
+.structured-extraction-table th,
+.structured-extraction-table td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border-color, #e4e7ec);
+  text-align: left;
+  vertical-align: top;
+}
+
+.structured-extraction-table th { background: #f8fafc; font-weight: 600; }
+.structured-extraction-table td small { display: block; margin-top: 4px; color: #667085; }
+.structured-cell--review { background: #fffbeb; color: #92400e; }
+
+.structured-extraction-json {
+  margin: 0;
+  padding: 18px;
+  overflow: auto;
+  max-height: 480px;
+  background: #111827;
+  color: #e5e7eb;
+  font-size: 13px;
+}
+
+.structured-extraction-text { display: grid; gap: 12px; padding: 16px 18px; }
+.structured-extraction-text article { border-bottom: 1px solid #e4e7ec; padding-bottom: 12px; }
+.structured-extraction-text dl div { display: grid; grid-template-columns: minmax(100px, 180px) 1fr; gap: 12px; }
+.structured-extraction-text dt { color: #667085; }
+.structured-extraction-text dd { margin: 0; }
+.structured-extraction-review,
+.structured-extraction-export-note { margin: 14px 18px; }

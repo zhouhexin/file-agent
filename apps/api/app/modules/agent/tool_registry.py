@@ -45,6 +45,7 @@ from app.modules.agent.tool_contracts import (
     OperationPlanToolOutput,
     OriginalFileMetadataToolOutput,
     SpreadsheetToolOutput,
+    StructuredExtractionToolOutput,
     ToolOutputValidationError,
     WorkspaceFileSearchToolOutput,
 )
@@ -73,6 +74,7 @@ from app.modules.agent.tool_schemas import (
     SearchToolInput,
     SpreadsheetAnalysisInput,
     SpreadsheetDocumentInput,
+    StructuredImageExtractionInput,
     ToolInputValidationError,
     WorkingCopyActionPlanInput,
 )
@@ -112,6 +114,7 @@ from app.modules.skills.managed_file_query_feedback import (
 from app.modules.spreadsheet_analysis.service import SpreadsheetAnalysisService
 from app.modules.spreadsheet_analysis.formatter import format_spreadsheet_analysis_response
 from app.modules.spreadsheet_workbench.service import SpreadsheetWorkbenchService
+from app.modules.structured_extraction.service import StructuredExtractionService
 
 
 class UnknownToolError(ValueError):
@@ -330,6 +333,8 @@ def _tool_invocation_status(output: Dict[str, Any]) -> str:
 
     if output.get("status") in {"PENDING", "PROCESSING"}:
         return "PENDING"
+    if output.get("status") == "WAITING_FOR_ASYNC_JOB":
+        return "WAITING_FOR_ASYNC_JOB"
     if output.get("ok") is False or output.get("status") == "FAILED":
         return "FAILED"
     if output.get("status") == "PARTIAL":
@@ -3095,6 +3100,52 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
     return handler
 
 
+def _structured_image_extraction_handler(
+    db: Any,
+    user_id: str | None,
+    conversation_id_getter: Callable[[], str | None] | None,
+    agent_run_id_getter: Callable[[], str | None] | None,
+) -> ToolHandler:
+    """创建动态图片结构化抽取异步任务 handler。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """只接受 document_id 与严格动态 Schema，路径由后端仓库解析。"""
+
+        document_id = str(getattr(tool_input, "document_id", ""))
+        if db is None or user_id is None:
+            return {
+                "kind": "structured_image_extraction",
+                "ok": False,
+                "status": "FAILED",
+                "document_id": document_id,
+                "error": {
+                    "code": "RUNTIME_CONTEXT_REQUIRED",
+                    "message": "图片结构化抽取上下文不可用。",
+                    "retryable": False,
+                    "user_action_required": False,
+                },
+                "record_count": 0,
+                "field_count": 0,
+                "review_count": 0,
+                "missing_required_field_count": 0,
+                "retryable": False,
+                "recommended_retry_strategy": "NONE",
+                "low_confidence_field_keys": [],
+                "field_schema": [],
+                "records": [],
+                "review_items": [],
+                "original_unchanged": True,
+            }
+        return StructuredExtractionService(
+            db=db,
+            user_id=user_id,
+            conversation_id=(conversation_id_getter() if conversation_id_getter else None),
+            agent_run_id=(agent_run_id_getter() if agent_run_id_getter else None),
+        ).enqueue(StructuredImageExtractionInput.model_validate(tool_input.model_dump()))
+
+    return handler
+
+
 def _failed_extraction_output(*, document_id: str, error: Dict[str, Any]) -> Dict[str, Any]:
     """生成标准解析失败输出，确保前端能展示逐文件失败原因。"""
 
@@ -3343,6 +3394,38 @@ def _build_mvp_tools(
     """
 
     tools = [
+        _tool(
+            "extract-image-structured-data",
+            "Extract user-requested dynamic fields from an authorized image or scanned PDF with persisted evidence.",
+            StructuredImageExtractionInput,
+            True,
+            False,
+            [
+                "structured_extraction_runs",
+                "structured_extraction_fields",
+                "document_extraction_runs",
+                "document_pages",
+                "document_elements",
+                "filesystem_jobs",
+                "change_sets",
+                "change_items",
+            ],
+            _structured_image_extraction_handler(
+                db,
+                user_id,
+                conversation_id_getter,
+                agent_run_id_getter,
+            ),
+            output_model=StructuredExtractionToolOutput,
+            adaptive_ready=(
+                get_settings().structured_extraction_enabled
+                and get_settings().pp_structure_enabled
+            ),
+            observation_policy="PLANNER_AFTER_EXECUTION",
+            risk_level="medium",
+            retry_policy="one_targeted_retry",
+            allowed_skill_ids=["image-structured-extraction"],
+        ),
         _tool("chunk-build", "Build chunks and evidence spans.", DocumentToolInput, True, False, ["document_chunks", "evidence_spans"], _chunk_build_handler(db, user_id)),
         _tool("read-document-insights", "Read deterministic ingest insights for uploaded documents.", DocumentInsightsReadInput, False, False, [], _document_insights_handler(db, user_id), output_model=DocumentInsightsToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
         _tool("read-document-classifications", "Read latest persisted classification suggestions for uploaded documents.", DocumentClassificationsReadInput, False, False, [], _document_classifications_handler(db, user_id), output_model=DocumentClassificationsToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),

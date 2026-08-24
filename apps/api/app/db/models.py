@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, List, Optional
 from uuid import uuid4
 
 from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, func, Index, Integer, JSON, String, Text, UniqueConstraint, text
@@ -419,6 +419,92 @@ class DocumentElement(Base):
 
     document: Mapped[Document] = relationship(back_populates="elements")
     extraction_run: Mapped[DocumentExtractionRun] = relationship(back_populates="elements")
+
+
+class StructuredExtractionRun(Base):
+    """一次图片或扫描件动态 Schema 抽取运行。"""
+
+    __tablename__ = "structured_extraction_runs"
+    __table_args__ = (
+        Index(
+            "ix_structured_extraction_runs_cache_lookup",
+            "document_version_id",
+            "schema_fingerprint",
+            "provider",
+            "model_name",
+            "prompt_version",
+            "retry_strategy",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    document_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    layout_extraction_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_extraction_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    agent_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    schema_mode: Mapped[str] = mapped_column(String(40), nullable=False)
+    field_schema_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    schema_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    record_mode: Mapped[str] = mapped_column(String(40), nullable=False)
+    presentation: Mapped[str] = mapped_column(String(40), nullable=False)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    prompt_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    retry_strategy: Mapped[str] = mapped_column(String(40), nullable=False, default="INITIAL")
+    target_field_keys_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    parent_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("structured_extraction_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="PENDING", index=True)
+    record_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    review_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    missing_required_field_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    quality_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    quality_band: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    error_code: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class StructuredExtractionField(Base):
+    """结构化抽取运行中的单个记录字段及其可定位证据。"""
+
+    __tablename__ = "structured_extraction_fields"
+    __table_args__ = (
+        UniqueConstraint(
+            "structured_extraction_run_id",
+            "record_index",
+            "field_key",
+            name="uq_structured_extraction_fields_record_key",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    structured_extraction_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("structured_extraction_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    record_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    field_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    field_label: Mapped[str] = mapped_column(String(80), nullable=False)
+    field_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    raw_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    normalized_value_json: Mapped[Any] = mapped_column(JSON, nullable=True)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    page_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    bbox_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    evidence_element_ids_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    warning_codes_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class DocumentIndexRun(Base):

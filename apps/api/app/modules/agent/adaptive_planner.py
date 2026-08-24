@@ -43,6 +43,12 @@ document_ids 后再选择上述读取 Tool。
 confirmed-file-action，后者永不出现在 Catalog 中。若 waiting_for_async_job 为 true，不得重复调用同一
 副作用 Tool，应 FINISH 并等待异步结果。重命名建议、删除/恢复/移动计划只会创建 OperationPlan，
 不会执行任何工作副本变更。
+图片或扫描件结构化抽取必须使用 image-structured-extraction：用户明确列出字段时使用
+EXPLICIT_FIELDS 且只能包含用户要求的字段；用户要求“全部信息”且未列字段时使用 AUTO_DISCOVER。
+presentation 必须遵循用户明确要求；首次调用只能使用 INITIAL。只有安全 observation 中
+structured_extraction.retryable=true 时才允许一次 VISION_CROP，target_field_keys 必须是
+low_confidence_field_keys 的子集。不得提供图片路径、bbox、模型名、Prompt 或执行参数。
+quality_band=HIGH 且 review_count=0 时 FINISH；增强后仍不确定时 FINISH 或 CLARIFY，禁止无限重试。
 现有 Catalog 确实无法完成明确用户目标时，可以输出 capability_suggestions，但建议不能进入当前 ToolPlan，
 不能生成 handler 代码，也不能声称能力已经存在、已经执行或已经成功保存建议。"""
 

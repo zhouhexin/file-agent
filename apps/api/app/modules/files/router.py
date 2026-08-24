@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile, status
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.db.models import User
+from app.core.config import get_settings
+from app.db.models import DocumentArtifact, User
 from app.modules.auth.dependencies import get_current_user
 from app.modules.files.schemas import (
     FileDeleteResponse,
@@ -15,6 +18,7 @@ from app.modules.files.schemas import (
     FileUploadResponse,
 )
 from app.modules.files.service import FileUploadService
+from app.modules.files.extraction_repository import FileExtractionRepository
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
@@ -55,6 +59,55 @@ def get_file_content(
     """返回原始附件内容，供前端点击预览或下载。"""
 
     return FileUploadService(db).get_content_response(document_id=document_id, current_user=current_user)
+
+
+@router.get("/{document_id}/artifacts/{artifact_id}", response_class=FileResponse)
+def download_document_artifact(
+    document_id: str,
+    artifact_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> FileResponse:
+    """下载当前用户文档的受控派生件，不接受调用方提供本地路径。"""
+
+    extraction_repository = FileExtractionRepository(db, current_user.id)
+    document = extraction_repository.get_document_for_current_user(document_id)
+    artifact = db.get(DocumentArtifact, artifact_id)
+    if document is None or artifact is None or artifact.document_id != document_id:
+        raise HTTPException(status_code=404, detail="派生文件不存在或无权访问。")
+    lifecycle = extraction_repository.resolve_original_file_for_document(document)
+    if not lifecycle.get("ok"):
+        error = dict(lifecycle.get("error") or {})
+        if error.get("code") == "FILE_TRASHED":
+            raise HTTPException(
+                status_code=410,
+                detail=str(error.get("message") or "文件已删除，请先恢复。"),
+            )
+        raise HTTPException(status_code=404, detail="派生文件不存在或无权访问。")
+    allowed_artifacts = {
+        "STRUCTURED_EXTRACTION_CSV": ("text/csv", ".csv"),
+        "STRUCTURED_EXTRACTION_XLSX": (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ".xlsx",
+        ),
+    }
+    expected = allowed_artifacts.get(str(artifact.artifact_type or ""))
+    if expected is None or not str(artifact.content_type or "").startswith(expected[0]):
+        raise HTTPException(status_code=404, detail="派生文件不存在或无权访问。")
+    storage_root = Path(get_settings().file_storage_root).resolve()
+    artifact_path = (storage_root / artifact.storage_path).resolve()
+    try:
+        artifact_path.relative_to(storage_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="派生文件路径无效。") from exc
+    if artifact.storage_backend != "local" or not artifact_path.is_file():
+        raise HTTPException(status_code=404, detail="派生文件不存在。")
+    suffix = expected[1]
+    return FileResponse(
+        path=artifact_path,
+        media_type=artifact.content_type,
+        filename=f"structured-extraction-{document_id}{suffix}",
+    )
 
 
 @router.get("/{document_id}/preview", response_model=FilePreviewResponse)

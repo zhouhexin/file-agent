@@ -32,6 +32,9 @@ graph = [
   "neo4j-graphrag>=1,<2",
   "sentence-transformers>=3,<6",
 ]
+structured-extraction = [
+  "paddlex[ocr]>=3.0,<4.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["app/tests"]

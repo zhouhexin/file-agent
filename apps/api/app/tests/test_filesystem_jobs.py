@@ -2,6 +2,7 @@
 
 from app.db.models import FilesystemJob, FilesystemJobEvent, ManagedRoot, User
 from app.modules.managed_files.jobs import FilesystemJobQueue
+from app.modules.managed_files.worker import _JobLeaseHeartbeat
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -25,6 +26,48 @@ def test_filesystem_job_queue_claims_pending_job():
         assert claimed.status == "RUNNING"
         assert claimed.locked_by == "worker-1"
         assert db.query(FilesystemJobEvent).filter(FilesystemJobEvent.job_id == job.id).count() >= 1
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_job_lease_heartbeat_renews_with_independent_session():
+    """长推理必须在主业务事务之外续租，避免同一任务被重复领取。"""
+
+    _client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        job = FilesystemJobQueue(db).create_job(
+            job_type="STRUCTURED_IMAGE_EXTRACTION",
+            queue_name="STRUCTURED_EXTRACTION",
+            root_id=None,
+            created_by=None,
+            payload={},
+        )
+        db.commit()
+        claimed = FilesystemJobQueue(db).claim_next(
+            worker_id="structured-worker",
+            queue_names={"STRUCTURED_EXTRACTION"},
+        )
+        assert claimed is not None
+        db.commit()
+        job_id = claimed.id
+        previous_expiry = claimed.lease_expires_at
+    finally:
+        db.close()
+
+    heartbeat = _JobLeaseHeartbeat(
+        session_factory=SessionLocal,
+        job_id=job_id,
+        worker_id="structured-worker",
+    )
+    assert heartbeat._renew_once() is True
+
+    db = SessionLocal()
+    try:
+        renewed = db.get(FilesystemJob, job_id)
+        assert renewed.heartbeat_at is not None
+        assert renewed.lease_expires_at >= previous_expiry
     finally:
         db.close()
         clear_overrides()

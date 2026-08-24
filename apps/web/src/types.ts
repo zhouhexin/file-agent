@@ -89,7 +89,8 @@ export type TaskResult = {
     | 'file_selection'
     | 'classification_clarification'
     | 'classification_decision'
-    | 'filename_conflict';
+    | 'filename_conflict'
+    | 'structured_extraction';
   display_mode: 'default' | 'classification_cards';
   final_response: string | null;
   processed_count: number;
@@ -109,6 +110,7 @@ export type TaskResult = {
   classification_clarification_result: ClassificationClarificationResult | null;
   classification_decision_result: ClassificationDecisionResult | null;
   filename_conflict_result: FilenameConflictResult | null;
+  structured_extraction_result: StructuredExtractionResult | null;
   pending_job_ids: string[];
   operation_plan_id: string | null;
   pending_decisions: Array<Record<string, unknown>>;
@@ -356,6 +358,57 @@ export type EvidenceAnswerResult = {
   limitations: string[];
   files: EvidenceAnswerFile[];
   cached: boolean;
+};
+
+export type StructuredExtractionField = {
+  key: string;
+  label: string;
+  field_type: string;
+  required: boolean;
+};
+
+export type StructuredExtractionCell = {
+  raw_text: unknown;
+  normalized_value: unknown;
+  confidence: number;
+  status: string;
+  evidence: {
+    page_number: number | null;
+    bbox: Partial<Record<'left' | 'top' | 'right' | 'bottom', number>>;
+  };
+  warnings: string[];
+};
+
+export type StructuredExtractionResult = {
+  document_id: string;
+  presentation: 'AUTO' | 'TABLE' | 'JSON' | 'CSV' | 'XLSX' | 'TEXT' | string;
+  schema_mode: string;
+  record_mode: string;
+  field_schema: StructuredExtractionField[];
+  records: Array<{
+    record_index: number;
+    fields: Record<string, StructuredExtractionCell>;
+  }>;
+  review_items: Array<{
+    record_index: number;
+    field_key: string;
+    field_label: string;
+    raw_text: unknown;
+    status: string;
+    reason_codes: string[];
+    page_number: number | null;
+  }>;
+  record_count: number;
+  review_count: number;
+  quality_band: 'HIGH' | 'MEDIUM' | 'LOW' | string;
+  original_unchanged: true;
+  export_artifact: {
+    artifact_id: string;
+    format: 'CSV' | 'XLSX';
+    filename: string;
+    content_type: string;
+    size_bytes: number;
+  } | null;
 };
 
 export type FileSelectionChoice = {

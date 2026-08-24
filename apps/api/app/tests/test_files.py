@@ -5,6 +5,7 @@ from __future__ import annotations
 from app.core import config
 from app.db.models import (
     Document,
+    DocumentArtifact,
     DocumentVersion,
     FileObject,
     FilesystemJob,
@@ -186,6 +187,80 @@ def test_get_file_content_enforces_owner(monkeypatch, tmp_path):
     assert own_response.status_code == 200
     assert own_response.content == b"preview-content"
     assert cross_response.status_code == 404
+    clear_overrides()
+
+
+def test_structured_artifact_download_restricts_owner_and_artifact_type(monkeypatch, tmp_path):
+    """通用派生件 ID 不能借结构化下载路由读取其他类型或其他用户文件。"""
+
+    _configure_storage(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    owner = _auth_header(client, "artifact-owner")
+    viewer = _auth_header(client, "artifact-viewer")
+    upload = client.post(
+        "/api/files/upload",
+        headers=owner,
+        files={"file": ("source.png", b"image-content", "image/png")},
+    )
+    document_id = upload.json()["document_id"]
+    artifact_dir = tmp_path / "uploads" / "derivatives"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    structured_path = artifact_dir / "result.csv"
+    structured_path.write_text("name\nvalue\n", encoding="utf-8")
+    preview_path = artifact_dir / "preview.txt"
+    preview_path.write_text("internal preview", encoding="utf-8")
+    db = SessionLocal()
+    try:
+        structured = DocumentArtifact(
+            id="structured-artifact",
+            document_id=document_id,
+            artifact_type="STRUCTURED_EXTRACTION_CSV",
+            storage_path="derivatives/result.csv",
+            content_type="text/csv; charset=utf-8",
+            size_bytes=structured_path.stat().st_size,
+            sha256="a" * 64,
+            source_sha256="b" * 64,
+            converter_name="structured-extraction-export",
+            converter_version="1",
+            converter_config_hash="c" * 64,
+        )
+        preview = DocumentArtifact(
+            id="preview-artifact",
+            document_id=document_id,
+            artifact_type="PREVIEW_TEXT",
+            storage_path="derivatives/preview.txt",
+            content_type="text/plain",
+            size_bytes=preview_path.stat().st_size,
+            sha256="d" * 64,
+            source_sha256="b" * 64,
+            converter_name="preview",
+            converter_version="1",
+            converter_config_hash="e" * 64,
+        )
+        db.add_all([structured, preview])
+        db.commit()
+        structured_artifact_id = structured.id
+        preview_artifact_id = preview.id
+    finally:
+        db.close()
+
+    own_response = client.get(
+        f"/api/files/{document_id}/artifacts/{structured_artifact_id}",
+        headers=owner,
+    )
+    wrong_type_response = client.get(
+        f"/api/files/{document_id}/artifacts/{preview_artifact_id}",
+        headers=owner,
+    )
+    cross_user_response = client.get(
+        f"/api/files/{document_id}/artifacts/{structured_artifact_id}",
+        headers=viewer,
+    )
+
+    assert own_response.status_code == 200
+    assert own_response.content == structured_path.read_bytes()
+    assert wrong_type_response.status_code == 404
+    assert cross_user_response.status_code == 404
     clear_overrides()
 
 

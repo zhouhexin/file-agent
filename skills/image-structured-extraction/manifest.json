@@ -1,0 +1,11 @@
+{
+  "id": "image-structured-extraction",
+  "version": "1.0.0",
+  "status": "ACTIVE",
+  "description": "从图片和扫描件中按用户动态字段抽取可追溯的结构化数据。",
+  "trigger_hints": ["识别图片中的字段", "从扫描件提取", "整理成表格", "返回 JSON", "提取全部信息"],
+  "allowed_tools": ["extract-image-structured-data"],
+  "required_capabilities": ["image-layout-parsing", "dynamic-schema-extraction"],
+  "risk_ceiling": "medium",
+  "deployment_gate": "structured_extraction"
+}

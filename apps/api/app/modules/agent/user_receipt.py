@@ -43,6 +43,7 @@ class UserTaskReceipt(BaseModel):
         "classification_clarification",
         "classification_decision",
         "filename_conflict",
+        "structured_extraction",
     ] = "text"
     display_mode: Literal["default", "classification_cards"] = "default"
     final_response: str | None = None
@@ -59,6 +60,7 @@ class UserTaskReceipt(BaseModel):
     classification_clarification_result: dict[str, Any] | None = None
     classification_decision_result: dict[str, Any] | None = None
     filename_conflict_result: dict[str, Any] | None = None
+    structured_extraction_result: dict[str, Any] | None = None
     pending_job_ids: list[str] = Field(default_factory=list)
     operation_plan_id: str | None = None
     pending_decisions: list[dict[str, Any]] = Field(default_factory=list)
@@ -87,6 +89,7 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         classification_decision_result,
     ) = _classification_decision_results(result)
     filename_conflict_result = _filename_conflict_result(result)
+    structured_extraction_result = _structured_extraction_result(result)
     initial_organization_results = _initial_organization_results(result)
     document_results = _merge_document_results(
         initial_organization_results,
@@ -104,6 +107,7 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         classification_clarification_result=classification_clarification_result,
         classification_decision_result=classification_decision_result,
         filename_conflict_result=filename_conflict_result,
+        structured_extraction_result=structured_extraction_result,
     )
     pending_decisions: list[dict[str, Any]] = []
     if result.operation_plan_id and not _has_executed_working_copy_result(result):
@@ -211,6 +215,7 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         classification_clarification_result=classification_clarification_result,
         classification_decision_result=classification_decision_result,
         filename_conflict_result=filename_conflict_result,
+        structured_extraction_result=structured_extraction_result,
         # 检索就绪任务属于内部依赖链，前端按同一 AgentRun 状态轮询即可；
         # 普通消息接口不能暴露其任务 ID、队列或“待准备”阶段。
         pending_job_ids=(
@@ -499,6 +504,7 @@ def _response_type(
     classification_clarification_result: dict[str, Any] | None,
     classification_decision_result: dict[str, Any] | None,
     filename_conflict_result: dict[str, Any] | None,
+    structured_extraction_result: dict[str, Any] | None,
 ) -> str:
     """把内部意图收敛为少量稳定的用户展示类型。"""
 
@@ -510,6 +516,8 @@ def _response_type(
         return "classification_decision"
     if filename_conflict_result:
         return "filename_conflict"
+    if structured_extraction_result:
+        return "structured_extraction"
     if rename_plan_result:
         return "rename_plan"
     if trash_restore_result:
@@ -731,6 +739,134 @@ def _filename_conflict_result(
                 ],
             }
     return None
+
+
+def _structured_extraction_result(result: AgentRunResult) -> dict[str, Any] | None:
+    """投影图片结构化抽取结果，隐藏运行、元素和本地文件内部标识。"""
+
+    for invocation in result.tool_invocations:
+        output = invocation.output_json
+        if (
+            invocation.tool_name != "extract-image-structured-data"
+            or not isinstance(output, dict)
+            or output.get("kind") != "structured_image_extraction"
+            or output.get("ok") is not True
+        ):
+            continue
+        field_schema = [
+            {
+                "key": str(item.get("key") or "")[:64],
+                "label": str(item.get("label") or "")[:80],
+                "field_type": str(item.get("field_type") or "string")[:40],
+                "required": bool(item.get("required", False)),
+            }
+            for item in list(output.get("field_schema") or [])
+            if isinstance(item, dict) and item.get("key") and item.get("label")
+        ][:40]
+        allowed_keys = {item["key"] for item in field_schema}
+        records = []
+        for item in list(output.get("records") or [])[:1000]:
+            if not isinstance(item, dict):
+                continue
+            fields = {}
+            for key, value in dict(item.get("fields") or {}).items():
+                if key not in allowed_keys or not isinstance(value, dict):
+                    continue
+                evidence = value.get("evidence") if isinstance(value.get("evidence"), dict) else {}
+                bbox = evidence.get("bbox") if isinstance(evidence.get("bbox"), dict) else {}
+                fields[key] = {
+                    "raw_text": _bounded_receipt_value(value.get("raw_text")),
+                    "normalized_value": _bounded_receipt_value(value.get("normalized_value")),
+                    "confidence": max(0.0, min(1.0, float(value.get("confidence") or 0))),
+                    "status": str(value.get("status") or "NEEDS_REVIEW")[:40],
+                    "evidence": {
+                        "page_number": (
+                            evidence.get("page_number")
+                            if isinstance(evidence.get("page_number"), int)
+                            and evidence.get("page_number") > 0
+                            else None
+                        ),
+                        "bbox": {
+                            coordinate: bbox.get(coordinate)
+                            for coordinate in ("left", "top", "right", "bottom")
+                            if isinstance(bbox.get(coordinate), (int, float))
+                        },
+                    },
+                    "warnings": [
+                        str(code)[:120]
+                        for code in list(value.get("warnings") or [])
+                        if str(code)
+                    ][:10],
+                }
+            records.append(
+                {
+                    "record_index": int(item.get("record_index") or len(records) + 1),
+                    "fields": fields,
+                }
+            )
+        review_items = [
+            {
+                "record_index": int(item.get("record_index") or 0),
+                "field_key": str(item.get("field_key") or "")[:64],
+                "field_label": str(item.get("field_label") or "")[:80],
+                "raw_text": _bounded_receipt_value(item.get("raw_text")),
+                "status": str(item.get("status") or "NEEDS_REVIEW")[:40],
+                "reason_codes": [
+                    str(code)[:120]
+                    for code in list(item.get("reason_codes") or [])
+                    if str(code)
+                ][:10],
+                "page_number": item.get("page_number")
+                if isinstance(item.get("page_number"), int)
+                else None,
+            }
+            for item in list(output.get("review_items") or [])[:200]
+            if isinstance(item, dict)
+        ]
+        raw_artifact = output.get("export_artifact")
+        export_artifact = None
+        if isinstance(raw_artifact, dict) and raw_artifact.get("artifact_id"):
+            artifact_format = str(raw_artifact.get("format") or "").upper()
+            if artifact_format in {"CSV", "XLSX"}:
+                export_artifact = {
+                    "artifact_id": str(raw_artifact["artifact_id"])[:36],
+                    "format": artifact_format,
+                    "filename": str(raw_artifact.get("filename") or "")[:255],
+                    "content_type": str(raw_artifact.get("content_type") or "")[:120],
+                    "size_bytes": max(0, int(raw_artifact.get("size_bytes") or 0)),
+                }
+        return {
+            "document_id": str(output.get("document_id") or ""),
+            "presentation": str(output.get("presentation") or "JSON"),
+            "schema_mode": str(output.get("schema_mode") or "EXPLICIT_FIELDS"),
+            "record_mode": str(output.get("record_mode") or "AUTO"),
+            "field_schema": field_schema,
+            "records": records,
+            "review_items": review_items,
+            "record_count": len(records),
+            "review_count": len(review_items),
+            "quality_band": str(output.get("quality_band") or "LOW"),
+            "original_unchanged": True,
+            "export_artifact": export_artifact,
+        }
+    return None
+
+
+def _bounded_receipt_value(value: Any) -> Any:
+    """限制普通回执中的动态字段值大小，避免全文或大对象穿透。"""
+
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:1000]
+    if isinstance(value, list):
+        return [_bounded_receipt_value(item) for item in value[:50]]
+    if isinstance(value, dict):
+        return {
+            str(key)[:80]: _bounded_receipt_value(item)
+            for key, item in list(value.items())[:20]
+        }
+    return str(value)[:1000]
 
 
 def _has_executed_working_copy_result(result: AgentRunResult) -> bool:
@@ -958,4 +1094,6 @@ def _suggested_next_actions(*, result: AgentRunResult, response_type: str) -> li
         return ["继续查找相关文件", "查看文件的详细内容"]
     if response_type == "managed_file_list":
         return ["继续按主题、年份或文件类型筛选"]
+    if response_type == "structured_extraction":
+        return ["复核低置信度字段", "按 JSON 格式重新展示"]
     return []

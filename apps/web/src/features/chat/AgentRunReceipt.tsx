@@ -19,6 +19,7 @@ import { EvidenceAnswerReceipt, FileSelectionReceipt } from './EvidenceAnswerRec
 import { ClassificationClarificationCard } from './ClassificationClarificationCard';
 import { FilenameConflictCard } from './FilenameConflictCard';
 import { FileTaskReceiptShell } from './FileTaskReceiptShell';
+import { StructuredExtractionReceipt } from './StructuredExtractionReceipt';
 import type { ChatAttachment } from './presentation';
 import { findAttachmentByDocumentId, formatFileSize } from './presentation';
 
@@ -142,6 +143,7 @@ export function AgentRunReceipt({
     && !taskResult.managed_file_result
     && !taskResult.file_search_result
     && !taskResult.evidence_answer_result
+    && !taskResult.structured_extraction_result
     && !taskResult.file_selection_result
   ) {
     // 异步任务刚入队时尚无最终回执；只展示通用处理状态，不暴露导入、索引或队列细节。
@@ -234,6 +236,17 @@ export function AgentRunReceipt({
       <p className="agent-chat-response">
         {taskResult.classification_decision_result.message}
       </p>
+    );
+  }
+  if (
+    taskResult.response_type === 'structured_extraction'
+    && taskResult.structured_extraction_result
+  ) {
+    return (
+      <StructuredExtractionReceipt
+        result={taskResult.structured_extraction_result}
+        token={token}
+      />
     );
   }
   if (

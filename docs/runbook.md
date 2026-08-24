@@ -806,7 +806,7 @@ Windows CMD 开发环境可以直接运行 `scripts\start-file-agent-workers.cmd
 读取项目根 `.env`，用当前机器的 `MANAGED_ROOT_*` 更新数据库中的运行时目录路径，真实打开每个目录
 验证可读性，并停用旧版本误登记的 `scan_batch_size` 等伪目录。只有预检成功后，才会以独立窗口启动
 scheduler、`RECONCILE,SCAN`、`DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION`、两个 `IMPORT` worker、
-一个 `ANALYSIS` worker 和一个 `GRAPH` worker。它适合本地开发
+一个 `ANALYSIS` worker、一个 `STRUCTURED_EXTRACTION` worker 和一个 `GRAPH` worker。它适合本地开发
 与烟测；生产环境仍可按以下命令基于容量分别部署更多 worker。
 
 Windows 必须从本机仓库根目录使用 Windows 路径执行，例如：
@@ -844,6 +844,10 @@ PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=import-2 \
 
 PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=analysis-1 \
   FILESYSTEM_WORKER_QUEUES=ANALYSIS \
+  /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
+
+PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=structured-extraction-1 \
+  FILESYSTEM_WORKER_QUEUES=STRUCTURED_EXTRACTION \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 
 PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=graph-1 \

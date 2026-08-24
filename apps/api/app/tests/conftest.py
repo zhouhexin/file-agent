@@ -48,6 +48,8 @@ def disable_real_integrations_by_default(monkeypatch, request):
         "MCP_FILESYSTEM_ENABLED",
         "OCR_ENABLED",
         "OCR_LLM_ENABLED",
+        "PP_STRUCTURE_ENABLED",
+        "STRUCTURED_EXTRACTION_ENABLED",
         "DOCLING_ENABLED",
         "MANAGED_ROOT_RECONCILE_ON_STARTUP",
     ):

@@ -79,7 +79,7 @@ Neo4j 图谱和图向量默认以 Shadow 模式开启。API 启动只创建 GRAP
 Windows CMD 可直接执行 `scripts\start-file-agent-workers.cmd`。脚本会先读取项目根 `.env`，把当前
 Windows 机器的 `MANAGED_ROOT_*` 路径同步到数据库并真实验证目录可读；预检失败时不会启动任何
 worker。预检通过后分别启动 scheduler、扫描 worker、生命周期 worker、两个 `IMPORT` worker、一个
-`ANALYSIS` worker 和一个 `GRAPH` worker；增加
+`ANALYSIS` worker、一个 `STRUCTURED_EXTRACTION` worker 和一个 `GRAPH` worker；增加
 `--with-watcher` 才会额外启动 watcher。若 Python 不在 PATH，先设置 `FILE_AGENT_PYTHON` 为解释器
 绝对路径。脚本无论从哪个当前目录调用都会先切换到仓库根，因此相对
 `WORKING_COPY_STORAGE_ROOT=./storage/working-copies` 始终指向仓库内目录。共享开发数据库已有
@@ -95,6 +95,8 @@ PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=IMPORT \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=ANALYSIS \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
+PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=STRUCTURED_EXTRACTION \
+  /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=GRAPH \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=FILE_OPERATION \
@@ -104,6 +106,11 @@ PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=RECONCILE,SCAN \
 PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.file_lifecycle.scheduler
 PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.file_lifecycle.watcher
 ```
+
+图片/扫描件动态字段抽取使用 PP-StructureV3 Python SDK，不依赖 MCP。部署时安装
+`pip install -e 'apps/api[structured-extraction]'`，配置 `.env` 中的 `PP_STRUCTURE_*` 与
+`STRUCTURED_EXTRACTION_*`，执行最新 Alembic 迁移后再启动独立队列。功能默认关闭；详细架构、
+安全边界和灰度步骤见 `docs/image-structured-extraction-autonomous-loop-implementation-plan.md`。
 
 当前服务地址：
 

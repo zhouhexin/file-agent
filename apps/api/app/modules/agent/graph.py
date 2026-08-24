@@ -1034,7 +1034,21 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
                 tool_name=str(step["tool_name"]),
                 tool_input=signature_input,
             )
-            if signature in executed_signatures:
+            structured_budget_error = _structured_extraction_budget_error(
+                tool_name=str(step["tool_name"]),
+                tool_input=signature_input,
+                state=state,
+            )
+            if structured_budget_error is not None:
+                code, message = structured_budget_error
+                invocation = _dispatch_rejection_invocation(
+                    step=step,
+                    tool_input=tool_input,
+                    code=code,
+                    message=message,
+                )
+                errors.append(code)
+            elif signature in executed_signatures:
                 invocation = _dispatch_rejection_invocation(
                     step=step,
                     tool_input=tool_input,
@@ -1081,6 +1095,7 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
                 except Exception as exc:
                     if step["tool_name"] not in {
                         "extract-document-text",
+                        "extract-image-structured-data",
                         "analyze-spreadsheet",
                         "profile-spreadsheet",
                         "validate-spreadsheet",
@@ -1192,6 +1207,65 @@ def _canonical_tool_input(
     except Exception:
         # 这里只生成幂等签名；真实 invoke 仍负责抛出标准未知 Tool 或 schema 校验错误。
         return tool_input
+
+
+def _structured_extraction_budget_error(
+    *,
+    tool_name: str,
+    tool_input: Dict[str, Any],
+    state: AgentGraphState,
+) -> tuple[str, str] | None:
+    """强制图片抽取最多一次初始执行和一次 Observation 约束的局部增强。"""
+
+    if tool_name != "extract-image-structured-data":
+        return None
+    previous_calls = [
+        item
+        for item in state.get("tool_invocations", [])
+        if item.get("tool_name") == tool_name
+    ]
+    if len(previous_calls) >= 2:
+        return (
+            "STRUCTURED_EXTRACTION_BUDGET_EXCEEDED",
+            "图片结构化抽取最多执行一次初始识别和一次局部增强。",
+        )
+    retry_strategy = str(tool_input.get("retry_strategy") or "INITIAL")
+    if retry_strategy != "VISION_CROP":
+        if previous_calls:
+            return (
+                "STRUCTURED_EXTRACTION_RETRY_INVALID",
+                "图片结构化抽取的第二次调用只能是局部视觉增强。",
+            )
+        return None
+    if len(previous_calls) != 1:
+        return (
+            "STRUCTURED_EXTRACTION_RETRY_INVALID",
+            "局部视觉增强只能发生在一次初始结构化抽取之后。",
+        )
+    observation_results = list((state.get("observation") or {}).get("results") or [])
+    structured = next(
+        (
+            item.get("structured_extraction")
+            for item in reversed(observation_results)
+            if item.get("tool_name") == tool_name
+            and isinstance(item.get("structured_extraction"), dict)
+        ),
+        None,
+    )
+    allowed_targets = set((structured or {}).get("low_confidence_field_keys") or [])
+    targets = set(tool_input.get("target_field_keys") or [])
+    if (
+        not structured
+        or structured.get("retryable") is not True
+        or structured.get("recommended_retry_strategy") != "VISION_CROP"
+        or not targets
+        or not targets.issubset(allowed_targets)
+    ):
+        return (
+            "STRUCTURED_EXTRACTION_RETRY_SCOPE_REJECTED",
+            "局部增强字段不在后端确认的低置信度范围内。",
+        )
+    return None
 
 
 def _dispatch_rejection_invocation(
@@ -1391,6 +1465,37 @@ def _safe_tool_observation(
         "requires_user_confirmation": requires_user_confirmation,
         "waiting_for_async_job": waiting_for_async_job,
     }
+    if tool_name == "extract-image-structured-data" and not waiting_for_async_job:
+        quality_band = str(result.get("quality_band") or "LOW")
+        retry_strategy = str(result.get("recommended_retry_strategy") or "NONE")
+        if retry_strategy not in {"NONE", "REOCR", "VISION_CROP"}:
+            retry_strategy = "NONE"
+        structured = {
+            "record_count": _safe_nonnegative_int(result.get("record_count")) or 0,
+            "field_count": _safe_nonnegative_int(result.get("field_count")) or 0,
+            "review_count": _safe_nonnegative_int(result.get("review_count")) or 0,
+            "missing_required_field_count": _safe_nonnegative_int(
+                result.get("missing_required_field_count")
+            )
+            or 0,
+            "quality_band": quality_band if quality_band in {"HIGH", "MEDIUM", "LOW"} else "LOW",
+            "retryable": result.get("retryable") is True,
+            "recommended_retry_strategy": retry_strategy,
+            "low_confidence_field_keys": [
+                str(value)
+                for value in list(result.get("low_confidence_field_keys") or [])
+                if str(value)
+            ][:20],
+        }
+        base["structured_extraction"] = structured
+        base["available_next_decisions"] = (
+            ["FINISH"]
+            if structured["quality_band"] == "HIGH" and structured["review_count"] == 0
+            else ["TOOL_PLAN", "CLARIFY", "FINISH"]
+            if structured["retryable"]
+            else ["CLARIFY", "FINISH"]
+        )
+        return ExecutionObservation.model_validate(base).model_dump()
     if tool_name != "hybrid-search":
         base["available_next_decisions"] = (
             ["FINISH", "CLARIFY"]
@@ -1542,7 +1647,26 @@ def _failed_tool_invocation(*, step: Dict[str, Any], error: Exception) -> ToolIn
         "user_action_required": False,
     }
 
-    if tool_name == "analyze-spreadsheet":
+    if tool_name == "extract-image-structured-data":
+        output_json: Dict[str, Any] = {
+            "kind": "structured_image_extraction",
+            "ok": False,
+            "status": "FAILED",
+            "document_id": document_id,
+            "record_count": 0,
+            "field_count": 0,
+            "review_count": 0,
+            "missing_required_field_count": 0,
+            "retryable": False,
+            "recommended_retry_strategy": "NONE",
+            "low_confidence_field_keys": [],
+            "field_schema": [],
+            "records": [],
+            "review_items": [],
+            "original_unchanged": True,
+            "error": error_payload,
+        }
+    elif tool_name == "analyze-spreadsheet":
         output_json: Dict[str, Any] = {
             "kind": "spreadsheet_analysis",
             "ok": False,

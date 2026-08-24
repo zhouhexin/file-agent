@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import PurePosixPath
 from typing import Any, Dict, List, Literal, Optional
 
@@ -16,6 +17,127 @@ class StrictToolInput(BaseModel):
     """拒绝 Planner 输出中未声明字段的 Tool 输入基类。"""
 
     model_config = ConfigDict(extra="forbid")
+
+
+class StructuredFieldSpec(BaseModel):
+    """图片结构化抽取的动态字段声明，不接受任意代码或 Prompt。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    label: str = Field(min_length=1, max_length=80)
+    field_type: Literal[
+        "string",
+        "integer",
+        "decimal",
+        "money",
+        "date",
+        "datetime",
+        "person_name",
+        "phone",
+        "id_number",
+        "organization",
+        "boolean",
+        "enum",
+    ]
+    required: bool = False
+    multiple: bool = False
+    aliases: List[str] = Field(default_factory=list, max_length=10)
+    enum_values: List[str] = Field(default_factory=list, max_length=30)
+
+    @field_validator("label")
+    @classmethod
+    def normalize_label(cls, value: str) -> str:
+        """移除字段标签首尾空白并拒绝控制字符。"""
+
+        normalized = " ".join(value.strip().split())
+        if any(ord(char) < 32 for char in normalized):
+            raise ValueError("field label contains control characters")
+        return normalized
+
+    @field_validator("aliases", "enum_values")
+    @classmethod
+    def normalize_string_list(cls, values: List[str]) -> List[str]:
+        """限制动态文本列表长度并按稳定顺序去重。"""
+
+        normalized: List[str] = []
+        for value in values:
+            item = " ".join(str(value or "").strip().split())
+            if not item or len(item) > 80:
+                raise ValueError("field aliases and enum values must be 1-80 characters")
+            if any(ord(char) < 32 for char in item):
+                raise ValueError("field aliases and enum values contain control characters")
+            if item not in normalized:
+                normalized.append(item)
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_enum_values(self) -> "StructuredFieldSpec":
+        """枚举字段必须声明候选值，其他字段不得夹带枚举配置。"""
+
+        if self.field_type == "enum" and not self.enum_values:
+            raise ValueError("enum field requires enum_values")
+        if self.field_type != "enum" and self.enum_values:
+            raise ValueError("non-enum field cannot include enum_values")
+        return self
+
+
+class StructuredImageExtractionInput(StrictToolInput):
+    """图片或扫描件动态结构化抽取白名单 Tool 的严格输入。"""
+
+    document_id: str = Field(min_length=1, max_length=36)
+    schema_mode: Literal["EXPLICIT_FIELDS", "AUTO_DISCOVER"]
+    record_mode: Literal[
+        "AUTO",
+        "SINGLE_RECORD",
+        "TABLE_ROWS",
+        "KEY_VALUE_GROUPS",
+    ] = "AUTO"
+    fields: List[StructuredFieldSpec] = Field(default_factory=list, max_length=40)
+    presentation: Literal[
+        "AUTO",
+        "TABLE",
+        "JSON",
+        "CSV",
+        "XLSX",
+        "TEXT",
+    ] = "AUTO"
+    retry_strategy: Literal["INITIAL", "REOCR", "VISION_CROP"] = "INITIAL"
+    target_field_keys: List[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("target_field_keys")
+    @classmethod
+    def normalize_target_field_keys(cls, values: List[str]) -> List[str]:
+        """重试字段只能使用与动态字段相同的安全 key 格式。"""
+
+        normalized: List[str] = []
+        pattern = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+        for value in values:
+            item = str(value or "").strip()
+            if not pattern.fullmatch(item):
+                raise ValueError("target field key has invalid format")
+            if item not in normalized:
+                normalized.append(item)
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_schema_and_retry(self) -> "StructuredImageExtractionInput":
+        """约束字段发现模式与最多一次定向增强所需参数。"""
+
+        field_keys = [item.key for item in self.fields]
+        if len(field_keys) != len(set(field_keys)):
+            raise ValueError("structured extraction field keys must be unique")
+        if self.schema_mode == "EXPLICIT_FIELDS" and not self.fields:
+            raise ValueError("EXPLICIT_FIELDS requires at least one field")
+        if self.schema_mode == "AUTO_DISCOVER" and self.fields:
+            raise ValueError("AUTO_DISCOVER cannot include planner-provided fields")
+        if self.retry_strategy == "VISION_CROP" and not self.target_field_keys:
+            raise ValueError("VISION_CROP requires target_field_keys")
+        if self.retry_strategy != "VISION_CROP" and self.target_field_keys:
+            raise ValueError("target_field_keys are only allowed for VISION_CROP")
+        if self.target_field_keys and not set(self.target_field_keys).issubset(field_keys):
+            raise ValueError("target_field_keys must exist in fields")
+        return self
 
 
 def _normalize_path_prefix(value: Optional[str]) -> Optional[str]:

@@ -24,6 +24,11 @@ DEFAULT_ADAPTIVE_PLANNER_SCHEMA_VERSION = "planner-decision-v1"
 DEFAULT_LOG_DIR = "./logs"
 DEFAULT_LOG_RETENTION_DAYS = 7
 DEFAULT_OCR_LLM_FALLBACK_QUALITY_THRESHOLD = 0.68
+DEFAULT_PP_STRUCTURE_MAX_IMAGE_PIXELS = 24_000_000
+DEFAULT_PP_STRUCTURE_MAX_PDF_PAGES = 50
+DEFAULT_STRUCTURED_EXTRACTION_MAX_FIELDS = 40
+DEFAULT_STRUCTURED_EXTRACTION_MAX_RETRY_FIELDS = 20
+DEFAULT_STRUCTURED_EXTRACTION_MAX_RECORDS = 1000
 DEFAULT_OCR_PADDLE_MODEL_SOURCE = "BOS"
 DEFAULT_DOCLING_FORMATS = ("pdf", "docx")
 DEFAULT_FILE_RENAME_EXECUTOR = "native"
@@ -174,6 +179,25 @@ class Settings(BaseModel):
     ocr_paddle_model_source: str = DEFAULT_OCR_PADDLE_MODEL_SOURCE
     ocr_llm_enabled: bool = False
     ocr_llm_fallback_quality_threshold: float = DEFAULT_OCR_LLM_FALLBACK_QUALITY_THRESHOLD
+    pp_structure_enabled: bool = False
+    pp_structure_device: str = "cpu"
+    pp_structure_pipeline_config: str = "PP-StructureV3"
+    pp_structure_model_source: str = "BOS"
+    pp_structure_max_image_pixels: int = DEFAULT_PP_STRUCTURE_MAX_IMAGE_PIXELS
+    pp_structure_max_pdf_pages: int = DEFAULT_PP_STRUCTURE_MAX_PDF_PAGES
+    structured_extraction_enabled: bool = False
+    structured_extraction_llm_provider: str = "disabled"
+    structured_extraction_llm_base_url: str = ""
+    structured_extraction_llm_api_key: str = ""
+    structured_extraction_llm_model: str = ""
+    structured_extraction_llm_timeout_seconds: int = 120
+    structured_extraction_max_fields: int = DEFAULT_STRUCTURED_EXTRACTION_MAX_FIELDS
+    structured_extraction_max_retry_fields: int = DEFAULT_STRUCTURED_EXTRACTION_MAX_RETRY_FIELDS
+    structured_extraction_max_records: int = DEFAULT_STRUCTURED_EXTRACTION_MAX_RECORDS
+    structured_extraction_prompt_version: str = "structured-extraction-v1"
+    structured_extraction_high_confidence: float = 0.85
+    structured_extraction_retry_confidence: float = 0.65
+    structured_extraction_external_images_authorized: bool = False
     docling_enabled: bool = True
     docling_formats: tuple[str, ...] = DEFAULT_DOCLING_FORMATS
     docling_ocr_enabled: bool = False
@@ -583,6 +607,80 @@ def get_settings() -> Settings:
                 str(DEFAULT_OCR_LLM_FALLBACK_QUALITY_THRESHOLD),
             )
         ),
+        pp_structure_enabled=os.getenv("PP_STRUCTURE_ENABLED", "false").lower() == "true",
+        pp_structure_device=os.getenv("PP_STRUCTURE_DEVICE", "cpu").strip() or "cpu",
+        pp_structure_pipeline_config=os.getenv(
+            "PP_STRUCTURE_PIPELINE_CONFIG", "PP-StructureV3"
+        ).strip()
+        or "PP-StructureV3",
+        pp_structure_model_source=os.getenv("PP_STRUCTURE_MODEL_SOURCE", "BOS").strip() or "BOS",
+        pp_structure_max_image_pixels=_bounded_int_env(
+            "PP_STRUCTURE_MAX_IMAGE_PIXELS",
+            DEFAULT_PP_STRUCTURE_MAX_IMAGE_PIXELS,
+            minimum=1_000_000,
+            maximum=200_000_000,
+        ),
+        pp_structure_max_pdf_pages=_bounded_int_env(
+            "PP_STRUCTURE_MAX_PDF_PAGES",
+            DEFAULT_PP_STRUCTURE_MAX_PDF_PAGES,
+            minimum=1,
+            maximum=500,
+        ),
+        structured_extraction_enabled=os.getenv(
+            "STRUCTURED_EXTRACTION_ENABLED", "false"
+        ).lower()
+        == "true",
+        structured_extraction_llm_provider=_choice(
+            os.getenv("STRUCTURED_EXTRACTION_LLM_PROVIDER", "disabled"),
+            allowed={"disabled", "openai_compatible"},
+            default="disabled",
+        ),
+        structured_extraction_llm_base_url=os.getenv(
+            "STRUCTURED_EXTRACTION_LLM_BASE_URL", ""
+        ).strip(),
+        structured_extraction_llm_api_key=os.getenv(
+            "STRUCTURED_EXTRACTION_LLM_API_KEY", ""
+        ),
+        structured_extraction_llm_model=os.getenv(
+            "STRUCTURED_EXTRACTION_LLM_MODEL", ""
+        ).strip(),
+        structured_extraction_llm_timeout_seconds=_bounded_int_env(
+            "STRUCTURED_EXTRACTION_LLM_TIMEOUT_SECONDS", 120, minimum=10, maximum=600
+        ),
+        structured_extraction_max_fields=_bounded_int_env(
+            "STRUCTURED_EXTRACTION_MAX_FIELDS",
+            DEFAULT_STRUCTURED_EXTRACTION_MAX_FIELDS,
+            minimum=1,
+            maximum=40,
+        ),
+        structured_extraction_max_retry_fields=_bounded_int_env(
+            "STRUCTURED_EXTRACTION_MAX_RETRY_FIELDS",
+            DEFAULT_STRUCTURED_EXTRACTION_MAX_RETRY_FIELDS,
+            minimum=1,
+            maximum=20,
+        ),
+        structured_extraction_max_records=_bounded_int_env(
+            "STRUCTURED_EXTRACTION_MAX_RECORDS",
+            DEFAULT_STRUCTURED_EXTRACTION_MAX_RECORDS,
+            minimum=1,
+            maximum=10_000,
+        ),
+        structured_extraction_prompt_version=os.getenv(
+            "STRUCTURED_EXTRACTION_PROMPT_VERSION", "structured-extraction-v1"
+        ).strip()
+        or "structured-extraction-v1",
+        structured_extraction_high_confidence=max(
+            0.0,
+            min(1.0, float(os.getenv("STRUCTURED_EXTRACTION_HIGH_CONFIDENCE", "0.85"))),
+        ),
+        structured_extraction_retry_confidence=max(
+            0.0,
+            min(1.0, float(os.getenv("STRUCTURED_EXTRACTION_RETRY_CONFIDENCE", "0.65"))),
+        ),
+        structured_extraction_external_images_authorized=os.getenv(
+            "STRUCTURED_EXTRACTION_EXTERNAL_IMAGES_AUTHORIZED", "false"
+        ).lower()
+        == "true",
         docling_enabled=os.getenv("DOCLING_ENABLED", "true").lower() == "true",
         docling_formats=tuple(
             item.strip().lower().lstrip(".")

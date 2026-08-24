@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from collections.abc import Callable
 
@@ -55,6 +56,10 @@ from app.modules.knowledge_graph.projection_service import GraphProjectionServic
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
 from app.modules.managed_files.scanner import ManagedFileScanner
+from app.modules.structured_extraction.worker import (
+    fail_structured_extraction_agent_run,
+    process_structured_extraction_job,
+)
 
 
 def _print_worker_status(
@@ -106,7 +111,80 @@ def _job_completion_summary(job: FilesystemJob) -> str | None:
         return f"scan_job_id={scan_job_id}" if scan_job_id else None
     if job.job_type == "IMPORT_WORKING_COPIES":
         return f"working_copy_created={not bool(result.get('idempotent'))}"
+    if job.job_type == "STRUCTURED_IMAGE_EXTRACTION":
+        return (
+            f"records={int(result.get('record_count') or 0)} "
+            f"review={int(result.get('review_count') or 0)}"
+        )
     return None
+
+
+class _JobLeaseHeartbeat:
+    """使用独立短 Session 为长任务续租，避免其他 Worker 重复领取。"""
+
+    def __init__(
+        self,
+        *,
+        session_factory: Callable[[], Session],
+        job_id: str,
+        worker_id: str,
+    ) -> None:
+        self.session_factory = session_factory
+        self.job_id = job_id
+        self.worker_id = worker_id
+        lease_seconds = max(3, int(get_settings().filesystem_job_lease_seconds))
+        self.interval_seconds = max(1.0, min(30.0, lease_seconds / 3))
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"filesystem-job-heartbeat-{job_id}",
+            daemon=True,
+        )
+        self._started = False
+
+    def start(self) -> None:
+        self._thread.start()
+        self._started = True
+
+    def stop(self) -> None:
+        if not self._started:
+            return
+        self._stop_event.set()
+        self._thread.join(timeout=min(2.0, self.interval_seconds + 0.5))
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self.interval_seconds):
+            if not self._renew_once():
+                return
+
+    def _renew_once(self) -> bool:
+        """执行一次独立续租；终态或租约失配时通知线程停止。"""
+
+        db = self.session_factory()
+        try:
+            job = db.get(FilesystemJob, self.job_id)
+            if (
+                job is None
+                or job.status != "RUNNING"
+                or job.lease_owner != self.worker_id
+            ):
+                return False
+            FilesystemJobQueue(db).heartbeat(job=job, worker_id=self.worker_id)
+            db.commit()
+            return True
+        except Exception as exc:
+            db.rollback()
+            log_event(
+                "filesystem.worker.heartbeat_failed",
+                level="WARNING",
+                job_id=self.job_id,
+                status="RUNNING",
+                error_code=exc.__class__.__name__,
+                message="任务租约续租失败，Worker 将在下一周期重试",
+            )
+            return True
+        finally:
+            db.close()
 
 
 def process_next_filesystem_job(
@@ -140,11 +218,20 @@ def process_next_filesystem_job(
                 status=job.status,
                 message="文件系统任务开始执行",
             )
+            heartbeat = _JobLeaseHeartbeat(
+                session_factory=session_factory,
+                job_id=job_id,
+                worker_id=worker_id,
+            )
             try:
-                _process_job(db=db, job=job)
-                # 检索未命中后静默提升的导入/分析任务完成时，继续原 hybrid-search。
-                # 这一步只更新原 AgentRun，不生成新的用户消息或暴露队列细节。
-                _advance_waiting_search_runs(db=db, completed_job=job)
+                heartbeat.start()
+                try:
+                    _process_job(db=db, job=job)
+                    # 检索未命中后静默提升的导入/分析任务完成时，继续原 hybrid-search。
+                    # 这一步只更新原 AgentRun，不生成新的用户消息或暴露队列细节。
+                    _advance_waiting_search_runs(db=db, completed_job=job)
+                finally:
+                    heartbeat.stop()
                 db.commit()
                 _print_worker_status(
                     "任务完成",
@@ -454,6 +541,9 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
     # 不能落入 Planner 或普通受管目录 Tool。
     if FileLifecycleJobProcessor(db).process(job):
         return
+    if job.job_type == "STRUCTURED_IMAGE_EXTRACTION":
+        process_structured_extraction_job(db=db, job=job)
+        return
     if job.job_type == "GRAPH_BOOTSTRAP_PROJECTION":
         _process_graph_bootstrap_projection(db=db, job=job)
         return
@@ -745,6 +835,12 @@ def _mark_agent_run_failed_for_job(
 ) -> None:
     """异步分类任务整体失败时同步结束原 AgentRun，避免前端永久等待。"""
 
+    if fail_structured_extraction_agent_run(
+        db=db,
+        job=job,
+        error_message=error_message,
+    ):
+        return
     if job.job_type != "CLASSIFY_MANAGED_FILES":
         _fail_waiting_search_runs(
             db=db,
@@ -1381,6 +1477,8 @@ def _public_job_error_message(*, job: FilesystemJob, error: Exception) -> str:
 
     if job.job_type == "CLASSIFY_MANAGED_FILES":
         return "受管文件后台分类失败，请稍后重试或联系管理员。"
+    if job.job_type == "STRUCTURED_IMAGE_EXTRACTION":
+        return "图片结构化抽取失败，原始文件未修改；请稍后重试或联系管理员。"
     if job.job_type in {"RECONCILE_MANAGED_ROOT", "SCAN_MANAGED_ROOT"} and isinstance(
         error,
         (FileNotFoundError, NotADirectoryError, PermissionError),

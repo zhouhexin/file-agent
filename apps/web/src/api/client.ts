@@ -242,6 +242,22 @@ export async function fetchUploadedFileBlob(token: string, documentId: string): 
   return response.blob();
 }
 
+export async function fetchDocumentArtifactBlob(
+  token: string,
+  documentId: string,
+  artifactId: string,
+): Promise<Blob> {
+  // 派生件下载只传稳定 ID；后端再次校验文档归属和存储路径边界。
+  const response = await fetch(
+    `${API_BASE_URL}/files/${documentId}/artifacts/${artifactId}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!response.ok) {
+    throw await readApiError(response, '结构化结果下载失败');
+  }
+  return response.blob();
+}
+
 export async function getFilePreview(
   token: string,
   documentId: string,
