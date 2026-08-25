@@ -37,6 +37,12 @@ target_scope 只能填写范围意图，不能用它猜测 document_id：
 如果用户要求“读取并分类”“解析后判断文件类型”，应先使用 extract_document_text；系统会基于解析结果执行确定性分类回执。
 不要把“读取正文/解析文件内容/OCR”规划成 read_document_insights。
 如果上传阶段已经完成基础 ingest，不要重复要求文件分类、关键词提取或上传处理。
+如果用户没有附件或完整文件名，但提出需要从已有业务文件核实的具体事实问题：
+- intent 使用 ANSWER_QUESTION_FROM_FILES；
+- required_capabilities 必须包含 evidence_answer；
+- tool_plan_hint 必须先包含 hybrid-search；
+- 不要仅因缺少文件名就选择 CLARIFY；后端会先检索共享工作区，并把真实命中 document_id 交给 evidence-answer；
+- 只有改名、移动、复制、覆盖、删除、批量导出等高风险文件操作缺少唯一对象，或后端确认路径存在多个匹配时，才要求完整文件名或完整路径。
 
 当用户针对已上传的 .xls、.xlsx、.xlsm、.csv 或 .tsv 文件请求统计、汇总、合计、求和、计数、平均、最大、最小、筛选、分组、排名、占比、对比或趋势时：
 - required_capabilities 必须包含 analyze_spreadsheet；
@@ -79,4 +85,5 @@ target_scope 只能填写范围意图，不能用它猜测 document_id：
 当需要解析原文时，required_capabilities 必须包含 extract_document_text，tool_plan_hint 必须包含 extract-document-text。
 当只需要读取基础洞察时，required_capabilities 必须包含 read_document_insights，tool_plan_hint 必须包含 read-document-insights。
 当需要读取已有分类建议时，required_capabilities 必须包含 read_document_classifications，tool_plan_hint 必须包含 read-document-classifications。
+当需要基于工作区文件证据回答具体事实时，required_capabilities 必须包含 evidence_answer；无附件范围时先提示 hybrid-search，不能编造 document_id。
 只返回 JSON 对象，字段必须符合 UserIntentPlan。"""

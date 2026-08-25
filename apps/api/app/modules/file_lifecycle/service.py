@@ -1446,13 +1446,22 @@ class FileLifecycleJobProcessor:
             )
         self.db.flush()
         # 建索引只读取已克隆页面，因此不会再次调用 LibreOffice 或文件解析器。
-        index_result = DocumentIndexService(db=self.db, settings=self.settings).build(
-            document_id=target_document.id,
-            document_version_id=target_version.id,
-            extraction_run_id=clone_run.id,
+        # 图片没有文字或 OCR 技术失败时，源侧只保存空正文与结构化警告；此时
+        # 工作副本仍需物化并建立文件名/目录元数据投影，不能因空正文再次失败。
+        has_indexable_text = any(
+            str(page.text_content or "").strip()
+            for page in self.db.query(DocumentPage)
+            .filter(DocumentPage.extraction_run_id == clone_run.id)
+            .all()
         )
-        if not index_result.get("ok"):
-            raise RuntimeError("工作副本复用源侧页面后建立索引失败")
+        if has_indexable_text:
+            index_result = DocumentIndexService(db=self.db, settings=self.settings).build(
+                document_id=target_document.id,
+                document_version_id=target_version.id,
+                extraction_run_id=clone_run.id,
+            )
+            if not index_result.get("ok"):
+                raise RuntimeError("工作副本复用源侧页面后建立索引失败")
         for source_summary in self.db.query(DocumentSummary).filter(
             DocumentSummary.document_id == source_document.id,
             DocumentSummary.document_version_id == source_version.id,

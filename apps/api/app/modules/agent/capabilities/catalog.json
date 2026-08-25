@@ -1,5 +1,5 @@
 {
-  "version": "2026-07-21",
+  "version": "2026-08-25",
   "capabilities": [
     {
       "id": "file_upload_read",
@@ -90,6 +90,15 @@
       "intents": ["SEARCH_FILES", "FIND_FILES"],
       "capability_keys": ["file_search", "file-search", "hybrid_search", "hybrid-search"],
       "tool_names": ["hybrid-search"]
+    },
+    {
+      "id": "evidence_answer",
+      "name": "工作区文件证据回答",
+      "description": "对无附件业务事实问题先检索共享工作区，再基于后端确认的活动文件原文证据回答并提供引用。",
+      "examples": ["大数据联合实验室由学院和哪家公司共同建立？仪式在哪里举行？", "请在工作区检索并回答这项活动由谁承办"],
+      "intents": ["EVIDENCE_ANSWER", "ANSWER_DOCUMENTS", "ANSWER_QUESTION_FROM_FILES"],
+      "capability_keys": ["evidence_answer", "evidence-answer"],
+      "tool_names": ["evidence-answer"]
     },
     {
       "id": "managed_file_query",

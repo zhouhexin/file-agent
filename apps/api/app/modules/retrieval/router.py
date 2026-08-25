@@ -147,7 +147,7 @@ def search_files(
     result = SearchCompletenessService(
         db=db,
         workspace_id=workspace_id,
-    ).attach(
+    ).attach_safely(
         result=result,
         scope=scope,
         unresolved_document_count=len(canonical_scope.unresolved_document_ids),

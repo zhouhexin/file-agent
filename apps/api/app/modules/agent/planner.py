@@ -87,6 +87,14 @@ MANAGED_FILE_CLASSIFICATION_HINTS = {
 }
 MCP_FILESYSTEM_HINTS = {"mcp_filesystem_read", "mcp-filesystem-list", "mcp-filesystem-search", "mcp-filesystem-info"}
 FILE_SEARCH_HINTS = {"file_search", "file-search", "hybrid_search", "hybrid-search"}
+EVIDENCE_ANSWER_HINTS = {"evidence_answer", "evidence-answer"}
+EVIDENCE_ANSWER_INTENTS = {
+    "ANSWER_DOCUMENTS",
+    "ANSWER_FROM_FILES",
+    "ANSWER_MANAGED_FILE",
+    "ANSWER_QUESTION_FROM_FILES",
+    "EVIDENCE_ANSWER",
+}
 SPREADSHEET_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".csv", ".tsv"}
 MANAGED_EXTENSION_ALIASES = {
     "pdf": "pdf",
@@ -410,6 +418,17 @@ class DeterministicPlanner:
         )
         # 识别普通主题文件检索；存在明确附件正文任务时，附件任务优先，避免扩大到全局文件范围。
         if (
+            not attachments
+            and _has_search_then_answer_intent(message=message, lowered=lowered)
+        ):
+            # “检索并回答”不是只找文件：先用只读检索获得后端确认的候选 ID，
+            # 再由 LangGraph 把严格命中范围交给 evidence-answer。
+            return _workspace_evidence_discovery_plan(
+                user_goal=message,
+                question=message,
+                answer_mode="FOCUSED",
+            )
+        if (
             _has_file_search_intent(message=message, lowered=lowered)
             and not has_attached_content_task
         ):
@@ -418,6 +437,12 @@ class DeterministicPlanner:
                 query=message,
                 document_ids=_document_ids(attachments),
             )
+
+        if not attachments and _is_general_conversational_question(
+            message=message,
+            lowered=lowered,
+        ):
+            return _general_chat_plan(intent="GENERAL_CHAT", user_goal=message)
 
         needs_file_scope = (
             _should_extract_text(message=message, lowered=lowered)
@@ -445,6 +470,12 @@ class DeterministicPlanner:
             and not document_ids
             and _has_workspace_evidence_intent(message=message, lowered=lowered)
         ):
+            if _has_answer_intent(message=message, lowered=lowered):
+                return _workspace_evidence_discovery_plan(
+                    user_goal=message,
+                    question=message,
+                    answer_mode="FOCUSED",
+                )
             return _evidence_answer_plan(
                 user_goal=message,
                 question=message,
@@ -456,7 +487,19 @@ class DeterministicPlanner:
                 ),
             )
 
-        # 需要文件正文、但既没有附件也不能解析为工作区问题时，要求用户补充具体文件。
+        # 无附件的自然业务事实问题默认在共享工作区发现证据，不要求普通用户先知道文件名。
+        if (
+            needs_file_scope
+            and not document_ids
+            and _has_unscoped_workspace_fact_question(message=message, lowered=lowered)
+        ):
+            return _workspace_evidence_discovery_plan(
+                user_goal=message,
+                question=message,
+                answer_mode="FOCUSED",
+            )
+
+        # 需要文件正文、但既没有附件也不能安全理解为事实问题时，要求用户补充具体任务范围。
         if needs_file_scope and not document_ids:
             return _missing_file_scope_plan(user_goal=message)
 
@@ -965,6 +1008,31 @@ def build_plan_from_user_intent(
             bool(_managed_root_key_from_list_request(message)),
         ]
     )
+    has_evidence_answer_route = (
+        intent_plan.intent in EVIDENCE_ANSWER_INTENTS
+        or bool(requested_capabilities.intersection(EVIDENCE_ANSWER_HINTS))
+        or "evidence-answer" in intent_plan.tool_plan_hint
+        or (
+            capability_route is not None
+            and capability_route.tool_name == "evidence-answer"
+        )
+    )
+    if not document_ids and (
+        has_evidence_answer_route
+        or _has_search_then_answer_intent(message=message, lowered=lowered)
+        or _has_unscoped_workspace_fact_question(message=message, lowered=lowered)
+    ):
+        # LLM 负责识别“需要文件事实”，后端负责把无范围问答收敛为固定的
+        # hybrid-search -> 严格候选 -> evidence-answer 链，不能直接信任模型猜测文件 ID。
+        return _workspace_evidence_discovery_plan(
+            user_goal=intent_plan.user_goal or message,
+            question=message,
+            answer_mode="FOCUSED",
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
+
     if (
         intent_plan.intent in {"SEARCH_FILES", "FIND_FILES"}
         or requested_capabilities.intersection(FILE_SEARCH_HINTS)
@@ -1366,6 +1434,60 @@ def _file_search_plan(
         ],
         evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
         confirmation_policy={"operation_plan_required": False},
+    )
+
+
+def _workspace_evidence_discovery_plan(
+    *,
+    user_goal: str,
+    question: str,
+    answer_mode: str,
+    response_style: str = "concise",
+    clarification_question: str | None = None,
+    llm_intent_plan: Dict[str, Any] | None = None,
+) -> PlannerOutput:
+    """先检索共享工作区，再把后端严格命中的文件交给证据回答。"""
+
+    search_plan = _file_search_plan(
+        user_goal=user_goal,
+        query=question,
+        document_ids=[],
+        response_style=response_style,
+        clarification_question=clarification_question,
+        llm_intent_plan=llm_intent_plan,
+    )
+    return search_plan.model_copy(
+        update={
+            "intent": "EVIDENCE_DISCOVERY",
+            "slots": {
+                **search_plan.slots,
+                "question": question,
+                "answer_mode": answer_mode,
+                "requested_outputs": ["answer", "references", "receipt"],
+                "workspace_evidence_discovery": True,
+            },
+        }
+    )
+
+
+def build_workspace_evidence_followup_plan(
+    *,
+    user_goal: str,
+    question: str,
+    document_ids: List[str],
+    answer_mode: str = "FOCUSED",
+    response_style: str = "concise",
+) -> PlannerOutput:
+    """把 hybrid-search 返回的后端受控候选构造成证据回答计划。"""
+
+    if not document_ids:
+        raise ValueError("workspace evidence follow-up requires document_ids")
+    return _evidence_answer_plan(
+        user_goal=user_goal,
+        question=question,
+        document_ids=list(dict.fromkeys(document_ids))[:50],
+        answer_mode=answer_mode,
+        response_style=response_style,
     )
 
 
@@ -3095,6 +3217,25 @@ def has_explicit_filename_content_request(message: str) -> bool:
     )
 
 
+def has_unscoped_workspace_fact_question(message: str) -> bool:
+    """供 LangGraph 固定无附件事实问答的首轮工作区发现边界。"""
+
+    lowered = message.lower()
+    classification_explanation_markers = [
+        "为什么被归",
+        "为何被归",
+        "为什么分类",
+        "分类依据",
+        "归类依据",
+        "被归到",
+    ]
+    return (
+        _has_unscoped_workspace_fact_question(message=message, lowered=lowered)
+        and not _has_file_search_intent(message=message, lowered=lowered)
+        and not any(value in message for value in classification_explanation_markers)
+    )
+
+
 def _has_summary_intent(*, message: str, lowered: str) -> bool:
     """判断用户是否要求总结、概括或讲解正文内容。"""
     summary_keywords = ["总结", "概括", "大概", "讲解", "说明一下", "文章内容"]
@@ -3139,6 +3280,48 @@ def _has_workspace_evidence_intent(*, message: str, lowered: str) -> bool:
         _has_answer_intent(message=message, lowered=lowered)
         or _has_summary_intent(message=message, lowered=lowered)
         or any(value in message for value in ["汇总", "统计", "合计", "求和"])
+    )
+
+
+def _has_search_then_answer_intent(*, message: str, lowered: str) -> bool:
+    """识别明确要求“先找证据再回答”的组合请求。"""
+
+    answer_actions = ["回答", "说明", "解释", "告诉我", "核实", "确认"]
+    english_actions = ["answer", "explain", "tell me", "verify"]
+    return _has_file_search_intent(message=message, lowered=lowered) and (
+        any(value in message for value in answer_actions)
+        or any(value in lowered for value in english_actions)
+    )
+
+
+def _has_unscoped_workspace_fact_question(*, message: str, lowered: str) -> bool:
+    """识别未写文件名、但适合从工作区寻找证据的自然事实问题。
+
+    File Agent 默认不使用开放世界知识回答事实问题。除明确的寒暄、身份和能力询问外，
+    完整疑问句应先进入只读工作区检索；高风险文件动作和受管路径操作在更高优先级分支处理。
+    """
+
+    if not _has_answer_intent(message=message, lowered=lowered):
+        return False
+    if _is_general_conversational_question(message=message, lowered=lowered):
+        return False
+    compact = re.sub(r"\s+", "", message).strip("，。！？,.!?")
+    return len(compact) >= 6
+
+
+def _is_general_conversational_question(*, message: str, lowered: str) -> bool:
+    """识别不需要文件事实的寒暄、身份与状态对话。"""
+
+    del lowered
+    compact = re.sub(r"\s+", "", message).strip("，。！？,.!?")
+    conversational_patterns = [
+        r"^(?:你好|您好|嗨|hello|hi)$",
+        r"^(?:你|您|系统|机器人|智能体|fileagent).{0,8}(?:是谁|叫什么|是什么)$",
+        r"^(?:你|您).{0,8}(?:好吗|怎么样)$",
+    ]
+    return any(
+        re.fullmatch(pattern, compact, flags=re.IGNORECASE)
+        for pattern in conversational_patterns
     )
 
 

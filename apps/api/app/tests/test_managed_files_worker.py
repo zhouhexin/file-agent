@@ -11,10 +11,14 @@ from app.db.models import (
     ChangeSet,
     Conversation,
     DocumentCategorySuggestion,
+    DocumentIndexRun,
+    DocumentPage,
+    DocumentSearchProfile,
     FilesystemJob,
     FilesystemJobEvent,
     ManagedFile,
     ManagedFileRevision,
+    ManagedFileSearchProfile,
     ManagedRoot,
     Message,
     RelevantFileSetItem,
@@ -761,6 +765,110 @@ def test_ready_source_revision_queues_background_materialization_and_reuses_one_
             assert jobs[0].queue_name == "MATERIALIZE"
             assert jobs[0].priority == 100
             assert jobs[0].payload_json["materialization_reason"] == "startup-full-sync"
+    finally:
+        get_settings.cache_clear()
+    clear_overrides()
+
+
+def test_metadata_only_image_analysis_materializes_searchable_working_copy(
+    monkeypatch,
+    tmp_path: Path,
+):
+    """OCR 技术失败图片仍应完成源索引、工作副本物化和目录元数据投影。"""
+
+    managed_dir = tmp_path / "managed"
+    event_dir = managed_dir / "20170606大数据联合实验室授牌" / "照片"
+    event_dir.mkdir(parents=True)
+    source = event_dir / "IMG_0198.JPG"
+    source.write_bytes(b"image-without-ocr-runtime")
+    working_dir = tmp_path / "working"
+    monkeypatch.setenv("WORKING_COPY_STORAGE_ROOT", str(working_dir))
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "uploads"))
+    monkeypatch.setenv("MATERIALIZE_ALL_MANAGED_FILES", "true")
+    get_settings.cache_clear()
+    client, session_factory = client_with_database()
+    try:
+        registered = client.post(
+            "/api/auth/register",
+            json={
+                "username": "metadata-image-user",
+                "password": "password123",
+                "display_name": "metadata-image-user",
+            },
+        )
+        assert registered.status_code == 200
+        with session_factory() as db:
+            root = ManagedRoot(
+                root_key="image_event_root",
+                display_name="image_event_root",
+                container_path=str(managed_dir),
+                created_by=registered.json()["id"],
+            )
+            db.add(root)
+            db.flush()
+            scan = FilesystemJob(
+                job_type="SCAN_MANAGED_ROOT",
+                queue_name="SCAN",
+                root_id=root.id,
+                status="PENDING",
+                payload_json={"root_key": root.root_key},
+                result_json={},
+            )
+            db.add(scan)
+            db.commit()
+
+        monkeypatch.setattr(
+            "app.modules.managed_files.source_analysis._extract_managed_source_document",
+            lambda **_kwargs: {
+                "ok": False,
+                "status": "FAILED",
+                "extractor": "ocr",
+                "error": {
+                    "code": "OCR_ENGINE_NOT_AVAILABLE",
+                    "message": "runtime failure",
+                },
+                "pages": [],
+            },
+        )
+        assert process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="metadata-image-scan",
+            queue_names={"SCAN"},
+        )
+        assert process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="metadata-image-analysis",
+            queue_names={"SOURCE_ANALYSIS"},
+        )
+        assert process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="metadata-image-materialize",
+            queue_names={"MATERIALIZE"},
+        )
+
+        with session_factory() as db:
+            revision = db.query(ManagedFileRevision).one()
+            assert revision.status == "READY"
+            source_profile = db.query(ManagedFileSearchProfile).one()
+            assert "授牌" in source_profile.search_text
+            working_copy = db.query(WorkingCopy).one()
+            working_profile = db.query(DocumentSearchProfile).one()
+            assert working_profile.working_copy_id == working_copy.id
+            assert "授牌" in str(working_profile.metadata_search_text)
+            pages = db.query(DocumentPage).filter(
+                DocumentPage.document_id == working_copy.document_id
+            ).all()
+            assert len(pages) == 1
+            assert pages[0].text_content == ""
+            assert pages[0].metadata_json["image_text_status"] == "OCR_FAILED"
+            assert db.query(DocumentIndexRun).filter(
+                DocumentIndexRun.document_version_id == working_copy.current_version_id
+            ).count() == 0
+            working_root = db.get(WorkingCopyRoot, working_copy.working_copy_root_id)
+            physical_copy = (
+                working_dir / working_root.relative_storage_path / working_copy.relative_path
+            )
+            assert physical_copy.read_bytes() == source.read_bytes()
     finally:
         get_settings.cache_clear()
         clear_overrides()

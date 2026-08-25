@@ -202,6 +202,36 @@ def test_upsert_is_idempotent():
         db.close()
 
 
+def test_upsert_indexes_relative_directory_for_metadata_only_files():
+    """无正文工作副本仍应通过相对目录进入弱检索，不把目录当成正式分类。"""
+
+    db = _db_session()
+    try:
+        _add_working_copy_with_summary(
+            db,
+            suffix="path-metadata",
+            user_id="user-path",
+            filename="IMG_0198.JPG",
+            summary_text="",
+            category_path=None,
+        )
+        copy = db.get(WorkingCopy, "working-copy-path-metadata")
+        copy.relative_path = "20170606大数据联合实验室授牌/照片/IMG_0198.JPG"
+        db.flush()
+
+        result = DocumentSearchProfileService(db=db).upsert_current_profile(copy.id)
+
+        assert result["ok"] is True
+        profile = db.query(DocumentSearchProfile).filter(
+            DocumentSearchProfile.working_copy_id == copy.id
+        ).one()
+        assert "实验室" in str(profile.metadata_search_text)
+        assert "授牌" in str(profile.metadata_search_text)
+        assert profile.category_search_text in {None, ""}
+    finally:
+        db.close()
+
+
 def test_backfill_creates_profiles_for_all_active_working_copies():
     """backfill 为所有 ACTIVE 工作副本创建投影。"""
 

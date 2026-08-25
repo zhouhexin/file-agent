@@ -296,7 +296,24 @@ class WorkingCopySearchReadinessService:
         """仅用受管元数据发现候选；这些记录不会直接进入普通用户结果。"""
 
         year = getattr(parsed, "year", None)
-        cleaned = str(getattr(parsed, "cleaned", "") or "")
+        fact_anchors = [
+            str(value).strip()
+            for value in list(getattr(parsed, "fact_anchor_phrases", []) or [])
+            if str(value).strip()
+        ]
+        fact_entities = {
+            str(value).strip()
+            for value in list(getattr(parsed, "fact_entity_phrases", []) or [])
+            if str(value).strip()
+        }
+        metadata_fact_anchors = [
+            value for value in fact_anchors if value not in fact_entities
+        ]
+        cleaned = str(
+            (metadata_fact_anchors[0] if metadata_fact_anchors else None)
+            or getattr(parsed, "cleaned", "")
+            or ""
+        )
         synonym_service = FileSearchSynonymService()
         equivalent_mention = synonym_service.find_equivalent_mention(cleaned)
         # 摘要回退路径没有 Jieba tokenizer，需把复合查询按稳定业务条件处理。
@@ -333,7 +350,15 @@ class WorkingCopySearchReadinessService:
                 re.sub(r"的", " ", phrase.lower()),
             )
         ]
-        terms = list(dict.fromkeys([*fragments, *getattr(parsed, "terms", [])]))
+        terms = list(
+            dict.fromkeys(
+                [
+                    *metadata_fact_anchors,
+                    *fragments,
+                    *getattr(parsed, "terms", []),
+                ]
+            )
+        )
         terms = [str(term).strip().lower() for term in terms if len(str(term).strip()) >= 2]
         metadata = func.lower(ManagedFile.filename + " " + ManagedFile.relative_path)
         filters = []

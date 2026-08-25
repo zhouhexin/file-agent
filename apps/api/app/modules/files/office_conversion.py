@@ -351,6 +351,16 @@ def resolve_libreoffice_executable(
     if configured:
         configured_path = Path(configured).expanduser()
         if configured_path.is_file():
+            # Windows 的 soffice.exe 是 GUI 启动器，可能在真正转换完成前退出；
+            # 同目录 soffice.com 才是可等待并可读取退出码的控制台入口。部署配置
+            # 即使写了常见的 exe 路径，也应保留其目录授权并优先切换到 com。
+            if (
+                platform_name.startswith("win")
+                and configured_path.name.casefold() == "soffice.exe"
+            ):
+                console_path = configured_path.with_suffix(".com")
+                if console_path.is_file():
+                    return console_path
             return configured_path
         located = which(configured)
         if located:

@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -203,5 +204,34 @@ def test_candidate_limit_or_unresolved_strict_scope_is_not_verifiable():
             unresolved_document_count=1,
         )
         assert unresolved["status"] == "UNVERIFIABLE"
+    finally:
+        db.close()
+
+
+def test_completeness_database_failure_preserves_search_results(monkeypatch):
+    """辅助统计超时只能降级完整性声明，不能丢失检索命中或抛出 500。"""
+
+    db = _db_session()
+    try:
+        service = SearchCompletenessService(db=db, workspace_id="workspace-1")
+
+        def _raise_timeout(**_kwargs):
+            raise SQLAlchemyError("statement timeout")
+
+        monkeypatch.setattr(service, "assess", _raise_timeout)
+        result = service.attach_safely(
+            result={
+                "ok": True,
+                "partial": False,
+                "results": [{"document_id": "doc-hit"}],
+            },
+            scope=_Scope(),
+        )
+
+        assert result["ok"] is True
+        assert result["results"] == [{"document_id": "doc-hit"}]
+        assert result["partial"] is True
+        assert result["search_completeness"]["status"] == "UNVERIFIABLE"
+        assert result["search_completeness"]["can_claim_complete"] is False
     finally:
         db.close()

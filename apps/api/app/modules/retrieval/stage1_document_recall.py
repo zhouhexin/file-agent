@@ -20,6 +20,8 @@ from sqlalchemy import tuple_
 from app.db.models import (
     Document,
     DocumentCategorySuggestion,
+    DocumentChunk,
+    DocumentIndexRun,
     DocumentSearchProfile,
     DocumentSummary,
     ManagedFile,
@@ -118,6 +120,49 @@ class Stage1DocumentRecallService:
         ]
         return self._enrich(candidates, scope=scope)
 
+    def enrich_working_copy_ids(
+        self,
+        *,
+        working_copy_ids: list[str] | tuple[str, ...],
+        scope: Any,
+    ) -> list[dict]:
+        """有界补齐已由后端确认的活动工作副本显示字段。
+
+        该入口不执行关键词召回，只供事件集合等确定性关系扩展复用现有批量富化，
+        避免重新实现权限、当前版本和逻辑路径校验。
+        """
+
+        safe_ids = list(
+            dict.fromkeys(str(value) for value in working_copy_ids if str(value))
+        )[:100]
+        if not safe_ids:
+            return []
+        rows = (
+            self.db.query(
+                WorkingCopy.id,
+                WorkingCopy.document_id,
+                WorkingCopy.current_version_id,
+            )
+            .filter(
+                WorkingCopy.id.in_(safe_ids),
+                WorkingCopy.workspace_id == self.workspace_id,
+                WorkingCopy.status == "ACTIVE",
+            )
+            .all()
+        )
+        candidates = [
+            {
+                "working_copy_id": row.id,
+                "document_id": row.document_id,
+                "document_version_id": row.current_version_id,
+                "_score": 0.0,
+                "_hit_source": "verified_event_directory",
+            }
+            for row in rows
+            if row.current_version_id
+        ]
+        return self._enrich(candidates, scope=scope)
+
     def _scope_predicates(self, scope: Any) -> list[Any]:
         """生成后端已解析的 L0/L1/L4 范围谓词。
 
@@ -131,6 +176,18 @@ class Stage1DocumentRecallService:
 
             return [sa.false()]
         return [DocumentSearchProfile.document_id.in_(document_ids)]
+
+    def _working_copy_scope_predicates(self, scope: Any) -> list[Any]:
+        """为直接关联工作副本的 Chunk 召回生成同一严格范围谓词。"""
+
+        if getattr(scope, "scope_mode", "global") != "strict":
+            return []
+        document_ids = list(getattr(scope, "strict_document_ids", ()) or ())
+        if not document_ids:
+            import sqlalchemy as sa
+
+            return [sa.false()]
+        return [WorkingCopy.document_id.in_(document_ids)]
 
     def _recall_postgresql(
         self, parsed_query: Any, scope: Any
@@ -261,7 +318,11 @@ class Stage1DocumentRecallService:
             if year_match is not None
             else sa.literal(2.1)
         )
-        ordering = [score.desc(), DocumentSearchProfile.normalized_filename.asc()]
+        # PostgreSQL 会把 ``ORDER BY 2.1`` 解释为列序号并拒绝非整数常量。
+        # 无显式年份时所有命中分数相同，只需稳定按文件名排序。
+        ordering = [DocumentSearchProfile.normalized_filename.asc()]
+        if year_match is not None:
+            ordering.insert(0, score.desc())
         rows = (
             self.db.query(
                 DocumentSearchProfile.working_copy_id,
@@ -325,7 +386,7 @@ class Stage1DocumentRecallService:
             else sa.case((filename_match, 2.1), else_=1.0)
         )
         ordering = [score.desc(), DocumentSearchProfile.normalized_filename.asc()]
-        rows = (
+        profile_rows = (
             self.db.query(
                 DocumentSearchProfile.working_copy_id,
                 DocumentSearchProfile.document_id,
@@ -347,7 +408,7 @@ class Stage1DocumentRecallService:
             .limit(self.config.retrieval_document_candidate_limit)
             .all()
         )
-        return [
+        results = [
             {
                 "working_copy_id": row.working_copy_id,
                 "document_id": row.document_id,
@@ -355,8 +416,56 @@ class Stage1DocumentRecallService:
                 "_score": float(row.score),
                 "_hit_source": "exact_short_phrase",
             }
-            for row in rows
+            for row in profile_rows
         ]
+        seen_working_copy_ids = {
+            str(item.get("working_copy_id") or "") for item in results
+        }
+        # 历史瘦投影可能只含文件名和摘要，而正文 Chunk 已经完整建立。短人名
+        # 必须同时从带 pg_trgm 索引的 Chunk 连续召回，否则“正文有该人员”仍会
+        # 被第一阶段挡掉，第二阶段没有机会验证证据。
+        chunk_rows = (
+            self.db.query(
+                WorkingCopy.id.label("working_copy_id"),
+                WorkingCopy.document_id,
+                WorkingCopy.current_version_id.label("document_version_id"),
+            )
+            .join(
+                DocumentChunk,
+                DocumentChunk.document_version_id == WorkingCopy.current_version_id,
+            )
+            .join(
+                DocumentIndexRun,
+                DocumentIndexRun.id == DocumentChunk.index_run_id,
+            )
+            .filter(
+                WorkingCopy.workspace_id == self.workspace_id,
+                WorkingCopy.status == "ACTIVE",
+                DocumentIndexRun.status == "COMPLETED",
+                DocumentChunk.search_text.contains(phrase),
+                *self._working_copy_scope_predicates(scope),
+            )
+            .group_by(
+                WorkingCopy.id,
+                WorkingCopy.document_id,
+                WorkingCopy.current_version_id,
+            )
+            .limit(self.config.retrieval_document_candidate_limit)
+            .all()
+        )
+        for row in chunk_rows:
+            if str(row.working_copy_id) in seen_working_copy_ids:
+                continue
+            results.append(
+                {
+                    "working_copy_id": row.working_copy_id,
+                    "document_id": row.document_id,
+                    "document_version_id": row.document_version_id,
+                    "_score": 1.4,
+                    "_hit_source": "exact_short_phrase_chunk",
+                }
+            )
+        return results
 
     def _gin_search(self, query_text: str, scope: Any) -> list[dict]:
         """search_vector GIN 索引召回。

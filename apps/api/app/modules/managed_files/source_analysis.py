@@ -44,6 +44,10 @@ from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_b
 from app.modules.classification.classifier_service import DocumentClassificationService
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text
+from app.modules.files.readable_source import (
+    ReadableDocumentSourceResolver,
+    apply_readable_source_metadata,
+)
 from app.modules.managed_files.path_policy import resolve_managed_relative_path
 from app.modules.retrieval.search_profile import _normalize_text
 
@@ -190,10 +194,15 @@ class ManagedSourceAnalysisService:
             revision.analysis_document_version_id = version.id
             version.source_analysis_run_id = analysis.id
             self.db.flush()
-            extraction = extract_document_text(
-                file_path=path,
+            extraction = _extract_managed_source_document(
+                db=self.db,
+                document=document,
+                source_path=path,
+            )
+            extraction = _prepare_image_metadata_extraction(
+                extraction=extraction,
                 filename=managed_file.filename,
-                content_type=_content_type(managed_file.extension),
+                content_type=document.content_type,
             )
             repository = FileExtractionRepository(self.db, str(owner_id))
             run = repository.create_extraction_run(
@@ -219,23 +228,36 @@ class ManagedSourceAnalysisService:
                 pages=list(extraction.get("pages") or []),
                 elements=list(extraction.get("elements") or []),
             )
-            classification = DocumentClassificationService(db=self.db).classify(
-                document_id=document.id,
-                document_version_id=version.id,
-                extraction_run_id=run.id,
-                filename=managed_file.filename,
-            )
-            index_result = DocumentIndexService(db=self.db, settings=self.settings).build(
-                document_id=document.id,
-                document_version_id=version.id,
-                extraction_run_id=run.id,
-            )
-            if not index_result.get("ok"):
-                error = dict(index_result.get("error") or {})
-                raise SourceAnalysisBusinessError(
-                    str(error.get("code") or "SOURCE_INDEX_FAILED"),
-                    str(error.get("message") or "原始文件索引失败"),
+            metadata_only = bool(extraction.get("metadata_only"))
+            if metadata_only:
+                classification = {
+                    "status": "SKIPPED_METADATA_ONLY",
+                    "categories": [],
+                    "warnings": list(extraction.get("warnings") or []),
+                }
+                index_result = {
+                    "ok": True,
+                    "status": "SKIPPED_METADATA_ONLY",
+                    "index_run_id": None,
+                }
+            else:
+                classification = DocumentClassificationService(db=self.db).classify(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    extraction_run_id=run.id,
+                    filename=managed_file.filename,
                 )
+                index_result = DocumentIndexService(db=self.db, settings=self.settings).build(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    extraction_run_id=run.id,
+                )
+                if not index_result.get("ok"):
+                    error = dict(index_result.get("error") or {})
+                    raise SourceAnalysisBusinessError(
+                        str(error.get("code") or "SOURCE_INDEX_FAILED"),
+                        str(error.get("message") or "原始文件索引失败"),
+                    )
             after = path.stat()
             if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                 raise SourceAnalysisBusinessError("SOURCE_CHANGED_DURING_ANALYSIS", "原始文件在只读分析期间发生变化")
@@ -247,8 +269,10 @@ class ManagedSourceAnalysisService:
                 document=document,
                 version=version,
                 extraction_run=run,
-                index_run_id=str(index_result.get("index_run_id") or ""),
+                index_run_id=str(index_result.get("index_run_id") or "") or None,
                 filename=managed_file.filename,
+                relative_path=managed_file.relative_path,
+                metadata_notice=str(extraction.get("metadata_notice") or ""),
             )
             # 逻辑源侧版本也必须指向本次分析运行，方便后续物化副本、审计和
             # 索引重建都精确追溯到同一份原始文件修订，不能只靠最新记录猜测。
@@ -261,6 +285,8 @@ class ManagedSourceAnalysisService:
             analysis.index_run_id = str(index_result.get("index_run_id") or "") or None
             analysis.parser_name = run.parser_name
             analysis.parser_version = run.parser_version
+            analysis.converter_name = str(extraction.get("conversion_converter") or "")
+            analysis.converter_version = str(extraction.get("conversion_converter_version") or "")
             analysis.finished_at = utcnow()
             self._sync_working_copy_status(managed_file=managed_file, source_sha256=sha256)
             self.db.flush()
@@ -281,6 +307,7 @@ class ManagedSourceAnalysisService:
                 "analysis_run_id": analysis.id,
                 "index_run_id": analysis.index_run_id,
                 "classification": classification,
+                "warnings": list(extraction.get("warnings") or []),
             }
         except Exception as exc:
             code = exc.code if isinstance(exc, SourceAnalysisBusinessError) else exc.__class__.__name__
@@ -352,8 +379,10 @@ class ManagedSourceAnalysisService:
         document: Document,
         version: DocumentVersion,
         extraction_run: DocumentExtractionRun,
-        index_run_id: str,
+        index_run_id: str | None,
         filename: str,
+        relative_path: str,
+        metadata_notice: str = "",
     ) -> None:
         """从已验证的通用派生事实复制出源侧检索投影，避免第二次解析文件。"""
 
@@ -398,7 +427,16 @@ class ManagedSourceAnalysisService:
             .one_or_none()
         )
         combined_text = "\n".join(
-            value for value in [filename, summary.summary_text if summary else "", " ".join(keywords), " ".join(entities)] if value
+            value
+            for value in [
+                filename,
+                relative_path,
+                Path(filename).suffix.lower().lstrip("."),
+                summary.summary_text if summary else "",
+                " ".join(keywords),
+                " ".join(entities),
+            ]
+            if value
         )
         search_text = " ".join(self.tokenizer.tokenize(combined_text))
         if profile is None:
@@ -410,8 +448,15 @@ class ManagedSourceAnalysisService:
         profile.analysis_run_id = analysis.id
         profile.normalized_filename = _normalize_text(filename)
         profile.title = filename
-        profile.summary = str(summary.summary_text if summary else "")
-        profile.topic_summary_json = topic_json
+        profile.summary = str(summary.summary_text if summary else metadata_notice)
+        profile.topic_summary_json = {
+            **topic_json,
+            **(
+                {"analysis_notice": metadata_notice, "metadata_only": True}
+                if metadata_notice
+                else {}
+            ),
+        }
         profile.keywords_json = keywords
         profile.entities_json = entities
         profile.years_json = years
@@ -425,12 +470,14 @@ class ManagedSourceAnalysisService:
         self.db.query(ManagedFileTextChunk).filter(
             ManagedFileTextChunk.managed_file_revision_id == revision.id
         ).delete(synchronize_session=False)
-        chunks = (
-            self.db.query(DocumentChunk)
-            .filter(DocumentChunk.index_run_id == index_run_id)
-            .order_by(DocumentChunk.chunk_index.asc())
-            .all()
-        )
+        chunks = []
+        if index_run_id:
+            chunks = (
+                self.db.query(DocumentChunk)
+                .filter(DocumentChunk.index_run_id == index_run_id)
+                .order_by(DocumentChunk.chunk_index.asc())
+                .all()
+            )
         for chunk in chunks:
             source_chunk = ManagedFileTextChunk(
                 managed_file_revision_id=revision.id,
@@ -507,6 +554,113 @@ class ManagedSourceAnalysisService:
             copy.updated_at = utcnow()
 
 
+def _extract_managed_source_document(
+    *,
+    db: Session,
+    document: Document,
+    source_path: Path,
+) -> dict[str, Any]:
+    """通过统一可读源解析受管原件，使旧 DOC 复用显式 LibreOffice 配置。"""
+
+    readable_source = ReadableDocumentSourceResolver(db=db).resolve(
+        document=document,
+        original_path=source_path,
+    )
+    extraction = extract_document_text(
+        file_path=readable_source.parse_path,
+        filename=readable_source.parse_filename,
+        content_type=readable_source.parse_content_type,
+    )
+    return apply_readable_source_metadata(extraction, source=readable_source)
+
+
+def _prepare_image_metadata_extraction(
+    *,
+    extraction: dict[str, Any],
+    filename: str,
+    content_type: str,
+) -> dict[str, Any]:
+    """让无文字或 OCR 异常图片保留空正文，并发布可重建元数据投影。"""
+
+    suffix = Path(filename).suffix.lower()
+    if not (
+        str(content_type or "").startswith("image/")
+        or suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"}
+    ):
+        return extraction
+
+    pages = [dict(page) for page in list(extraction.get("pages") or [])]
+    has_text = any(str(page.get("text") or "").strip() for page in pages)
+    if extraction.get("ok") and has_text:
+        return extraction
+
+    if extraction.get("ok"):
+        warning = {
+            "code": "IMAGE_NO_TEXT",
+            "message": "图片未识别到可用文字，已按文件名、相对目录和文件类型建立元数据索引。",
+            "retryable": False,
+        }
+        notice = "图片无可识别文字；已保留目录关系和元数据检索能力。"
+        if not pages:
+            pages = [{"page_number": 1, "sheet_name": None, "text": "", "metadata": {}}]
+        extractor = str(extraction.get("extractor") or "image-metadata")
+        read_profile = dict(extraction.get("read_profile") or {})
+    else:
+        error = dict(extraction.get("error") or {})
+        warning = {
+            "code": str(error.get("code") or "OCR_FAILED"),
+            "message": "图片 OCR 处理失败，已按文件名、相对目录和文件类型建立元数据索引。",
+            "retryable": True,
+        }
+        notice = "图片 OCR 处理失败；已保留目录关系和元数据检索能力。"
+        pages = [{"page_number": 1, "sheet_name": None, "text": "", "metadata": {}}]
+        extractor = "image-metadata"
+        read_profile = {
+            "file_type": "image",
+            "page_count": 1,
+            "sheet_count": 0,
+            "char_count": 0,
+            "has_text": False,
+            "requires_ocr": True,
+            "ocr_used": True,
+        }
+
+    warning_payload = {"code": warning["code"], "message": warning["message"]}
+    profiled_pages = []
+    for page in pages:
+        metadata = dict(page.get("metadata") or {})
+        metadata.update(
+            {
+                "metadata_only": True,
+                "image_text_status": (
+                    "NO_TEXT" if warning["code"] == "IMAGE_NO_TEXT" else "OCR_FAILED"
+                ),
+                "analysis_warnings": [warning_payload],
+                "read_quality": "PARTIAL",
+            }
+        )
+        profiled_pages.append({**page, "text": "", "metadata": metadata})
+
+    warnings = [
+        *[dict(item) for item in list(extraction.get("warnings") or []) if isinstance(item, dict)],
+        warning,
+    ]
+    return {
+        **extraction,
+        "ok": True,
+        "status": "COMPLETED",
+        "extractor": extractor,
+        "read_quality": "PARTIAL",
+        "read_profile": read_profile,
+        "pages": profiled_pages,
+        "elements": [],
+        "warnings": warnings,
+        "error": None,
+        "metadata_only": True,
+        "metadata_notice": notice,
+    }
+
+
 class SourceAnalysisBusinessError(RuntimeError):
     """可安全写入任务审计的源侧分析业务失败。"""
 
@@ -559,13 +713,29 @@ def _table_shape(text: str, ranges: list[Any]) -> tuple[int, int, list[str]]:
     lines = [line for line in text.splitlines() if line]
     headers = lines[0].split("\t")[:100] if lines else []
     max_column = len(headers)
-    cell_pattern = re.compile(r"[A-Z]+(\d+):([A-Z]+)(\d+)")
+    # 解析器通常返回 ``A1:D8``，历史数据也可能包含绝对引用、小写列名或
+    # 单个单元格。范围只是可重建结构提示，任何畸形值都必须被忽略，不能让
+    # 一份可正常读取的 Excel 因辅助统计失败而终止整个源侧分析。
+    cell_pattern = re.compile(
+        r"\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?",
+        re.IGNORECASE,
+    )
     max_row = len(lines)
     for item in ranges:
-        match = cell_pattern.fullmatch(str((item or {}).get("cell_range") or "")) if isinstance(item, dict) else None
-        if match:
-            max_row = max(max_row, int(match.group(2)))
-            max_column = max(max_column, _column_number(match.group(1)))
+        if not isinstance(item, dict):
+            continue
+        match = cell_pattern.fullmatch(
+            str((item or {}).get("cell_range") or "").strip()
+        )
+        if match is None:
+            continue
+        start_column, start_row, end_column, end_row = match.groups()
+        max_row = max(max_row, int(start_row), int(end_row or start_row))
+        max_column = max(
+            max_column,
+            _column_number(start_column.upper()),
+            _column_number((end_column or start_column).upper()),
+        )
     return max_row, max_column, headers
 
 

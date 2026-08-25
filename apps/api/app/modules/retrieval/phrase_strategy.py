@@ -322,6 +322,121 @@ class FileSearchPhraseStrategyService:
             ),
         }
 
+    def search_fact_anchors(
+        self,
+        *,
+        original_query: str,
+        parsed_query: Any,
+        scope: Any,
+        anchors: list[str] | tuple[str, ...],
+        requested_fields: list[str] | tuple[str, ...],
+    ) -> dict[str, Any]:
+        """分别验证事实问句锚点，并以文件交集确定可回答范围。
+
+        问句中的“哪个单位、多少费用”属于待回答字段，不能参与召回。多个
+        锚点只有在同一文件中都得到连续命中时才是 ``SUPPORTED``；只命中
+        部分锚点的文件降为 ``POSSIBLE``，不得授权后续证据回答。
+        """
+
+        unique_anchors = _unique_terms(list(anchors))[:6]
+        searches = [
+            (
+                anchor,
+                self.search(
+                    original_query=original_query,
+                    parsed_query=parsed_query,
+                    scope=scope,
+                    phrases=[anchor],
+                    require_body_evidence=False,
+                ),
+            )
+            for anchor in unique_anchors
+        ]
+        result_maps = [
+            _results_by_id(payload.get("results", []))
+            for _anchor, payload in searches
+        ]
+        supported_ids = (
+            set.intersection(*(set(items) for items in result_maps))
+            if result_maps
+            else set()
+        )
+        hit_counts: dict[str, int] = {}
+        source_items: dict[str, dict[str, Any]] = {}
+        matched_by_id: dict[str, list[str]] = {}
+        for (anchor, _payload), result_map in zip(searches, result_maps):
+            for result_id, item in result_map.items():
+                source_items.setdefault(result_id, item)
+                hit_counts[result_id] = hit_counts.get(result_id, 0) + 1
+                matched_by_id.setdefault(result_id, []).append(anchor)
+
+        results: list[dict[str, Any]] = []
+        for result_id, source_item in source_items.items():
+            matched = matched_by_id.get(result_id, [])
+            supported = result_id in supported_ids
+            item = {
+                **source_item,
+                "relevance_tier": "SUPPORTED" if supported else "POSSIBLE",
+                "matched_fact_anchors": matched,
+            }
+            if supported:
+                reason = f"已验证同一文件命中事实锚点：{'、'.join(matched)}"
+            else:
+                missing = [value for value in unique_anchors if value not in matched]
+                reason = (
+                    f"仅命中事实问句的部分线索：{'、'.join(matched)}；"
+                    f"尚未确认：{'、'.join(missing)}"
+                )
+            item["match_reasons"] = _append_reason(
+                item.get("match_reasons"), reason
+            )
+            results.append(item)
+        results.sort(
+            key=lambda item: (
+                str(item.get("relevance_tier") or "") == "POSSIBLE",
+                -hit_counts.get(_result_id(item), 0),
+                *_stable_result_sort_key(item),
+            )
+        )
+        supported_count = len(supported_ids)
+        possible_count = len(results) - supported_count
+        partial = any(bool(payload.get("partial")) for _anchor, payload in searches)
+        candidate_limit_reached = any(
+            bool(payload.get("candidate_limit_reached"))
+            for _anchor, payload in searches
+        )
+        log_event(
+            "retrieval.phrase_strategy.fact_anchors_completed",
+            level="WARNING" if partial or not supported_ids else "INFO",
+            tool_name="hybrid-search",
+            status="DEGRADED" if partial else "COMPLETED",
+            anchor_count=len(unique_anchors),
+            requested_field_count=len(list(requested_fields)),
+            supported_result_count=supported_count,
+            possible_result_count=possible_count,
+            message="事实问句锚点检索与文件交集校验完成",
+        )
+        return {
+            "ok": True,
+            "kind": "workspace_file_search",
+            "query": original_query,
+            "total_returned": len(results),
+            "supported_count": supported_count,
+            "possible_count": possible_count,
+            "partial": partial,
+            "candidate_limit_reached": candidate_limit_reached,
+            "results": results,
+            "fact_search": {
+                "anchors": unique_anchors,
+                "requested_fields": list(requested_fields)[:12],
+            },
+            "user_message": _tiered_user_message(
+                supported_count=supported_count,
+                possible_count=possible_count,
+                partial=partial,
+            ),
+        }
+
 
 def _metadata_contains_phrase(item: dict[str, Any], phrase: str) -> bool:
     """检查用户可见文件级字段中的连续短语，不能使用内部拆词分数代替。"""

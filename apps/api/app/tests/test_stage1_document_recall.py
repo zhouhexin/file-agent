@@ -20,6 +20,8 @@ from app.db.base import Base
 from app.db.models import (
     Document,
     DocumentCategorySuggestion,
+    DocumentChunk,
+    DocumentIndexRun,
     DocumentSearchProfile,
     DocumentSummary,
     DocumentVersion,
@@ -255,6 +257,108 @@ def test_filename_phrase_with_explicit_year_survives_noisy_candidate_limit():
             item["filename"] == "计算机学院2025考核工作总结20251231.docx"
             for item in result
         )
+    finally:
+        db.close()
+
+
+def test_exact_short_person_name_recalls_completed_chunk_when_thin_profile_omits_body():
+    """瘦投影未包含人名时，已完成正文 Chunk 仍必须进入第一阶段候选。"""
+
+    db = _db_session()
+    try:
+        document = _setup_profile(
+            db,
+            suffix="person-chunk",
+            user_id="user1",
+            filename="工作简报第七期.pdf",
+            summary_text="学院工作简报",
+        )
+        working_copy = db.query(WorkingCopy).filter(
+            WorkingCopy.document_id == document.id
+        ).one()
+        index_run = DocumentIndexRun(
+            id="index-person-chunk",
+            document_id=document.id,
+            document_version_id=working_copy.current_version_id,
+            extraction_run_id="extraction-person-chunk",
+            index_version="document-chunk-index-v2",
+            tokenizer="jieba",
+            tokenizer_version="test",
+            config_hash="person-chunk-config",
+            status="COMPLETED",
+        )
+        db.add(index_run)
+        db.flush()
+        db.add(
+            DocumentChunk(
+                id="chunk-person-chunk",
+                index_run_id=index_run.id,
+                document_id=document.id,
+                document_version_id=working_copy.current_version_id,
+                extraction_run_id=index_run.extraction_run_id,
+                chunk_index=0,
+                text_content="报告人彭绍亮，来自国防科技大学。",
+                search_text="报告人 彭绍亮 国防科技大学",
+                content_hash="content-person-chunk",
+                location_hash="location-person-chunk",
+            )
+        )
+        db.flush()
+
+        result = Stage1DocumentRecallService(
+            db=db,
+            user_id="user1",
+            workspace_id="ws-user1",
+            config=_FakeConfig(),
+        )._exact_short_phrase_match(
+            "彭绍亮",
+            _FakeParsedQuery(cleaned="彭绍亮"),
+            _FakeScope(),
+        )
+
+        assert [item["working_copy_id"] for item in result] == [working_copy.id]
+        assert result[0]["_hit_source"] == "exact_short_phrase_chunk"
+    finally:
+        db.close()
+
+
+def test_filename_phrase_without_year_does_not_order_by_float_constant():
+    """无年份分支不得生成 PostgreSQL 会误解为列序号的 ``ORDER BY 2.1``。"""
+
+    db = _db_session()
+    try:
+        _setup_profile(
+            db,
+            suffix="phrase-no-year",
+            user_id="user1",
+            filename="大数据联合实验室授牌材料.docx",
+        )
+        db.commit()
+        statements: list[str] = []
+
+        def _record_statement(_conn, _cursor, statement, *_args):
+            statements.append(statement)
+
+        bind = db.get_bind()
+        event.listen(bind, "before_cursor_execute", _record_statement)
+        try:
+            Stage1DocumentRecallService(
+                db=db,
+                user_id="user1",
+                workspace_id="ws-user1",
+                config=_FakeConfig(),
+            )._filename_phrase_match(
+                "大数据联合实验室授牌",
+                _FakeParsedQuery(cleaned="大数据联合实验室授牌"),
+                _FakeScope(),
+            )
+        finally:
+            event.remove(bind, "before_cursor_execute", _record_statement)
+
+        statement = next(item for item in statements if "ORDER BY" in item.upper())
+        order_by = statement.upper().split("ORDER BY", 1)[1]
+        assert "NORMALIZED_FILENAME ASC" in order_by
+        assert "? DESC" not in order_by
     finally:
         db.close()
 

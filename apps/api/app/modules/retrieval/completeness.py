@@ -10,9 +10,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy.orm import Session
+import sqlalchemy as sa
+from sqlalchemy.orm import Session, aliased
 
-from app.core.logging import log_event
+from app.core.logging import format_exception_traceback, log_event
 from app.db.models import (
     DocumentExtractionRun,
     DocumentIndexRun,
@@ -60,6 +61,68 @@ class SearchCompletenessService:
         )
         return {**result, "search_completeness": completeness}
 
+    def attach_safely(
+        self,
+        *,
+        result: dict[str, Any],
+        scope: Any,
+        unresolved_document_count: int = 0,
+    ) -> dict[str, Any]:
+        """隔离完整性统计故障，避免辅助统计把有效检索升级为 HTTP 500。"""
+
+        try:
+            # PostgreSQL 的 statement timeout 会把当前事务标记为 aborted。
+            # 完整性统计属于只读辅助信息，必须在 savepoint 内运行，失败后才能
+            # 继续保存 ToolInvocation、AgentRun 和已有检索结果。
+            with self.db.begin_nested():
+                return self.attach(
+                    result=result,
+                    scope=scope,
+                    unresolved_document_count=unresolved_document_count,
+                )
+        except Exception as exc:
+            scope_mode = str(getattr(scope, "scope_mode", "global") or "global")
+            strict_document_ids = list(
+                dict.fromkeys(
+                    str(value)
+                    for value in (getattr(scope, "strict_document_ids", ()) or ())
+                    if str(value)
+                )
+            )
+            scope_label = (
+                f"本次确认的 {len(strict_document_ids)} 份文件"
+                if scope_mode == "strict" and strict_document_ids
+                else "当前共享工作区全部活动文件"
+            )
+            completeness = self._payload(
+                status="UNVERIFIABLE",
+                scope_label=scope_label,
+                eligible_file_count=0,
+                ready_file_count=0,
+                pending_file_count=0,
+                failed_file_count=0,
+                candidate_limit_reached=bool(result.get("candidate_limit_reached")),
+                message=(
+                    "当前命中结果已返回，但完整性统计暂时不可用，"
+                    "因此不能确认结果已找全。"
+                ),
+            )
+            log_event(
+                "retrieval.completeness.failed",
+                level="ERROR",
+                tool_name="hybrid-search",
+                status="DEGRADED",
+                workspace_id=self.workspace_id,
+                error_code=exc.__class__.__name__,
+                exception_traceback=format_exception_traceback(exc),
+                message="文件检索完整性统计失败，保留已有命中并安全降级",
+            )
+            return {
+                **result,
+                "partial": True,
+                "search_completeness": completeness,
+            }
+
     def assess(
         self,
         *,
@@ -105,98 +168,80 @@ class SearchCompletenessService:
             self._log_assessment(payload)
             return payload
 
-        copies_query = self.db.query(
-            WorkingCopy.id,
-            WorkingCopy.document_id,
-            WorkingCopy.current_version_id,
-        ).filter(
+        copy_filters = [
             WorkingCopy.workspace_id == self.workspace_id,
             WorkingCopy.status == "ACTIVE",
-        )
+        ]
         if scope_mode == "strict":
-            copies_query = copies_query.filter(
+            copy_filters.append(
                 WorkingCopy.document_id.in_(strict_document_ids)
             )
-        copies = copies_query.all()
-        working_copy_ids = [str(row.id) for row in copies]
-        version_ids = [
-            str(row.current_version_id)
-            for row in copies
-            if row.current_version_id is not None
-        ]
-        document_by_version = {
-            str(row.current_version_id): str(row.document_id)
-            for row in copies
-            if row.current_version_id is not None
-        }
-
-        profile_ready_pairs: set[tuple[str, str]] = set()
-        index_ready_versions: set[str] = set()
-        failed_versions: set[str] = set()
-        successful_extraction_versions: set[str] = set()
-        if working_copy_ids:
-            profile_ready_pairs = {
-                (str(working_copy_id), str(document_version_id))
-                for working_copy_id, document_version_id in self.db.query(
-                    DocumentSearchProfile.working_copy_id,
-                    DocumentSearchProfile.document_version_id,
-                )
-                .filter(
-                    DocumentSearchProfile.working_copy_id.in_(working_copy_ids),
+        copy_count = int(
+            self.db.query(sa.func.count(WorkingCopy.id))
+            .filter(*copy_filters)
+            .scalar()
+            or 0
+        )
+        # 使用显式 JOIN + COUNT DISTINCT，让 PostgreSQL 能按现有外键/状态索引
+        # 制定集合计划；不能对每个工作副本执行相关 EXISTS 子查询。
+        ready_file_count = int(
+            self.db.query(sa.func.count(sa.distinct(WorkingCopy.id)))
+            .join(
+                DocumentSearchProfile,
+                sa.and_(
+                    DocumentSearchProfile.working_copy_id == WorkingCopy.id,
+                    DocumentSearchProfile.document_version_id
+                    == WorkingCopy.current_version_id,
                     DocumentSearchProfile.status == "ACTIVE",
-                )
-                .all()
-            }
-        if version_ids:
-            index_ready_versions = {
-                str(row.document_version_id)
-                for row in self.db.query(DocumentIndexRun.document_version_id)
-                .filter(
-                    DocumentIndexRun.document_version_id.in_(version_ids),
+                ),
+            )
+            .join(
+                DocumentIndexRun,
+                sa.and_(
+                    DocumentIndexRun.document_version_id
+                    == WorkingCopy.current_version_id,
                     DocumentIndexRun.status == "COMPLETED",
                     DocumentIndexRun.index_version == INDEX_VERSION,
-                )
-                .all()
-            }
-            extraction_rows = self.db.query(
-                DocumentExtractionRun.document_version_id,
-                DocumentExtractionRun.status,
-            ).filter(
-                DocumentExtractionRun.document_version_id.in_(version_ids),
-                DocumentExtractionRun.status.in_(("COMPLETED", "FAILED")),
-            ).all()
-            successful_extraction_versions = {
-                str(version_id)
-                for version_id, status in extraction_rows
-                if version_id is not None and status == "COMPLETED"
-            }
-            failed_versions = {
-                str(version_id)
-                for version_id, status in extraction_rows
-                if version_id is not None and status == "FAILED"
-            }
-
-        ready_file_count = 0
-        failed_file_count = 0
-        for copy in copies:
-            version_id = str(copy.current_version_id or "")
-            ready = (
-                (str(copy.id), version_id) in profile_ready_pairs
-                and bool(version_id)
-                and version_id in index_ready_versions
+                ),
             )
-            if ready:
-                ready_file_count += 1
-                continue
-            # 只有当前版本没有成功解析、同时已出现失败解析才视为已知失败；历史失败
-            # 不能掩盖后续成功重处理。
-            if (
-                version_id
-                and version_id in failed_versions
-                and version_id not in successful_extraction_versions
-                and document_by_version.get(version_id)
-            ):
-                failed_file_count += 1
+            .filter(*copy_filters)
+            .scalar()
+            or 0
+        )
+        extraction_state = (
+            self.db.query(
+                DocumentExtractionRun.document_version_id.label("version_id"),
+                sa.func.max(
+                    sa.case(
+                        (DocumentExtractionRun.status == "FAILED", 1),
+                        else_=0,
+                    )
+                ).label("has_failed"),
+                sa.func.max(
+                    sa.case(
+                        (DocumentExtractionRun.status == "COMPLETED", 1),
+                        else_=0,
+                    )
+                ).label("has_completed"),
+            )
+            .filter(DocumentExtractionRun.document_version_id.is_not(None))
+            .group_by(DocumentExtractionRun.document_version_id)
+            .subquery()
+        )
+        failed_file_count = int(
+            self.db.query(sa.func.count(WorkingCopy.id))
+            .join(
+                extraction_state,
+                extraction_state.c.version_id == WorkingCopy.current_version_id,
+            )
+            .filter(
+                *copy_filters,
+                extraction_state.c.has_failed == 1,
+                extraction_state.c.has_completed == 0,
+            )
+            .scalar()
+            or 0
+        )
 
         # 全局检索同时覆盖工作副本和当前源侧修订。严格附件范围仍只以用户已
         # 确认的工作副本为准，不能把附件外的原始文件引入完整性承诺。
@@ -207,51 +252,64 @@ class SearchCompletenessService:
         if scope_mode != "strict":
             # 新受管根在首次命中前不会创建 ``WorkingCopyRoot``；完整性统计同样
             # 必须覆盖这些只读源文件，不能以工作副本映射是否存在作为可检索前提。
-            source_rows = (
-                self.db.query(ManagedFileRevision, ManagedFile, ManagedFileSearchProfile)
+            covered_copy = aliased(WorkingCopy)
+            source_base = (
+                self.db.query(ManagedFileRevision.id)
                 .join(ManagedFile, ManagedFile.id == ManagedFileRevision.managed_file_id)
                 .join(ManagedRoot, ManagedRoot.id == ManagedFile.root_id)
                 .outerjoin(
-                    ManagedFileSearchProfile,
-                    ManagedFileSearchProfile.managed_file_revision_id == ManagedFileRevision.id,
+                    covered_copy,
+                    sa.and_(
+                        covered_copy.workspace_id == self.workspace_id,
+                        covered_copy.status == "ACTIVE",
+                        covered_copy.managed_file_id == ManagedFile.id,
+                        covered_copy.imported_source_sha256
+                        == ManagedFileRevision.content_sha256,
+                    ),
                 )
                 .filter(
                     ManagedFile.status == "ACTIVE",
                     ManagedRoot.enabled.is_(True),
                     ManagedFileRevision.is_current.is_(True),
+                    covered_copy.id.is_(None),
                 )
-                .all()
             )
-            source_file_ids = [str(managed_file.id) for _revision, managed_file, _profile in source_rows]
-            covered_pairs = {
-                (str(managed_file_id), str(content_sha256 or ""))
-                for managed_file_id, content_sha256 in self.db.query(
-                    WorkingCopy.managed_file_id,
-                    WorkingCopy.imported_source_sha256,
+            source_eligible = int(
+                source_base.with_entities(
+                    sa.func.count(sa.distinct(ManagedFileRevision.id))
+                ).scalar()
+                or 0
+            )
+            source_ready = int(
+                source_base.join(
+                    ManagedFileSearchProfile,
+                    sa.and_(
+                        ManagedFileSearchProfile.managed_file_revision_id
+                        == ManagedFileRevision.id,
+                        ManagedFileSearchProfile.status == "ACTIVE",
+                    ),
                 )
-                .filter(
-                    WorkingCopy.workspace_id == self.workspace_id,
-                    WorkingCopy.status == "ACTIVE",
-                    WorkingCopy.managed_file_id.in_(source_file_ids or ["__none__"]),
+                .filter(ManagedFileRevision.status == "READY")
+                .with_entities(
+                    sa.func.count(sa.distinct(ManagedFileRevision.id))
                 )
-                .all()
-            }
-            for revision, managed_file, source_profile in source_rows:
-                # 当前修订已有内容一致活动副本时由工作副本计数，不重复计数。
-                if (str(managed_file.id), str(revision.content_sha256 or "")) in covered_pairs:
-                    continue
-                source_eligible += 1
-                profile_ready = bool(
-                    source_profile is not None and source_profile.status == "ACTIVE"
+                .scalar()
+                or 0
+            )
+            source_failed = int(
+                source_base.filter(ManagedFileRevision.status == "FAILED")
+                .with_entities(
+                    sa.func.count(sa.distinct(ManagedFileRevision.id))
                 )
-                if revision.status == "READY" and profile_ready:
-                    source_ready += 1
-                elif revision.status == "FAILED":
-                    source_failed += 1
-                else:
-                    source_pending += 1
+                .scalar()
+                or 0
+            )
+            source_pending = max(
+                0,
+                source_eligible - source_ready - source_failed,
+            )
 
-        eligible_file_count = len(copies) + source_eligible
+        eligible_file_count = copy_count + source_eligible
         ready_file_count += source_ready
         failed_file_count += source_failed
         pending_file_count = max(

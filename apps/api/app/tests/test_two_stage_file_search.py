@@ -27,6 +27,9 @@ from app.db.models import (
     DocumentSummary,
     DocumentVersion,
     EvidenceSpan,
+    ManagedFile,
+    ManagedFileRevision,
+    ManagedRoot,
     WorkingCopy,
 )
 from app.modules.retrieval.scope_resolver import FileSearchScopeResolver
@@ -49,6 +52,7 @@ def _setup_full_doc(
     db, *, suffix, user_id, workspace_id,
     filename, summary_text, chunk_text, category_path=None,
     wc_status="ACTIVE", index_status="COMPLETED",
+    relative_path=None, working_copy_root_id=None,
 ):
     """创建完整的 Document 链路：Document + Version + WorkingCopy + Summary + Category + Profile + Chunk + Evidence。"""
     doc = Document(
@@ -66,10 +70,10 @@ def _setup_full_doc(
     db.flush()
 
     wc = WorkingCopy(
-        id=f"wc-{suffix}", working_copy_root_id=f"root-{suffix}",
+        id=f"wc-{suffix}", working_copy_root_id=(working_copy_root_id or f"root-{suffix}"),
         workspace_id=workspace_id, managed_file_id=f"mf-{suffix}",
         document_id=doc.id, current_version_id=ver.id,
-        relative_path=filename, relative_path_hash=suffix * 64,
+        relative_path=(relative_path or filename), relative_path_hash=suffix * 64,
         filename=filename, extension="docx",
         size_bytes=doc.size_bytes, content_sha256=doc.sha256,
         imported_source_sha256=doc.sha256, status=wc_status,
@@ -155,10 +159,11 @@ def _setup_full_doc(
 
 
 class _FakeParsedQuery:
-    def __init__(self, cleaned="", terms=None, year=None, relative_year=None):
+    def __init__(self, cleaned="", terms=None, year=None, month=None, relative_year=None):
         self.cleaned = cleaned
         self.terms = terms or []
         self.year = year
+        self.month = month
         self.relative_year = relative_year
         self.doc_number = None
         self.taxonomy_candidates = []
@@ -296,6 +301,264 @@ def test_year_suffix_and_compound_report_queries_return_consistent_results():
         } == {"wc-year-report-2020"}
     finally:
         db.close()
+
+
+def test_explicit_year_and_month_filter_same_topic_to_requested_event_date():
+    """年月必须与主题分开召回并作为正文硬条件，不能混成零命中的长短语。"""
+
+    db = _db_session()
+    try:
+        _setup_full_doc(
+            db,
+            suffix="lab-june",
+            user_id="import-auditor",
+            workspace_id="shared-workspace",
+            filename="大数据联合实验室授牌仪式流程.docx",
+            summary_text="大数据联合实验室授牌仪式流程",
+            chunk_text="大数据联合实验室授牌仪式流程，时间：2017年6月6日上午10时。",
+        )
+        _setup_full_doc(
+            db,
+            suffix="lab-july",
+            user_id="import-auditor",
+            workspace_id="shared-workspace",
+            filename="大数据联合实验室授牌仪式安排.docx",
+            summary_text="大数据联合实验室授牌仪式安排",
+            chunk_text="大数据联合实验室授牌仪式安排，时间：2017年7月6日上午10时。",
+        )
+        db.commit()
+
+        tokenizer = _StableQueryTokenizer()
+        parser = FileSearchQueryParser(tokenizer=tokenizer)
+        parsed = parser.parse("找出2017年6月大数据联合实验室授牌相关的全部材料。")
+        result = FileSearchPhraseStrategyService(
+            search_service=TwoStageFileSearchService(
+                db=db,
+                user_id="current-chat-user",
+                workspace_id="shared-workspace",
+                tokenizer=tokenizer,
+            ),
+            tokenizer=tokenizer,
+        ).search(
+            original_query=parsed.original,
+            parsed_query=parsed,
+            scope=_FakeScope(),
+            phrases=[parsed.cleaned],
+            require_body_evidence=False,
+        )
+
+        assert parsed.cleaned == "大数据联合实验室授牌"
+        assert parsed.year == 2017
+        assert parsed.month == 6
+        assert [item["working_copy_id"] for item in result["results"]] == [
+            "wc-lab-june"
+        ]
+    finally:
+        db.close()
+
+
+def test_dated_related_all_materials_expands_verified_event_directories_only():
+    """目标问法应保留授牌/揭牌锚点并补齐其同目录配套文件。"""
+
+    from app.modules.agent.tool_registry import _execute_controlled_file_search
+    from app.modules.agent.tool_schemas import SearchToolInput
+
+    db = _db_session()
+    try:
+        common = {
+            "user_id": "import-auditor",
+            "workspace_id": "shared-workspace",
+            "working_copy_root_id": "root-event",
+        }
+        _setup_full_doc(
+            db,
+            suffix="event-flow",
+            filename="大数据联合实验室授牌仪式流程.docx",
+            relative_path="学院承办会议/大数据联合实验室成立/大数据联合实验室授牌仪式流程.docx",
+            summary_text="大数据联合实验室授牌仪式流程",
+            chunk_text="大数据联合实验室授牌仪式流程，时间：2017年6月6日上午10时。",
+            **common,
+        )
+        _setup_full_doc(
+            db,
+            suffix="event-plaque",
+            filename="大数据联合实验室.png",
+            relative_path="学院承办会议/大数据联合实验室成立/大数据联合实验室.png",
+            summary_text="实验室牌匾图片",
+            chunk_text="西安理工大学计算机科学与工程学院，广州泰迪智能科技有限公司。",
+            **common,
+        )
+        _setup_full_doc(
+            db,
+            suffix="event-news",
+            filename="大数据联合实验室新闻稿20170606.docx",
+            relative_path="20170606大数据联合实验室授牌/大数据联合实验室新闻稿20170606.docx",
+            summary_text="大数据联合实验室成立暨揭牌仪式举行",
+            chunk_text="2017年6月6日，大数据联合实验室成立暨揭牌仪式举行。",
+            **common,
+        )
+        _setup_full_doc(
+            db,
+            suffix="event-lecture",
+            filename="大数据讲座及讲师简介.docx",
+            relative_path="20170606大数据联合实验室授牌/大数据讲座及讲师简介.docx",
+            summary_text="大数据讲座及讲师简介",
+            chunk_text="介绍本次讲座内容与讲师经历。",
+            **common,
+        )
+        _setup_full_doc(
+            db,
+            suffix="unrelated-sibling",
+            filename="其他会议附件.docx",
+            relative_path="学院承办会议/其他会议/其他会议附件.docx",
+            summary_text="其他会议附件",
+            chunk_text="2017年6月6日举行其他会议。",
+            **common,
+        )
+        managed_root = ManagedRoot(
+            id="managed-event-root",
+            root_key="test-library",
+            display_name="测试资料库",
+            container_path="/managed/test-library",
+            enabled=True,
+        )
+        db.add(managed_root)
+        for suffix, relative_path in (
+            (
+                "event-flow",
+                "学院承办会议/大数据联合实验室成立/大数据联合实验室授牌仪式流程.docx",
+            ),
+            (
+                "event-plaque",
+                "学院承办会议/大数据联合实验室成立/大数据联合实验室.png",
+            ),
+            (
+                "event-news",
+                "20170606大数据联合实验室授牌/大数据联合实验室新闻稿20170606.docx",
+            ),
+            (
+                "event-lecture",
+                "20170606大数据联合实验室授牌/大数据讲座及讲师简介.docx",
+            ),
+        ):
+            filename = relative_path.rsplit("/", 1)[-1]
+            managed_file = ManagedFile(
+                id=f"mf-{suffix}",
+                root_id=managed_root.id,
+                relative_path=relative_path,
+                relative_path_hash=f"managed-path-{suffix}",
+                filename=filename,
+                extension="." + filename.rsplit(".", 1)[-1].lower(),
+                size_bytes=100,
+                fingerprint=f"managed-fingerprint-{suffix}",
+                status="ACTIVE",
+            )
+            db.add_all(
+                [
+                    managed_file,
+                    ManagedFileRevision(
+                        id=f"managed-revision-{suffix}",
+                        managed_file_id=managed_file.id,
+                        revision_number=1,
+                        size_bytes=100,
+                        quick_fingerprint=managed_file.fingerprint,
+                        content_sha256=(suffix * 64)[:64],
+                        status="READY",
+                        analysis_status="READY",
+                        is_current=True,
+                    ),
+                ]
+            )
+        db.commit()
+
+        tokenizer = _StableQueryTokenizer()
+        parsed = FileSearchQueryParser(tokenizer=tokenizer).parse(
+            "找出2017年6月大数据联合实验室授牌相关的全部材料。"
+        )
+        search_service = TwoStageFileSearchService(
+            db=db,
+            user_id="current-chat-user",
+            workspace_id="shared-workspace",
+            tokenizer=tokenizer,
+        )
+        result = _execute_controlled_file_search(
+            db=db,
+            user_id="current-chat-user",
+            conversation_id=None,
+            agent_run_id=None,
+            tool_input=SearchToolInput(query=parsed.original),
+            search_query=parsed.original,
+            parsed=parsed,
+            scope=_FakeScope(),
+            tokenizer=tokenizer,
+            search_service=search_service,
+        )
+
+        assert {item["filename"] for item in result["results"]} == {
+            "大数据联合实验室新闻稿20170606.docx",
+            "大数据讲座及讲师简介.docx",
+        }
+        assert result["total_returned"] == 2
+        assert result["supported_count"] == 2
+        assert {
+            "其他会议附件.docx",
+            "大数据联合实验室授牌仪式流程.docx",
+            "大数据联合实验室.png",
+        }.isdisjoint({item["filename"] for item in result["results"]})
+        directory_related = [
+            item for item in result["results"]
+            if item["relevance_tier"] == "RELATED"
+        ]
+        assert {item["filename"] for item in directory_related} == {
+            "大数据讲座及讲师简介.docx",
+        }
+        assert all(
+            "唯一匹配年月" in " ".join(item["match_reasons"])
+            for item in directory_related
+        )
+    finally:
+        db.close()
+
+
+def test_event_directory_expansion_does_not_apply_to_ordinary_or_strict_search():
+    """缺少年月全集门槛或处于附件严格范围时不得扩展同目录文件。"""
+
+    from app.modules.retrieval.event_collection import (
+        EventCollectionSearchService,
+        resolve_event_collection_request,
+    )
+
+    parser = FileSearchQueryParser(tokenizer=_StableQueryTokenizer())
+    assert resolve_event_collection_request(
+        parser.parse("查找大数据联合实验室授牌相关材料")
+    ) is None
+    assert resolve_event_collection_request(
+        parser.parse("找出2017年大数据联合实验室授牌相关的全部材料")
+    ) is None
+    request = resolve_event_collection_request(
+        parser.parse("找出2017年6月大数据联合实验室授牌相关的全部材料")
+    )
+    assert request is not None
+
+    class _NeverCalledStrategy:
+        pass
+
+    service = EventCollectionSearchService(
+        db=None,
+        workspace_id="workspace-1",
+        phrase_strategy=_NeverCalledStrategy(),
+        stage1_service=None,
+    )
+    expanded, partial = service._expand_directories(
+        anchors=[{"working_copy_id": "wc-1"}],
+        request=request,
+        parsed_query=parser.parse(
+            "找出2017年6月大数据联合实验室授牌相关的全部材料"
+        ),
+        scope=_FakeScope(scope_mode="strict", strict_ids=("doc-1",)),
+    )
+    assert expanded == []
+    assert partial is False
 
 
 def test_deictic_and_plain_file_selector_queries_return_same_documents():
