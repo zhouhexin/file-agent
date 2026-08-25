@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import mimetypes
 import os
 import shutil
 import tempfile
@@ -14,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.models import Document, FileObject, ManagedFile, ManagedFileSnapshot, ManagedRoot, User
+from app.modules.files.content_types import infer_content_type
 from app.modules.managed_files.path_policy import resolve_managed_relative_path
 from app.modules.managed_files.snapshot_repository import ManagedFileSnapshotRepository
 
@@ -116,7 +116,8 @@ class ManagedFileSnapshotService:
             user_id=self.user_id,
             workspace_id=user.default_workspace_id if user is not None else None,
             original_filename=Path(filename).name,
-            content_type=mimetypes.guess_type(filename)[0] or "application/octet-stream",
+            # 受管快照和工作副本必须共享同一套稳定 MIME 映射，不能依赖宿主机注册表差异。
+            content_type=infer_content_type(filename=filename),
             size_bytes=size_bytes,
             sha256=source_sha256,
             status="USED_IN_MESSAGE",

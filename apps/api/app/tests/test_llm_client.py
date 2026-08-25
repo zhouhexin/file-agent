@@ -97,6 +97,31 @@ def test_llm_client_wraps_remote_protocol_error(monkeypatch):
     assert "LLM 请求失败" in str(exc_info.value)
 
 
+def test_llm_client_retries_one_transient_timeout_when_enabled(monkeypatch):
+    """结构化抽取可显式重试一次瞬时超时，普通调用默认仍不重试。"""
+
+    attempts = 0
+
+    def fake_post(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ReadTimeout("temporary timeout")
+        return _FakeResponse('{"ok":true}')
+
+    monkeypatch.setattr("app.modules.llm.client.httpx.post", fake_post)
+    client = OpenAICompatibleLLMClient(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="test-model",
+        timeout_seconds=180,
+        max_retries=1,
+    )
+
+    assert client.complete_json(system_prompt="system", user_payload={}) == {"ok": True}
+    assert attempts == 2
+
+
 @pytest.mark.parametrize(
     ("body", "content_type", "expected_message"),
     [

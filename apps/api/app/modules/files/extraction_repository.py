@@ -136,24 +136,89 @@ class FileExtractionRepository:
                 },
             }
 
-        file_object = (
+        file_objects = (
             self.db.query(FileObject)
             .filter(
                 FileObject.document_id == document.id,
                 FileObject.storage_backend.in_({"local", "working_copy_local", "trash_local"}),
             )
             .order_by(FileObject.created_at.asc())
+            .all()
+        )
+        if not file_objects:
+            return _error("FILE_OBJECT_NOT_FOUND", "文件对象不存在。")
+        storage = FileLifecycleStorageService()
+        unsafe_path_seen = False
+        for file_object in file_objects:
+            try:
+                file_path = storage.file_object_path(file_object)
+            except ValueError:
+                unsafe_path_seen = True
+                continue
+            if file_path.is_file():
+                return {
+                    "ok": True,
+                    "document": document,
+                    "file_object": file_object,
+                    "file_path": file_path,
+                }
+
+        # 上传暂存文件会在归档成功后按生命周期策略清理。聊天附件仍保存上传
+        # Document ID，因此解析和重处理必须沿 UploadArchiveRecord 读取同一哈希的
+        # 不可变归档原件；不能把已清理的 quarantine FileObject 误报为文件丢失。
+        upload_version = (
+            self.db.query(DocumentVersion)
+            .filter(
+                DocumentVersion.document_id == document.id,
+                DocumentVersion.storage_tier == "UPLOAD",
+            )
+            .order_by(
+                DocumentVersion.version_number.desc(),
+                DocumentVersion.created_at.desc(),
+            )
             .first()
         )
-        if file_object is None:
-            return _error("FILE_OBJECT_NOT_FOUND", "文件对象不存在。")
-        try:
-            file_path = FileLifecycleStorageService().file_object_path(file_object)
-        except ValueError:
+        archive = (
+            self.db.query(UploadArchiveRecord)
+            .filter(
+                UploadArchiveRecord.upload_document_version_id == upload_version.id,
+                UploadArchiveRecord.status == "ARCHIVED",
+                UploadArchiveRecord.archive_relative_path.is_not(None),
+            )
+            .one_or_none()
+            if upload_version is not None
+            else None
+        )
+        if (
+            archive is not None
+            and archive.content_sha256 == upload_version.sha256
+            and upload_version.sha256 == document.sha256
+        ):
+            try:
+                archived_path = storage.archive_path(str(archive.archive_relative_path))
+            except (RuntimeError, ValueError):
+                unsafe_path_seen = True
+            else:
+                if archived_path.is_file():
+                    metadata_object = next(
+                        (
+                            item
+                            for item in file_objects
+                            if item.sha256 == upload_version.sha256
+                            and item.size_bytes == upload_version.size_bytes
+                        ),
+                        file_objects[0],
+                    )
+                    return {
+                        "ok": True,
+                        "document": document,
+                        "file_object": metadata_object,
+                        "file_path": archived_path,
+                        "source_tier": "UPLOAD_ARCHIVE",
+                    }
+        if unsafe_path_seen:
             return _error("UNSAFE_STORAGE_PATH", "文件存储路径越界，已拒绝读取。")
-        if not file_path.exists():
-            return _error("FILE_NOT_FOUND_ON_DISK", "本地文件不存在。")
-        return {"ok": True, "document": document, "file_object": file_object, "file_path": file_path}
+        return _error("FILE_NOT_FOUND_ON_DISK", "本地文件不存在。")
 
     def create_extraction_run(
         self,

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from app.core.config import get_settings
+from app.modules.files.content_types import detect_image_content_type
 from app.modules.llm.client import OpenAICompatibleLLMClient
 
 
@@ -249,11 +250,9 @@ def _quality_score(*, text: str, confidence: float | None) -> float:
 
 
 def _mime_type_for_image(image_path: Path) -> str:
-    """根据图片后缀推断 data URL MIME 类型。"""
+    """按真实图片容器生成 data URL MIME，不能把伪装文件发送给外部 Provider。"""
 
-    suffix = image_path.suffix.lower()
-    if suffix in {".jpg", ".jpeg"}:
-        return "image/jpeg"
-    if suffix == ".webp":
-        return "image/webp"
-    return "image/png"
+    content_type = detect_image_content_type(image_path)
+    if content_type is None:
+        raise ValueError("图片文件无法安全读取或格式不受支持。")
+    return content_type

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+from copy import deepcopy
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
@@ -32,22 +33,81 @@ class LayoutParsingProviderProtocol(Protocol):
         """解析一个已授权文件并返回普通可序列化结构。"""
 
 
-@lru_cache(maxsize=4)
-def _load_pipeline(*, device: str, pipeline_config: str, model_source: str) -> Any:
+@lru_cache(maxsize=8)
+def _load_pipeline(
+    *,
+    device: str,
+    pipeline_config: str,
+    model_source: str,
+    use_table_recognition: bool,
+    use_formula_recognition: bool,
+    use_chart_recognition: bool,
+    use_seal_recognition: bool,
+    use_region_detection: bool,
+) -> Any:
     """按受控配置为每个 worker 进程缓存重量级 Pipeline。"""
 
     # 显式部署配置必须覆盖继承到进程中的旧值，否则缓存 key 与实际模型源会不一致。
     os.environ["PADDLE_PDX_MODEL_SOURCE"] = model_source
+    if device.partition(":")[0].lower() == "cpu":
+        # PaddleX 会在导入 flags 模块时冻结该开关；必须在首次导入 paddlex 前设置。
+        # 顶层 pp_option 仍保留作为第二道约束，覆盖没有继承全局默认值的嵌套模型。
+        os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "False"
     try:
         from paddlex import create_pipeline
+        from paddlex.inference.models import PaddlePredictorOption
+        from paddlex.inference.pipelines import load_pipeline_config
     except ImportError as exc:
         raise PpStructureUnavailableError(
             "缺少 PaddleX PP-StructureV3 Python SDK；请安装 structured-extraction 可选依赖。"
         ) from exc
     try:
-        return create_pipeline(pipeline=pipeline_config, device=device)
+        config = _configured_pipeline(
+            load_pipeline_config(pipeline_config),
+            use_table_recognition=use_table_recognition,
+            use_formula_recognition=use_formula_recognition,
+            use_chart_recognition=use_chart_recognition,
+            use_seal_recognition=use_seal_recognition,
+            use_region_detection=use_region_detection,
+        )
+        # Paddle 3.3.x 的 oneDNN 新执行器尚不能处理部分 PP-DocLayout 数组属性；
+        # CPU 明确使用普通 Paddle 后端，避免真实推理阶段才抛 NotImplementedError。
+        predictor_option = (
+            PaddlePredictorOption(run_mode="paddle")
+            if device.partition(":")[0].lower() == "cpu"
+            else None
+        )
+        return create_pipeline(
+            config=config,
+            device=device,
+            pp_option=predictor_option,
+        )
     except Exception as exc:
         raise PpStructureUnavailableError("PP-StructureV3 Pipeline 初始化失败。") from exc
+
+
+def _configured_pipeline(
+    config: dict[str, Any],
+    *,
+    use_table_recognition: bool,
+    use_formula_recognition: bool,
+    use_chart_recognition: bool,
+    use_seal_recognition: bool,
+    use_region_detection: bool,
+) -> dict[str, Any]:
+    """复制官方配置并收敛运行能力，避免 CPU Worker 隐式加载无关重模型。"""
+
+    configured = deepcopy(config)
+    configured.update(
+        {
+            "use_table_recognition": use_table_recognition,
+            "use_formula_recognition": use_formula_recognition,
+            "use_chart_recognition": use_chart_recognition,
+            "use_seal_recognition": use_seal_recognition,
+            "use_region_detection": use_region_detection,
+        }
+    )
+    return configured
 
 
 class PpStructureV3Provider:
@@ -86,6 +146,11 @@ class PpStructureV3Provider:
                 device=self.settings.pp_structure_device,
                 pipeline_config=self.settings.pp_structure_pipeline_config,
                 model_source=self.settings.pp_structure_model_source,
+                use_table_recognition=self.settings.pp_structure_use_table_recognition,
+                use_formula_recognition=self.settings.pp_structure_use_formula_recognition,
+                use_chart_recognition=self.settings.pp_structure_use_chart_recognition,
+                use_seal_recognition=self.settings.pp_structure_use_seal_recognition,
+                use_region_detection=self.settings.pp_structure_use_region_detection,
             )
         )
         try:
@@ -223,15 +288,31 @@ def _layout_elements(data: dict[str, Any]) -> list[dict[str, Any]]:
     for key in ("elements", "layout", "layout_parsing_result", "parsing_res_list"):
         values = data.get(key)
         if isinstance(values, list):
-            return [item for item in values if isinstance(item, dict)]
+            normalized = [item for item in values if isinstance(item, dict)]
+            if normalized:
+                return normalized
         if isinstance(values, dict):
             for nested_key in ("elements", "blocks", "parsing_res_list"):
                 nested = values.get(nested_key)
                 if isinstance(nested, list):
-                    return [item for item in nested if isinstance(item, dict)]
-    texts = list(data.get("rec_texts") or [])
-    scores = list(data.get("rec_scores") or [])
-    polygons = list(data.get("rec_polys") or data.get("dt_polys") or [])
+                    normalized = [item for item in nested if isinstance(item, dict)]
+                    if normalized:
+                        return normalized
+    # PP-StructureV3 可能在版面模型没有命中块时只返回 overall_ocr_res；
+    # 这仍是可定位的真实 OCR 证据，不能误判成空页面。
+    ocr_data = data.get("overall_ocr_res")
+    if isinstance(ocr_data, dict) and isinstance(ocr_data.get("res"), dict):
+        ocr_data = ocr_data["res"]
+    if not isinstance(ocr_data, dict):
+        ocr_data = data
+    text_values = ocr_data.get("rec_texts")
+    score_values = ocr_data.get("rec_scores")
+    polygon_values = ocr_data.get("rec_polys")
+    if polygon_values is None:
+        polygon_values = ocr_data.get("dt_polys")
+    texts = list(text_values) if text_values is not None else []
+    scores = list(score_values) if score_values is not None else []
+    polygons = list(polygon_values) if polygon_values is not None else []
     return [
         {
             "text": text,
@@ -254,11 +335,16 @@ def _normalize_element(raw: dict[str, Any], *, element_index: int) -> LayoutElem
         or ""
     )
     confidence = _optional_confidence(raw.get("confidence", raw.get("score")))
+    # PaddleX 官方结果中的 polygon 是 NumPy 数组，不能参与 Python 的 ``or`` 真值运算。
     bbox = _normalize_bbox(
-        raw.get("bbox")
-        or raw.get("block_bbox")
-        or raw.get("coordinate")
-        or raw.get("poly")
+        next(
+            (
+                raw[key]
+                for key in ("bbox", "block_bbox", "coordinate", "poly")
+                if key in raw and raw[key] is not None
+            ),
+            None,
+        )
     )
     element_type = str(
         raw.get("label") or raw.get("type") or raw.get("block_label") or "text"

@@ -181,11 +181,14 @@ def _resume_agent_run(
         {
             "status": status,
             "final_response": final_response,
+            # 一致性补偿重试成功后必须清除旧失败快照，避免 UI 继续展示已恢复的错误。
+            "errors": [],
             "changeset_id": output.get("changeset_id") or graph_state.get("changeset_id"),
         }
     )
     agent_run.status = status
     agent_run.final_response = final_response
+    agent_run.error_message = None
     agent_run.changeset_id = output.get("changeset_id") or agent_run.changeset_id
     agent_run.graph_state_json = graph_state
     agent_run.updated_at = utcnow()

@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import numpy as np
 from openpyxl import load_workbook
 from PIL import Image
 from pydantic import ValidationError
@@ -44,20 +45,26 @@ from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.agent.tool_schemas import StructuredFieldSpec, StructuredImageExtractionInput
 from app.modules.agent.user_receipt import build_user_task_receipt
 from app.modules.managed_files.worker import _public_job_error_message
+from app.modules.llm.client import LLMResponseError
 from app.modules.structured_extraction.autonomous_loop import merge_structured_outputs
 from app.modules.structured_extraction.evidence import EvidenceElement
 from app.modules.structured_extraction.export import StructuredExtractionExportService
 from app.modules.structured_extraction.normalization import normalize_field_value
 from app.modules.structured_extraction.llm_provider import (
+    DeterministicLayoutExtractionProvider,
     LlmStructuredExtractionProvider,
     build_structured_extraction_provider,
 )
-from app.modules.structured_extraction.pp_structure_provider import PpStructureV3Provider
+from app.modules.structured_extraction.pp_structure_provider import (
+    PpStructureV3Provider,
+    _configured_pipeline,
+)
 from app.modules.structured_extraction.repository import StructuredExtractionRepository
 from app.modules.structured_extraction.schemas import CandidateExtraction, StructuredExtractionResult
 from app.modules.structured_extraction.service import StructuredExtractionService
 from app.modules.structured_extraction.worker import (
     _structured_graph_summary,
+    _resume_agent_run,
     fail_structured_extraction_agent_run,
 )
 
@@ -192,6 +199,30 @@ def test_structured_plan_supports_arbitrary_fields_and_rejects_non_image_scope()
     assert unsupported is None
 
 
+def test_structured_plan_preserves_five_custom_table_columns_in_requested_order():
+    """自定义业务列的数量和顺序必须进入严格 Tool Schema，不能固定成三列。"""
+
+    plan = build_structured_image_extraction_plan(
+        user_goal=(
+            "识别图中申请人、资助金额、申请日期、使用情况摘要和备注，"
+            "并以表格形式展示"
+        ),
+        attachments=[{"document_id": "doc-1", "filename": "form.jpg"}],
+    )
+
+    assert plan is not None
+    tool_input = StructuredImageExtractionInput.model_validate(plan.steps[0].input)
+    assert tool_input.presentation == "TABLE"
+    assert [field.label for field in tool_input.fields] == [
+        "申请人",
+        "资助金额",
+        "申请日期",
+        "使用情况摘要",
+        "备注",
+    ]
+    assert len(tool_input.fields) == 5
+
+
 def test_structured_goal_guard_repairs_wrong_tool_when_scope_is_authorized():
     """专用 Tool 已启用且附件明确时，错误 LLM 路由被安全计划替换。"""
 
@@ -221,6 +252,32 @@ def test_structured_goal_guard_repairs_wrong_tool_when_scope_is_authorized():
 
     assert guarded.intent == "EXTRACT_STRUCTURED_IMAGE_DATA"
     assert guarded.steps[0].tool_name == "extract-image-structured-data"
+    assert projection["fallback_reason"] == "STRUCTURED_PLAN_NORMALIZED"
+
+
+def test_structured_goal_guard_replaces_incomplete_llm_field_schema():
+    """LLM 选对 Tool 但漏字段时，后端必须恢复用户原文中的完整显式字段契约。"""
+
+    incomplete = build_structured_image_extraction_plan(
+        user_goal="从图片中识别申请人、资助金额，并以表格形式展示",
+        attachments=[{"document_id": "doc-1", "filename": "form.jpg"}],
+    )
+    message = "从图片中识别申请人、资助金额以及使用登记情况中的申请日期，并以表格形式展示"
+
+    guarded, projection = _enforce_structured_extraction_goal(
+        state={"message": message},
+        plan=incomplete,
+        user_intent_plan={"source": "adaptive_planner"},
+        catalog_snapshot={"enabled_tool_names": ["extract-image-structured-data"]},
+        attachments=[{"document_id": "doc-1", "filename": "form.jpg"}],
+    )
+
+    tool_input = StructuredImageExtractionInput.model_validate(guarded.steps[0].input)
+    assert [field.key for field in tool_input.fields] == [
+        "applicant",
+        "funding_amount",
+        "application_date",
+    ]
     assert projection["fallback_reason"] == "STRUCTURED_PLAN_NORMALIZED"
 
 
@@ -288,6 +345,32 @@ def test_pp_structure_provider_normalizes_page_cells_and_bbox(tmp_path: Path):
     assert element.bbox.model_dump() == {"left": 10.0, "top": 20.0, "right": 110.0, "bottom": 60.0}
 
 
+def test_pp_structure_runtime_config_disables_unrequested_heavy_models_without_mutation():
+    """CPU Worker 只加载显式能力，并且不能污染 PaddleX 官方配置缓存。"""
+
+    source = {
+        "pipeline_name": "PP-StructureV3",
+        "use_table_recognition": True,
+        "use_formula_recognition": True,
+        "SubPipelines": {"GeneralOCR": {"pipeline_name": "OCR"}},
+    }
+
+    configured = _configured_pipeline(
+        source,
+        use_table_recognition=False,
+        use_formula_recognition=False,
+        use_chart_recognition=False,
+        use_seal_recognition=False,
+        use_region_detection=True,
+    )
+
+    assert configured["use_table_recognition"] is False
+    assert configured["use_formula_recognition"] is False
+    assert configured["use_region_detection"] is True
+    assert source["use_table_recognition"] is True
+    assert configured["SubPipelines"] is not source["SubPipelines"]
+
+
 def test_pp_structure_provider_accepts_official_result_envelope_and_block_fields(tmp_path: Path):
     """适配 PaddleX 官方 JSON 中的 res、parsing_res_list 和 block_bbox。"""
 
@@ -331,6 +414,53 @@ def test_pp_structure_provider_accepts_official_result_envelope_and_block_fields
         "top": 30.0,
         "right": 420.0,
         "bottom": 90.0,
+    }
+
+
+def test_pp_structure_provider_falls_back_to_nested_overall_ocr(tmp_path: Path):
+    """版面块为空时仍保留 PP-StructureV3 的通用 OCR 行作为可定位证据。"""
+
+    image_path = tmp_path / "ocr-only.png"
+    image_path.write_bytes(b"fake-image")
+
+    class FakePipeline:
+        def predict(self, **_):
+            return [
+                {
+                    "res": {
+                        "page_index": 0,
+                        "width": 900,
+                        "height": 1200,
+                        "parsing_res_list": [],
+                        "overall_ocr_res": {
+                            "rec_texts": ["申请人：测试用户"],
+                            "rec_scores": [0.98],
+                            "rec_polys": np.array(
+                                [[[10, 20], [210, 20], [210, 60], [10, 60]]]
+                            ),
+                        },
+                    }
+                }
+            ]
+
+    provider = PpStructureV3Provider(
+        settings=SimpleNamespace(
+            pp_structure_device="cpu",
+            pp_structure_pipeline_config="PP-StructureV3",
+            pp_structure_model_source="BOS",
+        ),
+        pipeline_factory=lambda **_: FakePipeline(),
+    )
+
+    page = provider.parse(file_path=image_path).pages[0]
+
+    assert page.elements[0].text == "申请人：测试用户"
+    assert page.elements[0].confidence == pytest.approx(0.98)
+    assert page.elements[0].bbox.model_dump() == {
+        "left": 10.0,
+        "top": 20.0,
+        "right": 210.0,
+        "bottom": 60.0,
     }
 
 
@@ -386,6 +516,134 @@ def test_zero_provider_records_become_explicit_review_items():
     assert result.missing_required_field_count == 1
     assert result.retryable is False
     assert rows[0][1].status == "MISSING"
+
+
+def test_llm_failure_falls_back_to_deterministic_key_value_mapping():
+    """外部字段映射超时不能抹掉已成功取得的本地 OCR 证据。"""
+
+    class FailingProvider:
+        supports_vision_retry = False
+
+        def extract(self, **_):
+            raise LLMResponseError("timeout")
+
+    service = object.__new__(StructuredExtractionService)
+    service.settings = Settings(database_url="sqlite+pysqlite:///:memory:")
+    service.agent_run_id = "agent-fallback"
+    service.extraction_provider = FailingProvider()
+    field = StructuredFieldSpec(
+        key="applicant",
+        label="申请人",
+        field_type="person_name",
+    )
+    element = EvidenceElement(
+        id="element-fallback",
+        document_id="doc-fallback",
+        extraction_run_id="layout-fallback",
+        text="申请人：测试用户",
+        page_number=1,
+        bbox={"left": 10, "top": 20, "right": 200, "bottom": 60},
+        metadata={"confidence": 0.96},
+    )
+
+    candidates = service._extract_candidates_with_fallback(
+        run=SimpleNamespace(document_id="doc-fallback"),
+        extraction_arguments={
+            "fields": [field],
+            "schema_mode": "EXPLICIT_FIELDS",
+            "record_mode": "SINGLE_RECORD",
+            "elements": [element],
+            "max_records": 10,
+        },
+    )
+
+    assert candidates.records[0].fields["applicant"].raw_text == "测试用户"
+    assert candidates.records[0].fields["applicant"].evidence_element_ids == [
+        "element-fallback"
+    ]
+    assert "LLM_FALLBACK_USED" in candidates.warnings
+
+
+def test_deterministic_fallback_reconstructs_bbox_table_by_headers_and_row_anchors():
+    """无单元格元数据时，仅按明确表头、序号锚点和列 bbox 重建记录。"""
+
+    def element(element_id, text, left, top, right, bottom):
+        return EvidenceElement(
+            id=element_id,
+            document_id="doc-table",
+            extraction_run_id="layout-table",
+            text=text,
+            page_number=1,
+            bbox={"left": left, "top": top, "right": right, "bottom": bottom},
+            metadata={"confidence": 0.95},
+        )
+
+    elements = [
+        element("h0", "序号", 80, 10, 140, 40),
+        element("h1", "申请人", 170, 10, 250, 40),
+        element("h2", "资助金额", 265, 10, 360, 40),
+        element("h3", "使用情况", 380, 10, 500, 40),
+        element("r1", "1", 115, 55, 140, 85),
+        element("n1", "测试甲", 175, 50, 245, 90),
+        element("a1", "1000", 275, 50, 345, 90),
+        element("u1", "会议", 390, 50, 470, 90),
+        element("d1", "2026.6.5", 510, 50, 590, 90),
+        element("r2", "2", 115, 105, 140, 135),
+        element("n2", "测试乙", 175, 100, 245, 140),
+        element("a2", "2500", 275, 100, 345, 140),
+        # 日期中心略越过序号中心中线，仍应按手写基线偏移归入第 2 行。
+        element("d2", "2026.6.6", 510, 132, 590, 162),
+        element("r3", "3", 115, 155, 140, 185),
+        # 申请人签在右侧、金额和用途粘连时只生成低置信度真实 OCR 候选。
+        element("a3", "3500.-（会议费）", 270, 150, 470, 190),
+        element("n3", "测试丙", 520, 150, 590, 190),
+    ]
+    fields = [
+        StructuredFieldSpec(key="applicant", label="申请人", field_type="person_name"),
+        StructuredFieldSpec(key="amount", label="资助金额", field_type="money"),
+        StructuredFieldSpec(key="date", label="申请日期", field_type="date"),
+    ]
+
+    result = DeterministicLayoutExtractionProvider().extract(
+        fields=fields,
+        schema_mode="EXPLICIT_FIELDS",
+        record_mode="AUTO",
+        elements=elements,
+        max_records=10,
+    )
+
+    assert len(result.records) == 3
+    assert result.records[0].fields["applicant"].raw_text == "测试甲"
+    assert result.records[0].fields["amount"].raw_text == "1000"
+    assert result.records[0].fields["date"].raw_text == "2026.6.5"
+    assert result.records[1].fields["applicant"].evidence_element_ids == ["n2"]
+    assert result.records[1].fields["date"].raw_text == "2026.6.6"
+    assert result.records[2].fields["applicant"].raw_text == "测试丙"
+    assert result.records[2].fields["applicant"].confidence <= 0.65
+    assert result.records[2].fields["amount"].raw_text == "3500.-"
+    assert result.records[2].fields["amount"].confidence <= 0.45
+
+
+@pytest.mark.parametrize(
+    ("raw_text", "expected"),
+    [
+        ("11500.-", {"amount": "11500", "currency": None}),
+        ("3000-", {"amount": "3000", "currency": None}),
+        ("1000.", {"amount": "1000", "currency": None}),
+    ],
+)
+def test_money_normalization_accepts_handwritten_accounting_suffix(raw_text, expected):
+    """完整数字后的手写记账尾缀不应让确定金额退化成待确认。"""
+
+    value, status, warnings = normalize_field_value(
+        field=StructuredFieldSpec(key="amount", label="金额", field_type="money"),
+        raw_text=raw_text,
+        candidate_value=raw_text,
+    )
+
+    assert value == expected
+    assert status == "NORMALIZED"
+    assert warnings == []
 
 
 def test_low_confidence_field_enters_review_and_bounded_vision_retry():
@@ -1000,6 +1258,30 @@ def test_async_failure_persists_run_and_failure_changeset():
     ).one()
     assert failure.after_value_json["original_unchanged"] is True
 
+    structured_run.status = "COMPLETED"
+    _resume_agent_run(
+        db=db,
+        job=job,
+        run=structured_run,
+        output={
+            "kind": "structured_image_extraction",
+            "ok": True,
+            "status": "COMPLETED",
+            "document_id": structured_run.document_id,
+            "structured_extraction_run_id": structured_run.id,
+            "record_count": 1,
+            "field_count": 2,
+            "review_count": 0,
+            "quality_band": "HIGH",
+            "original_unchanged": True,
+        },
+        clarification=None,
+    )
+
+    assert agent_run.status == "COMPLETED"
+    assert agent_run.error_message is None
+    assert agent_run.graph_state_json["errors"] == []
+
 
 def test_structured_worker_public_error_does_not_expose_exception_details():
     job = FilesystemJob(
@@ -1059,6 +1341,82 @@ def test_user_receipt_projects_dynamic_result_and_export_without_internal_paths(
     assert projected["records"][0]["fields"]["applicant"]["normalized_value"] == "金润逸"
     assert projected["export_artifact"]["artifact_id"] == "artifact-1"
     assert "storage_path" not in projected["export_artifact"]
+
+
+def test_user_receipt_preserves_custom_column_count_and_order():
+    """回执投影必须完整保留后端验证后的动态显示列。"""
+
+    output = _tool_result(
+        status="COMPLETED",
+        quality_band="HIGH",
+        field_status="NORMALIZED",
+        confidence=0.96,
+    )
+    schema = [
+        {"key": "applicant", "label": "申请人", "field_type": "person_name"},
+        {"key": "amount", "label": "资助金额", "field_type": "money"},
+        {"key": "date", "label": "申请日期", "field_type": "date"},
+        {"key": "usage", "label": "使用情况摘要", "field_type": "string"},
+        {"key": "remark", "label": "备注", "field_type": "string"},
+    ]
+    output["presentation"] = "TABLE"
+    output["field_schema"] = schema
+    output["field_count"] = len(schema)
+    output["records"] = [
+        {
+            "record_index": 1,
+            "fields": {
+                item["key"]: {
+                    "raw_text": item["label"],
+                    "normalized_value": item["label"],
+                    "confidence": 0.96,
+                    "status": "NORMALIZED",
+                    "evidence": {"page_number": 1, "bbox": {}},
+                    "warnings": [],
+                }
+                for item in schema
+            },
+        }
+    ]
+    result = AgentRunResult(
+        agent_run_id="run-columns",
+        conversation_id="conv-columns",
+        user_id="user-1",
+        message_id="message-columns",
+        intent="EXTRACT_STRUCTURED_DATA",
+        status="COMPLETED",
+        selected_skills=["image-structured-extraction"],
+        tool_plan={},
+        tool_results=[],
+        tool_invocations=[
+            ToolInvocationRecord(
+                tool_name="extract-image-structured-data",
+                input_json={},
+                output_json=output,
+                status="COMPLETED",
+            )
+        ],
+        final_response="已完成",
+    )
+
+    projected = build_user_task_receipt(result).structured_extraction_result
+
+    assert projected is not None
+    assert [item["label"] for item in projected["field_schema"]] == [
+        "申请人",
+        "资助金额",
+        "申请日期",
+        "使用情况摘要",
+        "备注",
+    ]
+    assert len(projected["field_schema"]) == 5
+    assert list(projected["records"][0]["fields"]) == [
+        "applicant",
+        "amount",
+        "date",
+        "usage",
+        "remark",
+    ]
 
 
 def test_graph_summary_does_not_copy_structured_field_values():

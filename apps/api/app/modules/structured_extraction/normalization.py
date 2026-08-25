@@ -103,12 +103,19 @@ def _normalize_scalar(*, field: StructuredFieldSpec, raw: str) -> Any:
 
 
 def _numeric_text(value: str) -> str:
-    """移除确定性的金额装饰符；模糊字符仍导致解析失败。"""
+    """移除确定性的金额装饰符；模糊字符仍导致解析失败。
+
+    手写报销、资助登记表常用 ``10000.-``、``3000-`` 或 ``1000.`` 表示整数金额。
+    这些尾缀位于完整数字之后，不承载小数值，可以确定性移除；数字主体中的点、横线
+    或其他字符仍然拒绝，避免把看不清的金额修补成业务事实。
+    """
 
     normalized = value.strip()
     normalized = normalized.replace(",", "").replace("，", "")
     normalized = re.sub(r"(?:人民币|RMB|CNY|￥|¥|元)", "", normalized, flags=re.IGNORECASE)
     normalized = normalized.strip()
+    normalized = re.sub(r"(?<=\d)[.。．]?[-—–]\s*$", "", normalized)
+    normalized = re.sub(r"(?<=\d)[.。．]\s*$", "", normalized)
     if not re.fullmatch(r"[-+]?(?:\d+(?:\.\d+)?|\.\d+)", normalized):
         raise ValueError("ambiguous numeric value")
     return normalized

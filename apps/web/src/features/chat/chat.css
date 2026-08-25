@@ -2320,6 +2320,17 @@
   gap: 10px;
 }
 
+.structured-extraction-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px 10px;
+}
+
+.structured-extraction-heading > strong { font-size: 17px; }
+.structured-extraction-heading > small { color: #667085; }
+
 .structured-quality {
   border-radius: 999px;
   padding: 2px 8px;
@@ -2348,6 +2359,8 @@
 }
 
 .structured-extraction-table th { background: #f8fafc; font-weight: 600; }
+.structured-extraction-table tfoot th,
+.structured-extraction-table tfoot td { background: #f8fafc; font-weight: 600; }
 .structured-extraction-table td small { display: block; margin-top: 4px; color: #667085; }
 .structured-cell--review { background: #fffbeb; color: #92400e; }
 
@@ -2368,3 +2381,5 @@
 .structured-extraction-text dd { margin: 0; }
 .structured-extraction-review,
 .structured-extraction-export-note { margin: 14px 18px; }
+.structured-extraction-review ul { margin: 8px 0 0; padding-left: 20px; }
+.structured-extraction-review li + li { margin-top: 6px; }

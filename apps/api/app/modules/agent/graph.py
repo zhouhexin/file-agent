@@ -670,10 +670,24 @@ def _enforce_structured_extraction_goal(
 
     if not is_structured_image_extraction_request(state.get("message", "")):
         return plan, user_intent_plan
-    if any(
+    has_structured_step = any(
         str(step.tool_name) == "extract-image-structured-data"
         for step in list(plan.steps or [])
-    ):
+    )
+    if has_structured_step:
+        # LLM 即使选对 Tool 也可能漏掉用户明确列出的字段；后端确定性解析结果是字段契约的
+        # 最终边界，同时重新绑定真实附件范围，不能直接放行不完整的 LLM Tool 参数。
+        recovered = build_structured_image_extraction_plan(
+            user_goal=state.get("message", ""),
+            attachments=list(attachments or []),
+        )
+        if recovered is not None:
+            return recovered, {
+                **dict(user_intent_plan or {}),
+                "source": "structured_extraction_goal_guard",
+                "fallback_reason": "STRUCTURED_PLAN_NORMALIZED",
+                "original_intent": str(getattr(plan, "intent", "") or ""),
+            }
         return plan, user_intent_plan
     enabled_tools = set(catalog_snapshot.get("enabled_tool_names", []))
     if "extract-image-structured-data" in enabled_tools:
@@ -1891,14 +1905,22 @@ def _tool_errors_from_invocations(tool_invocations: List[Dict[str, Any]]) -> Lis
 
 
 def _filesystem_job_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """提取受管目录异步任务回执。"""
+    """提取并规范化异步任务回执。
+
+    通用文件任务历史上返回 ``job_id``，结构化抽取严格契约返回 ``async_job_id``；Graph 必须
+    在持久化 State 前统一为 ``job_id``，否则会把已入队任务误判成没有业务结果并提前完成。
+    """
 
     for result in reversed(tool_results):
-        if (
-            result.get("kind") == "filesystem_job"
-            and (result.get("job_id") or result.get("job_ids"))
-        ):
-            return result
+        if result.get("kind") != "filesystem_job":
+            continue
+        job_id = result.get("job_id") or result.get("async_job_id")
+        job_ids = result.get("job_ids")
+        if job_id or job_ids:
+            return {
+                **result,
+                "job_id": job_id,
+            }
     return {}
 
 

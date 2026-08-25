@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Dict
 
 import httpx
@@ -20,7 +21,16 @@ class LLMResponseError(RuntimeError):
 class OpenAICompatibleLLMClient:
     """调用 OpenAI-compatible Chat Completions 接口。"""
 
-    def __init__(self, *, api_key: str, base_url: str, model: str, timeout_seconds: int) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        model: str,
+        timeout_seconds: int,
+        max_retries: int = 0,
+        retry_delay_seconds: float = 0,
+    ) -> None:
         """保存模型调用配置。"""
 
         if not api_key or not base_url or not model:
@@ -29,6 +39,8 @@ class OpenAICompatibleLLMClient:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.max_retries = max(0, min(2, int(max_retries)))
+        self.retry_delay_seconds = max(0.0, min(5.0, float(retry_delay_seconds)))
 
     def complete_json(self, *, system_prompt: str, user_payload: Dict[str, Any]) -> Dict[str, Any]:
         """调用模型并解析 JSON 对象响应。"""
@@ -110,24 +122,46 @@ class OpenAICompatibleLLMClient:
     def _post_chat_completion(self, *, payload: Dict[str, Any]) -> httpx.Response:
         """统一调用 Chat Completions，并把网络和 HTTP 错误收敛成 LLMResponseError。"""
 
-        try:
-            response = httpx.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=self.timeout_seconds,
-            )
-            response.raise_for_status()
-            return response
-        except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code
-            body = exc.response.text[:300]
-            raise LLMResponseError(f"LLM HTTP 请求失败：status={status_code}，model={self.model}，body={body}") from exc
-        except httpx.RequestError as exc:
-            raise LLMResponseError(f"LLM 请求失败：{exc.__class__.__name__}，model={self.model}，message={exc}") from exc
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = httpx.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=self.timeout_seconds,
+                )
+                response.raise_for_status()
+                return response
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                if status_code in {408, 429, 500, 502, 503, 504} and attempt < self.max_retries:
+                    self._wait_before_retry()
+                    continue
+                body = exc.response.text[:300]
+                raise LLMResponseError(
+                    f"LLM HTTP 请求失败：status={status_code}，model={self.model}，body={body}"
+                ) from exc
+            except httpx.RequestError as exc:
+                retryable = isinstance(
+                    exc,
+                    (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError),
+                )
+                if retryable and attempt < self.max_retries:
+                    self._wait_before_retry()
+                    continue
+                raise LLMResponseError(
+                    f"LLM 请求失败：{exc.__class__.__name__}，model={self.model}，message={exc}"
+                ) from exc
+        raise AssertionError("LLM retry loop exited without a response")
+
+    def _wait_before_retry(self) -> None:
+        """仅对显式启用重试的调用做短暂退避，避免放大网关瞬时故障。"""
+
+        if self.retry_delay_seconds:
+            time.sleep(self.retry_delay_seconds)
 
 
 def _parse_json_object_from_content(content: str) -> Dict[str, Any]:

@@ -26,6 +26,7 @@ from app.modules.files.schemas import (
     FilePreviewSection,
     FileUploadResponse,
 )
+from app.modules.files.content_types import infer_content_type
 
 
 class FileUploadService:
@@ -49,7 +50,12 @@ class FileUploadService:
         """
 
         filename = Path(file.filename or "uploaded-file").name
-        content_type = file.content_type or "application/octet-stream"
+        # 浏览器可能把合法图片上报为 application/octet-stream；统一推断可避免同一文件在
+        # 上传、受管目录导入和工作副本导入三条链路中得到不同 MIME。
+        content_type = infer_content_type(
+            filename=filename,
+            declared_content_type=file.content_type,
+        )
         self._validate_upload_metadata(filename=filename, content_type=content_type)
         incoming_path, size_bytes, sha256 = await self._stream_upload_to_quarantine(file=file)
         relative_path: str | None = None

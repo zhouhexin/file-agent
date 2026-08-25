@@ -22,7 +22,13 @@ from app.db.models import (
 )
 from app.modules.agent.tool_schemas import StructuredFieldSpec, StructuredImageExtractionInput
 from app.modules.files.extraction_repository import FileExtractionRepository
+from app.modules.files.content_types import (
+    SUPPORTED_STRUCTURED_CONTENT_TYPES,
+    SUPPORTED_STRUCTURED_IMAGE_CONTENT_TYPES,
+    detect_structured_source_content_type,
+)
 from app.modules.managed_files.jobs import FilesystemJobQueue
+from app.modules.llm.client import LLMResponseError
 from app.modules.structured_extraction.evidence import (
     EvidenceElement,
     merge_evidence_bbox,
@@ -30,6 +36,7 @@ from app.modules.structured_extraction.evidence import (
 )
 from app.modules.structured_extraction.export import StructuredExtractionExportService
 from app.modules.structured_extraction.llm_provider import (
+    DeterministicLayoutExtractionProvider,
     StructuredExtractionProviderProtocol,
     build_structured_extraction_provider,
 )
@@ -48,15 +55,6 @@ from app.modules.structured_extraction.schemas import (
     NormalizedField,
     StructuredExtractionResult,
 )
-
-
-SUPPORTED_IMAGE_CONTENT_TYPES = {
-    "image/png",
-    "image/jpeg",
-    "image/webp",
-    "image/bmp",
-    "image/tiff",
-}
 
 
 class StructuredExtractionService:
@@ -111,16 +109,19 @@ class StructuredExtractionService:
                 message=str(error.get("message") or "无法读取已授权文件。"),
             )
         document = resolved["document"]
-        if document.content_type not in SUPPORTED_IMAGE_CONTENT_TYPES | {"application/pdf"}:
+        source_content_type = detect_structured_source_content_type(Path(resolved["file_path"]))
+        if source_content_type not in SUPPORTED_STRUCTURED_CONTENT_TYPES:
             return _failure_output(
                 document_id=document.id,
                 code="UNSUPPORTED_STRUCTURED_IMAGE_TYPE",
-                message="仅支持图片和 PDF 扫描件的结构化抽取。",
+                message=(
+                    "无法确认文件是受支持的 JPEG、PNG、WEBP、BMP、TIFF 图片或 PDF 扫描件。"
+                ),
             )
         try:
             self._validate_source_limits(
                 file_path=resolved["file_path"],
-                content_type=document.content_type,
+                content_type=source_content_type,
             )
         except ValueError as exc:
             return _failure_output(
@@ -228,7 +229,6 @@ class StructuredExtractionService:
         if not resolved.get("ok"):
             error = dict(resolved.get("error") or {})
             raise RuntimeError(str(error.get("message") or "无法解析结构化抽取原件。"))
-        document = resolved["document"]
         version = self.db.get(DocumentVersion, run.document_version_id)
         file_object = resolved["file_object"]
         source_path = Path(resolved["file_path"])
@@ -238,6 +238,9 @@ class StructuredExtractionService:
             or _sha256_file(source_path) != str(version.sha256)
         ):
             raise RuntimeError("文件内容版本已变化，已停止结构化抽取。")
+        source_content_type = detect_structured_source_content_type(source_path)
+        if source_content_type not in SUPPORTED_STRUCTURED_CONTENT_TYPES:
+            raise RuntimeError("文件内容不是受支持的图片或 PDF，已停止结构化抽取。")
         parser_config_hash = _layout_config_fingerprint(
             provider=self.layout_provider,
             settings=self.settings,
@@ -264,10 +267,11 @@ class StructuredExtractionService:
             image_url = self._targeted_crop_data_url(
                 run=run,
                 source_path=source_path,
-                content_type=document.content_type,
+                content_type=source_content_type,
             )
-            candidates = self.extraction_provider.extract_with_image(
-                **extraction_arguments,
+            candidates = self._extract_candidates_with_fallback(
+                run=run,
+                extraction_arguments=extraction_arguments,
                 image_url=image_url,
             )
             elements.extend(
@@ -278,7 +282,10 @@ class StructuredExtractionService:
                 )
             )
         else:
-            candidates = self.extraction_provider.extract(**extraction_arguments)
+            candidates = self._extract_candidates_with_fallback(
+                run=run,
+                extraction_arguments=extraction_arguments,
+            )
         if run.record_mode == "SINGLE_RECORD" and len(candidates.records) > 1:
             raise RuntimeError("结构化抽取模型返回了超出单记录模式的记录数量。")
         if run.schema_mode == "AUTO_DISCOVER":
@@ -339,6 +346,39 @@ class StructuredExtractionService:
             quality_band=result.quality_band,
         )
         return output
+
+    def _extract_candidates_with_fallback(
+        self,
+        *,
+        run: StructuredExtractionRun,
+        extraction_arguments: dict[str, Any],
+        image_url: str | None = None,
+    ) -> CandidateExtraction:
+        """外部字段映射不可用时降级到本地确定性映射，并保留可复核警告。"""
+
+        try:
+            if image_url is not None:
+                return self.extraction_provider.extract_with_image(
+                    **extraction_arguments,
+                    image_url=image_url,
+                )
+            return self.extraction_provider.extract(**extraction_arguments)
+        except LLMResponseError as exc:
+            fallback = DeterministicLayoutExtractionProvider().extract(
+                **extraction_arguments
+            )
+            warnings = list(
+                dict.fromkeys([*fallback.warnings, "LLM_FALLBACK_USED"])
+            )
+            log_event(
+                "structured_extraction.llm_fallback",
+                settings=self.settings,
+                agent_run_id=self.agent_run_id,
+                document_id=run.document_id,
+                status="NEEDS_REVIEW",
+                error_code=exc.__class__.__name__,
+            )
+            return fallback.model_copy(update={"warnings": warnings})
 
     def result_for_run(self, run: StructuredExtractionRun) -> StructuredExtractionResult:
         """从长期事实重建统一结果，供异步恢复和会话刷新使用。"""
@@ -650,7 +690,7 @@ class StructuredExtractionService:
     def _validate_source_limits(self, *, file_path: Path, content_type: str) -> None:
         """在入队前限制图片像素与 PDF 页数。"""
 
-        if content_type in SUPPORTED_IMAGE_CONTENT_TYPES:
+        if content_type in SUPPORTED_STRUCTURED_IMAGE_CONTENT_TYPES:
             try:
                 with Image.open(file_path) as image:
                     frame_count = int(getattr(image, "n_frames", 1) or 1)

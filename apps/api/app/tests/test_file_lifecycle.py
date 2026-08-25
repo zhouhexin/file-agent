@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -42,6 +43,7 @@ from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSu
 from app.modules.file_lifecycle.risk import inspect_basic_file_risks
 from app.modules.file_lifecycle.layout_repair import WorkingCopyLayoutRepairService
 from app.modules.file_lifecycle.service import working_copy_search_artifact_status
+from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.worker import process_next_filesystem_job
@@ -847,6 +849,47 @@ def test_trashed_upload_source_cannot_read_historical_content(monkeypatch, tmp_p
         ).resolve_original_file(upload["document_id"])
         assert resolved["ok"] is False
         assert resolved["error"]["code"] == "FILE_TRASHED"
+    clear_overrides()
+
+
+def test_uploaded_document_resolves_immutable_archive_after_staging_cleanup(
+    monkeypatch,
+    tmp_path,
+):
+    """暂存文件清理后，上传附件 ID 仍应沿审计血缘读取不可变归档原件。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "archived-original-reader")
+    payload = b"immutable archived image bytes"
+    upload = _upload(
+        client,
+        headers,
+        filename="资助登记.txt",
+        content=payload,
+    )
+    _drain(SessionLocal)
+
+    with SessionLocal() as db:
+        document = db.get(Document, upload["document_id"])
+        assert document is not None
+        archive = db.query(UploadArchiveRecord).filter_by(
+            upload_document_version_id=upload["upload_document_version_id"]
+        ).one()
+        assert archive.status == "ARCHIVED"
+        archived_path = Path(tmp_path / "originals" / str(archive.archive_relative_path))
+        assert archived_path.read_bytes() == payload
+
+        storage = FileLifecycleStorageService()
+        for file_object in db.query(FileObject).filter_by(document_id=document.id).all():
+            staging_path = storage.file_object_path(file_object)
+            staging_path.resolve().relative_to((tmp_path / "uploads").resolve())
+            staging_path.unlink(missing_ok=True)
+
+        resolved = FileExtractionRepository(db, document.user_id).resolve_original_file(document.id)
+        assert resolved["ok"] is True
+        assert resolved["source_tier"] == "UPLOAD_ARCHIVE"
+        assert Path(resolved["file_path"]).read_bytes() == payload
     clear_overrides()
 
 

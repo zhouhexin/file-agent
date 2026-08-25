@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from mimetypes import guess_type
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -15,6 +14,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.db.models import FilesystemJob, FilesystemJobEvent, ManagedFile, ManagedRoot, User
+from app.modules.files.content_types import infer_content_type
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.path_policy import PathPolicyError, resolve_managed_relative_path
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
@@ -329,7 +329,7 @@ class ManagedFileService:
             )
         except PathPolicyError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        media_type = guess_type(file_path.name)[0] or "application/octet-stream"
+        media_type = infer_content_type(filename=file_path.name)
         return FileResponse(
             path=file_path,
             media_type=media_type,

@@ -183,6 +183,11 @@ class Settings(BaseModel):
     pp_structure_device: str = "cpu"
     pp_structure_pipeline_config: str = "PP-StructureV3"
     pp_structure_model_source: str = "BOS"
+    pp_structure_use_table_recognition: bool = False
+    pp_structure_use_formula_recognition: bool = False
+    pp_structure_use_chart_recognition: bool = False
+    pp_structure_use_seal_recognition: bool = False
+    pp_structure_use_region_detection: bool = True
     pp_structure_max_image_pixels: int = DEFAULT_PP_STRUCTURE_MAX_IMAGE_PIXELS
     pp_structure_max_pdf_pages: int = DEFAULT_PP_STRUCTURE_MAX_PDF_PAGES
     structured_extraction_enabled: bool = False
@@ -190,7 +195,7 @@ class Settings(BaseModel):
     structured_extraction_llm_base_url: str = ""
     structured_extraction_llm_api_key: str = ""
     structured_extraction_llm_model: str = ""
-    structured_extraction_llm_timeout_seconds: int = 120
+    structured_extraction_llm_timeout_seconds: int = 180
     structured_extraction_max_fields: int = DEFAULT_STRUCTURED_EXTRACTION_MAX_FIELDS
     structured_extraction_max_retry_fields: int = DEFAULT_STRUCTURED_EXTRACTION_MAX_RETRY_FIELDS
     structured_extraction_max_records: int = DEFAULT_STRUCTURED_EXTRACTION_MAX_RECORDS
@@ -614,6 +619,27 @@ def get_settings() -> Settings:
         ).strip()
         or "PP-StructureV3",
         pp_structure_model_source=os.getenv("PP_STRUCTURE_MODEL_SOURCE", "BOS").strip() or "BOS",
+        # CPU Worker 默认只加载字段抽取必需的版面与 OCR 模型；重型专项模型必须显式开启。
+        pp_structure_use_table_recognition=os.getenv(
+            "PP_STRUCTURE_USE_TABLE_RECOGNITION", "false"
+        ).lower()
+        == "true",
+        pp_structure_use_formula_recognition=os.getenv(
+            "PP_STRUCTURE_USE_FORMULA_RECOGNITION", "false"
+        ).lower()
+        == "true",
+        pp_structure_use_chart_recognition=os.getenv(
+            "PP_STRUCTURE_USE_CHART_RECOGNITION", "false"
+        ).lower()
+        == "true",
+        pp_structure_use_seal_recognition=os.getenv(
+            "PP_STRUCTURE_USE_SEAL_RECOGNITION", "false"
+        ).lower()
+        == "true",
+        pp_structure_use_region_detection=os.getenv(
+            "PP_STRUCTURE_USE_REGION_DETECTION", "true"
+        ).lower()
+        == "true",
         pp_structure_max_image_pixels=_bounded_int_env(
             "PP_STRUCTURE_MAX_IMAGE_PIXELS",
             DEFAULT_PP_STRUCTURE_MAX_IMAGE_PIXELS,
@@ -645,7 +671,7 @@ def get_settings() -> Settings:
             "STRUCTURED_EXTRACTION_LLM_MODEL", ""
         ).strip(),
         structured_extraction_llm_timeout_seconds=_bounded_int_env(
-            "STRUCTURED_EXTRACTION_LLM_TIMEOUT_SECONDS", 120, minimum=10, maximum=600
+            "STRUCTURED_EXTRACTION_LLM_TIMEOUT_SECONDS", 180, minimum=10, maximum=600
         ),
         structured_extraction_max_fields=_bounded_int_env(
             "STRUCTURED_EXTRACTION_MAX_FIELDS",

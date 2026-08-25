@@ -70,6 +70,7 @@ from app.modules.managed_files.path_policy import resolve_managed_relative_path
 from app.modules.classification.service import persist_document_results_classifications
 from app.modules.chunks.service import DocumentIndexService, INDEX_VERSION
 from app.modules.files.extraction_repository import FileExtractionRepository
+from app.modules.files.content_types import infer_content_type
 from app.modules.retrieval.search_profile import DocumentSearchProfileService
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
@@ -1041,7 +1042,8 @@ class FileLifecycleJobProcessor:
                 user_id=user_id,
                 workspace_id=workspace_id,
                 original_filename=managed_file.filename,
-                content_type=_guess_content_type(managed_file.extension),
+                # 工作副本与上传、受管快照共享稳定 MIME 映射；图片不能再回落为通用二进制。
+                content_type=infer_content_type(filename=managed_file.filename),
                 size_bytes=managed_file.size_bytes,
                 sha256=source_sha256,
                 status="WORKING_COPY",
@@ -2098,18 +2100,3 @@ def _similarity_bucket(score: float) -> str:
 
     lower = int(score * 20) * 5
     return f"{lower}-{min(100, lower + 5)}%"
-
-
-def _guess_content_type(extension: str) -> str:
-    """为导入工作副本提供稳定 MIME；未知类型保持二进制。"""
-
-    return {
-        ".txt": "text/plain",
-        ".md": "text/markdown",
-        ".csv": "text/csv",
-        ".pdf": "application/pdf",
-        ".doc": "application/msword",
-        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        ".xls": "application/vnd.ms-excel",
-        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    }.get(extension.lower(), "application/octet-stream")

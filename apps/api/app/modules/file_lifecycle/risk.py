@@ -10,6 +10,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import zipfile
 
+from app.modules.files.content_types import (
+    expected_content_types_for_filename,
+    normalize_content_type,
+)
+
 
 @dataclass(slots=True)
 class BasicFileRiskAssessment:
@@ -34,8 +39,8 @@ def inspect_basic_file_risks(*, file_path: Path, filename: str, content_type: st
 
     suffix = Path(filename).suffix.lower()
     result = BasicFileRiskAssessment(extension=suffix)
-    expected_mime_types = _expected_mime_types(suffix)
-    normalized_mime = content_type.lower().strip()
+    expected_mime_types = expected_content_types_for_filename(filename)
+    normalized_mime = normalize_content_type(content_type)
     if normalized_mime and normalized_mime != "application/octet-stream" and expected_mime_types:
         result.mime_consistent = normalized_mime in expected_mime_types
         if result.mime_consistent is False:
@@ -61,25 +66,6 @@ def inspect_basic_file_risks(*, file_path: Path, filename: str, content_type: st
     elif result.warnings:
         result.status = "WARNING"
     return result
-
-
-def _expected_mime_types(suffix: str) -> set[str]:
-    """返回常见浏览器可能上报的受控 MIME 集合。"""
-
-    return {
-        ".pdf": {"application/pdf"},
-        ".doc": {"application/msword"},
-        ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
-        ".xls": {"application/vnd.ms-excel"},
-        ".xlsx": {
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "application/vnd.ms-excel",
-        },
-        ".xlsm": {"application/vnd.ms-excel.sheet.macroenabled.12", "application/vnd.ms-excel"},
-        ".txt": {"text/plain"},
-        ".md": {"text/markdown", "text/plain"},
-        ".csv": {"text/csv", "application/csv", "text/plain"},
-    }.get(suffix, set())
 
 
 def _ooxml_contains_macro(file_path: Path) -> bool:
