@@ -279,6 +279,18 @@ class UploadLifecycleService:
             self.db.commit()
             raise HTTPException(status_code=409, detail="Duplicate review expired")
 
+        upload_version = self.db.get(DocumentVersion, review.upload_document_version_id)
+        upload_document = self.db.get(Document, upload_version.document_id) if upload_version else None
+        if (
+            upload_document is not None
+            and upload_document.status == "USED_IN_MESSAGE"
+            and request.decision in {"USE_EXISTING_FILE", "CANCEL_UPLOAD"}
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Upload already used in a message; it can no longer be replaced or cancelled",
+            )
+
         selected_copy: WorkingCopy | None = None
         if request.decision == "USE_EXISTING_FILE":
             selected_copy = self._validate_existing_candidate(
@@ -301,8 +313,6 @@ class UploadLifecycleService:
         review.status = "RESOLVED"
         review.decision = request.decision
         review.decided_at = utcnow()
-        upload_version = self.db.get(DocumentVersion, review.upload_document_version_id)
-        upload_document = self.db.get(Document, upload_version.document_id) if upload_version else None
         if upload_document is not None and request.decision in {"USE_EXISTING_FILE", "CANCEL_UPLOAD"}:
             upload_document.status = (
                 "UPLOAD_REPLACED_BY_EXISTING"

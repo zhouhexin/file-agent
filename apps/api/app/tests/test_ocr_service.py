@@ -135,5 +135,7 @@ def test_paddle_provider_supports_v3_result_structure(monkeypatch, tmp_path):
 
     assert "show_log" not in captured["kwargs"]
     assert captured["kwargs"]["use_doc_unwarping"] is False
+    assert captured["kwargs"]["device"] == "cpu"
+    assert captured["kwargs"]["enable_mkldnn"] is False
     assert result["text"] == "西安理工大学文件\n西安理工人事〔2022】14号"
     assert result["confidence"] == 0.97

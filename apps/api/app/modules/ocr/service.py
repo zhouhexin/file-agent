@@ -75,6 +75,8 @@ class PaddleOcrProvider:
                     use_doc_orientation_classify=False,
                     use_doc_unwarping=False,
                     use_textline_orientation=True,
+                    device="cpu",
+                    enable_mkldnn=False,
                 )
             else:
                 self._ocr = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)

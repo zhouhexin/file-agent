@@ -33,6 +33,7 @@ import {
   canPreviewFileInfo,
   canPreviewInBrowser,
   deduplicateAttachmentsByDocumentId,
+  hasUnresolvedUploadReview,
   isVisibleConversationHistoryMessage,
 } from './presentation';
 import type { ChatAttachment, ChatTurn } from './presentation';
@@ -133,6 +134,8 @@ export function ChatPage({
   const pollingUploadReviewsRef = useRef<Set<string>>(new Set());
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const hasTurns = chatTurns.length > 0;
+  const waitingForDuplicateResolution = hasUnresolvedUploadReview(draftAttachments)
+    || Object.keys(duplicateReviews).length > 0;
   const primaryConversationId = getWebConversationId(user.id);
   const [conversationId, setConversationId] = useState(primaryConversationId);
 
@@ -307,7 +310,10 @@ export function ChatPage({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (submitting || uploading || historyLoading) {
+    if (submitting || uploading || historyLoading || waitingForDuplicateResolution) {
+      if (waitingForDuplicateResolution) {
+        setError('请先完成附件的重复文件确认，再发送任务。');
+      }
       return;
     }
     const currentMessage = message.trim();
@@ -411,7 +417,7 @@ export function ChatPage({
       return;
     }
     event.preventDefault();
-    if (submitting || uploading || historyLoading || !message.trim()) {
+    if (submitting || uploading || historyLoading || waitingForDuplicateResolution || !message.trim()) {
       return;
     }
     event.currentTarget.form?.requestSubmit();
@@ -921,9 +927,19 @@ export function ChatPage({
                   onChange={handleFileChange}
                 />
               </label>
-              <button className="primary-button send-button" disabled={submitting || uploading || historyLoading} type="submit">
+              <button
+                className="primary-button send-button"
+                disabled={submitting || uploading || historyLoading || waitingForDuplicateResolution}
+                type="submit"
+              >
                 <Send size={18} />
-                {submitting ? '发送中...' : historyLoading ? '加载中...' : '发送'}
+                {submitting
+                  ? '发送中...'
+                  : historyLoading
+                    ? '加载中...'
+                    : waitingForDuplicateResolution
+                      ? '请先确认重复文件'
+                      : '发送'}
               </button>
             </div>
           </form>

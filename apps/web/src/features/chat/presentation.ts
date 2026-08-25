@@ -41,6 +41,13 @@ export function deduplicateAttachmentsByDocumentId(
   });
 }
 
+export function hasUnresolvedUploadReview(attachments: ChatAttachment[]): boolean {
+  return attachments.some(
+    (attachment) => Boolean(attachment.upload_document_version_id)
+      && attachment.duplicate_review_status !== 'RESOLVED',
+  );
+}
+
 export function isVisibleConversationHistoryMessage(
   message: Pick<ConversationHistoryMessage, 'role' | 'content'>,
 ): boolean {

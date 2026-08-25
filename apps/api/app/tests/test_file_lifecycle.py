@@ -1150,6 +1150,58 @@ def test_duplicate_upload_waits_for_dialog_and_can_use_existing(monkeypatch, tmp
         clear_overrides()
 
 
+@pytest.mark.parametrize("decision", ["USE_EXISTING_FILE", "CANCEL_UPLOAD"])
+def test_duplicate_upload_cannot_be_cleaned_after_message_lock(monkeypatch, tmp_path, decision):
+    """临时上传进入消息后不得再被替换或取消，否则运行中的 Agent 会失去原文件。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "duplicate-locked-owner")
+    _upload(client, headers, "first.txt", b"identical locked body")
+    _drain(SessionLocal)
+    second = _upload(client, headers, "second.txt", b"identical locked body")
+    process_next_filesystem_job(session_factory=SessionLocal, worker_id="duplicate-locked-test")
+    review = client.get(
+        f"/api/uploads/{second['upload_document_version_id']}/duplicate-review",
+        headers=headers,
+    ).json()
+
+    db = SessionLocal()
+    try:
+        document = db.get(Document, second["document_id"])
+        document.status = "USED_IN_MESSAGE"
+        document.locked_message_id = "message-in-flight"
+        document.locked_conversation_id = "conversation-in-flight"
+        db.commit()
+    finally:
+        db.close()
+
+    decision_payload = {
+        "duplicate_review_id": review["id"],
+        "decision": decision,
+    }
+    if decision == "USE_EXISTING_FILE":
+        decision_payload["selected_existing_working_copy_id"] = review["candidates"][0][
+            "existing_working_copy_id"
+        ]
+    response = client.post(
+        f"/api/uploads/{second['upload_document_version_id']}/duplicate-review/decision",
+        headers=headers,
+        json=decision_payload,
+    )
+
+    assert response.status_code == 409
+    db = SessionLocal()
+    try:
+        persisted_review = db.get(UploadDuplicateReview, review["id"])
+        upload_file = db.query(FileObject).filter_by(document_id=second["document_id"]).one()
+        assert persisted_review.status == "WAITING_CONFIRMATION"
+        assert (tmp_path / "uploads" / upload_file.storage_path).exists()
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def test_duplicate_upload_reports_deleted_match_and_requires_explicit_reupload(monkeypatch, tmp_path):
     """相同内容只命中已删除文件时必须询问是否再次上传，不能自动复活或合并。"""
 
