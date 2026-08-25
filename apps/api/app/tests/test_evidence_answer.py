@@ -23,6 +23,11 @@ from app.db.models import (
     DocumentSummary,
     DocumentVersion,
     EvidenceSpan,
+    FilesystemJob,
+    ManagedFile,
+    ManagedFileAnalysisRun,
+    ManagedFileRevision,
+    ManagedRoot,
     QAAnswer,
     TrashEntry,
     UploadArchiveRecord,
@@ -46,6 +51,7 @@ from app.modules.file_lifecycle.shared_workspace import (
     SHARED_WORKSPACE_SYSTEM_KEY,
     SHARED_WORKSPACE_TYPE,
 )
+from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.retrieval.clarification_planner import FileSearchClarificationPlanner
 from app.modules.retrieval.clarification_service import FileSearchClarificationService
 
@@ -70,6 +76,25 @@ class FakeEvidenceClient:
                 {
                     "text": "申报截止时间是2026年7月31日。",
                     "evidence_ids": [evidence[0]["evidence_id"]],
+                }
+            ],
+            "limitations": [],
+            "status": "COMPLETED",
+        }
+
+
+class EchoEvidenceClient:
+    """把第一条受控证据原样作为结论，保护源侧首答的引用校验边界。"""
+
+    def complete_json(self, *, system_prompt, user_payload):
+        """只引用传入证据，不依赖真实模型或固定业务文本。"""
+
+        evidence = user_payload["evidence"][0]
+        return {
+            "claims": [
+                {
+                    "text": evidence["quote"],
+                    "evidence_ids": [evidence["evidence_id"]],
                 }
             ],
             "limitations": [],
@@ -537,7 +562,7 @@ def test_explicit_filename_locks_single_active_working_copy_without_workspace_re
         user_id="user-1",
         conversation_id="conversation-1",
         settings=_settings(),
-        client=FakeEvidenceClient(),
+        client=EchoEvidenceClient(),
     )
 
     # 若实现误退回语义召回，这个断言会直接暴露单文件范围被扩大。
@@ -1205,3 +1230,196 @@ def test_history_collects_document_ids_from_evidence_tool_only():
         "document-1",
         "document-2",
     }
+
+
+def test_ready_managed_source_answers_without_working_copy_and_queues_materialization():
+    """已完成源侧分析的首次内容问答必须直接回答，并物化该相关源文件。"""
+
+    db = _session()
+    user = User(id="source-user", username="source-user", password_hash="x")
+    shared = Workspace(
+        id="source-workspace",
+        name="共享工作区",
+        workspace_type=SHARED_WORKSPACE_TYPE,
+        system_key=SHARED_WORKSPACE_SYSTEM_KEY,
+    )
+    conversation = Conversation(
+        id="source-conversation",
+        user_id=user.id,
+        workspace_id=shared.id,
+        title="源侧证据测试",
+    )
+    root = ManagedRoot(
+        id="source-root",
+        root_key="source-root",
+        display_name="源目录",
+        container_path="/managed/source-root",
+        enabled=True,
+    )
+    managed_file = ManagedFile(
+        id="source-file",
+        root_id=root.id,
+        relative_path="劳务/劳务费发放说明.txt",
+        relative_path_hash="source-path-hash",
+        filename="劳务费发放说明.txt",
+        extension=".txt",
+        size_bytes=32,
+        fingerprint="source-fingerprint",
+        content_sha256="f" * 64,
+        status="ACTIVE",
+    )
+    source_document = Document(
+        id="source-document",
+        user_id=user.id,
+        workspace_id=None,
+        original_filename=managed_file.filename,
+        content_type="text/plain",
+        size_bytes=32,
+        sha256="f" * 64,
+        status="MANAGED_SOURCE_ANALYSIS",
+        ingest_status="INDEXED",
+    )
+    source_version = DocumentVersion(
+        id="source-version",
+        document_id=source_document.id,
+        version_number=1,
+        storage_tier="MANAGED_SOURCE",
+        storage_path="managed-source://source-revision",
+        filename=managed_file.filename,
+        content_type="text/plain",
+        size_bytes=32,
+        sha256="f" * 64,
+        source_type="MANAGED_SOURCE_ANALYSIS",
+        source_managed_file_id=managed_file.id,
+        source_managed_file_revision_id="source-revision",
+    )
+    revision = ManagedFileRevision(
+        id="source-revision",
+        managed_file_id=managed_file.id,
+        revision_number=1,
+        size_bytes=32,
+        quick_fingerprint=managed_file.fingerprint,
+        content_sha256="f" * 64,
+        status="READY",
+        analysis_status="READY",
+        is_current=True,
+        analysis_document_id=source_document.id,
+        analysis_document_version_id=source_version.id,
+    )
+    extraction = DocumentExtractionRun(
+        id="source-extraction",
+        document_id=source_document.id,
+        document_version_id=source_version.id,
+        status="COMPLETED",
+    )
+    index_run = DocumentIndexRun(
+        id="source-index",
+        document_id=source_document.id,
+        document_version_id=source_version.id,
+        extraction_run_id=extraction.id,
+        index_version="document-chunk-index-v2",
+        tokenizer="jieba",
+        tokenizer_version="test",
+        config_hash="s" * 64,
+        status="COMPLETED",
+        chunk_count=1,
+        evidence_count=1,
+    )
+    chunk = DocumentChunk(
+        id="source-chunk",
+        index_run_id=index_run.id,
+        document_id=source_document.id,
+        document_version_id=source_version.id,
+        extraction_run_id=extraction.id,
+        chunk_index=0,
+        chunk_type="text",
+        text_content="劳务费按照审核后的名单发放。",
+        search_text="劳务费 审核 名单 发放",
+        content_hash="t" * 64,
+        location_hash="u" * 64,
+        char_count=14,
+        token_count=4,
+        page_start=1,
+        page_end=1,
+    )
+    evidence = EvidenceSpan(
+        id="source-evidence",
+        chunk_id=chunk.id,
+        document_id=source_document.id,
+        document_version_id=source_version.id,
+        extraction_run_id=extraction.id,
+        span_index=0,
+        evidence_type="text_quote",
+        quote=chunk.text_content,
+        start_offset=0,
+        end_offset=len(chunk.text_content),
+        page_number=1,
+        source="document_chunk",
+    )
+    analysis = ManagedFileAnalysisRun(
+        id="source-analysis",
+        managed_file_revision_id=revision.id,
+        status="COMPLETED",
+        extraction_run_id=extraction.id,
+        index_run_id=index_run.id,
+        parser_name="plain-text",
+        parser_version="test",
+    )
+    db.add_all(
+        [
+            user,
+            shared,
+            conversation,
+            root,
+            managed_file,
+            source_document,
+            source_version,
+            revision,
+            extraction,
+            index_run,
+            chunk,
+            evidence,
+            analysis,
+        ]
+    )
+    db.flush()
+
+    # 启动全量同步已经创建低优先级任务时，问答必须复用并提升它，不能再创建
+    # 第二个并发复制任务。
+    background_job = FilesystemJobQueue(db).create_job(
+        job_type="MATERIALIZE_WORKING_COPY",
+        queue_name="MATERIALIZE",
+        root_id=None,
+        created_by=user.id,
+        priority=100,
+        deduplication_key=f"working-copy-materialize:{shared.id}:{revision.id}",
+        payload={
+            "managed_file_revision_id": revision.id,
+            "materialization_reason": "startup-full-sync",
+        },
+    )
+
+    result = EvidenceAnswerService(
+        db=db,
+        user_id=user.id,
+        conversation_id=conversation.id,
+        settings=_settings(),
+        client=EchoEvidenceClient(),
+    ).answer(
+        question="劳务费发放说明.txt 总结文件内容",
+        document_ids=[source_document.id],
+    )
+
+    assert result["status"] == "COMPLETED"
+    assert result["references"][0]["availability"] == "SOURCE_ANALYZED"
+    assert result["references"][0]["can_open"] is False
+    materialization_jobs = db.query(FilesystemJob).filter(
+        FilesystemJob.job_type == "MATERIALIZE_WORKING_COPY"
+    ).all()
+    assert len(materialization_jobs) == 1
+    assert materialization_jobs[0].id == background_job.id
+    assert materialization_jobs[0].priority == 20
+    assert materialization_jobs[0].payload_json["managed_file_revision_id"] == revision.id
+    assert materialization_jobs[0].payload_json["materialization_reason"] == "user-relevant"
+    assert materialization_jobs[0].payload_json["relevant_file_set_id"]
+    db.close()

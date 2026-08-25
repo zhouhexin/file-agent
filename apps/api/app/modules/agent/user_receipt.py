@@ -620,6 +620,7 @@ def _safe_file_search_item(item: dict[str, Any]) -> dict[str, Any]:
         for key in (
             "working_copy_id",
             "managed_file_id",
+            "resource_type",
             "document_id",
             "document_version_id",
             "filename",
@@ -629,6 +630,8 @@ def _safe_file_search_item(item: dict[str, Any]) -> dict[str, Any]:
             "year",
             "overview",
             "relevance_tier",
+            "can_open",
+            "availability_message",
         )
         if key in item
     }

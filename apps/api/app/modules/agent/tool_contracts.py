@@ -154,7 +154,10 @@ class WorkspaceFileSearchToolOutput(GenericToolOutput):
     search_completeness: dict[str, Any] | None = None
     user_message: str = ""
     search_clarification: dict[str, Any] | None = None
+    # 一字差异候选只用于请求用户确认，不能进入 document_ids 绑定。
+    query_corrections: list[dict[str, Any]] = Field(default_factory=list, max_length=4)
     trash_restore_selection: dict[str, Any] | None = None
+    relevant_file_set_id: str | None = None
 
 
 class EvidenceAnswerToolOutput(GenericToolOutput):

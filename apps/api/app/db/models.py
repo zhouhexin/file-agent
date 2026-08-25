@@ -206,6 +206,14 @@ class DocumentVersion(Base):
     source_managed_file_id: Mapped[Optional[str]] = mapped_column(
         String(36), ForeignKey("managed_files.id", ondelete="RESTRICT"), nullable=True, index=True
     )
+    # 源侧分析也复用 DocumentVersion 保存可定位正文，但它没有工作副本物理文件。
+    # 这两个稳定关联让工作副本只复制一次内容、复用同一原始修订的分析事实。
+    source_managed_file_revision_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("managed_file_revisions.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    source_analysis_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("managed_file_analysis_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     operation_plan_id: Mapped[Optional[str]] = mapped_column(
         String(36), ForeignKey("operation_plans.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -1415,6 +1423,189 @@ class ManagedFile(Base):
     last_seen_scan_run_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class ManagedFileRevision(Base):
+    """受管原始文件的一次不可变内容修订。
+
+    扫描阶段仅用快速元数据发现修订；完整 SHA-256 与正文事实由 SOURCE_ANALYSIS
+    worker 写入。原始目录只读，任何调用方均不得通过此模型修改真实文件。
+    """
+
+    __tablename__ = "managed_file_revisions"
+    __table_args__ = (
+        UniqueConstraint("managed_file_id", "revision_number", name="uq_managed_file_revisions_file_number"),
+        Index("ix_managed_file_revisions_current", "managed_file_id", "is_current"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    managed_file_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("managed_files.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    modified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    file_identity: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)
+    quick_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, default="", index=True)
+    content_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="ANALYSIS_PENDING", index=True)
+    analysis_status: Mapped[str] = mapped_column(String(40), nullable=False, default="PENDING", index=True)
+    is_current: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
+    analysis_document_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, unique=True, index=True
+    )
+    analysis_document_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="SET NULL"), nullable=True, unique=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class ManagedFileAnalysisRun(Base):
+    """原始文件修订的只读解析、摘要和索引运行审计。"""
+
+    __tablename__ = "managed_file_analysis_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    managed_file_revision_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("managed_file_revisions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="RUNNING", index=True)
+    parser_name: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    parser_version: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    converter_name: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    converter_version: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    summary_provider: Mapped[str] = mapped_column(String(80), nullable=False, default="extractive")
+    summary_version: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    index_version: Mapped[str] = mapped_column(String(80), nullable=False, default="chunk-index-v1")
+    extraction_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_extraction_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    index_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_index_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class ManagedFileSearchProfile(Base):
+    """原始文件修订的可重建文件级检索投影，不保存物理路径。"""
+
+    __tablename__ = "managed_file_search_profiles"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    managed_file_revision_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("managed_file_revisions.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+    )
+    analysis_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("managed_file_analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    normalized_filename: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    title: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    topic_summary_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    keywords_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    entities_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    years_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    document_type: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    sheet_names_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    search_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    search_vector: Mapped[Optional[str]] = mapped_column(TSVECTOR().with_variant(Text(), "sqlite"), nullable=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="ACTIVE", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class ManagedFileTextChunk(Base):
+    """原始文件修订的正文检索投影，并关联可引用的通用 Chunk。"""
+
+    __tablename__ = "managed_file_text_chunks"
+    __table_args__ = (
+        UniqueConstraint("managed_file_revision_id", "chunk_index", name="uq_managed_file_text_chunks_revision_index"),
+        Index("ix_managed_file_text_chunks_search_vector_gin", "search_vector", postgresql_using="gin"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    managed_file_revision_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("managed_file_revisions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_chunk_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_chunks.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    page_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    sheet_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    cell_range: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    section_title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    text_content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    search_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    search_vector: Mapped[Optional[str]] = mapped_column(TSVECTOR().with_variant(Text(), "sqlite"), nullable=True)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class ManagedFileTableStructure(Base):
+    """由确定性表格解析器生成的原始文件 Sheet 结构和统计。"""
+
+    __tablename__ = "managed_file_table_structures"
+    __table_args__ = (
+        UniqueConstraint("managed_file_revision_id", "sheet_name", name="uq_managed_file_table_structures_revision_sheet"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    managed_file_revision_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("managed_file_revisions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sheet_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    column_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    headers_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    column_types_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    date_ranges_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    numeric_statistics_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    sample_values_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class RelevantFileSet(Base):
+    """一次已完成相关性验证的稳定文件集合，用于回答后的批量物化。"""
+
+    __tablename__ = "relevant_file_sets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    conversation_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True)
+    agent_run_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    query_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, default="", index=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="READY", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class RelevantFileSetItem(Base):
+    """相关文件集合中的一项，只收录最终结果，不能保存扩大召回候选。"""
+
+    __tablename__ = "relevant_file_set_items"
+    __table_args__ = (
+        UniqueConstraint("relevant_file_set_id", "managed_file_revision_id", name="uq_relevant_file_set_revision"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    relevant_file_set_id: Mapped[str] = mapped_column(String(36), ForeignKey("relevant_file_sets.id", ondelete="CASCADE"), nullable=False, index=True)
+    managed_file_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("managed_files.id", ondelete="SET NULL"), nullable=True, index=True)
+    managed_file_revision_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("managed_file_revisions.id", ondelete="SET NULL"), nullable=True, index=True)
+    working_copy_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("working_copies.id", ondelete="SET NULL"), nullable=True, index=True)
+    resource_type: Mapped[str] = mapped_column(String(40), nullable=False, default="WORKING_COPY", index=True)
+    relevance_tier: Mapped[str] = mapped_column(String(40), nullable=False, default="RELATED", index=True)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="READY", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class WorkingCopyRoot(Base):

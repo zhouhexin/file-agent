@@ -109,8 +109,18 @@ class DocumentSearchProfileService:
                 )
         category_terms = self._tokenize(" ".join(category_terms_list))
 
+        # 工作副本来自受管目录时，相对目录是“全部材料”集合关系和弱检索信号。
+        # 它只能参与候选召回，不能替代正文证据或直接生成正式分类。
         metadata_terms = self._tokenize(
-            self._build_metadata_text(summary, suggestions)
+            " ".join(
+                value
+                for value in [
+                    wc.relative_path or "",
+                    wc.extension or "",
+                    self._build_metadata_text(summary, suggestions),
+                ]
+                if value
+            )
         )
 
         summary_terms = self._tokenize(

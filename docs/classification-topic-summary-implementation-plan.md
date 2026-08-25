@@ -1,5 +1,10 @@
 # 分类主题摘要优先的文件分类实施方案
 
+> 2026-08-13 补充：普通受管原始目录的摘要与正文索引将前移到原始文件修订分析阶段，工作副本在
+> 文件被实际使用后按需物化并复用同一修订的分析结果；上传附件和内容发生变化的工作副本仍沿用
+> `ANALYZE_DOCUMENT_VERSION`。具体方案见
+> `docs/managed-source-index-lazy-working-copy-implementation-plan.md`。
+
 状态：执行中（CPU-only 抽取式默认 Provider 已完成）
 日期：2026-07-21
 适用范围：File Agent 工作副本文档解析后的持久化摘要、多标签分类、文档级检索和证据问答链路

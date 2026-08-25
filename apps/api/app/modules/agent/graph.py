@@ -23,8 +23,10 @@ from app.modules.agent.binding_resolver import (
 )
 from app.modules.agent.planner import (
     build_structured_image_extraction_plan,
+    build_workspace_evidence_followup_plan,
     build_plan_from_user_intent,
     has_explicit_filename_content_request,
+    has_unscoped_workspace_fact_question,
     is_missing_generated_output_feedback,
     is_structured_image_extraction_request,
     structured_extraction_unavailable_plan,
@@ -239,6 +241,15 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
     planning_round = int(state.get("planning_round", 0)) + 1
     planning_attachments = _planning_attachments(state)
     shadow_planner_decision: Dict[str, Any] = {}
+    verified_followup = _verified_workspace_evidence_followup_plan(state)
+    if verified_followup is not None:
+        # 第二阶段范围只能来自 hybrid-search 的脱敏后端观察。这里固定安全链路，
+        # 避免 LLM 网关或 schema 异常把已找到的证据候选重新退回“请提供文件名”。
+        return _planner_state_update(
+            plan=verified_followup,
+            user_intent_plan={"source": "verified_workspace_search_followup"},
+            planning_round=planning_round,
+        )
     if state.get("planner_mode") == "llm":
         # 重规划必须消费上一轮观察，不能再次被同一个 deterministic preflight 截回原计划。
         preflight_plan = (
@@ -259,12 +270,15 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                 "STRUCTURED_EXTRACTION_UNAVAILABLE",
             }
             and not (
-                preflight_plan.intent == "EVIDENCE_ANSWER"
-                and has_explicit_filename_content_request(state["message"])
+                (
+                    preflight_plan.intent == "EVIDENCE_ANSWER"
+                    and has_explicit_filename_content_request(state["message"])
+                )
+                or preflight_plan.intent == "EVIDENCE_DISCOVERY"
             )
         ):
-            # enabled 模式由 Catalog Planner 选择成熟 Tool；只有完整文件名构成后端已验证的硬对象范围，
-            # 不能让模型改写为全库检索。其余旧关键词预检只保留给 Legacy/Shadow 与故障降级。
+            # enabled 模式由 Catalog Planner 选择成熟 Tool；完整文件名构成后端已验证的硬对象范围，
+            # 无附件事实问题则必须先走只读工作区发现。两者都是不能由模型放宽的后端范围策略。
             preflight_plan = None
         if preflight_plan is not None:
             update = _planner_state_update(
@@ -655,6 +669,10 @@ def _deterministic_preflight_plan(
         and has_explicit_filename_content_request(state["message"])
     ):
         return plan
+    if plan.intent == "EVIDENCE_DISCOVERY" and has_unscoped_workspace_fact_question(
+        state["message"]
+    ):
+        return plan
     return None
 
 
@@ -716,6 +734,34 @@ def _enforce_structured_extraction_goal(
         "decision_type": "TOOL_PLAN",
         "fallback_reason": reason.upper(),
     }
+
+
+def _verified_workspace_evidence_followup_plan(state: AgentGraphState):
+    """仅将 hybrid-search 的严格命中 ID 交给 evidence-answer。"""
+
+    if str(state.get("intent") or "") != "EVIDENCE_DISCOVERY":
+        return None
+    if str(state.get("last_dispatch_tool_name") or "") != "hybrid-search":
+        return None
+    observation = state.get("observation") or {}
+    results = [
+        item
+        for item in list(observation.get("results") or [])
+        if isinstance(item, dict) and item.get("tool_name") == "hybrid-search"
+    ]
+    if not any(item.get("result_status") == "MATCHED" for item in results):
+        return None
+    document_ids = list(state.get("observed_document_ids") or [])
+    if not document_ids:
+        return None
+    slots = dict(state.get("slots") or {})
+    return build_workspace_evidence_followup_plan(
+        user_goal=str(state.get("message") or "回答工作区文件问题"),
+        question=str(slots.get("question") or state.get("message") or ""),
+        document_ids=document_ids,
+        answer_mode=str(slots.get("answer_mode") or "FOCUSED"),
+        response_style=str(slots.get("response_style") or "concise"),
+    )
 
 
 def _planning_attachments(state: AgentGraphState) -> List[Dict[str, Any]]:
@@ -1183,6 +1229,7 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
                     if step["tool_name"] not in {
                         "extract-document-text",
                         "extract-image-structured-data",
+                        "hybrid-search",
                         "analyze-spreadsheet",
                         "profile-spreadsheet",
                         "validate-spreadsheet",
@@ -1455,8 +1502,17 @@ def observe_tool_result(
         # 写入型 Tool 失败后不能让模型继续创建其他副作用；观察仍可供审计，但下一步只允许结束或澄清。
         for observation_item in observation_items:
             observation_item["available_next_decisions"] = ["FINISH", "CLARIFY"]
+    verified_workspace_answer_followup = (
+        str(state.get("intent") or "") == "EVIDENCE_DISCOVERY"
+        and tool_name == "hybrid-search"
+        and any(
+            item.get("result_status") == "MATCHED"
+            and bool(item.get("document_ids"))
+            for item in observation_items
+        )
+    )
     can_replan = (
-        (explicit_replan or planner_after_execution)
+        (explicit_replan or planner_after_execution or verified_workspace_answer_followup)
         and (not has_failed_result or failed_result_can_replan)
         and not has_waiting_result
         and not has_user_decision
@@ -1727,10 +1783,22 @@ def _failed_tool_invocation(*, step: Dict[str, Any], error: Exception) -> ToolIn
     tool_name = str(step.get("tool_name") or "unknown-tool")
     tool_input = step.get("input", {})
     document_id = str(tool_input.get("document_id") or "")
+    safe_message = str(error)
+    if tool_name == "hybrid-search":
+        # 数据库驱动异常可能包含 SQL、绑定参数甚至物理路径，普通用户回执不得透传。
+        safe_message = "文件检索暂时不可用，请稍后重试。"
+        log_event(
+            "agent.hybrid_search.failed",
+            level="ERROR",
+            tool_name=tool_name,
+            status="FAILED",
+            error_code=error.__class__.__name__,
+            message=str(error),
+        )
     error_payload = {
         "code": "TOOL_EXECUTION_FAILED",
-        "message": str(error),
-        "retryable": False,
+        "message": safe_message,
+        "retryable": tool_name == "hybrid-search",
         "user_action_required": False,
     }
 
@@ -1751,6 +1819,16 @@ def _failed_tool_invocation(*, step: Dict[str, Any], error: Exception) -> ToolIn
             "records": [],
             "review_items": [],
             "original_unchanged": True,
+            "error": error_payload,
+        }
+    elif tool_name == "hybrid-search":
+        output_json = {
+            "kind": "workspace_file_search",
+            "ok": False,
+            "status": "FAILED",
+            "total_returned": 0,
+            "partial": True,
+            "results": [],
             "error": error_payload,
         }
     elif tool_name == "analyze-spreadsheet":
@@ -2305,7 +2383,10 @@ def _deterministic_response(
 
     workspace_file_search = result_summary.get("workspace_file_search", {})
     if workspace_file_search:
-        if workspace_file_search.get("search_clarification"):
+        if (
+            workspace_file_search.get("search_clarification")
+            or workspace_file_search.get("query_corrections")
+        ):
             return {
                 "status": "NEEDS_REVIEW",
                 "final_response": _build_workspace_file_search_response(
@@ -2651,6 +2732,11 @@ def _workspace_file_search_from_results(tool_results: List[Dict[str, Any]]) -> D
                 if isinstance(result.get("search_clarification"), dict)
                 else {}
             ),
+            "query_corrections": [
+                item
+                for item in list(result.get("query_corrections") or [])
+                if isinstance(item, dict)
+            ],
             "error": result.get("error") if isinstance(result.get("error"), dict) else {},
         }
     return {}
@@ -2870,6 +2956,20 @@ def _build_workspace_file_search_response(payload: Dict[str, Any]) -> str:
             search_clarification.get("prompt")
             or "这个查找条件存在不同范围，请选择后继续。"
         )
+    query_corrections = [
+        item
+        for item in list(payload.get("query_corrections") or [])
+        if isinstance(item, dict)
+    ]
+    if query_corrections:
+        suggestions = "；".join(
+            f"“{item.get('original')}”是否应为“{item.get('candidate')}”"
+            for item in query_corrections
+        )
+        return (
+            f"没有按原姓名找到可确认的事实证据。发现相近姓名：{suggestions}。"
+            "为避免把不同人员的信息混在一起，请确认正确姓名后再继续。"
+        )
     results = [item for item in payload.get("results", []) if isinstance(item, dict)]
     completeness = payload.get("search_completeness")
     completeness_message = (
@@ -2878,7 +2978,27 @@ def _build_workspace_file_search_response(payload: Dict[str, Any]) -> str:
         else ""
     )
     if not results:
-        base_message = "没有找到与这段描述明确相关的已整理文件。你可以补充主题、年份、单位或文件类型后再找。"
+        completeness_status = (
+            str(completeness.get("status") or "")
+            if isinstance(completeness, dict)
+            else ""
+        )
+        if completeness_status == "PROCESSING":
+            base_message = (
+                "相关范围中仍有文件正在建立检索资料，当前空结果不代表原文件中没有答案。"
+            )
+        elif (
+            isinstance(completeness, dict)
+            and int(completeness.get("failed_file_count") or 0) > 0
+        ):
+            base_message = (
+                "相关范围中有文件未能建立检索资料，当前无法据此判断原文件中是否存在答案。"
+            )
+        else:
+            base_message = (
+                "在当前已完成索引且可检索的范围内，没有找到与这段描述明确对应的证据。"
+                "你可以补充主题、年份、单位或文件类型后再找。"
+            )
         return "\n".join(item for item in (base_message, completeness_message) if item)
     supported_count = int(payload.get("supported_count") or 0)
     possible_count = int(payload.get("possible_count") or 0)
@@ -3023,7 +3143,9 @@ def _build_general_chat_response(intent_summary: Dict[str, Any]) -> str:
             return (
                 "我还不能确定要重命名哪一个文件。请明确回复：把“原文件名.ext”重命名为“新文件名.ext”。"
             )
-        return "我还不能确定要处理哪一个文件。请使用完整文件名。"
+        return (
+            "我还不能确定具体任务范围。请补充要执行的动作，或提供附件、目录、主题等可识别范围。"
+        )
     if user_goal in {"你好", "您好", "hello", "hi", "Hello", "Hi"}:
         return "你好，我在。请告诉我你想聊什么。"
     return "我已收到。请继续说明你的需求。"

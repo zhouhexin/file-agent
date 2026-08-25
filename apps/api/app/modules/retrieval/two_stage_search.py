@@ -14,6 +14,7 @@ embedding 分支关闭时，其权重重新分配给 Chunk 词法相关度。
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from typing import Any
 
@@ -24,6 +25,7 @@ from app.modules.retrieval.chunk_lexical_search import DocumentChunkLexicalSearc
 from app.modules.retrieval.evidence_projector import SearchEvidenceProjector
 from app.modules.retrieval.query_parser import exact_short_chinese_phrase
 from app.modules.retrieval.stage1_document_recall import Stage1DocumentRecallService
+from app.modules.retrieval.managed_source_search import ManagedSourceSearchService
 
 
 class _DefaultConfig:
@@ -77,6 +79,9 @@ class TwoStageFileSearchService:
         )
         self.evidence = SearchEvidenceProjector(
             db=db, user_id=user_id, workspace_id=workspace_id,
+        )
+        self.managed_source = ManagedSourceSearchService(
+            db=db, workspace_id=workspace_id, tokenizer=tokenizer,
         )
 
     def search(
@@ -344,12 +349,21 @@ class TwoStageFileSearchService:
                 message="没有可进入正文精查的当前文档版本",
             )
 
-        # 显式年份是硬过滤条件，不只是排序加分。组合查询先按主题召回，再在相同
-        # 候选版本内验证年份；这样“2020年的述职报告”不会被当成一个不存在的连续短语。
+        # 显式年月是硬过滤条件，不只是排序加分。组合查询先按主题召回，再在相同
+        # 候选版本内验证日期；这样“2017年6月的授牌材料”不会被当成一个不存在的连续短语。
         year_match_version_ids: set[str] = set()
         explicit_year = getattr(parsed_query, "year", None)
-        if explicit_year and version_ids:
-            if cleaned_query == str(explicit_year):
+        explicit_month = getattr(parsed_query, "month", None)
+        if explicit_year and explicit_month:
+            explicit_date_query = f"{int(explicit_year)}年{int(explicit_month)}月"
+        elif explicit_year:
+            explicit_date_query = str(explicit_year)
+        elif explicit_month:
+            explicit_date_query = f"{int(explicit_month)}月"
+        else:
+            explicit_date_query = ""
+        if explicit_date_query and version_ids:
+            if cleaned_query == explicit_date_query:
                 year_match_version_ids = {
                     str(item.get("document_version_id"))
                     for item in chunk_results
@@ -360,10 +374,10 @@ class TwoStageFileSearchService:
                 try:
                     with self.db.begin_nested():
                         year_chunks = self.stage2.search(
-                            query=str(explicit_year),
+                            query=explicit_date_query,
                             document_version_ids=version_ids,
                             limit=min(int(self.config.retrieval_chunk_global_limit), 24),
-                            exact_phrase_override=str(explicit_year),
+                            exact_phrase_override=explicit_date_query,
                         )
                     year_match_version_ids = {
                         str(item.get("document_version_id"))
@@ -379,8 +393,9 @@ class TwoStageFileSearchService:
                         query_fingerprint=query_fingerprint,
                         candidate_version_count=len(version_ids),
                         matched_version_count=len(year_match_version_ids),
-                        year=int(explicit_year),
-                        message="显式年份候选验证完成",
+                        year=int(explicit_year) if explicit_year else None,
+                        month=int(explicit_month) if explicit_month else None,
+                        message="显式年月候选验证完成",
                     )
                 except Exception as exc:
                     chunk_degraded = True
@@ -393,8 +408,9 @@ class TwoStageFileSearchService:
                         workspace_id=self.workspace_id,
                         query_fingerprint=query_fingerprint,
                         error_code=exc.__class__.__name__,
-                        year=int(explicit_year),
-                        message="显式年份正文验证失败，保留文件名和摘要年份校验",
+                        year=int(explicit_year) if explicit_year else None,
+                        month=int(explicit_month) if explicit_month else None,
+                        message="显式年月正文验证失败，保留文件名和摘要日期校验",
                     )
 
         # Evidence 投影
@@ -456,6 +472,51 @@ class TwoStageFileSearchService:
             scope=scope,
             year_match_version_ids=year_match_version_ids,
         )
+        # 源侧分支只补充当前未被同修订工作副本覆盖的记录。两边均已完成
+        # 相关性校验后才合并，不能把扩大召回候选误放入用户最终列表。
+        source_state = {"results": [], "pending_count": 0, "failed_count": 0, "eligible_count": 0}
+        if bool(getattr(self.config, "managed_source_search_enabled", True)):
+            try:
+                # 源侧搜索只是双范围补充分支。其索引异常不能回滚已经成功的
+                # 工作副本检索，也不能让用户误以为工作副本结果不存在。
+                with self.db.begin_nested():
+                    source_state = self.managed_source.search(
+                        parsed_query=parsed_query,
+                        scope=scope,
+                        limit=candidate_limit,
+                        # 短语策略需要源侧同样提供连续正文命中，不能只让工作
+                        # 副本分支执行该约束，否则双范围结果会出现分级不一致。
+                        exact_phrase=exact_phrase,
+                    )
+            except Exception as exc:
+                source_state = {
+                    "results": [],
+                    "pending_count": 0,
+                    "failed_count": 0,
+                    "eligible_count": 0,
+                    "degraded": True,
+                }
+                log_event(
+                    "retrieval.managed_source.failed",
+                    level="ERROR",
+                    tool_name="hybrid-search",
+                    status="DEGRADED",
+                    workspace_id=self.workspace_id,
+                    query_fingerprint=query_fingerprint,
+                    error_code=exc.__class__.__name__,
+                    message="受管原始文件检索分支失败，保留工作副本检索结果",
+                )
+            source_results = list(source_state.get("results") or [])
+            # 源侧服务已经按“内容一致的活动工作副本”完成去重。此处不能再按
+            # ``managed_file_id`` 排除，否则源文件出现新修订而旧工作副本仍存在时，
+            # 新修订会被静默遗漏。
+            fused.extend(source_results)
+            fused.sort(
+                key=lambda item: (
+                    -float(item.get("_score") or 0.0),
+                    str(item.get("working_copy_id") or item.get("managed_file_revision_id") or ""),
+                )
+            )
         if require_body_evidence:
             # “正文提到/包含/出现”是事实约束；没有 Chunk 连续命中的文件即使文件名或摘要相关，
             # 也不能作为正文命中返回给用户。
@@ -466,7 +527,11 @@ class TwoStageFileSearchService:
             for item in fused:
                 item.pop("_body_phrase_hit", None)
 
-        partial = chunk_degraded
+        partial = chunk_degraded or bool(
+            source_state.get("pending_count")
+            or source_state.get("failed_count")
+            or source_state.get("degraded")
+        )
         log_event(
             "retrieval.search.completed",
             level="WARNING" if partial or not fused else "INFO",
@@ -480,6 +545,9 @@ class TwoStageFileSearchService:
             detail_version_count=len(version_ids),
             chunk_result_count=len(chunk_results),
             evidence_count=len(evidence_map),
+            source_result_count=len(source_state.get("results") or []),
+            source_pending_count=int(source_state.get("pending_count") or 0),
+            source_failed_count=int(source_state.get("failed_count") or 0),
             result_count=len(fused),
             partial=partial,
             candidate_limit_reached=candidate_limit_reached,
@@ -492,6 +560,11 @@ class TwoStageFileSearchService:
             "total_returned": len(fused),
             "partial": partial,
             "candidate_limit_reached": candidate_limit_reached,
+            "managed_source_coverage": {
+                "eligible_file_count": int(source_state.get("eligible_count") or 0),
+                "pending_file_count": int(source_state.get("pending_count") or 0),
+                "failed_file_count": int(source_state.get("failed_count") or 0),
+            },
             "results": fused,
             "user_message": self._build_user_message(fused, partial),
         }
@@ -623,9 +696,17 @@ class TwoStageFileSearchService:
         for c in stage1_candidates:
             wc_id = c.get("working_copy_id")
             vid = c.get("document_version_id")
-            if getattr(parsed_query, "year", None) and not self._matches_explicit_year(
+            if (
+                getattr(parsed_query, "year", None)
+                or getattr(parsed_query, "month", None)
+            ) and not self._matches_explicit_date(
                 candidate=c,
-                year=int(parsed_query.year),
+                year=(int(parsed_query.year) if parsed_query.year else None),
+                month=(
+                    int(parsed_query.month)
+                    if getattr(parsed_query, "month", None)
+                    else None
+                ),
                 year_match_version_ids=year_match_version_ids or set(),
             ):
                 continue
@@ -675,10 +756,12 @@ class TwoStageFileSearchService:
             results.append(
                 {
                     "working_copy_id": wc_id,
+                    "resource_type": "WORKING_COPY",
                     "managed_file_id": c.get("managed_file_id"),
                     "document_id": c.get("document_id"),
                     "document_version_id": vid,
                     "filename": c.get("filename", ""),
+                    # 逻辑路径只用于用户区分同名文件，绝不能替换为容器绝对路径。
                     "root_key": c.get("root_key"),
                     "relative_path": c.get("relative_path"),
                     "category_path": c.get("category_path", []),
@@ -689,6 +772,9 @@ class TwoStageFileSearchService:
                     "evidence_preview": evidence_preview,
                     "_body_phrase_hit": chunk_score > 0,
                     "_score": fused_score,
+                    # 普通检索的基础词法结果仍需上层策略完成相关性分级；不应
+                    # 因为有文件名或摘要命中就自动触发批量工作副本物化。
+                    "relevance_tier": "RELATED" if c.get("_hit_source") == "exact_filename" else "POSSIBLE",
                 }
             )
 
@@ -740,14 +826,37 @@ class TwoStageFileSearchService:
         return deduplicated
 
     @staticmethod
-    def _matches_explicit_year(
+    def _matches_explicit_date(
         *,
         candidate: dict,
-        year: int,
+        year: int | None,
+        month: int | None,
         year_match_version_ids: set[str],
     ) -> bool:
-        """通过结构化摘要、文件名、摘要文本或正文 Chunk 验证显式年份。"""
+        """通过结构化摘要、文件名、摘要文本或正文 Chunk 验证显式年月。"""
 
+        version_id = str(candidate.get("document_version_id") or "")
+        if version_id in year_match_version_ids:
+            return True
+        searchable_text = " ".join(
+            [
+                str(candidate.get("filename") or ""),
+                str(candidate.get("summary") or ""),
+            ]
+        )
+        if month is not None:
+            month_pattern = rf"(?:0?{month})\s*月"
+            if year is not None:
+                if re.search(
+                    rf"{year}\s*(?:年|[-_./])?\s*0?{month}(?:\s*月)?",
+                    searchable_text,
+                ):
+                    return True
+                # 同时指定年月时，只有结构化年份不能单独满足月份条件。
+                return False
+            return re.search(month_pattern, searchable_text) is not None
+        if year is None:
+            return True
         year_text = str(year)
         structured_year = candidate.get("year")
         if isinstance(structured_year, (list, tuple, set)):
@@ -759,7 +868,7 @@ class TwoStageFileSearchService:
             return True
         if year_text in str(candidate.get("summary") or ""):
             return True
-        return str(candidate.get("document_version_id") or "") in year_match_version_ids
+        return False
 
     def _build_match_reasons(
         self,
@@ -782,7 +891,7 @@ class TwoStageFileSearchService:
             reasons.append(f"文件名命中：{filename}")
         elif hit_source == "trgm_fallback":
             reasons.append("文件名模糊匹配（轻微错字）")
-        elif hit_source == "chunk_fallback":
+        elif hit_source in {"chunk_fallback", "exact_short_phrase_chunk"}:
             reasons.append("原文命中查询")
 
         if category_path:

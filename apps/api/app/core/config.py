@@ -53,6 +53,14 @@ DEFAULT_GRAPH_PROJECTION_BATCH_SIZE = 500
 DEFAULT_GRAPH_CLASSIFICATION_ROLLOUT_PERCENT = 10
 DEFAULT_GRAPH_FEEDBACK_EVAL_MIN_SAMPLES = 100
 DEFAULT_MANAGED_FILE_CLASSIFICATION_SYNC_LIMIT = 20
+DEFAULT_MANAGED_FILE_INITIALIZATION_MODE = "source_index_first"
+DEFAULT_MANAGED_SOURCE_ANALYSIS_BACKGROUND_PRIORITY = 100
+DEFAULT_MANAGED_SOURCE_ANALYSIS_ON_DEMAND_PRIORITY = 10
+DEFAULT_MANAGED_SOURCE_ANALYSIS_BATCH_SIZE = 20
+DEFAULT_MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY = 1
+DEFAULT_MATERIALIZE_WORKING_COPY_PRIORITY = 20
+DEFAULT_MATERIALIZE_WORKING_COPY_BACKGROUND_PRIORITY = 100
+DEFAULT_MATERIALIZE_RELEVANT_FILES_BATCH_SIZE = 50
 DEFAULT_LEGACY_OFFICE_CONVERSION_TIMEOUT_SECONDS = 90
 DEFAULT_LEGACY_OFFICE_MAX_FILE_SIZE_MB = 100
 DEFAULT_LEGACY_OFFICE_DERIVATIVE_DIR = "derivatives/office"
@@ -165,6 +173,21 @@ class Settings(BaseModel):
     retrieval_query_max_chars: int = 500
     retrieval_preview_max_chars: int = 240
     retrieval_statement_timeout_ms: int = 2000
+    # 受管原始目录先建立只读检索索引；分析完成后再由独立队列全量同步工作副本。
+    managed_file_initialization_mode: str = DEFAULT_MANAGED_FILE_INITIALIZATION_MODE
+    managed_source_analysis_enabled: bool = True
+    managed_source_analysis_background_priority: int = DEFAULT_MANAGED_SOURCE_ANALYSIS_BACKGROUND_PRIORITY
+    managed_source_analysis_on_demand_priority: int = DEFAULT_MANAGED_SOURCE_ANALYSIS_ON_DEMAND_PRIORITY
+    managed_source_analysis_batch_size: int = DEFAULT_MANAGED_SOURCE_ANALYSIS_BATCH_SIZE
+    managed_source_libreoffice_concurrency: int = DEFAULT_MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY
+    managed_source_search_enabled: bool = True
+    materialize_all_managed_files: bool = True
+    materialize_relevant_files_after_response: bool = True
+    materialize_working_copy_priority: int = DEFAULT_MATERIALIZE_WORKING_COPY_PRIORITY
+    materialize_working_copy_background_priority: int = (
+        DEFAULT_MATERIALIZE_WORKING_COPY_BACKGROUND_PRIORITY
+    )
+    materialize_relevant_files_batch_size: int = DEFAULT_MATERIALIZE_RELEVANT_FILES_BATCH_SIZE
     retrieval_filename_trgm_min_chars: int = 4
     retrieval_filename_trgm_candidate_limit: int = 20
     retrieval_filename_trgm_similarity_threshold: float = 0.25
@@ -584,6 +607,68 @@ def get_settings() -> Settings:
         ),
         retrieval_statement_timeout_ms=max(
             100, min(30000, int(os.getenv("RETRIEVAL_STATEMENT_TIMEOUT_MS", "2000")))
+        ),
+        managed_file_initialization_mode=_choice(
+            os.getenv(
+                "MANAGED_FILE_INITIALIZATION_MODE",
+                DEFAULT_MANAGED_FILE_INITIALIZATION_MODE,
+            ),
+            allowed={"source_index_first", "eager_working_copy"},
+            default=DEFAULT_MANAGED_FILE_INITIALIZATION_MODE,
+        ),
+        managed_source_analysis_enabled=os.getenv(
+            "MANAGED_SOURCE_ANALYSIS_ENABLED", "true"
+        ).lower() == "true",
+        managed_source_analysis_background_priority=_bounded_int_env(
+            "MANAGED_SOURCE_ANALYSIS_BACKGROUND_PRIORITY",
+            DEFAULT_MANAGED_SOURCE_ANALYSIS_BACKGROUND_PRIORITY,
+            minimum=1,
+            maximum=1000,
+        ),
+        managed_source_analysis_on_demand_priority=_bounded_int_env(
+            "MANAGED_SOURCE_ANALYSIS_ON_DEMAND_PRIORITY",
+            DEFAULT_MANAGED_SOURCE_ANALYSIS_ON_DEMAND_PRIORITY,
+            minimum=1,
+            maximum=1000,
+        ),
+        managed_source_analysis_batch_size=_bounded_int_env(
+            "MANAGED_SOURCE_ANALYSIS_BATCH_SIZE",
+            DEFAULT_MANAGED_SOURCE_ANALYSIS_BATCH_SIZE,
+            minimum=1,
+            maximum=200,
+        ),
+        managed_source_libreoffice_concurrency=_bounded_int_env(
+            "MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY",
+            DEFAULT_MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY,
+            minimum=1,
+            maximum=8,
+        ),
+        managed_source_search_enabled=os.getenv(
+            "MANAGED_SOURCE_SEARCH_ENABLED", "true"
+        ).lower() == "true",
+        materialize_all_managed_files=os.getenv(
+            "MATERIALIZE_ALL_MANAGED_FILES", "true"
+        ).lower() == "true",
+        materialize_relevant_files_after_response=os.getenv(
+            "MATERIALIZE_RELEVANT_FILES_AFTER_RESPONSE", "true"
+        ).lower() == "true",
+        materialize_working_copy_priority=_bounded_int_env(
+            "MATERIALIZE_WORKING_COPY_PRIORITY",
+            DEFAULT_MATERIALIZE_WORKING_COPY_PRIORITY,
+            minimum=1,
+            maximum=1000,
+        ),
+        materialize_working_copy_background_priority=_bounded_int_env(
+            "MATERIALIZE_WORKING_COPY_BACKGROUND_PRIORITY",
+            DEFAULT_MATERIALIZE_WORKING_COPY_BACKGROUND_PRIORITY,
+            minimum=1,
+            maximum=1000,
+        ),
+        materialize_relevant_files_batch_size=_bounded_int_env(
+            "MATERIALIZE_RELEVANT_FILES_BATCH_SIZE",
+            DEFAULT_MATERIALIZE_RELEVANT_FILES_BATCH_SIZE,
+            minimum=1,
+            maximum=500,
         ),
         retrieval_filename_trgm_min_chars=max(
             4, min(20, int(os.getenv("RETRIEVAL_FILENAME_TRGM_MIN_CHARS", "4")))

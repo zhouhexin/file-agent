@@ -201,6 +201,71 @@ def test_year_suffix_and_compound_year_queries_share_stable_core_terms():
     assert {(item.cleaned, item.year) for item in compound} == {("述职报告", 2020)}
 
 
+def test_all_materials_query_removes_result_quantity_word():
+    """“全部”描述返回数量，不得污染业务主题短语或造成零召回。"""
+
+    result = _make_parser().parse(
+        "找出2017年6月大数据联合实验室授牌相关的全部材料。"
+    )
+
+    assert result.year == 2017
+    assert result.month == 6
+    assert result.cleaned == "大数据联合实验室授牌"
+
+
+def test_fact_question_separates_file_and_person_anchors_from_requested_fields():
+    """事实问句只能用清单和姓名找文件，待回答字段不能拼进连续短语。"""
+
+    result = _make_parser().parse(
+        "2017年住宿清单中,潘志康来自哪个单位、住宿几天费用多少"
+    )
+
+    assert result.year == 2017
+    assert result.is_fact_question is True
+    assert result.fact_anchor_phrases == ["住宿清单", "潘志康"]
+    assert result.fact_entity_phrases == ["潘志康"]
+    assert result.requested_fact_fields == [
+        "单位或机构",
+        "住宿天数",
+        "费用或金额",
+    ]
+
+
+def test_fact_question_extracts_entity_once_across_pronoun_followup_clause():
+    """后续“他的……”只描述待回答字段，不能成为新的文件实体。"""
+
+    result = _make_parser().parse(
+        "彭绍高来自哪个单位,他的报告题目是什么"
+    )
+
+    assert result.is_fact_question is True
+    assert result.fact_anchor_phrases == ["彭绍高"]
+    assert result.fact_entity_phrases == ["彭绍高"]
+    assert result.requested_fact_fields == ["单位或机构", "报告题目"]
+
+
+def test_fact_question_rules_cover_event_partner_and_location_without_hardcoded_answer():
+    """同一通用规则应覆盖机构合作方与活动地点，而不是只识别住宿示例。"""
+
+    result = _make_parser().parse(
+        "大数据联合实验室由学院和哪家公司共同建立？仪式在哪里举行？"
+    )
+
+    assert result.is_fact_question is True
+    assert result.fact_anchor_phrases == ["大数据联合实验室"]
+    assert result.requested_fact_fields == ["地点", "公司"]
+
+
+def test_literal_file_search_does_not_enable_fact_question_rewrite():
+    """“哪些文件提到了……”仍保持显式正文连续匹配，不能被事实规则放宽。"""
+
+    result = _make_parser().parse("哪些文件提到了彭绍高")
+
+    assert result.relation_mode == "LITERAL"
+    assert result.is_fact_question is False
+    assert result.fact_anchor_phrases == []
+
+
 def test_extracts_relative_year():
     """相对时间必须换算为年份硬过滤条件，而不是遗留为普通检索词。"""
 

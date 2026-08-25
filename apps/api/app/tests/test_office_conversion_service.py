@@ -83,6 +83,26 @@ def test_resolve_libreoffice_executable_prefers_configured_path(tmp_path):
     assert resolved == executable
 
 
+def test_resolve_configured_windows_soffice_exe_prefers_console_sibling(tmp_path):
+    """显式配置 GUI exe 时仍应使用同目录可等待的 soffice.com。"""
+
+    program_dir = tmp_path / "LibreOffice" / "program"
+    program_dir.mkdir(parents=True)
+    executable = program_dir / "soffice.exe"
+    console = program_dir / "soffice.com"
+    executable.write_bytes(b"")
+    console.write_bytes(b"")
+
+    resolved = resolve_libreoffice_executable(
+        configured=str(executable),
+        platform_name="win32",
+        environ={},
+        which=lambda _name: None,
+    )
+
+    assert resolved == console
+
+
 def test_resolve_libreoffice_executable_finds_windows_soffice_com_first(tmp_path):
     """Windows 默认目录中必须优先使用 soffice.com。"""
 

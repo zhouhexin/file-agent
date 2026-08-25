@@ -106,7 +106,7 @@ class ManagedFileService:
         return self.to_job_response(job)
 
     def create_reconcile_job(self, *, root_id: str, current_user: User) -> FilesystemJobResponse:
-        """创建受管原始目录全量同步任务，HTTP 请求不等待扫描或导入。"""
+        """创建受管目录同步任务，HTTP 请求不等待扫描、源侧分析或全量后台物化。"""
 
         _require_role(current_user, {"admin", "ops"})
         root = self.repository.get_root(root_id)
@@ -180,7 +180,7 @@ class ManagedFileService:
         limit: int = 100,
         offset: int = 0,
     ) -> list[FailedFileJobResponse]:
-        """列出最终失败的导入和分析任务，供 ops/admin 定位具体文件。"""
+        """列出最终失败的导入、源侧分析和副本分析任务，供 ops/admin 定位问题。"""
 
         _require_role(current_user, {"admin", "ops"})
         jobs = (
@@ -188,7 +188,12 @@ class ManagedFileService:
             .filter(
                 FilesystemJob.status == "FAILED",
                 FilesystemJob.job_type.in_(
-                    {"IMPORT_WORKING_COPIES", "ANALYZE_DOCUMENT_VERSION"}
+                    {
+                        "IMPORT_WORKING_COPIES",
+                        "MATERIALIZE_WORKING_COPY",
+                        "ANALYZE_MANAGED_FILE_REVISION",
+                        "ANALYZE_DOCUMENT_VERSION",
+                    }
                 ),
             )
             .order_by(FilesystemJob.finished_at.desc(), FilesystemJob.created_at.desc())

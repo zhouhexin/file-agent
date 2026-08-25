@@ -166,11 +166,11 @@ def test_message_does_not_expand_explicit_filename_before_working_copy_is_active
         assert task_result["evidence_answer_result"] is None
         assert task_result["pending_job_ids"] == []
 
-    # 导入和分析完成后 worker 必须自动续跑原请求；用户不需要再次发送问题。
+    # 源侧分析完成后 worker 必须自动续跑原请求；用户不需要再次发送问题。
     while process_next_filesystem_job(
         session_factory=session_factory,
         worker_id="search-readiness-test",
-        queue_names={"IMPORT", "ANALYSIS"},
+        queue_names={"SOURCE_ANALYSIS", "MATERIALIZE", "IMPORT", "ANALYSIS"},
     ):
         pass
     with session_factory() as db:

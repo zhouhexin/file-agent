@@ -344,7 +344,8 @@ LexRank 选择可定位原文句子，不下载模型、不要求 GPU，也不�
 `openai_compatible` 会兼容映射为 `llm`，但新配置统一使用 `llm`。
 
 阶段五将 Chunk 索引升级为 `document-chunk-index-v2`，Evidence quote 覆盖完整 Chunk。升级代码和
-数据库迁移后必须同时启动 scheduler、SCAN/RECONCILE worker 与 IMPORT worker；历史 v1 索引会被
+数据库迁移后必须同时启动 scheduler、SCAN/RECONCILE worker、SOURCE_ANALYSIS worker 与
+MATERIALIZE,IMPORT worker；历史 v1 索引会被
 识别为待修复并重建。重建完成前全文总结明确返回 `INDEX_PENDING`，不会把旧 500 字符证据冒充完整
 总结。
 
@@ -352,11 +353,10 @@ OCR 第一阶段使用本地 PaddleOCR 作为默认 Provider。图片文件会�
 
 PDF、DOCX 默认使用 Docling 进行本地结构化解析，并将标题、章节、正文、页眉页脚和位置元素写入 `document_elements`。`DOCLING_OCR_ENABLED=false` 时，扫描件继续使用上述 PaddleOCR/LLM OCR 链路；Docling 缺失、转换失败或正文为空时自动回退现有 PyMuPDF/python-docx 解析器。首次启用或升级 Docling 后，解析器配置指纹会变化，相关文件下一次读取时会生成新的解析运行，旧解析结果继续保留用于历史审计。
 
-升级到结构化解析版本后执行：
+升级到结构化解析版本后，在仓库根目录执行：
 
 ```bash
-cd apps/api
-/opt/homebrew/anaconda3/envs/py311/bin/python -m alembic -c alembic.ini upgrade head
+/opt/homebrew/anaconda3/envs/py311/bin/python -m alembic -c apps/api/alembic.ini upgrade head
 ```
 
 分类 LLM 判定由 `LLM_CLASSIFICATION_MODE` 单独控制：
@@ -789,6 +789,10 @@ MANAGED_PATH_DEFAULT_MODE=NONE
 MANAGED_PATH_VECTOR_PILOT_LIMIT=1000
 MANAGED_FILE_CLASSIFICATION_SYNC_LIMIT=20
 MANAGED_FILE_CLASSIFICATION_BATCH_SIZE=20
+MATERIALIZE_ALL_MANAGED_FILES=true
+MATERIALIZE_WORKING_COPY_BACKGROUND_PRIORITY=100
+MATERIALIZE_RELEVANT_FILES_AFTER_RESPONSE=true
+MATERIALIZE_WORKING_COPY_PRIORITY=20
 ```
 
 受管目录文件分类不超过 `MANAGED_FILE_CLASSIFICATION_SYNC_LIMIT` 时在当前 AgentRun
@@ -805,8 +809,9 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
 Windows CMD 开发环境可以直接运行 `scripts\start-file-agent-workers.cmd`。脚本会先执行同步预检：
 读取项目根 `.env`，用当前机器的 `MANAGED_ROOT_*` 更新数据库中的运行时目录路径，真实打开每个目录
 验证可读性，并停用旧版本误登记的 `scan_batch_size` 等伪目录。只有预检成功后，才会以独立窗口启动
-scheduler、`RECONCILE,SCAN`、`DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION`、两个 `IMPORT` worker、
-一个 `ANALYSIS` worker、一个 `STRUCTURED_EXTRACTION` worker 和一个 `GRAPH` worker。它适合本地开发
+scheduler、`RECONCILE,SCAN`、`DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION`、一个 `SOURCE_ANALYSIS` worker、
+两个 `MATERIALIZE,IMPORT` worker、一个 `ANALYSIS` worker、一个 `STRUCTURED_EXTRACTION` worker 和一个
+`GRAPH` worker。它适合本地开发
 与烟测；生产环境仍可按以下命令基于容量分别部署更多 worker。
 
 Windows 必须从本机仓库根目录使用 Windows 路径执行，例如：
@@ -834,12 +839,12 @@ PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=duplicate-archive-1 \
   FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 
-PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=import-1 \
-  FILESYSTEM_WORKER_QUEUES=IMPORT \
+PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=source-analysis-1 \
+  FILESYSTEM_WORKER_QUEUES=SOURCE_ANALYSIS \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 
-PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=import-2 \
-  FILESYSTEM_WORKER_QUEUES=IMPORT \
+PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=materialize-1 \
+  FILESYSTEM_WORKER_QUEUES=MATERIALIZE,IMPORT \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 
 PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=analysis-1 \
@@ -869,7 +874,10 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
   -m app.modules.file_lifecycle.watcher
 ```
 
-API 启动钩子、scheduler 和 watcher 都只创建 `filesystem_jobs`。实际 SHA-256 查重、归档、扫描、导入、布局修复和暂存清理由 worker 完成。受管目录扫描对新增文件不再预先完整哈希；`IMPORT` worker 在单次复制数据流中计算 SHA-256。每批立即创建 `IMPORT` 任务，快速生成活动工作副本后再提交 `ANALYSIS` 任务。`REPAIR_WORKING_COPY_LAYOUT` 会先把旧根前缀以及历史“待整理/待确认”路径迁到 `shared/<root_key>/<源相对路径>`，并写入 `SYSTEM_LAYOUT_REPAIR` 路径记录。GRAPH worker 完成一次性 Neo4j bootstrap 和正式分类 Outbox 增量投影，API 重启不再同步执行 `sync_all()`。任务通过租约和幂等键恢复，每个任务最多尝试三次；达到上限后保持 `FAILED`。ops/admin 可在 `/admin/failed-files` 查看失败文件，状态接口为：
+API 启动钩子、scheduler 和 watcher 都只创建 `filesystem_jobs`。实际 SHA-256 查重、归档、扫描、源侧分析、后台物化、布局修复和暂存清理由 worker 完成。受管目录扫描对新增文件不再预先完整哈希；每批立即创建 `SOURCE_ANALYSIS` 任务，源侧分析完成后即可通过摘要和正文索引检索、回答，并自动创建低优先级 `MATERIALIZE_WORKING_COPY`，逐步把全部受管文件同步到共享工作目录。全量同步未完成期间，检索同时覆盖活动工作副本和未物化但已分析的源文件；用户查询、阅读或选择到的最终相关源文件会复用同一幂等任务并提升优先级，回答不等待物理复制。物化复用源侧页面和索引，不重复 LibreOffice 转换；上传归档的即时副本仍由 `IMPORT` 兼容处理。尚未完成源侧分析的文件只能参与元数据候选，涉及正文或总结时必须先完成分析，不能编造内容结论。`REPAIR_WORKING_COPY_LAYOUT` 会先把旧根前缀以及历史“待整理/待确认”路径迁到 `shared/<root_key>/<源相对路径>`，并写入 `SYSTEM_LAYOUT_REPAIR` 路径记录。GRAPH worker 完成一次性 Neo4j bootstrap 和正式分类 Outbox 增量投影，API 重启不再同步执行 `sync_all()`。任务通过租约和幂等键恢复，每个任务最多尝试三次；达到上限后保持 `FAILED`。ops/admin 可在 `/admin/failed-files` 查看失败文件，状态接口为：
+
+部署本次全量同步逻辑后必须重启 API、scheduler、`RECONCILE,SCAN`、`SOURCE_ANALYSIS`
+和 `MATERIALIZE,IMPORT` worker；只重启 API 会创建扫描任务，但不会实际分析或复制文件。
 
 本次布局修复没有新增数据库列或表，不需要新增 Alembic migration；更新代码后必须重启 scheduler、
 `RECONCILE`、`IMPORT`、`ANALYSIS` 和 `GRAPH` worker。不要手工移动 `待整理`、`待确认` 或旧根目录，

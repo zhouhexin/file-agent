@@ -1,6 +1,6 @@
 @echo off
 rem File Agent Windows CMD worker 启动器。
-rem 使用独立窗口并行执行扫描和导入，启动前必须完成当前机器目录配置预检。
+rem 使用独立窗口并行执行扫描、源侧分析和按需物化，启动前必须完成当前机器目录配置预检。
 
 setlocal EnableExtensions
 set "PROJECT_ROOT=%~dp0.."
@@ -31,14 +31,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [File Agent] Starting scheduler and isolated filesystem workers...
+echo [File Agent] Starting scheduler, scan worker, source analysis worker, materialize workers, analysis worker, structured extraction worker, and graph worker...
 
 rem 预检把本机路径提交到数据库后才能启动 scheduler，避免扫描读取其他机器的旧路径。
 set "FILESYSTEM_WORKER_ID="
 set "FILESYSTEM_WORKER_QUEUES="
 start "File Agent - Lifecycle Scheduler" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.file_lifecycle.scheduler"
 
-rem 对账和扫描只发现原始文件；复制和导入由独立生命周期 worker 消费。
+rem 对账和扫描只发现原始文件；初始化只提交 SOURCE_ANALYSIS，不复制全部工作副本。
 set "FILESYSTEM_WORKER_ID=reconcile-scan-worker"
 set "FILESYSTEM_WORKER_QUEUES=RECONCILE,SCAN"
 start "File Agent - Scan Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
@@ -48,16 +48,21 @@ set "FILESYSTEM_WORKER_ID=lifecycle-worker"
 set "FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION"
 start "File Agent - Lifecycle Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
 
-rem 两个独立 IMPORT worker 并发完成原件复制和活动工作副本登记，缓解大目录积压。
-set "FILESYSTEM_WORKER_ID=import-worker-1"
-set "FILESYSTEM_WORKER_QUEUES=IMPORT"
-start "File Agent - Import Worker 1" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
+rem 源侧分析包括旧 Office 的 LibreOffice 转换；默认一个 worker，避免多个 soffice 抢占资源。
+set "FILESYSTEM_WORKER_ID=source-analysis-worker"
+set "FILESYSTEM_WORKER_QUEUES=SOURCE_ANALYSIS"
+start "File Agent - Source Analysis Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
 
-set "FILESYSTEM_WORKER_ID=import-worker-2"
-set "FILESYSTEM_WORKER_QUEUES=IMPORT"
-start "File Agent - Import Worker 2" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
+rem 只有用户查询、阅读或选择的相关文件才由 MATERIALIZE 复制为工作副本，可独立扩容。
+set "FILESYSTEM_WORKER_ID=materialize-worker-1"
+set "FILESYSTEM_WORKER_QUEUES=MATERIALIZE,IMPORT"
+start "File Agent - Materialize Worker 1" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
 
-rem 解析、摘要、分类和正文索引在慢队列串行执行，不阻塞新文件进入共享工作目录。
+set "FILESYSTEM_WORKER_ID=materialize-worker-2"
+set "FILESYSTEM_WORKER_QUEUES=MATERIALIZE,IMPORT"
+start "File Agent - Materialize Worker 2" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
+
+rem 工作副本内容发生变化后才在 ANALYSIS 队列重新解析、摘要、分类和建索引。
 set "FILESYSTEM_WORKER_ID=analysis-worker"
 set "FILESYSTEM_WORKER_QUEUES=ANALYSIS"
 start "File Agent - Analysis Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"

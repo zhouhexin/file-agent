@@ -25,6 +25,9 @@ function SearchResultCard({
   onOpenAttachment?: (file: ChatAttachment) => void;
   onOpenDocument?: (documentId: string, filename: string) => void;
 }) {
+  // root_key 是已配置受管目录的逻辑标识，不是服务器路径；与相对路径一起展示，
+  // 才能在多个受管目录存在同名同相对路径时保持可区分。
+  const logicalPath = [file.root_key, file.relative_path].filter(Boolean).join(' / ');
   const categoryLabel =
     file.category_path && file.category_path.length > 0
       ? file.category_path.join(' / ')
@@ -44,6 +47,11 @@ function SearchResultCard({
         <span className="search-result-filename">
           {file.filename}
         </span>
+        {logicalPath ? (
+          <span className="search-result-relative-path" title={logicalPath}>
+            位置：{logicalPath}
+          </span>
+        ) : null}
         <div className="search-result-tags" aria-label="文件分类">
           <span className="category-chip category-chip--compact search-result-category-tag">
             <Tag size={13} aria-hidden />
@@ -75,7 +83,11 @@ function SearchResultCard({
         ) : null}
       </div>
 
-      {((attachment && onOpenAttachment) || onOpenDocument) ? (
+      {file.can_open === false ? (
+        <span className="search-result-action is-disabled">
+          {file.availability_message || '工作副本正在生成'}
+        </span>
+      ) : ((attachment && onOpenAttachment) || onOpenDocument) ? (
         <button
           type="button"
           className="search-result-action"

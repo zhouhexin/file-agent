@@ -11,11 +11,17 @@ from app.db.models import (
     ChangeSet,
     Conversation,
     DocumentCategorySuggestion,
+    DocumentIndexRun,
+    DocumentPage,
+    DocumentSearchProfile,
     FilesystemJob,
     FilesystemJobEvent,
     ManagedFile,
+    ManagedFileRevision,
+    ManagedFileSearchProfile,
     ManagedRoot,
     Message,
+    RelevantFileSetItem,
     ToolInvocation,
     User,
     WorkingCopy,
@@ -25,6 +31,7 @@ from app.db.models import (
 from app.modules.agent.state import ToolInvocationRecord
 from app.modules.managed_files.worker import (
     _advance_waiting_search_runs,
+    _enqueue_background_materialization_jobs_for_revisions,
     _public_job_error_message,
     process_next_filesystem_job,
     reconcile_waiting_search_runs,
@@ -33,6 +40,8 @@ from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.scanner import ManagedFileScanner
 from app.modules.managed_files.service import sync_configured_managed_roots
 from app.modules.file_lifecycle.service import FileLifecycleJobProcessor
+from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
+from app.modules.retrieval.relevant_file_sets import RelevantFileSetService
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -424,7 +433,9 @@ def test_worker_processes_scan_job_and_persists_files(tmp_path: Path, capsys):
         assert "任务完成" in console_output
         assert "job_type=SCAN_MANAGED_ROOT" in console_output
         assert "files_discovered=1" in console_output
-        assert "import_jobs=" in console_output
+        # 源侧索引优先模式先入队只读分析，READY 后才允许续接全量工作副本同步。
+        assert "source_analysis_jobs=" in console_output
+        assert "import_jobs=" not in console_output
         assert str(managed_dir) not in console_output
     finally:
         db.close()
@@ -471,8 +482,8 @@ def test_scan_job_error_message_distinguishes_path_failure_from_internal_failure
     assert "secret internal detail" not in internal
 
 
-def test_scan_publishes_import_jobs_by_batch_before_full_root_completion(monkeypatch, tmp_path: Path, capsys):
-    """大目录扫描必须按批提交 IMPORT 任务，不能等整轮扫描完成后才统一入队。"""
+def test_scan_publishes_source_analysis_jobs_by_batch_before_full_root_completion(monkeypatch, tmp_path: Path, capsys):
+    """大目录扫描必须按批提交源侧分析，不能在修订 READY 前并发复制。"""
 
     managed_dir = tmp_path / "incremental-root"
     managed_dir.mkdir()
@@ -521,16 +532,25 @@ def test_scan_publishes_import_jobs_by_batch_before_full_root_completion(monkeyp
 
         with session_factory() as db:
             completed_scan = db.get(FilesystemJob, job_id)
-            import_jobs = (
+            source_analysis_jobs = (
                 db.query(FilesystemJob)
-                .filter(FilesystemJob.job_type == "IMPORT_WORKING_COPIES")
+                .filter(FilesystemJob.job_type == "ANALYZE_MANAGED_FILE_REVISION")
                 .order_by(FilesystemJob.created_at.asc())
                 .all()
             )
             assert completed_scan is not None
             assert completed_scan.result_json["batches_committed"] == 3
-            assert len(import_jobs) == 3
-            assert all(item.queue_name == "IMPORT" and item.status == "PENDING" for item in import_jobs)
+            assert len(source_analysis_jobs) == 3
+            assert all(
+                item.queue_name == "SOURCE_ANALYSIS" and item.status == "PENDING"
+                for item in source_analysis_jobs
+            )
+            assert (
+                db.query(FilesystemJob)
+                .filter(FilesystemJob.job_type == "IMPORT_WORKING_COPIES")
+                .count()
+                == 0
+            )
 
         console_output = capsys.readouterr().out
         assert console_output.count("扫描批次已提交") == 3
@@ -539,11 +559,11 @@ def test_scan_publishes_import_jobs_by_batch_before_full_root_completion(monkeyp
         clear_overrides()
 
 
-def test_scan_requeues_completed_import_when_local_working_copy_is_missing(
+def test_scan_waits_for_source_analysis_before_materializing_working_copy(
     monkeypatch,
     tmp_path: Path,
 ):
-    """共享开发库已有记录但本机文件缺失时，扫描必须重新物化同一工作副本。"""
+    """源目录初始化先提交分析任务，同一文件不得在 READY 前并发复制。"""
 
     managed_dir = tmp_path / "managed"
     managed_dir.mkdir()
@@ -591,50 +611,368 @@ def test_scan_requeues_completed_import_when_local_working_copy_is_missing(
             worker_id="repair-scan-worker",
             queue_names={"SCAN"},
         )
-        first_import_job_id = process_next_filesystem_job(
-            session_factory=session_factory,
-            worker_id="repair-import-worker",
-            queue_names={"IMPORT"},
-        )
-        assert first_import_job_id is not None
-
         with session_factory() as db:
-            working_copy = db.query(WorkingCopy).one()
-            working_root = db.get(WorkingCopyRoot, working_copy.working_copy_root_id)
-            assert working_root is not None
-            physical_path = working_dir / working_root.relative_storage_path / working_copy.relative_path
-            assert physical_path.read_text(encoding="utf-8") == "科研项目材料提交要求"
-            physical_path.unlink()
-            second_scan = FilesystemJob(
-                job_type="SCAN_MANAGED_ROOT",
-                queue_name="SCAN",
-                root_id=root_id,
-                status="PENDING",
-                payload_json={"root_key": "school_files", "reason": "repair-test"},
-                result_json={},
+            source_jobs = (
+                db.query(FilesystemJob)
+                .filter(FilesystemJob.job_type == "ANALYZE_MANAGED_FILE_REVISION")
+                .all()
             )
-            db.add(second_scan)
-            db.commit()
+            assert len(source_jobs) == 1
+            assert source_jobs[0].queue_name == "SOURCE_ANALYSIS"
+            assert db.query(WorkingCopy).count() == 0
+            assert (
+                db.query(FilesystemJob)
+                .filter(FilesystemJob.job_type == "IMPORT_WORKING_COPIES")
+                .count()
+                == 0
+            )
 
+        # 分析完成后必须自动续接 MATERIALIZE；复制阶段复用源侧结果，原件保持不变。
         assert process_next_filesystem_job(
             session_factory=session_factory,
-            worker_id="repair-scan-worker",
+            worker_id="source-analysis-worker",
+            queue_names={"SOURCE_ANALYSIS"},
+        )
+        with session_factory() as db:
+            completed_source_job = (
+                db.query(FilesystemJob)
+                .filter(FilesystemJob.job_type == "ANALYZE_MANAGED_FILE_REVISION")
+                .one()
+            )
+            assert completed_source_job.result_json.get("status") == "READY", (
+                completed_source_job.result_json
+            )
+            materialization = (
+                db.query(FilesystemJob)
+                .filter(FilesystemJob.job_type == "MATERIALIZE_WORKING_COPY")
+                .one()
+            )
+            assert materialization.status == "PENDING"
+            assert materialization.priority == 100
+            # 模拟后台 worker 已经领取任务后用户才命中该文件：运行中任务不能
+            # 改写 payload，但相关集合仍必须在任务完成后按 revision_id 收敛。
+            materialization.status = "RUNNING"
+            revision_id = materialization.payload_json["managed_file_revision_id"]
+            materialization_result = RelevantFileSetService(db=db).persist_and_enqueue(
+                workspace_id=get_shared_workspace_id(db),
+                user_id=registered.json()["id"],
+                conversation_id=None,
+                agent_run_id=None,
+                query="科研项目材料",
+                results=[
+                    {
+                        "resource_type": "MANAGED_SOURCE",
+                        "managed_file_revision_id": revision_id,
+                        "relevance_tier": "RELATED",
+                    }
+                ],
+            )
+            assert materialization_result is not None
+            relevant_item = db.query(RelevantFileSetItem).one()
+            assert relevant_item.status == "MATERIALIZING"
+            assert "relevant_file_set_id" not in materialization.payload_json
+
+            assert FileLifecycleJobProcessor(db).process(materialization) is True
+            db.flush()
+            db.refresh(relevant_item)
+            assert relevant_item.status == "MATERIALIZED"
+            working_copy = db.query(WorkingCopy).one()
+            assert relevant_item.working_copy_id == working_copy.id
+            working_root = db.get(WorkingCopyRoot, working_copy.working_copy_root_id)
+            assert working_root is not None
+            physical_copy = (
+                working_dir / working_root.relative_storage_path / working_copy.relative_path
+            )
+            assert physical_copy.read_text(encoding="utf-8") == "科研项目材料提交要求"
+            assert source.read_text(encoding="utf-8") == "科研项目材料提交要求"
+    finally:
+        get_settings.cache_clear()
+        clear_overrides()
+
+
+def test_ready_source_revision_queues_background_materialization_and_reuses_one_job(
+    monkeypatch,
+):
+    """READY 修订必须进入全量同步，重复触发仍只能保留一个幂等物化任务。"""
+
+    monkeypatch.setenv("MATERIALIZE_ALL_MANAGED_FILES", "true")
+    monkeypatch.setenv("MATERIALIZE_WORKING_COPY_BACKGROUND_PRIORITY", "100")
+    get_settings.cache_clear()
+    client, session_factory = client_with_database()
+    try:
+        registered = client.post(
+            "/api/auth/register",
+            json={
+                "username": "background-materialize-user",
+                "password": "password123",
+                "display_name": "background-materialize-user",
+            },
+        )
+        assert registered.status_code == 200
+        with session_factory() as db:
+            root = ManagedRoot(
+                root_key="background_root",
+                display_name="后台同步目录",
+                container_path="/managed/background-root",
+                created_by=registered.json()["id"],
+            )
+            db.add(root)
+            db.flush()
+            managed_file = ManagedFile(
+                root_id=root.id,
+                relative_path="通知/科研通知.txt",
+                relative_path_hash="background-materialize-path",
+                filename="科研通知.txt",
+                extension=".txt",
+                size_bytes=24,
+                fingerprint="background-materialize-fingerprint",
+                content_sha256="a" * 64,
+                status="ACTIVE",
+            )
+            db.add(managed_file)
+            db.flush()
+            revision = ManagedFileRevision(
+                managed_file_id=managed_file.id,
+                revision_number=1,
+                size_bytes=24,
+                quick_fingerprint=managed_file.fingerprint,
+                content_sha256=managed_file.content_sha256,
+                status="READY",
+                analysis_status="READY",
+                is_current=True,
+            )
+            db.add(revision)
+            db.flush()
+
+            first_ids = _enqueue_background_materialization_jobs_for_revisions(
+                db=db,
+                revisions=[revision],
+                created_by=registered.json()["id"],
+            )
+            second_ids = _enqueue_background_materialization_jobs_for_revisions(
+                db=db,
+                revisions=[revision],
+                created_by=registered.json()["id"],
+            )
+
+            jobs = (
+                db.query(FilesystemJob)
+                .filter(FilesystemJob.job_type == "MATERIALIZE_WORKING_COPY")
+                .all()
+            )
+            assert first_ids == second_ids
+            assert len(jobs) == 1
+            assert jobs[0].queue_name == "MATERIALIZE"
+            assert jobs[0].priority == 100
+            assert jobs[0].payload_json["materialization_reason"] == "startup-full-sync"
+    finally:
+        get_settings.cache_clear()
+    clear_overrides()
+
+
+def test_metadata_only_image_analysis_materializes_searchable_working_copy(
+    monkeypatch,
+    tmp_path: Path,
+):
+    """OCR 技术失败图片仍应完成源索引、工作副本物化和目录元数据投影。"""
+
+    managed_dir = tmp_path / "managed"
+    event_dir = managed_dir / "20170606大数据联合实验室授牌" / "照片"
+    event_dir.mkdir(parents=True)
+    source = event_dir / "IMG_0198.JPG"
+    source.write_bytes(b"image-without-ocr-runtime")
+    working_dir = tmp_path / "working"
+    monkeypatch.setenv("WORKING_COPY_STORAGE_ROOT", str(working_dir))
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "uploads"))
+    monkeypatch.setenv("MATERIALIZE_ALL_MANAGED_FILES", "true")
+    get_settings.cache_clear()
+    client, session_factory = client_with_database()
+    try:
+        registered = client.post(
+            "/api/auth/register",
+            json={
+                "username": "metadata-image-user",
+                "password": "password123",
+                "display_name": "metadata-image-user",
+            },
+        )
+        assert registered.status_code == 200
+        with session_factory() as db:
+            root = ManagedRoot(
+                root_key="image_event_root",
+                display_name="image_event_root",
+                container_path=str(managed_dir),
+                created_by=registered.json()["id"],
+            )
+            db.add(root)
+            db.flush()
+            scan = FilesystemJob(
+                job_type="SCAN_MANAGED_ROOT",
+                queue_name="SCAN",
+                root_id=root.id,
+                status="PENDING",
+                payload_json={"root_key": root.root_key},
+                result_json={},
+            )
+            db.add(scan)
+            db.commit()
+
+        monkeypatch.setattr(
+            "app.modules.managed_files.source_analysis._extract_managed_source_document",
+            lambda **_kwargs: {
+                "ok": False,
+                "status": "FAILED",
+                "extractor": "ocr",
+                "error": {
+                    "code": "OCR_ENGINE_NOT_AVAILABLE",
+                    "message": "runtime failure",
+                },
+                "pages": [],
+            },
+        )
+        assert process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="metadata-image-scan",
             queue_names={"SCAN"},
         )
-        repaired_job_id = process_next_filesystem_job(
+        assert process_next_filesystem_job(
             session_factory=session_factory,
-            worker_id="repair-import-worker",
-            queue_names={"IMPORT"},
+            worker_id="metadata-image-analysis",
+            queue_names={"SOURCE_ANALYSIS"},
+        )
+        assert process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="metadata-image-materialize",
+            queue_names={"MATERIALIZE"},
         )
 
-        assert repaired_job_id == first_import_job_id
-        assert physical_path.read_text(encoding="utf-8") == "科研项目材料提交要求"
         with session_factory() as db:
-            repaired_job = db.get(FilesystemJob, repaired_job_id)
-            assert repaired_job is not None
-            assert repaired_job.status == "COMPLETED"
-            assert repaired_job.result_json["physical_copy_repaired"] is True
-            assert db.query(WorkingCopy).count() == 1
+            revision = db.query(ManagedFileRevision).one()
+            assert revision.status == "READY"
+            source_profile = db.query(ManagedFileSearchProfile).one()
+            assert "授牌" in source_profile.search_text
+            working_copy = db.query(WorkingCopy).one()
+            working_profile = db.query(DocumentSearchProfile).one()
+            assert working_profile.working_copy_id == working_copy.id
+            assert "授牌" in str(working_profile.metadata_search_text)
+            pages = db.query(DocumentPage).filter(
+                DocumentPage.document_id == working_copy.document_id
+            ).all()
+            assert len(pages) == 1
+            assert pages[0].text_content == ""
+            assert pages[0].metadata_json["image_text_status"] == "OCR_FAILED"
+            assert db.query(DocumentIndexRun).filter(
+                DocumentIndexRun.document_version_id == working_copy.current_version_id
+            ).count() == 0
+            working_root = db.get(WorkingCopyRoot, working_copy.working_copy_root_id)
+            physical_copy = (
+                working_dir / working_root.relative_storage_path / working_copy.relative_path
+            )
+            assert physical_copy.read_bytes() == source.read_bytes()
+    finally:
+        get_settings.cache_clear()
+        clear_overrides()
+
+
+def test_source_analysis_completion_automatically_queues_background_materialization(
+    monkeypatch,
+):
+    """SOURCE_ANALYSIS 完成钩子必须自动续接全量同步，无需等待用户搜索。"""
+
+    monkeypatch.setenv("MATERIALIZE_ALL_MANAGED_FILES", "true")
+    get_settings.cache_clear()
+    client, session_factory = client_with_database()
+    try:
+        registered = client.post(
+            "/api/auth/register",
+            json={
+                "username": "analysis-hook-user",
+                "password": "password123",
+                "display_name": "analysis-hook-user",
+            },
+        )
+        assert registered.status_code == 200
+        with session_factory() as db:
+            root = ManagedRoot(
+                root_key="analysis_hook_root",
+                display_name="分析完成钩子目录",
+                container_path="/managed/analysis-hook-root",
+                created_by=registered.json()["id"],
+            )
+            db.add(root)
+            db.flush()
+            managed_file = ManagedFile(
+                root_id=root.id,
+                relative_path="材料/分析完成.txt",
+                relative_path_hash="analysis-hook-path",
+                filename="分析完成.txt",
+                extension=".txt",
+                size_bytes=12,
+                fingerprint="analysis-hook-fingerprint",
+                status="ACTIVE",
+            )
+            db.add(managed_file)
+            db.flush()
+            revision = ManagedFileRevision(
+                managed_file_id=managed_file.id,
+                revision_number=1,
+                size_bytes=12,
+                quick_fingerprint=managed_file.fingerprint,
+                status="ANALYSIS_PENDING",
+                analysis_status="PENDING",
+                is_current=True,
+            )
+            db.add(revision)
+            db.flush()
+            source_job = FilesystemJobQueue(db).create_job(
+                job_type="ANALYZE_MANAGED_FILE_REVISION",
+                queue_name="SOURCE_ANALYSIS",
+                root_id=root.id,
+                created_by=registered.json()["id"],
+                payload={
+                    "managed_file_revision_id": revision.id,
+                    "user_id": registered.json()["id"],
+                },
+            )
+            db.commit()
+            revision_id = revision.id
+            source_job_id = source_job.id
+
+        def fake_analyze(self, *, revision_id: str, user_id: str | None = None):
+            """用确定性状态替代真实解析，只验证完成钩子的队列边界。"""
+
+            revision = self.db.get(ManagedFileRevision, revision_id)
+            assert revision is not None
+            revision.status = "READY"
+            revision.analysis_status = "READY"
+            revision.content_sha256 = "b" * 64
+            return {"status": "READY", "revision_id": revision_id}
+
+        monkeypatch.setattr(
+            "app.modules.managed_files.worker.ManagedSourceAnalysisService.analyze",
+            fake_analyze,
+        )
+        processed = process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="source-analysis-hook-worker",
+            queue_names={"SOURCE_ANALYSIS"},
+        )
+        assert processed == source_job_id
+
+        with session_factory() as db:
+            completed = db.get(FilesystemJob, source_job_id)
+            materialization = (
+                db.query(FilesystemJob)
+                .filter(FilesystemJob.job_type == "MATERIALIZE_WORKING_COPY")
+                .one()
+            )
+            assert completed is not None
+            assert completed.status == "COMPLETED"
+            assert completed.result_json["materialization_job_ids"] == [
+                materialization.id
+            ]
+            assert materialization.priority == 100
+            assert materialization.payload_json["managed_file_revision_id"] == revision_id
     finally:
         get_settings.cache_clear()
         clear_overrides()

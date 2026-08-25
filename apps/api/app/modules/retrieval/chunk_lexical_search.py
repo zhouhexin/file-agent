@@ -138,7 +138,13 @@ class DocumentChunkLexicalSearchService:
         )
         if exact_search_text:
             query = query.filter(
-                DocumentChunk.search_vector.op("@@")(exact_candidate_query)
+                or_(
+                    DocumentChunk.search_vector.op("@@")(exact_candidate_query),
+                    # 中文姓名可能被 Jieba 与相邻职务切成一个更长词项，例如
+                    # “学院彭绍亮研究员”。search_text 的 pg_trgm GIN 能先按
+                    # 连续短语收窄候选，随后仍由下方正文检查作最终验证。
+                    DocumentChunk.search_text.contains(exact_search_text),
+                )
             )
         else:
             query = query.filter(
@@ -246,8 +252,8 @@ class DocumentChunkLexicalSearchService:
     ) -> list[dict[str, Any]]:
         """PostgreSQL 全局 Chunk GIN 补召回。
 
-        严格短语先用全部词项 AND 的 GIN 查询召回有限 Chunk，再检查正文连续短语；
-        禁止在共享工作区全部正文上执行未索引的 contains 扫描。
+        严格短语先用词项 GIN 或 search_text 的 pg_trgm GIN 召回有限 Chunk，
+        再检查正文连续短语；禁止在未索引的 text_content 上执行全局 contains 扫描。
         """
 
         query_text = " OR ".join(dict.fromkeys(tokens))
@@ -291,7 +297,10 @@ class DocumentChunkLexicalSearchService:
         )
         if exact_search_text:
             ranked_query = ranked_query.filter(
-                DocumentChunk.search_vector.op("@@")(exact_candidate_query)
+                or_(
+                    DocumentChunk.search_vector.op("@@")(exact_candidate_query),
+                    DocumentChunk.search_text.contains(exact_search_text),
+                )
             )
         else:
             ranked_query = ranked_query.filter(

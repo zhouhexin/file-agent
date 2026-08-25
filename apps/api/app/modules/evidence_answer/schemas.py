@@ -8,14 +8,16 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class EvidenceItem(BaseModel):
-    """一条已经过活动工作副本权限校验的原文证据。"""
+    """一条已完成工作副本或源侧修订范围校验的原文证据。"""
 
     model_config = ConfigDict(extra="forbid")
 
     evidence_id: str
     document_id: str
     document_version_id: str
-    working_copy_id: str
+    # 源侧只读证据没有工作副本；空值明确表示不能据此直接执行文件操作。
+    working_copy_id: str | None = None
+    managed_file_revision_id: str | None = None
     filename: str
     quote: str
     page_number: int | None = None

@@ -214,7 +214,7 @@ export type SearchContext = {
 };
 
 // 两阶段文件搜索结果的普通用户投影。
-// 不包含 Skill、Tool、内部路径、SQL 分数或 search_text。
+// 不包含 Skill、Tool、容器绝对路径、SQL 分数或 search_text。
 export type FileSearchMatchLocation = {
   page_number?: number | null;
   sheet_name?: string | null;
@@ -224,6 +224,8 @@ export type FileSearchMatchLocation = {
 export type FileSearchResultFile = {
   working_copy_id: string | null;
   managed_file_id?: string | null;
+  // 源侧结果用于首次只读检索，尚未物化前不能当作可下载的工作副本。
+  resource_type?: 'WORKING_COPY' | 'MANAGED_SOURCE';
   document_id: string;
   document_version_id: string;
   filename: string;
@@ -236,6 +238,8 @@ export type FileSearchResultFile = {
   match_reasons: string[];
   match_location: FileSearchMatchLocation | null;
   evidence_preview: string;
+  can_open?: boolean;
+  availability_message?: string;
   // 后端基于受控索引和正文证据给出的检索分级，不能由前端自行推断。
   relevance_tier?: 'SUPPORTED' | 'POSSIBLE';
 };
@@ -331,7 +335,8 @@ export type FilenameConflictResult = {
 export type EvidenceAnswerFile = {
   document_id: string;
   document_version_id: string;
-  working_copy_id: string;
+  // 源侧证据回答在首次命中时尚未物化工作副本，因此允许为空。
+  working_copy_id: string | null;
   filename: string;
   category_labels: string[];
   availability: 'AVAILABLE' | string;

@@ -25,7 +25,7 @@ from app.modules.retrieval.clarification_planner import (
     FileSearchClarificationPlanner,
 )
 from app.modules.retrieval.phrase_strategy import FileSearchPhraseStrategyService
-from app.modules.retrieval.query_parser import FileSearchQueryParser
+from app.modules.retrieval.query_parser import FileSearchQueryParser, ParsedQuery
 from app.modules.retrieval.synonym_service import (
     FileSearchSynonymService,
     expand_scope_entity_phrases,
@@ -35,6 +35,7 @@ from app.modules.agent.tool_registry import (
     _execute_controlled_file_search,
     _intersect_file_search_results,
     _require_large_search_result_confirmation,
+    _search_result_status,
 )
 from app.modules.conversations.schemas import SendMessageRequest
 from app.modules.conversations.service import ConversationMessageService
@@ -240,6 +241,35 @@ class _FakeSchoolScopeSearch:
         }
 
 
+class _FakeFactAnchorSearch:
+    """分别返回清单和姓名命中，验证事实问句必须取同文件交集。"""
+
+    def search(self, *, exact_phrase: str, **_kwargs):
+        shared = {
+            "working_copy_id": "wc-stay-list",
+            "document_id": "doc-stay-list",
+            "filename": "计算机学院2017学术报告住宿清单.xlsx",
+            "overview": "",
+            "category_path": [],
+            "_body_phrase_hit": True,
+        }
+        mapping = {
+            "住宿清单": [
+                shared,
+                {
+                    "working_copy_id": "wc-other-list",
+                    "document_id": "doc-other-list",
+                    "filename": "其他住宿清单.xlsx",
+                    "overview": "",
+                    "category_path": [],
+                    "_body_phrase_hit": True,
+                },
+            ],
+            "潘志庚": [shared],
+        }
+        return {"partial": False, "results": mapping.get(exact_phrase, [])}
+
+
 def _db():
     """创建启用完整 ORM 表的 SQLite 会话。"""
 
@@ -303,6 +333,85 @@ def test_query_parser_distinguishes_literal_related_and_unspecified():
     assert (literal.cleaned, literal.relation_mode) == ("任职通知", "LITERAL")
     assert (related.cleaned, related.relation_mode) == ("任职通知", "RELATED")
     assert (unspecified.cleaned, unspecified.relation_mode) == ("任职通知", "UNSPECIFIED")
+
+
+def test_fact_question_searches_anchors_separately_and_only_supports_intersection():
+    """事实问题的字段词不得进入短语，同一文件命中全部锚点后才能继续读取。"""
+
+    search = _FakeFactAnchorSearch()
+    result = _execute_controlled_file_search(
+        db=_db(),
+        user_id="user-1",
+        conversation_id=None,
+        agent_run_id=None,
+        tool_input=SimpleNamespace(
+            match_mode="AUTO",
+            phrases=[],
+            require_body_evidence=False,
+        ),
+        search_query="2017年住宿清单中，潘志庚来自哪个单位、住宿几天费用多少",
+        parsed=ParsedQuery(
+            original="2017年住宿清单中，潘志庚来自哪个单位、住宿几天费用多少",
+            cleaned="住宿清单中 潘志庚来自哪个单位 住宿几天费用多少",
+            terms=[],
+            relation_mode="UNSPECIFIED",
+            required_topic_terms=[],
+            supporting_topic_terms=[],
+            is_fact_question=True,
+            fact_anchor_phrases=["住宿清单", "潘志庚"],
+            requested_fact_fields=["单位或机构", "住宿天数", "费用或金额"],
+        ),
+        scope=object(),
+        tokenizer=_Tokenizer(),
+        search_service=search,
+    )
+
+    assert result["supported_count"] == 1
+    assert result["possible_count"] == 1
+    assert [item["working_copy_id"] for item in result["results"]] == [
+        "wc-stay-list",
+        "wc-other-list",
+    ]
+    assert result["results"][0]["relevance_tier"] == "SUPPORTED"
+    assert result["results"][1]["relevance_tier"] == "POSSIBLE"
+    assert result["fact_search"]["requested_fields"] == [
+        "单位或机构",
+        "住宿天数",
+        "费用或金额",
+    ]
+
+
+def test_empty_fact_search_distinguishes_pending_failed_and_no_evidence():
+    """空结果必须区分索引未完成、索引失败和已检索但无证据。"""
+
+    pending = _search_result_status(
+        {
+            "ok": True,
+            "results": [],
+            "search_completeness": {"status": "PROCESSING"},
+        }
+    )
+    failed = _search_result_status(
+        {
+            "ok": True,
+            "results": [],
+            "search_completeness": {
+                "status": "PARTIAL",
+                "failed_file_count": 1,
+            },
+        }
+    )
+    no_evidence = _search_result_status(
+        {
+            "ok": True,
+            "results": [],
+            "search_completeness": {"status": "COMPLETE"},
+        }
+    )
+
+    assert pending[:2] == ("INDEX_PENDING", "INDEX_PENDING")
+    assert failed[:2] == ("INDEX_FAILED", "INDEX_FAILED")
+    assert no_evidence[:2] == ("NO_MATCHING_EVIDENCE", "READY")
 
 
 def test_synonym_service_returns_complete_phrases_and_broad_topics_separately():

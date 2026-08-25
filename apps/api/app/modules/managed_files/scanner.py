@@ -38,9 +38,10 @@ class ManagedFileScanner:
     ) -> FilesystemScanRun:
         """增量扫描一个受管目录，并在每批完成后发布已发现文件。
 
-        扫描器只登记原始文件元数据，回调由 worker 创建 IMPORT 任务并提交事务。
-        因而导入 worker 不必等待整棵目录扫描结束；即使扫描进程中断，已经提交
-        的批次仍能按已有幂等键继续导入，原始文件不会被修改。
+        扫描器只登记原始文件元数据，回调由 worker 创建 ``SOURCE_ANALYSIS`` 任务并
+        提交事务。源侧分析 worker 不必等待整棵目录扫描结束；即使扫描进程中断，
+        已经提交的批次仍能按已有幂等键继续分析，原始文件不会被修改，也不会在
+        初始化阶段被批量复制到工作副本目录。
         """
 
         scan_started_at = time.monotonic()
@@ -50,7 +51,7 @@ class ManagedFileScanner:
 
         root_path = Path(root.container_path)
         # 配置错误或服务账户没有挂载目录时必须让任务明确失败；静默返回 0 个文件
-        # 会让部署人员误以为同步成功，实际却从未进入 IMPORT 阶段。
+        # 会让部署人员误以为同步成功，实际却从未进入源侧分析阶段。
         if not root_path.exists():
             raise FileNotFoundError("受管原始目录不存在或当前服务账户不可访问")
         if not root_path.is_dir():
@@ -71,8 +72,6 @@ class ManagedFileScanner:
         files_discovered = 0
         files_updated = 0
         errors = 0
-        hashed_files = 0
-        hash_duration_ms = 0
         # 记录本轮已经处理的真实相对路径，供原件重命名/移动识别使用。该集合必须
         # 在遍历前初始化；否则历史索引存在且路径变化时会触发 NameError，中断启动扫描。
         seen_paths: set[str] = set()
@@ -92,8 +91,16 @@ class ManagedFileScanner:
                 continue
             stat = resolved.stat()
             relative_path_hash = _path_hash(relative_path)
-            fingerprint = _fingerprint(relative_path=relative_path, size_bytes=stat.st_size, modified_at=stat.st_mtime)
             file_identity = _file_identity(stat)
+            fingerprint = _fingerprint(
+                # 原始文件“内容修订”不应因单纯改名或移动而重复解析。可靠 inode
+                # 可作为稳定身份；网络盘没有 inode 时安全退回相对路径，宁可重分析
+                # 也不能把不同文件错误合并。
+                file_identity=file_identity,
+                relative_path=relative_path,
+                size_bytes=stat.st_size,
+                modified_at=stat.st_mtime,
+            )
             existing = existing_by_path.get(relative_path)
             if existing is None and file_identity is not None:
                 # 同一设备和 inode 在本轮出现在新路径时视为原始文件重命名/移动，
@@ -109,21 +116,15 @@ class ManagedFileScanner:
                     )
                 ):
                     existing = identity_match
-            # 全量内容哈希只在异步扫描 worker 中计算；元数据未变化时复用既有哈希，
-            # 避免查询请求承担大文件 I/O，同时保证查重不用轻量 fingerprint 冒充内容事实。
+            # 扫描只做快速元数据登记。完整哈希属于 SOURCE_ANALYSIS 的一次只读读取，
+            # 不能让目录同步在“修改过的文件”上再次完整读盘而退化为阻塞任务。
             if existing is None:
-                # 首次全量扫描只登记元数据；IMPORT worker 在复制数据流中一次性计算
-                # SHA-256，避免每个新文件在扫描和复制阶段被完整读取两遍。
                 content_sha256 = None
             elif existing.fingerprint == fingerprint:
-                # 新文件已经登记但仍在等待 IMPORT 时哈希为空；重复扫描必须继续留空，
-                # 不能抢在复制 worker 前重新完整读取同一文件。
                 content_sha256 = existing.content_sha256
             else:
-                hash_started_at = time.perf_counter()
-                content_sha256 = _sha256_file(resolved)
-                hashed_files += 1
-                hash_duration_ms += int((time.perf_counter() - hash_started_at) * 1000)
+                # 旧哈希不能代表新修订，分析 worker 会在校验前后元数据后重新计算。
+                content_sha256 = None
             category_path = _category_path_for(root=root, relative_path=relative_path)
             if existing is None:
                 existing = ManagedFile(
@@ -223,8 +224,6 @@ class ManagedFileScanner:
             duration_ms=int((time.monotonic() - scan_started_at) * 1000),
             root_id=root.id,
             files_discovered=files_discovered,
-            files_hashed=hashed_files,
-            hash_duration_ms=hash_duration_ms,
             message="受管原始目录扫描完成",
         )
         root.last_reconciled_at = scan_run.finished_at
@@ -241,7 +240,7 @@ class ManagedFileScanner:
         errors: int,
         on_batch: Callable[[list[ManagedFile], FilesystemScanRun], None] | None,
     ) -> None:
-        """持久化当前扫描进度，并让 worker 发布可立即导入的文件批次。"""
+        """持久化当前扫描进度，并让 worker 提交后续源分析或兼容导入任务。"""
 
         scan_run.files_discovered = files_discovered
         scan_run.files_updated = files_updated
@@ -305,10 +304,13 @@ def _indexed_source_still_exists(*, root_path: Path, relative_path: str) -> bool
         return True
 
 
-def _fingerprint(*, relative_path: str, size_bytes: int, modified_at: float) -> str:
-    """生成 P0 轻量 fingerprint，后续可升级为内容 hash。"""
+def _fingerprint(
+    *, file_identity: str | None, relative_path: str, size_bytes: int, modified_at: float
+) -> str:
+    """生成源修订轻量 fingerprint，改名不应强制触发一次全文重分析。"""
 
-    payload = f"{relative_path}\0{size_bytes}\0{int(modified_at)}"
+    stable_identity = file_identity or f"path:{relative_path}"
+    payload = f"{stable_identity}\0{size_bytes}\0{int(modified_at * 1000)}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -316,16 +318,6 @@ def _path_hash(relative_path: str) -> str:
     """生成相对路径唯一性哈希，避免把长路径放进唯一索引。"""
 
     return hashlib.sha256(relative_path.encode("utf-8")).hexdigest()
-
-
-def _sha256_file(path: Path) -> str:
-    """流式计算原始文件完整 SHA-256，供同步状态和重复检查使用。"""
-
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _is_hidden_relative_path(relative_path: str) -> bool:

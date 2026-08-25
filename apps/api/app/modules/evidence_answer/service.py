@@ -30,6 +30,9 @@ from app.db.models import (
     DocumentSummary,
     DocumentVersion,
     EvidenceSpan,
+    ManagedFile,
+    ManagedFileRevision,
+    ManagedRoot,
     QAAnswer,
     TrashEntry,
     UploadArchiveRecord,
@@ -240,6 +243,25 @@ class EvidenceAnswerService:
             )
         exact_filename = _explicit_filename_from_question(normalized_question)
         active_rows = self._resolve_active_working_copies(explicit_ids)
+        # 源侧逻辑 Document ID 不属于工作副本 Readiness 的 canonical 集合；若先
+        # 使用 ``explicit_ids``，它会被当作未解析附件丢弃，进而错误回复“文件
+        # 不存在”。这里只接受 Tool 绑定的稳定 ID，仍不会自行扩张到全局源目录。
+        explicit_source_rows = (
+            self._resolve_explicit_managed_sources(requested_ids)
+            if requested_ids and not active_rows
+            else []
+        )
+        if explicit_source_rows:
+            # 由检索结果或已验证证据绑定的源侧文件应直接回答。不能先走工作副本
+            # 准备检查，否则“已完成源侧分析、尚未物化”的正常首次访问会被误报为
+            # 正在处理。
+            return self._answer_managed_source(
+                question=normalized_question,
+                mode=mode,
+                policy=policy,
+                source_rows=explicit_source_rows,
+                started_at=started_at,
+            )
         if exact_filename:
             log_event(
                 "evidence_answer.exact_filename.detected",
@@ -264,6 +286,11 @@ class EvidenceAnswerService:
                 if confirmed_document_scope
                 else self._resolve_exact_filename_working_copies(exact_filename)
             )
+            source_rows = (
+                []
+                if confirmed_document_scope or exact_rows
+                else self._resolve_exact_filename_managed_sources(exact_filename)
+            )
             log_event(
                 "evidence_answer.exact_filename.resolved",
                 settings=self.settings,
@@ -276,7 +303,7 @@ class EvidenceAnswerService:
                 operator_message=(
                     f"完整文件名匹配到 {len(exact_rows)} 个活动工作副本。"
                     if exact_rows
-                    else "完整文件名尚未匹配到活动工作副本。"
+                    else f"完整文件名匹配到 {len(source_rows)} 个可读取原始文件修订。"
                 ),
                 recommended_action=(
                     None
@@ -298,6 +325,23 @@ class EvidenceAnswerService:
                 return exact_selection
             if exact_rows:
                 active_rows = exact_rows
+            elif len(source_rows) == 1:
+                # 源侧已完成分析时直接根据已持久化正文证据回答；工作副本物化在
+                # 回答记录提交后异步执行，不能把本轮降级为“正在处理”。
+                return self._answer_managed_source(
+                    question=normalized_question,
+                    mode=mode,
+                    policy=policy,
+                    source_rows=source_rows,
+                    started_at=started_at,
+                )
+            elif len(source_rows) > 1:
+                return self._no_evidence(
+                    question=normalized_question,
+                    mode=mode,
+                    index_status="SOURCE_AMBIGUOUS",
+                    message="找到多个同名原始文件，请补充所属目录、年份或先在检索结果中选择具体文件。",
+                )
             else:
                 # 未命中完整名称时，先保留“刚上传、尚未导入”的明确状态；其余场景
                 # 只能展示相似文件单选，绝不能退回已推断附件或全库正文回答。
@@ -367,6 +411,14 @@ class EvidenceAnswerService:
             )
 
         if not active_rows:
+            if explicit_source_rows:
+                return self._answer_managed_source(
+                    question=normalized_question,
+                    mode=mode,
+                    policy=policy,
+                    source_rows=explicit_source_rows,
+                    started_at=started_at,
+                )
             active_rows = self._recall_active_working_copies(normalized_question)
             active_rows = self._expand_same_name_rows(active_rows)
             if active_rows:
@@ -887,6 +939,227 @@ class EvidenceAnswerService:
             for working_copy, version in rows
             if _normalize_filename_identity(working_copy.filename) == identity
         ]
+
+    def _resolve_exact_filename_managed_sources(
+        self, filename: str
+    ) -> list[tuple[ManagedFileRevision, ManagedFile, ManagedRoot, DocumentVersion]]:
+        """按完整文件名查找尚未被工作副本覆盖的已分析原始文件修订。"""
+
+        identity = _normalize_filename_identity(filename)
+        rows = (
+            self.db.query(ManagedFileRevision, ManagedFile, ManagedRoot, DocumentVersion)
+            .join(ManagedFile, ManagedFile.id == ManagedFileRevision.managed_file_id)
+            .join(ManagedRoot, ManagedRoot.id == ManagedFile.root_id)
+            .join(DocumentVersion, DocumentVersion.id == ManagedFileRevision.analysis_document_version_id)
+            .filter(
+                ManagedFileRevision.is_current.is_(True),
+                ManagedFileRevision.status == "READY",
+                ManagedFile.status == "ACTIVE",
+                ManagedRoot.enabled.is_(True),
+                func.lower(ManagedFile.filename) == filename.lower(),
+            )
+            .all()
+        )
+        result = []
+        for revision, managed_file, root, version in rows:
+            if _normalize_filename_identity(managed_file.filename) != identity:
+                continue
+            matching_copy = (
+                self.db.query(WorkingCopy.id)
+                .filter(
+                    WorkingCopy.workspace_id == self.workspace_id,
+                    WorkingCopy.managed_file_id == managed_file.id,
+                    WorkingCopy.status == "ACTIVE",
+                    WorkingCopy.imported_source_sha256 == revision.content_sha256,
+                )
+                .first()
+            )
+            if matching_copy is None:
+                result.append((revision, managed_file, root, version))
+        return result
+
+    def _resolve_explicit_managed_sources(
+        self, document_ids: list[str]
+    ) -> list[tuple[ManagedFileRevision, ManagedFile, ManagedRoot, DocumentVersion]]:
+        """解析由后端检索绑定的源侧逻辑 Document ID，不扩大为全局文件范围。"""
+
+        if not document_ids:
+            return []
+        rows = (
+            self.db.query(ManagedFileRevision, ManagedFile, ManagedRoot, DocumentVersion)
+            .join(ManagedFile, ManagedFile.id == ManagedFileRevision.managed_file_id)
+            .join(ManagedRoot, ManagedRoot.id == ManagedFile.root_id)
+            .join(DocumentVersion, DocumentVersion.id == ManagedFileRevision.analysis_document_version_id)
+            .filter(
+                ManagedFileRevision.is_current.is_(True),
+                ManagedFileRevision.status == "READY",
+                ManagedFile.status == "ACTIVE",
+                ManagedRoot.enabled.is_(True),
+                ManagedFileRevision.analysis_document_id.in_(document_ids),
+            )
+            .all()
+        )
+        return rows
+
+    def _answer_managed_source(
+        self,
+        *,
+        question: str,
+        mode: str,
+        policy: Any,
+        source_rows: list[tuple[ManagedFileRevision, ManagedFile, ManagedRoot, DocumentVersion]],
+        started_at: float,
+    ) -> dict[str, Any]:
+        """用当前源修订的 EvidenceSpan 回答，且不触发原始文件物理读取。"""
+
+        items, index_status = self._load_source_evidence(
+            question=question,
+            source_rows=source_rows,
+            full_summary=mode == "FULL_SUMMARY" or policy.question_type == "SUMMARY",
+        )
+        if not items:
+            return self._no_evidence(
+                question=question,
+                mode=mode,
+                index_status=index_status,
+                message="该原始文件尚未获得能够支持回答的正文证据。",
+            )
+        evidence_fingerprint = self._evidence_fingerprint(items)
+        request_fingerprint = self._source_request_fingerprint(question=question, mode=mode, source_rows=source_rows)
+        package = EvidencePackage(
+            question=_model_question(question, mode=mode),
+            question_type=policy.question_type,
+            answer_mode=mode,
+            scope={"mode": "managed_source", "revision_ids": [row[0].id for row in source_rows]},
+            evidence_items=items,
+            limitations=[],
+            evidence_fingerprint=evidence_fingerprint,
+        )
+        try:
+            structured, usage = self._generate(package=package)
+        except (LLMResponseError, ValidationError) as exc:
+            structured = self._deterministic_fallback(
+                items=items, mode=mode, reason="模型回答校验失败，已切换为原文抽取式摘要。"
+            )
+            usage = {"llm_calls": 0, "fallback_error": exc.__class__.__name__}
+        validated, warnings = self._validate_claims(structured, items, answer_mode=mode)
+        if not validated:
+            return self._no_evidence(
+                question=question,
+                mode=mode,
+                index_status=index_status,
+                message="模型没有生成可由当前原始文件证据支持的结论。",
+            )
+        if not self._source_revisions_are_still_current(items):
+            return self._failure("SOURCE_CHANGED", "回答生成期间原始文件状态发生变化，请重新查询。")
+        answer_text, used_ids = self._render_answer(validated)
+        record = self._persist(
+            question=question,
+            answer_text=answer_text,
+            mode=mode,
+            status="PARTIAL" if warnings else "COMPLETED",
+            request_fingerprint=request_fingerprint,
+            evidence_fingerprint=evidence_fingerprint,
+            items=items,
+            used_ids=used_ids,
+            index_status=index_status,
+            limitations=warnings,
+            usage=usage,
+            question_type=policy.question_type,
+        )
+        # 回答已经保存后才入队。本轮涉及的全部源修订都由同一集合物化，单个
+        # 物化失败不会影响本轮已经返回的证据结论。
+        from app.modules.retrieval.relevant_file_sets import RelevantFileSetService
+
+        RelevantFileSetService(db=self.db, settings=self.settings).persist_and_enqueue(
+            workspace_id=self.workspace_id,
+            user_id=self.user_id,
+            conversation_id=self.conversation_id,
+            agent_run_id=self.agent_run_id,
+            query=question,
+            results=[
+                {
+                    "resource_type": "MANAGED_SOURCE",
+                    "managed_file_id": managed_file.id,
+                    "managed_file_revision_id": revision.id,
+                    "relevance_tier": "RELATED",
+                }
+                for revision, managed_file, _root, _version in source_rows
+            ],
+        )
+        self._log_completed(
+            event="evidence_answer.managed_source.persisted",
+            started_at=started_at,
+            status=record.status,
+            document_count=len(source_rows),
+            evidence_count=len(items),
+            qa_answer_id=record.id,
+            llm_call_count=int(usage.get("llm_calls") or 0),
+        )
+        return self._public_payload(record=record, items=items, limitations=warnings, cached=False)
+
+    def _load_source_evidence(
+        self,
+        *,
+        question: str,
+        source_rows: list[tuple[ManagedFileRevision, ManagedFile, ManagedRoot, DocumentVersion]],
+        full_summary: bool,
+    ) -> tuple[list[EvidenceItem], str]:
+        """从源侧逻辑版本读取已索引 EvidenceSpan，不访问原始物理文件。"""
+
+        version_to_source = {version.id: (revision, managed_file) for revision, managed_file, _root, version in source_rows}
+        version_ids = list(version_to_source)
+        index_ids = {
+            row.document_version_id
+            for row in self.db.query(DocumentIndexRun).filter(
+                DocumentIndexRun.document_version_id.in_(version_ids),
+                DocumentIndexRun.status == "COMPLETED",
+                DocumentIndexRun.evidence_count > 0,
+            ).all()
+        }
+        if not index_ids:
+            return [], "INDEX_PENDING"
+        if full_summary:
+            spans = self.db.query(EvidenceSpan).filter(EvidenceSpan.document_version_id.in_(index_ids)).order_by(
+                EvidenceSpan.document_version_id.asc(), EvidenceSpan.page_number.asc(), EvidenceSpan.sheet_name.asc(), EvidenceSpan.span_index.asc()
+            ).limit(self.settings.evidence_answer_max_items).all()
+        else:
+            tokens = FileSearchQueryParser(tokenizer=self.tokenizer).parse(question).terms
+            rows = (
+                self.db.query(EvidenceSpan, DocumentChunk)
+                .join(DocumentChunk, DocumentChunk.id == EvidenceSpan.chunk_id)
+                .filter(EvidenceSpan.document_version_id.in_(index_ids))
+                .order_by(DocumentChunk.chunk_index.asc(), EvidenceSpan.span_index.asc())
+                .all()
+            )
+            spans = [
+                span for span, chunk in rows
+                if any(term.casefold() in f"{chunk.search_text} {chunk.text_content}".casefold() for term in tokens)
+            ][: self.settings.evidence_answer_max_items]
+            # “为什么被归类”“请解释这份文件”等问题的提问词未必会原样出现
+            # 在正文。源侧和工作副本都必须在已有索引证据中保留受控降级，避免
+            # 已完成分析的首次访问被错误回复为“没有证据”。
+            if not spans:
+                spans = [span for span, _chunk in rows][: self.settings.evidence_answer_max_items]
+        result: list[EvidenceItem] = []
+        for span in spans:
+            source = version_to_source.get(span.document_version_id)
+            if source is None:
+                continue
+            revision, managed_file = source
+            result.append(EvidenceItem(
+                evidence_id=span.id,
+                document_id=span.document_id,
+                document_version_id=span.document_version_id,
+                working_copy_id=None,
+                managed_file_revision_id=revision.id,
+                filename=managed_file.filename,
+                quote=span.quote,
+                page_number=span.page_number,
+                sheet_name=span.sheet_name,
+                cell_range=span.cell_range,
+            ))
+        return result, "INDEX_READY" if len(index_ids) == len(version_ids) else "PARTIAL_INDEX"
 
     def _exact_filename_selection(
         self,
@@ -1618,6 +1891,8 @@ class EvidenceAnswerService:
                     evidence_span_id=item.evidence_id,
                     document_id=item.document_id,
                     document_version_id=item.document_version_id,
+                    # 源侧证据没有工作副本；nullable 外键用于保留同一套引用审计，
+                    # 不能由此推导文件可操作性。
                     working_copy_id=item.working_copy_id,
                     reference_index=reference_index,
                     label=item.filename,
@@ -1651,12 +1926,13 @@ class EvidenceAnswerService:
             return None
         refs = (
             self.db.query(AnswerReference, WorkingCopy, EvidenceSpan)
-            .join(WorkingCopy, WorkingCopy.id == AnswerReference.working_copy_id)
+            .outerjoin(WorkingCopy, WorkingCopy.id == AnswerReference.working_copy_id)
             .join(EvidenceSpan, EvidenceSpan.id == AnswerReference.evidence_span_id)
             .filter(
                 AnswerReference.qa_answer_id == record.id,
-                WorkingCopy.status == "ACTIVE",
-                WorkingCopy.current_version_id == AnswerReference.document_version_id,
+                # 工作副本引用必须仍是当前活动版本；源侧引用改由下方修订校验。
+                (AnswerReference.working_copy_id.is_(None))
+                | ((WorkingCopy.status == "ACTIVE") & (WorkingCopy.current_version_id == AnswerReference.document_version_id)),
             )
             .order_by(AnswerReference.reference_index.asc())
             .all()
@@ -1669,8 +1945,9 @@ class EvidenceAnswerService:
                 evidence_id=span.id,
                 document_id=reference.document_id,
                 document_version_id=reference.document_version_id,
-                working_copy_id=working_copy.id,
-                filename=working_copy.filename,
+                working_copy_id=working_copy.id if working_copy is not None else None,
+                managed_file_revision_id=self._source_revision_id_for_version(reference.document_version_id),
+                filename=working_copy.filename if working_copy is not None else reference.label,
                 quote=span.quote,
                 page_number=span.page_number,
                 sheet_name=span.sheet_name,
@@ -1678,6 +1955,9 @@ class EvidenceAnswerService:
             )
             for reference, working_copy, span in refs
         ]
+        if any(item.working_copy_id is None for item in items):
+            if not self._source_revisions_are_still_current(items):
+                return None
         limitations = list((record.retrieval_trace_json or {}).get("limitations") or [])
         return self._public_payload(record=record, items=items, limitations=limitations, cached=True)
 
@@ -1751,9 +2031,9 @@ class EvidenceAnswerService:
                     "working_copy_id": item.working_copy_id,
                     "filename": item.filename,
                     "category_labels": category_labels.get(item.document_id, []),
-                    "availability": "AVAILABLE",
-                    "availability_message": "文件可用",
-                    "can_open": True,
+                    "availability": "AVAILABLE" if item.working_copy_id else "SOURCE_ANALYZED",
+                    "availability_message": "文件可用" if item.working_copy_id else "已从受管原始文件读取，工作副本正在后台生成",
+                    "can_open": bool(item.working_copy_id),
                     "can_restore": False,
                     "reference_indexes": [],
                     "evidence_items": [],
@@ -1815,6 +2095,25 @@ class EvidenceAnswerService:
         }
         return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
+    def _source_request_fingerprint(
+        self,
+        *,
+        question: str,
+        mode: str,
+        source_rows: list[tuple[ManagedFileRevision, ManagedFile, ManagedRoot, DocumentVersion]],
+    ) -> str:
+        """为源侧证据回答构造仅依赖当前修订的缓存失效指纹。"""
+
+        payload = {
+            "question": _FULL_SUMMARY_CACHE_KEY if mode == "FULL_SUMMARY" else " ".join(question.split()).casefold(),
+            "mode": mode,
+            "revisions": sorted((revision.id, revision.content_sha256, version.id) for revision, _file, _root, version in source_rows),
+            "prompt": self.settings.evidence_answer_prompt_version,
+            "schema": self.settings.evidence_answer_schema_version,
+            "model": self.settings.llm_chat_model,
+        }
+        return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
     @staticmethod
     def _evidence_fingerprint(items: list[EvidenceItem]) -> str:
         """根据证据 ID、版本和正文摘要生成可失效指纹。"""
@@ -1838,6 +2137,36 @@ class EvidenceAnswerService:
             .all()
         )
         return {(row.id, row.current_version_id) for row in rows} == expected
+
+    def _source_revisions_are_still_current(self, items: list[EvidenceItem]) -> bool:
+        """提交源侧回答前确认每条证据仍属于当前 READY 修订。"""
+
+        revision_ids = {str(item.managed_file_revision_id or "") for item in items if item.managed_file_revision_id}
+        if not revision_ids:
+            return False
+        rows = (
+            self.db.query(ManagedFileRevision.id)
+            .join(ManagedFile, ManagedFile.id == ManagedFileRevision.managed_file_id)
+            .join(ManagedRoot, ManagedRoot.id == ManagedFile.root_id)
+            .filter(
+                ManagedFileRevision.id.in_(revision_ids),
+                ManagedFileRevision.is_current.is_(True),
+                ManagedFileRevision.status == "READY",
+                ManagedFile.status == "ACTIVE",
+                ManagedRoot.enabled.is_(True),
+            )
+            .all()
+        )
+        return {str(row.id) for row in rows} == revision_ids
+
+    def _source_revision_id_for_version(self, document_version_id: str) -> str | None:
+        """读取逻辑源版本的修订关系，仅用于缓存回放的当前性校验。"""
+
+        return self.db.query(ManagedFileRevision.id).filter(
+            ManagedFileRevision.analysis_document_version_id == document_version_id,
+            ManagedFileRevision.is_current.is_(True),
+            ManagedFileRevision.status == "READY",
+        ).scalar()
 
     def _deleted_selection(self, document_ids: list[str]) -> dict[str, Any] | None:
         """把明确指向回收站文件的附件或上下文转换为恢复提示。"""
@@ -2026,6 +2355,13 @@ def _explicit_filename_from_question(question: str) -> str | None:
     candidate = re.sub(
         r"^(?:请|麻烦)?(?:帮我)?(?:对|把|将)?\s*"
         r"(?:(?:完整|全面|详细|全文)?(?:总结|概括|讲解|说明|读取|解析)(?:一下)?)\s*",
+        "",
+        candidate,
+    ).strip()
+    # 正常提问常以“为什么/请问/关于”紧接完整文件名；正则需要先截到扩展名，
+    # 因此在这里去掉固定问句前缀，避免把“为什么文件.docx”当成真实文件名。
+    candidate = re.sub(
+        r"^(?:为什么|为何|请问|关于|查看|打开|读取|总结|概括|解释|说明)\s*",
         "",
         candidate,
     ).strip()

@@ -1,8 +1,8 @@
-"""工作副本检索就绪协调服务。
+"""检索就绪协调服务。
 
-普通问答和文件检索仍只读取活动工作副本。本服务只在活动范围没有命中时，用
-``managed_files`` 元数据发现可能尚未导入的文件，并静默提升对应导入/分析任务；
-受管原件不能直接作为回答或“已找到文件”的依据。
+双范围检索优先使用已经完成的源侧分析或活动工作副本。本服务只在相关源文件
+尚未分析时提升 ``SOURCE_ANALYSIS``，而不是为一次读取抢先复制工作副本；源侧
+分析完成后可直接回答，工作副本由全量后台同步创建，最终相关文件会提升同一任务。
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.logging import log_event
 from app.db.models import (
     Document,
@@ -26,6 +27,7 @@ from app.db.models import (
 )
 from app.modules.file_lifecycle.service import working_copy_search_artifact_status
 from app.modules.managed_files.jobs import FilesystemJobQueue
+from app.modules.managed_files.source_analysis import ManagedFileRevisionService
 from app.modules.retrieval.synonym_service import (
     FileSearchSynonymService,
     expand_scope_entity_phrases,
@@ -129,7 +131,7 @@ class WorkingCopySearchReadinessService:
         parsed: Any,
         unresolved_upload_document_ids: list[str] | None = None,
     ) -> dict[str, Any] | None:
-        """静默创建或提升本次检索可能依赖的导入、分析任务。
+        """静默创建或提升本次检索可能依赖的源侧分析任务。
 
         返回值只供 Agent Runtime 进入通用处理中状态，禁止包含候选文件名、原始路径、
         “待准备”或队列阶段等用户可见信息。
@@ -294,7 +296,24 @@ class WorkingCopySearchReadinessService:
         """仅用受管元数据发现候选；这些记录不会直接进入普通用户结果。"""
 
         year = getattr(parsed, "year", None)
-        cleaned = str(getattr(parsed, "cleaned", "") or "")
+        fact_anchors = [
+            str(value).strip()
+            for value in list(getattr(parsed, "fact_anchor_phrases", []) or [])
+            if str(value).strip()
+        ]
+        fact_entities = {
+            str(value).strip()
+            for value in list(getattr(parsed, "fact_entity_phrases", []) or [])
+            if str(value).strip()
+        }
+        metadata_fact_anchors = [
+            value for value in fact_anchors if value not in fact_entities
+        ]
+        cleaned = str(
+            (metadata_fact_anchors[0] if metadata_fact_anchors else None)
+            or getattr(parsed, "cleaned", "")
+            or ""
+        )
         synonym_service = FileSearchSynonymService()
         equivalent_mention = synonym_service.find_equivalent_mention(cleaned)
         # 摘要回退路径没有 Jieba tokenizer，需把复合查询按稳定业务条件处理。
@@ -333,7 +352,15 @@ class WorkingCopySearchReadinessService:
                 re.sub(r"的", " ", phrase.lower()),
             )
         ]
-        terms = list(dict.fromkeys([*fragments, *getattr(parsed, "terms", [])]))
+        terms = list(
+            dict.fromkeys(
+                [
+                    *metadata_fact_anchors,
+                    *fragments,
+                    *getattr(parsed, "terms", []),
+                ]
+            )
+        )
         terms = [str(term).strip().lower() for term in terms if len(str(term).strip()) >= 2]
         metadata = func.lower(ManagedFile.filename + " " + ManagedFile.relative_path)
         filters = []
@@ -400,7 +427,12 @@ class WorkingCopySearchReadinessService:
         return candidates
 
     def _ensure_ready_job(self, managed_file: ManagedFile) -> FilesystemJob | None:
-        """保证候选拥有活动副本及检索派生数据，终态失败任务绝不自动重开。"""
+        """保证候选拥有可回答的源侧索引或活动副本，终态失败任务绝不自动重开。
+
+        新受管目录的首次访问必须优先等待 ``SOURCE_ANALYSIS``，而不是抢先复制
+        工作副本。待源侧分析完成后，双范围检索会直接使用其证据回答；全量后台
+        同步会创建 ``MATERIALIZE_WORKING_COPY``，最终相关文件只提升其优先级。
+        """
 
         queue = FilesystemJobQueue(self.db)
         working_copy = (
@@ -413,6 +445,40 @@ class WorkingCopySearchReadinessService:
             .one_or_none()
         )
         if working_copy is None:
+            settings = get_settings()
+            if (
+                settings.managed_file_initialization_mode == "source_index_first"
+                and settings.managed_source_analysis_enabled
+            ):
+                revision = ManagedFileRevisionService(db=self.db).ensure_current_revision(
+                    managed_file=managed_file
+                )
+                if revision.status == "READY":
+                    # 检索将于本轮后续重试中直接读取源侧资料，无需提前复制。
+                    return None
+                if revision.status == "FAILED":
+                    # 已知终态失败不能由用户重复查询隐式重开，管理员重处理才可重试。
+                    return None
+                job = queue.create_job(
+                    job_type="ANALYZE_MANAGED_FILE_REVISION",
+                    queue_name="SOURCE_ANALYSIS",
+                    root_id=managed_file.root_id,
+                    created_by=self.user_id,
+                    deduplication_key=f"managed-source-analysis:{revision.id}",
+                    priority=settings.managed_source_analysis_on_demand_priority,
+                    max_attempts=3,
+                    payload={
+                        "managed_file_revision_id": revision.id,
+                        "user_id": self.user_id,
+                    },
+                )
+                if job.status == "PENDING":
+                    queue.promote_pending_job(
+                        job=job,
+                        priority=settings.managed_source_analysis_on_demand_priority,
+                    )
+                return job
+            # 兼容部署显式启用 eager_working_copy 的旧迁移模式；默认路径不会进入。
             job = queue.create_job(
                 job_type="IMPORT_WORKING_COPIES",
                 queue_name="IMPORT",

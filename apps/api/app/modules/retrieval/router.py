@@ -33,6 +33,7 @@ from app.modules.retrieval.clarification_service import (
     FileSearchClarificationError,
     FileSearchClarificationService,
 )
+from app.modules.retrieval.relevant_file_sets import RelevantFileSetService
 
 
 router = APIRouter(prefix="/api", tags=["search"])
@@ -146,10 +147,20 @@ def search_files(
     result = SearchCompletenessService(
         db=db,
         workspace_id=workspace_id,
-    ).attach(
+    ).attach_safely(
         result=result,
         scope=scope,
         unresolved_document_count=len(canonical_scope.unresolved_document_ids),
+    )
+    # 兼容检索 API 与聊天主入口使用同一相关文件集合规则；只对最终相关文件
+    # 入队物化，不能因当前页面的 top_k 截断而遗漏后续结果。
+    RelevantFileSetService(db=db, settings=get_settings()).persist_and_enqueue(
+        workspace_id=workspace_id,
+        user_id=current_user.id,
+        conversation_id=request.conversation_id,
+        agent_run_id=None,
+        query=request.query,
+        results=list(result.get("results") or []),
     )
     files = list(result.get("results") or [])[: request.top_k]
     return {

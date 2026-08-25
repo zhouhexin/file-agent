@@ -48,6 +48,7 @@ _FILLER_PHRASES = [
     "文件",
     "文档",
     "材料",
+    "全部",
     "一下",
 ]
 
@@ -69,6 +70,7 @@ _BROAD_ACTION_TERMS = (
 
 _YEAR_PATTERN = re.compile(r"(20\d{2})年?")
 _YEAR_SUFFIX_PATTERN = re.compile(r"((?:19|20)\d{2})\s*年(?:度)?")
+_MONTH_PATTERN = re.compile(r"(?<!\d)(1[0-2]|0?[1-9])\s*月")
 _RELATIVE_TIME_PATTERN = re.compile(r"(前年|去年|今年|前天|昨天|今天)")
 _DOC_NUMBER_PATTERN = re.compile(r"[(\[]?\d+\s*号[\])]?")
 _PERSON_HONORIFICS = ("老师", "同志", "先生", "女士")
@@ -109,6 +111,7 @@ class ParsedQuery:
     relation_mode: Literal["LITERAL", "RELATED", "UNSPECIFIED"] = "UNSPECIFIED"
     terms: list[str] = field(default_factory=list)
     year: int | None = None
+    month: int | None = None
     relative_year: int | None = None
     taxonomy_candidates: list[str] = field(default_factory=list)
     unit_candidates: list[str] = field(default_factory=list)
@@ -116,6 +119,10 @@ class ParsedQuery:
     doc_number: str | None = None
     required_topic_terms: list[str] = field(default_factory=list)
     supporting_topic_terms: list[str] = field(default_factory=list)
+    is_fact_question: bool = False
+    fact_anchor_phrases: list[str] = field(default_factory=list)
+    fact_entity_phrases: list[str] = field(default_factory=list)
+    requested_fact_fields: list[str] = field(default_factory=list)
 
 
 class FileSearchQueryParser:
@@ -154,6 +161,7 @@ class FileSearchQueryParser:
 
         # 3. 提取显式年份
         year = self._extract_year(cleaned)
+        month = self._extract_month(cleaned)
 
         # 4. 相对时间先按服务器当前日期换算为实际年份，供后续硬过滤使用。
         resolved_relative_time = self._resolve_relative_time(cleaned)
@@ -169,6 +177,7 @@ class FileSearchQueryParser:
         # 组合查询中把年份从主题短语移除，避免搜索不存在的连续短语
         # “2020年的述职报告”；纯年份查询则保留规范化数字作为正文条件。
         cleaned = _strip_explicit_year_filter(cleaned, year=year)
+        cleaned = _strip_explicit_month_filter(cleaned, month=month)
 
         # 5. 分词提取主题词
         try:
@@ -183,18 +192,31 @@ class FileSearchQueryParser:
             cleaned=cleaned,
             terms=terms,
         )
+        from app.modules.retrieval.fact_query import build_fact_search_plan
+
+        relation_mode = self._relation_mode(query)
+        fact_plan = build_fact_search_plan(
+            query=query,
+            cleaned=cleaned,
+            relation_mode=relation_mode,
+        )
 
         return ParsedQuery(
             original=query,
             cleaned=cleaned,
-            relation_mode=self._relation_mode(query),
+            relation_mode=relation_mode,
             terms=terms[:64],
             year=year,
+            month=month,
             relative_year=relative_year,
             doc_number=doc_number,
             taxonomy_candidates=taxonomy_candidates,
             required_topic_terms=required_topic_terms,
             supporting_topic_terms=supporting_topic_terms,
+            is_fact_question=fact_plan.is_fact_question,
+            fact_anchor_phrases=list(fact_plan.anchor_phrases),
+            fact_entity_phrases=list(fact_plan.entity_phrases),
+            requested_fact_fields=list(fact_plan.requested_fields),
         )
 
     def _relation_mode(
@@ -226,6 +248,12 @@ class FileSearchQueryParser:
                 if 2000 <= year <= 2100:
                     return year
         return None
+
+    def _extract_month(self, text: str) -> int | None:
+        """提取显式月份（如 6月、06 月），供正文日期硬过滤使用。"""
+
+        match = _MONTH_PATTERN.search(text)
+        return int(match.group(1)) if match is not None else None
 
     def _resolve_relative_time(self, text: str) -> tuple[int, int] | None:
         """将相对日期解析为目标年份与相对年份差。"""
@@ -289,6 +317,9 @@ def normalize_file_search_query(text: str) -> str:
     result = _DEICTIC_FILE_SET_SELECTOR_PATTERN.sub("", result)
     for phrase in _FILLER_PHRASES:
         result = result.replace(phrase, " ")
+    # 句末问号、句号和枚举分隔符只属于自然语言语法。若残留到 exact phrase，
+    # PostgreSQL 会把“大数据联合实验室授牌。”当成与正文不同的连续短语。
+    result = re.sub(r"[，,。！？?；;：:]+", " ", result)
     result = " ".join(result.split())
     # “哪个文件、哪几份材料”等问句选择词只用于表达检索动作，不属于检索主题。
     # 这里同时移除紧随其后的文件对象，但不能全局删除“报告、通知”等可能的业务主题。
@@ -301,7 +332,9 @@ def normalize_file_search_query(text: str) -> str:
     result = _CONTENT_RELATION_PATTERN.sub("", result)
     result = re.sub(r"\s*的\s*$", "", result)
     # “年/年度”在文件检索中是年份语法后缀，不应改变正文检索词。
-    result = _YEAR_SUFFIX_PATTERN.sub(r"\1", result)
+    # 年份后必须保留分隔，避免“2017年6月”被拼成“20176月”，导致年份硬过滤
+    # 无法从主题短语中移除。
+    result = _YEAR_SUFFIX_PATTERN.sub(r"\1 ", result)
     return " ".join(result.split())
 
 
@@ -336,6 +369,21 @@ def _strip_explicit_year_filter(text: str, *, year: int | None) -> str:
     )
     normalized = " ".join(stripped.split()).strip()
     return normalized or year_text
+
+
+def _strip_explicit_month_filter(text: str, *, month: int | None) -> str:
+    """组合查询中移除月份，纯月份查询仍保留规范化的“n月”。"""
+
+    if month is None:
+        return str(text or "").strip()
+    stripped = re.sub(
+        rf"(?<!\d)0?{month}\s*月\s*(?:的)?",
+        " ",
+        str(text or ""),
+        count=1,
+    )
+    normalized = " ".join(stripped.split()).strip()
+    return normalized or f"{month}月"
 
 
 def exact_short_chinese_phrase(text: str) -> str | None:

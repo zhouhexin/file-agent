@@ -663,7 +663,7 @@ def _search_handler(
             result = SearchCompletenessService(
                 db=db,
                 workspace_id=workspace_id,
-            ).attach(
+            ).attach_safely(
                 result=result,
                 scope=fallback_scope,
                 unresolved_document_count=len(
@@ -895,11 +895,27 @@ def _search_handler(
         result = SearchCompletenessService(
             db=db,
             workspace_id=workspace_id,
-        ).attach(
+        ).attach_safely(
             result=result,
             scope=scope,
             unresolved_document_count=len(canonical_scope.unresolved_document_ids),
         )
+        # 只有最终已返回的相关文件才进入集合；它们的源侧物化完全异步，不能推迟
+        # 本次搜索回执。用户可见的“可能相关”同样属于最终结果，会被一并物化，
+        # 但内部扩大召回候选从未进入此处，不能触发批量复制。
+        if result.get("ok") and list(result.get("results") or []):
+            from app.modules.retrieval.relevant_file_sets import RelevantFileSetService
+
+            materialization = RelevantFileSetService(db=db, settings=settings).persist_and_enqueue(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                agent_run_id=(agent_run_id_getter() if agent_run_id_getter else None),
+                query=search_query,
+                results=list(result.get("results") or []),
+            )
+            if materialization is not None:
+                result["relevant_file_set_id"] = materialization["relevant_file_set_id"]
         log_event(
             "retrieval.active_scope.completed",
             level="WARNING" if result.get("partial") else "INFO",
@@ -1029,6 +1045,8 @@ def _search_result_status(
         return "NEEDS_CLARIFICATION", "READY", ["WAIT_FOR_USER"]
     if isinstance(result.get("trash_restore_selection"), dict):
         return "NEEDS_CONFIRMATION", "READY", ["WAIT_FOR_USER"]
+    if list(result.get("query_corrections") or []):
+        return "NEEDS_CLARIFICATION", "READY", ["WAIT_FOR_USER", "REFINE_SEARCH"]
     if result.get("ok") is False:
         error = result.get("error") if isinstance(result.get("error"), dict) else {}
         code = str(error.get("code") or "SEARCH_FAILED")
@@ -1050,6 +1068,23 @@ def _search_result_status(
                 "READ_MATCHED_DOCUMENTS",
                 "REFINE_SEARCH",
             ],
+        )
+    completeness = (
+        result.get("search_completeness")
+        if isinstance(result.get("search_completeness"), dict)
+        else {}
+    )
+    if str(completeness.get("status") or "") == "PROCESSING":
+        return "INDEX_PENDING", "INDEX_PENDING", ["WAIT_FOR_INDEX", "REFINE_SEARCH"]
+    if int(completeness.get("failed_file_count") or 0) > 0:
+        return "INDEX_FAILED", "INDEX_FAILED", ["RETRY_INDEX", "REFINE_SEARCH"]
+    if str(completeness.get("status") or "") in {"PARTIAL", "UNVERIFIABLE"}:
+        return "ZERO_RESULTS", "PARTIAL_INDEX", ["REFINE_SEARCH", "CLARIFY"]
+    if str(completeness.get("status") or "") == "COMPLETE":
+        return (
+            "NO_MATCHING_EVIDENCE",
+            "READY",
+            ["REFINE_SEARCH", "CLARIFY"],
         )
     return (
         "ZERO_RESULTS",
@@ -1268,6 +1303,7 @@ def _intersect_file_search_results(
     entity_by_id = {
         str(
             item.get("working_copy_id")
+            or item.get("managed_file_revision_id")
             or item.get("document_version_id")
             or item.get("document_id")
             or ""
@@ -1407,6 +1443,92 @@ def _execute_controlled_file_search(
     supporting_topic_terms = list(
         getattr(parsed, "supporting_topic_terms", []) or []
     )
+    from app.modules.retrieval.event_collection import (
+        EventCollectionSearchService,
+        resolve_event_collection_request,
+    )
+
+    event_collection_request = resolve_event_collection_request(parsed)
+    if event_collection_request is not None:
+        log_event(
+            "retrieval.strategy.selected",
+            tool_name="hybrid-search",
+            status="COMPLETED",
+            strategy="verified_event_collection",
+            relation_mode=relation_mode,
+            action_phrase_count=len(event_collection_request.action_phrases),
+            message="采用年月事件锚点与同目录配套材料检索",
+        )
+        return EventCollectionSearchService(
+            db=db,
+            workspace_id=str(search_service.workspace_id),
+            phrase_strategy=strategy,
+            stage1_service=search_service.stage1,
+        ).search(
+            original_query=search_query,
+            parsed_query=parsed,
+            scope=scope,
+            request=event_collection_request,
+        )
+    fact_anchors = list(getattr(parsed, "fact_anchor_phrases", []) or [])
+    if (
+        bool(getattr(parsed, "is_fact_question", False))
+        and fact_anchors
+        and relation_mode != "LITERAL"
+    ):
+        log_event(
+            "retrieval.strategy.selected",
+            tool_name="hybrid-search",
+            status="COMPLETED",
+            strategy="verified_fact_anchors",
+            relation_mode=relation_mode,
+            fact_anchor_count=len(fact_anchors),
+            requested_field_count=len(
+                list(getattr(parsed, "requested_fact_fields", []) or [])
+            ),
+            message="采用事实锚点与待回答字段分离检索",
+        )
+        fact_result = strategy.search_fact_anchors(
+            original_query=search_query,
+            parsed_query=parsed,
+            scope=scope,
+            anchors=fact_anchors,
+            requested_fields=list(
+                getattr(parsed, "requested_fact_fields", []) or []
+            ),
+        )
+        if int(fact_result.get("supported_count") or 0) == 0:
+            from app.modules.retrieval.entity_correction import (
+                FactEntityCorrectionService,
+                attach_entity_corrections,
+            )
+
+            try:
+                corrections = FactEntityCorrectionService(
+                    db=db,
+                    workspace_id=str(search_service.workspace_id),
+                ).suggest(
+                    entity_phrases=list(
+                        getattr(parsed, "fact_entity_phrases", []) or []
+                    )
+                )
+            except Exception as exc:
+                # 纠错提示只是空结果后的辅助信息。历史投影缺列、SQL 超时或
+                # 候选服务异常都必须保留原始检索结果，不能升级成 HTTP 500。
+                corrections = []
+                log_event(
+                    "retrieval.fact_entity_correction.failed",
+                    level="WARNING",
+                    tool_name="hybrid-search",
+                    status="DEGRADED",
+                    error_code=exc.__class__.__name__,
+                    message="事实人名纠错候选不可用，保留原始检索结果",
+                )
+            fact_result = attach_entity_corrections(
+                result=fact_result,
+                corrections=corrections,
+            )
+        return fact_result
     if relation_mode == "LITERAL" and required_topic_terms and supporting_topic_terms:
         # “涉及劳务费发放”一类问题既要求核心业务主题，也包含容易泛化的
         # 工作动作。由 Tool 用受控正文检索验证两者，不能由 LLM 或文件名
@@ -1697,6 +1819,7 @@ def _search_result_ids(payload: Dict[str, Any]) -> set[str]:
     return {
         str(
             item.get("working_copy_id")
+            or item.get("managed_file_revision_id")
             or item.get("document_version_id")
             or item.get("document_id")
             or ""
@@ -1705,6 +1828,7 @@ def _search_result_ids(payload: Dict[str, Any]) -> set[str]:
         if isinstance(item, dict)
         and (
             item.get("working_copy_id")
+            or item.get("managed_file_revision_id")
             or item.get("document_version_id")
             or item.get("document_id")
         )

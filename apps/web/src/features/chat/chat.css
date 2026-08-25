@@ -1326,8 +1326,10 @@
 
 .search-result-relative-path {
   color: #64748b;
+  display: block;
   font-size: 12px;
   line-height: 1.45;
+  margin-top: 2px;
   overflow-wrap: anywhere;
 }
 

@@ -3029,3 +3029,237 @@ def test_llm_mode_preserves_exact_filename_scope_before_catalog_planning():
     assert [name for name, _input in registry.calls] == ["evidence-answer"]
     assert registry.calls[0][1]["question"] == message
     assert registry.calls[0][1]["document_ids"] == []
+
+
+def test_unscoped_business_question_starts_with_workspace_search():
+    """无附件业务事实问题必须先检索工作区，不能要求用户猜完整文件名。"""
+
+    message = "大数据联合实验室由学院和哪家公司共同建立？仪式在哪里举行？"
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-workspace-question",
+        user_id="user-1",
+        message_id="msg-workspace-question",
+        message=message,
+        attachments=[],
+    )
+
+    assert plan.intent == "EVIDENCE_DISCOVERY"
+    assert [step.tool_name for step in plan.steps] == ["hybrid-search"]
+    assert plan.steps[0].input == {"query": message, "document_ids": []}
+    assert plan.slots["question"] == message
+
+
+def test_llm_file_question_intent_is_normalized_to_workspace_discovery():
+    """LLM 只声明证据问答意图，后端固定先搜索且不接受模型猜测文件 ID。"""
+
+    message = "大数据联合实验室由学院和哪家公司共同建立？仪式在哪里举行？"
+    intent_plan = UserIntentPlan(
+        intent="ANSWER_QUESTION_FROM_FILES",
+        user_goal=message,
+        needs_file_context=True,
+        required_capabilities=["evidence_answer"],
+        tool_plan_hint=["hybrid-search"],
+    )
+
+    plan = build_plan_from_user_intent(
+        intent_plan=intent_plan,
+        message=message,
+        attachments=[],
+    )
+
+    assert plan.intent == "EVIDENCE_DISCOVERY"
+    assert [step.tool_name for step in plan.steps] == ["hybrid-search"]
+    assert plan.steps[0].input["document_ids"] == []
+
+
+def test_workspace_question_uses_verified_search_hits_for_evidence_answer():
+    """fallback 链路应把严格检索命中交给 evidence-answer，并保留两次 Tool 审计。"""
+
+    class DisabledLLMIntentService:
+        """强制覆盖模型不可用时的确定性 fallback。"""
+
+        enabled = False
+
+    class SearchThenAnswerRegistry:
+        """返回一个严格命中和一个带引用回答。"""
+
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, tool_name, input_json):
+            self.calls.append((tool_name, input_json))
+            if tool_name == "hybrid-search":
+                return ToolInvocationRecord(
+                    tool_name=tool_name,
+                    input_json=input_json,
+                    output_json={
+                        "kind": "workspace_file_search",
+                        "ok": True,
+                        "status": "COMPLETED",
+                        "query": input_json["query"],
+                        "total_returned": 1,
+                        "results": [
+                            {
+                                "document_id": "doc-lab-news",
+                                "filename": "大数据联合实验室揭牌仪式.docx",
+                                "relevance_tier": "SUPPORTED",
+                            }
+                        ],
+                        "document_ids": ["doc-lab-news"],
+                        "effective_conditions": [],
+                        "index_status": "READY",
+                        "result_status": "MATCHED",
+                    },
+                    status="COMPLETED",
+                )
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "kind": "evidence_answer",
+                    "ok": True,
+                    "status": "SUPPORTED",
+                    "answer": "由广州泰迪智能科技有限公司共同建立，仪式在教六楼1115会议室举行。",
+                    "references": [
+                        {
+                            "document_id": "doc-lab-news",
+                            "filename": "大数据联合实验室揭牌仪式.docx",
+                        }
+                    ],
+                },
+                status="COMPLETED",
+            )
+
+    registry = SearchThenAnswerRegistry()
+    message = "大数据联合实验室由学院和哪家公司共同建立？仪式在哪里举行？"
+    result = AgentRuntimeService(
+        registry_factory=lambda _db, _user_id: registry,
+        llm_intent_service=DisabledLLMIntentService(),
+    ).run_message(
+        conversation_id="conv-workspace-answer",
+        user_id="user-1",
+        message_id="msg-workspace-answer",
+        message=message,
+    )
+
+    assert [name for name, _input in registry.calls] == [
+        "hybrid-search",
+        "evidence-answer",
+    ]
+    assert registry.calls[1][1]["document_ids"] == ["doc-lab-news"]
+    assert result.intent == "EVIDENCE_ANSWER"
+    assert "广州泰迪智能科技有限公司" in (result.final_response or "")
+
+
+def test_workspace_question_does_not_promote_possible_only_candidates():
+    """“可能相关”候选不能进入 evidence-answer，避免把弱命中提升为文件事实。"""
+
+    class DisabledLLMIntentService:
+        enabled = False
+
+    class PossibleOnlyRegistry:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, tool_name, input_json):
+            self.calls.append((tool_name, input_json))
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "kind": "workspace_file_search",
+                    "ok": True,
+                    "status": "COMPLETED",
+                    "query": input_json["query"],
+                    "total_returned": 1,
+                    "results": [
+                        {
+                            "document_id": "doc-possible",
+                            "filename": "可能相关.docx",
+                            "relevance_tier": "POSSIBLE",
+                        }
+                    ],
+                    "document_ids": [],
+                    "effective_conditions": [],
+                    "index_status": "READY",
+                    "result_status": "POSSIBLE_ONLY",
+                },
+                status="COMPLETED",
+            )
+
+    registry = PossibleOnlyRegistry()
+    AgentRuntimeService(
+        registry_factory=lambda _db, _user_id: registry,
+        llm_intent_service=DisabledLLMIntentService(),
+    ).run_message(
+        conversation_id="conv-possible-only",
+        user_id="user-1",
+        message_id="msg-possible-only",
+        message="大数据联合实验室由学院和哪家公司共同建立？仪式在哪里举行？",
+    )
+
+    assert [name for name, _input in registry.calls] == ["hybrid-search"]
+
+
+def test_workspace_search_exception_becomes_audited_failure_instead_of_500():
+    """检索 handler 的未预期异常必须形成失败回执，不能冒泡到消息接口。"""
+
+    class DisabledLLMIntentService:
+        enabled = False
+
+    class FailingSearchRegistry:
+        def invoke(self, tool_name, input_json):
+            assert tool_name == "hybrid-search"
+            raise RuntimeError("internal database details")
+
+    result = AgentRuntimeService(
+        registry_factory=lambda _db, _user_id: FailingSearchRegistry(),
+        llm_intent_service=DisabledLLMIntentService(),
+    ).run_message(
+        conversation_id="conv-search-failure",
+        user_id="user-1",
+        message_id="msg-search-failure",
+        message="找出2017年6月大数据联合实验室授牌相关的全部材料。",
+    )
+
+    assert len(result.tool_invocations) == 1
+    invocation = result.tool_invocations[0]
+    assert invocation.status == "FAILED"
+    assert invocation.output_json["kind"] == "workspace_file_search"
+    assert "internal database details" not in (result.final_response or "")
+    assert "文件检索暂时不可用" in (result.final_response or "")
+
+
+def test_identity_question_remains_general_chat_without_workspace_search():
+    """身份寒暄不应因为问号被扩大为工作区文件检索。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-general-chat",
+        user_id="user-1",
+        message_id="msg-general-chat",
+        message="你是谁？",
+        attachments=[],
+    )
+
+    assert plan.intent == "GENERAL_CHAT"
+    assert [step.tool_name for step in plan.steps] == ["intent-summary"]
+
+
+def test_low_risk_missing_scope_does_not_require_full_filename():
+    """低风险但范围不足的请求应允许补充主题或目录，不应强制完整文件名。"""
+
+    class DisabledLLMIntentService:
+        enabled = False
+
+    result = AgentRuntimeService(
+        llm_intent_service=DisabledLLMIntentService(),
+    ).run_message(
+        conversation_id="conv-low-risk-scope",
+        user_id="user-1",
+        message_id="msg-low-risk-scope",
+        message="总结一下",
+    )
+
+    assert result.intent == "MISSING_FILE_SCOPE"
+    assert "完整文件名" not in (result.final_response or "")
+    assert "附件、目录、主题" in (result.final_response or "")
