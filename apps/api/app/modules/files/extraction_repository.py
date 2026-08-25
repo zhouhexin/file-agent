@@ -341,7 +341,7 @@ class FileExtractionRepository:
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
-    """兼容 Python 3.9 的路径包含关系判断。"""
+    """判断路径是否位于指定根目录内。"""
 
     try:
         path.relative_to(root)
