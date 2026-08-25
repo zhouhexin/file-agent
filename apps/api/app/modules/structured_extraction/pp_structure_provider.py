@@ -39,11 +39,14 @@ def _load_pipeline(
     device: str,
     pipeline_config: str,
     model_source: str,
+    use_doc_preprocessor: bool,
     use_table_recognition: bool,
     use_formula_recognition: bool,
     use_chart_recognition: bool,
     use_seal_recognition: bool,
     use_region_detection: bool,
+    text_detection_model: str,
+    text_recognition_model: str,
 ) -> Any:
     """按受控配置为每个 worker 进程缓存重量级 Pipeline。"""
 
@@ -64,11 +67,14 @@ def _load_pipeline(
     try:
         config = _configured_pipeline(
             load_pipeline_config(pipeline_config),
+            use_doc_preprocessor=use_doc_preprocessor,
             use_table_recognition=use_table_recognition,
             use_formula_recognition=use_formula_recognition,
             use_chart_recognition=use_chart_recognition,
             use_seal_recognition=use_seal_recognition,
             use_region_detection=use_region_detection,
+            text_detection_model=text_detection_model,
+            text_recognition_model=text_recognition_model,
         )
         # Paddle 3.3.x 的 oneDNN 新执行器尚不能处理部分 PP-DocLayout 数组属性；
         # CPU 明确使用普通 Paddle 后端，避免真实推理阶段才抛 NotImplementedError。
@@ -89,17 +95,21 @@ def _load_pipeline(
 def _configured_pipeline(
     config: dict[str, Any],
     *,
+    use_doc_preprocessor: bool = True,
     use_table_recognition: bool,
     use_formula_recognition: bool,
     use_chart_recognition: bool,
     use_seal_recognition: bool,
     use_region_detection: bool,
+    text_detection_model: str = "PP-OCRv6_medium_det",
+    text_recognition_model: str = "PP-OCRv6_medium_rec",
 ) -> dict[str, Any]:
-    """复制官方配置并收敛运行能力，避免 CPU Worker 隐式加载无关重模型。"""
+    """复制官方配置，收敛能力并覆盖普通 OCR 与表格 OCR 的模型。"""
 
     configured = deepcopy(config)
     configured.update(
         {
+            "use_doc_preprocessor": use_doc_preprocessor,
             "use_table_recognition": use_table_recognition,
             "use_formula_recognition": use_formula_recognition,
             "use_chart_recognition": use_chart_recognition,
@@ -107,7 +117,48 @@ def _configured_pipeline(
             "use_region_detection": use_region_detection,
         }
     )
+    _override_general_ocr_models(
+        configured,
+        text_detection_model=text_detection_model,
+        text_recognition_model=text_recognition_model,
+    )
     return configured
+
+
+def _override_general_ocr_models(
+    config: dict[str, Any],
+    *,
+    text_detection_model: str,
+    text_recognition_model: str,
+) -> None:
+    """只覆盖 PP-StructureV3 的通用与表格 OCR，不破坏印章等专项模型。"""
+
+    subpipelines = config.get("SubPipelines")
+    if not isinstance(subpipelines, dict):
+        return
+    general_ocr_configs: list[dict[str, Any]] = []
+    direct = subpipelines.get("GeneralOCR")
+    if isinstance(direct, dict):
+        general_ocr_configs.append(direct)
+    table = subpipelines.get("TableRecognition")
+    if isinstance(table, dict):
+        table_subpipelines = table.get("SubPipelines")
+        if isinstance(table_subpipelines, dict):
+            table_ocr = table_subpipelines.get("GeneralOCR")
+            if isinstance(table_ocr, dict):
+                general_ocr_configs.append(table_ocr)
+    for general_ocr in general_ocr_configs:
+        modules = general_ocr.get("SubModules")
+        if not isinstance(modules, dict):
+            continue
+        detection = modules.get("TextDetection")
+        recognition = modules.get("TextRecognition")
+        if isinstance(detection, dict):
+            detection["model_name"] = text_detection_model
+            detection["model_dir"] = None
+        if isinstance(recognition, dict):
+            recognition["model_name"] = text_recognition_model
+            recognition["model_dir"] = None
 
 
 class PpStructureV3Provider:
@@ -146,18 +197,25 @@ class PpStructureV3Provider:
                 device=self.settings.pp_structure_device,
                 pipeline_config=self.settings.pp_structure_pipeline_config,
                 model_source=self.settings.pp_structure_model_source,
+                use_doc_preprocessor=self.settings.pp_structure_use_doc_preprocessor,
                 use_table_recognition=self.settings.pp_structure_use_table_recognition,
                 use_formula_recognition=self.settings.pp_structure_use_formula_recognition,
                 use_chart_recognition=self.settings.pp_structure_use_chart_recognition,
                 use_seal_recognition=self.settings.pp_structure_use_seal_recognition,
                 use_region_detection=self.settings.pp_structure_use_region_detection,
+                text_detection_model=self.settings.pp_structure_text_detection_model,
+                text_recognition_model=self.settings.pp_structure_text_recognition_model,
             )
         )
         try:
             outputs = pipeline.predict(
                 input=str(file_path),
-                use_doc_orientation_classify=True,
-                use_doc_unwarping=True,
+                use_doc_orientation_classify=getattr(
+                    self.settings, "pp_structure_use_doc_preprocessor", True
+                ),
+                use_doc_unwarping=getattr(
+                    self.settings, "pp_structure_use_doc_preprocessor", True
+                ),
                 use_textline_orientation=True,
             )
         except Exception as exc:

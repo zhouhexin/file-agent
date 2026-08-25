@@ -24,6 +24,7 @@ from app.db.models import (
     ChangeItem,
     DocumentElement,
     DocumentExtractionRun,
+    DocumentPage,
     DocumentVersion,
     FilesystemJob,
     StructuredExtractionField,
@@ -62,6 +63,10 @@ from app.modules.structured_extraction.pp_structure_provider import (
 from app.modules.structured_extraction.repository import StructuredExtractionRepository
 from app.modules.structured_extraction.schemas import CandidateExtraction, StructuredExtractionResult
 from app.modules.structured_extraction.service import StructuredExtractionService
+from app.modules.structured_extraction.vision_provider import (
+    PaddleOcrVlVisionRetryProvider,
+    VisionTextBlock,
+)
 from app.modules.structured_extraction.worker import (
     _structured_graph_summary,
     _resume_agent_run,
@@ -352,7 +357,28 @@ def test_pp_structure_runtime_config_disables_unrequested_heavy_models_without_m
         "pipeline_name": "PP-StructureV3",
         "use_table_recognition": True,
         "use_formula_recognition": True,
-        "SubPipelines": {"GeneralOCR": {"pipeline_name": "OCR"}},
+        "SubPipelines": {
+            "GeneralOCR": {
+                "pipeline_name": "OCR",
+                "SubModules": {
+                    "TextDetection": {"model_name": "PP-OCRv5_server_det", "model_dir": "/old"},
+                    "TextRecognition": {"model_name": "PP-OCRv5_server_rec", "model_dir": "/old"},
+                },
+            },
+            "TableRecognition": {
+                "SubPipelines": {
+                    "GeneralOCR": {
+                        "SubModules": {
+                            "TextDetection": {"model_name": "PP-OCRv5_server_det"},
+                            "TextRecognition": {"model_name": "PP-OCRv5_server_rec"},
+                        }
+                    }
+                }
+            },
+            "SealRecognition": {
+                "SubModules": {"TextDetection": {"model_name": "PP-OCRv4_server_seal_det"}}
+            },
+        },
     }
 
     configured = _configured_pipeline(
@@ -367,8 +393,61 @@ def test_pp_structure_runtime_config_disables_unrequested_heavy_models_without_m
     assert configured["use_table_recognition"] is False
     assert configured["use_formula_recognition"] is False
     assert configured["use_region_detection"] is True
+    assert configured["use_doc_preprocessor"] is True
     assert source["use_table_recognition"] is True
     assert configured["SubPipelines"] is not source["SubPipelines"]
+    general = configured["SubPipelines"]["GeneralOCR"]["SubModules"]
+    table = configured["SubPipelines"]["TableRecognition"]["SubPipelines"]["GeneralOCR"]["SubModules"]
+    assert general["TextDetection"]["model_name"] == "PP-OCRv6_medium_det"
+    assert general["TextRecognition"]["model_name"] == "PP-OCRv6_medium_rec"
+    assert general["TextDetection"]["model_dir"] is None
+    assert table["TextDetection"]["model_name"] == "PP-OCRv6_medium_det"
+    assert table["TextRecognition"]["model_name"] == "PP-OCRv6_medium_rec"
+    assert configured["SubPipelines"]["SealRecognition"]["SubModules"]["TextDetection"]["model_name"] == "PP-OCRv4_server_seal_det"
+    assert source["SubPipelines"]["GeneralOCR"]["SubModules"]["TextDetection"]["model_name"] == "PP-OCRv5_server_det"
+
+
+def test_paddleocr_vl_provider_normalizes_sdk_blocks_without_loading_real_model():
+    """本地 VLM SDK 对象必须立即投影为稳定文本和坐标结构。"""
+
+    class FakePipeline:
+        def predict(self, **_):
+            return [
+                {
+                    "parsing_res_list": [
+                        SimpleNamespace(
+                            content="申请人：金润逸",
+                            bbox=[10, 20, 210, 70],
+                            label="text",
+                        )
+                    ]
+                }
+            ]
+
+    settings = SimpleNamespace(
+        paddleocr_vl_pipeline_version="v1.6",
+        paddleocr_vl_model_name="PaddleOCR-VL-1.6-0.9B",
+        paddleocr_vl_backend="native",
+        paddleocr_vl_device="cpu",
+        paddleocr_vl_max_new_tokens=1024,
+    )
+    provider = PaddleOcrVlVisionRetryProvider(
+        settings=settings,
+        pipeline_factory=lambda **_: FakePipeline(),
+    )
+    buffer = io.BytesIO()
+    Image.new("RGB", (300, 100), "white").save(buffer, format="PNG")
+    result = provider.recognize(
+        image_url="data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    )
+
+    assert result.blocks == [
+        VisionTextBlock(
+            text="申请人：金润逸",
+            bbox={"left": 10.0, "top": 20.0, "right": 210.0, "bottom": 70.0},
+            label="text",
+        )
+    ]
 
 
 def test_pp_structure_provider_accepts_official_result_envelope_and_block_fields(tmp_path: Path):
@@ -1020,7 +1099,7 @@ def test_vision_retry_crop_uses_persisted_bbox_not_planner_coordinates(tmp_path:
 
     assert data_url.startswith("data:image/png;base64,")
     assert crop.width < 1000 and crop.height < 800
-    assert crop.width == 188 and crop.height == 108
+    assert crop.width == 376 and crop.height == 216
 
     candidates = CandidateExtraction.model_validate(
         {
@@ -1048,6 +1127,127 @@ def test_vision_retry_crop_uses_persisted_bbox_not_planner_coordinates(tmp_path:
     assert evidence[0].bbox == {"left": 100, "top": 120, "right": 240, "bottom": 180}
     assert candidates.records[0].fields["amount"].evidence_element_ids == [evidence[0].id]
     assert db.query(DocumentElement).filter(DocumentElement.label == "vision_crop_text").count() == 1
+
+
+def test_local_vlm_can_retry_missing_field_on_single_page_and_persist_its_bbox():
+    """没有基础 OCR bbox 的缺失字段只能由单页本地 VLM 建立新证据。"""
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    schema = [{"key": "date", "label": "申请日期", "field_type": "date"}]
+    parent = _database_run(
+        run_id="vl-parent",
+        document_id="vl-doc",
+        version_id="vl-version",
+        schema=schema,
+        retry_strategy="INITIAL",
+    )
+    child = _database_run(
+        run_id="vl-child",
+        document_id="vl-doc",
+        version_id="vl-version",
+        schema=schema,
+        retry_strategy="VISION_CROP",
+    )
+    child.parent_run_id = parent.id
+    child.target_field_keys_json = ["date"]
+    layout_run = DocumentExtractionRun(
+        id="vl-layout",
+        document_id="vl-doc",
+        document_version_id="vl-version",
+        status="COMPLETED",
+        extractor="fake",
+    )
+    parent.layout_extraction_run_id = layout_run.id
+    db.add_all(
+        [
+            parent,
+            child,
+            layout_run,
+            DocumentPage(
+                document_id="vl-doc",
+                extraction_run_id=layout_run.id,
+                page_number=1,
+                text_content="",
+                metadata_json={"width": 1000, "height": 800},
+            ),
+            StructuredExtractionField(
+                structured_extraction_run_id=parent.id,
+                record_index=1,
+                field_key="date",
+                field_label="申请日期",
+                field_type="date",
+                raw_text=None,
+                confidence=0,
+                status="MISSING",
+                bbox_json={},
+            ),
+        ]
+    )
+    db.flush()
+    service = object.__new__(StructuredExtractionService)
+    service.db = db
+    service.settings = SimpleNamespace(
+        structured_extraction_high_confidence=0.9,
+        structured_extraction_retry_confidence=0.65,
+        structured_extraction_max_retry_fields=8,
+        structured_extraction_external_images_authorized=False,
+    )
+    service.extraction_provider = SimpleNamespace(supports_vision_retry=False)
+    service.vision_provider = SimpleNamespace(
+        enabled=True,
+        is_external=False,
+        supports_unlocated_retry=True,
+        name="paddleocr_vl",
+    )
+
+    initial, _ = service._normalize_candidates(
+        run=parent,
+        layout_extraction_run_id=layout_run.id,
+        fields=[StructuredFieldSpec(key="date", label="申请日期", field_type="date")],
+        candidates=CandidateExtraction(records=[]),
+        elements=[],
+    )
+    assert initial.retryable is True
+    assert initial.low_confidence_field_keys == ["date"]
+
+    candidates = CandidateExtraction.model_validate(
+        {
+            "records": [
+                {
+                    "record_index": 1,
+                    "fields": {
+                        "date": {
+                            "raw_text": "2026.6.5",
+                            "value": "2026.6.5",
+                            "confidence": 0.92,
+                            "evidence_element_ids": ["vision-transient:0"],
+                        }
+                    },
+                }
+            ]
+        }
+    )
+    evidence = StructuredExtractionRepository(db).append_vision_candidate_evidence(
+        run=child,
+        layout_extraction_run_id=layout_run.id,
+        candidates=candidates,
+        vision_elements=[
+            EvidenceElement(
+                id="vision-transient:0",
+                document_id="vl-doc",
+                extraction_run_id=layout_run.id,
+                text="申请日期 2026.6.5",
+                page_number=1,
+                bbox={"left": 300, "top": 120, "right": 460, "bottom": 160},
+                metadata={"source": "paddleocr_vl"},
+            )
+        ],
+    )
+    assert evidence[0].page_number == 1
+    assert evidence[0].bbox == {"left": 300.0, "top": 120.0, "right": 460.0, "bottom": 160.0}
+    assert candidates.records[0].fields["date"].evidence_element_ids == [evidence[0].id]
 
 
 @pytest.mark.parametrize("presentation", ["CSV", "XLSX"])

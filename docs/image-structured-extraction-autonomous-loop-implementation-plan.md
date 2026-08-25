@@ -391,7 +391,38 @@ def parse(self, *, file_path: Path, page_number: int | None = None) -> LayoutPar
 - 不记录图片 Base64、OCR 全文、绝对路径或完整 SDK 结果。
 - SDK 初始化失败、模型缺失和输入不支持必须返回结构化错误。
 
-### 8.1 稳定版面结构
+### 8.1 OCR 质量升级（2026-08-25 已实现）
+
+基础识别继续使用 PP-StructureV3，但其两处通用 OCR 子流水线统一覆盖为：
+
+```text
+普通页面 GeneralOCR
+  TextDetection   -> PP-OCRv6_medium_det
+  TextRecognition -> PP-OCRv6_medium_rec
+
+TableRecognition 内嵌 GeneralOCR
+  TextDetection   -> PP-OCRv6_medium_det
+  TextRecognition -> PP-OCRv6_medium_rec
+```
+
+覆盖规则只处理上述两个 `GeneralOCR` 节点，不递归替换 `SealRecognition` 等专项模型。模型目录同时
+清空为 `null`，使 PaddleX 按新的 `model_name` 解析权重，避免旧的本地目录继续指向 PP-OCRv5。
+这一配置由 `PP_STRUCTURE_TEXT_DETECTION_MODEL` 和 `PP_STRUCTURE_TEXT_RECOGNITION_MODEL` 控制，
+默认值即 PP-OCRv6 medium。
+
+升级后的解析缓存身份必须包含检测模型、识别模型以及表格、公式、图表、印章、区域开关。字段抽取运行的
+`model_name` 还要包含字段映射模型和 PaddleOCR-VL 模型身份。任何一项变化都创建新运行，不能错误复用
+旧 PP-OCRv5 结果。
+
+`PP_STRUCTURE_USE_DOC_PREPROCESSOR=true` 必须同时写入 Pipeline 初始化配置和 `predict()` 参数，确保
+`PP-LCNet_x1_0_doc_ori` 与 `UVDoc` 已初始化后才请求页面方向识别和去畸变。两侧配置不一致时 PaddleX
+会关闭式拒绝推理，因此该开关也必须进入解析与字段抽取缓存身份。
+
+选择 medium 而不是 mobile 的原因是本能力运行在专用 worker，优先保证扫描表格和手写内容质量；
+部署方仍可用上述两个环境变量显式切换模型。首次部署应预下载权重并做一次 warm-up，避免首个用户承担
+下载和初始化耗时。
+
+### 8.2 稳定版面结构
 
 建议内部定义：
 
@@ -778,6 +809,15 @@ Planner 只能使用后端 Observation 允许的字段：
 
 - 只处理第一次运行标记的低置信度字段。
 - 裁剪 bbox 来自 Persistent Stores，不接受 Planner 坐标。
+- 本地 `PaddleOCR-VL-1.6-0.9B` 通过 `PaddleOCRVL` Python SDK 延迟加载，不通过 MCP，也不把图片发送到
+  外部服务；Provider 输出立即转换为普通文本块和 bbox。
+- 已定位低置信度字段使用带上下文边距的局部裁剪，并默认以 2 倍 Lanczos 放大后交给 PaddleOCR-VL。
+- 基础 OCR 完全遗漏的字段没有 bbox 时，只有原文档恰好一页且本地 PaddleOCR-VL 已启用，后端才允许
+  使用整页作为一次二次识别输入；多页歧义时关闭式停止，不让 Planner 猜页码。
+- PaddleOCR-VL 文本块坐标必须通过后端保存的裁剪偏移、缩放倍率和页面比例映射回原页面坐标，再写入
+  `document_elements`。候选字段仍须引用这些证据 ID；仅有 VLM 文本而没有有效证据时继续进入待复核。
+- 本地视觉 Provider 不要求 `STRUCTURED_EXTRACTION_EXTERNAL_IMAGES_AUTHORIZED=true`；该开关只授权
+  既有外部多模态字段映射 Provider 接收裁剪图片。
 - 每个字段保留适当上下文边距，不能扩张为任意整盘目录读取。
 - 第二次运行通过 `parent_run_id` 关联第一次运行。
 - 合并结果只替换置信度更高且证据有效的字段。
@@ -1057,6 +1097,9 @@ PP_STRUCTURE_ENABLED=false
 PP_STRUCTURE_DEVICE=cpu
 PP_STRUCTURE_PIPELINE_CONFIG=PP-StructureV3
 PP_STRUCTURE_MODEL_SOURCE=BOS
+PP_STRUCTURE_TEXT_DETECTION_MODEL=PP-OCRv6_medium_det
+PP_STRUCTURE_TEXT_RECOGNITION_MODEL=PP-OCRv6_medium_rec
+PP_STRUCTURE_USE_DOC_PREPROCESSOR=true
 PP_STRUCTURE_MAX_IMAGE_PIXELS=24000000
 PP_STRUCTURE_MAX_PDF_PAGES=50
 
@@ -1072,6 +1115,16 @@ STRUCTURED_EXTRACTION_MAX_RECORDS=1000
 STRUCTURED_EXTRACTION_PROMPT_VERSION=v1
 STRUCTURED_EXTRACTION_HIGH_CONFIDENCE=0.85
 STRUCTURED_EXTRACTION_RETRY_CONFIDENCE=0.65
+STRUCTURED_EXTRACTION_EXTERNAL_IMAGES_AUTHORIZED=false
+
+# 本地二次识别；disabled 时不会加载 VLM。
+STRUCTURED_EXTRACTION_VISION_PROVIDER=disabled
+STRUCTURED_EXTRACTION_VISION_CROP_UPSCALE=2.0
+PADDLEOCR_VL_PIPELINE_VERSION=v1.6
+PADDLEOCR_VL_MODEL_NAME=PaddleOCR-VL-1.6-0.9B
+PADDLEOCR_VL_BACKEND=native
+PADDLEOCR_VL_DEVICE=cpu
+PADDLEOCR_VL_MAX_NEW_TOKENS=4096
 ```
 
 结构化识别并发由部署时启动的 `STRUCTURED_EXTRACTION` Worker 进程数量控制，不提供一个无法改变
@@ -1087,6 +1140,10 @@ STRUCTURED_EXTRACTION_RETRY_CONFIDENCE=0.65
 - 当前全局 Adaptive Planner 可以保持 `shadow`。明确的图片结构化请求先由后端把用户明示字段与授权
   附件规范化为严格初始 Tool 计划，后台字段映射与可选一次局部增强仍由 LLM Autonomous Loop 完成，
   不要求为了单项能力把全局 Planner 切换为 `enabled`。
+- `STRUCTURED_EXTRACTION_VISION_PROVIDER=paddleocr_vl` 只启用本地第二遍识别，仍由 Adaptive Planner
+  根据安全 Observation 决定是否执行，后端强制最多一次；它不会让 VLM 直接选择 Tool。
+- CPU 环境的 PaddleOCR-VL 延迟明显高于 PP-OCRv6。应维持独立 `STRUCTURED_EXTRACTION` worker，并通过
+  worker 进程数控制并发；API/SSE 只观察任务事件，不在请求线程中执行模型推理。内存不足时保持单 worker。
 - 真实 `.env` 不提交；`.env.example` 只放空密钥。
 - Provider 设置变化必须改变缓存 fingerprint。
 - 配置或依赖缺失时能力清单显示不可用，不能注册空成功 Tool。
@@ -1201,6 +1258,7 @@ docs/runbook.md
 2. 实现 EXPLICIT_FIELDS 和 AUTO_DISCOVER。
 3. 实现类型归一化、证据校验和质量等级。
 4. 实现一次局部视觉增强及父子运行合并。
+5. 基础 OCR 升级为 PP-OCRv6 medium，并为缺失/低置信度字段接入本地 PaddleOCR-VL-1.6 二次识别。
 
 验收：模糊字段进入待复核，金额和日期由后端归一化，Schema 外字段被拒绝。
 

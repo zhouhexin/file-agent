@@ -28,6 +28,27 @@ from app.modules.structured_extraction.schemas import (
 )
 
 
+def _merge_same_page_bbox(elements: list[EvidenceElement]) -> dict[str, float]:
+    """合并同页 VLM 文本块坐标；非法坐标由上游 Provider 丢弃。"""
+
+    if not elements:
+        return {}
+    page_number = elements[0].page_number
+    boxes = [
+        element.bbox
+        for element in elements
+        if element.page_number == page_number and element.bbox
+    ]
+    if not boxes:
+        return {}
+    return {
+        "left": min(float(box["left"]) for box in boxes),
+        "top": min(float(box["top"]) for box in boxes),
+        "right": max(float(box["right"]) for box in boxes),
+        "bottom": max(float(box["bottom"]) for box in boxes),
+    }
+
+
 class StructuredExtractionRepository:
     """封装图片结构化抽取的持久化和审计写入。"""
 
@@ -256,8 +277,9 @@ class StructuredExtractionRepository:
         run: StructuredExtractionRun,
         layout_extraction_run_id: str,
         candidates: CandidateExtraction,
+        vision_elements: list[EvidenceElement] | None = None,
     ) -> list[EvidenceElement]:
-        """把局部图片识别值绑定到父运行 bbox，形成可审计派生证据元素。"""
+        """持久化二次识别证据；优先使用 VLM 坐标，兼容外部视觉父 bbox。"""
 
         if not run.parent_run_id:
             return []
@@ -274,6 +296,7 @@ class StructuredExtractionRepository:
             for row in parent_rows
             if row.page_number and row.bbox_json
         }
+        vision_by_id = {element.id: element for element in (vision_elements or [])}
         maximum_index = (
             self.db.query(func.max(DocumentElement.element_index))
             .filter(DocumentElement.extraction_run_id == layout_extraction_run_id)
@@ -287,7 +310,16 @@ class StructuredExtractionRepository:
                 if field_key not in target_keys or not candidate.raw_text:
                     continue
                 parent = by_record_key.get((record.record_index, field_key))
-                if parent is None:
+                cited = [
+                    vision_by_id[element_id]
+                    for element_id in candidate.evidence_element_ids
+                    if element_id in vision_by_id
+                ]
+                page_number = cited[0].page_number if cited else getattr(parent, "page_number", None)
+                bbox = _merge_same_page_bbox(cited) if cited else dict(
+                    getattr(parent, "bbox_json", {}) or {}
+                )
+                if not page_number or not bbox:
                     continue
                 row = DocumentElement(
                     document_id=run.document_id,
@@ -295,13 +327,17 @@ class StructuredExtractionRepository:
                     element_index=next_index,
                     label="vision_crop_text",
                     text_content=candidate.raw_text,
-                    page_number=parent.page_number,
-                    bbox_json=dict(parent.bbox_json or {}),
+                    page_number=page_number,
+                    bbox_json=bbox,
                     content_layer="body",
                     parent_ref=f"structured-extraction:{run.parent_run_id}",
                     metadata_json={
                         "element_type": "vision_crop_text",
-                        "source": "vision_crop",
+                        "source": (
+                            str(cited[0].metadata.get("source") or "vision_crop")
+                            if cited
+                            else "external_vision_crop"
+                        ),
                         "field_key": field_key,
                         "confidence": candidate.confidence,
                     },

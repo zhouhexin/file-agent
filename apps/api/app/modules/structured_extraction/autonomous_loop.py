@@ -77,7 +77,7 @@ class StructuredExtractionAutonomousLoop:
             document_version_id=run.document_version_id,
             schema_fingerprint=fingerprint,
             provider=service.layout_provider.name,
-            model_name=service.extraction_provider.model_name,
+            model_name=service.model_identity,
             prompt_version=service.settings.structured_extraction_prompt_version,
             retry_strategy="VISION_CROP",
         )
@@ -86,7 +86,7 @@ class StructuredExtractionAutonomousLoop:
             document_version_id=run.document_version_id,
             schema_fingerprint=fingerprint,
             provider=service.layout_provider.name,
-            model_name=service.extraction_provider.model_name,
+            model_name=service.model_identity,
             prompt_version=service.settings.structured_extraction_prompt_version,
             agent_run_id=agent_run.id,
             parent_run_id=run.id,

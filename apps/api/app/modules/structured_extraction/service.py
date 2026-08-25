@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,26 @@ from app.modules.structured_extraction.schemas import (
     NormalizedField,
     StructuredExtractionResult,
 )
+from app.modules.structured_extraction.vision_provider import (
+    VisionRecognitionResult,
+    VisionRetryProviderProtocol,
+    build_vision_retry_provider,
+)
+
+
+@dataclass(frozen=True)
+class _VisionCrop:
+    """后端裁剪图及其到版面页面坐标系的确定性变换。"""
+
+    data_url: str
+    page_number: int
+    image_left: float
+    image_top: float
+    page_to_image_scale_x: float
+    page_to_image_scale_y: float
+    resize_factor: float
+    page_width: float
+    page_height: float
 
 
 class StructuredExtractionService:
@@ -70,6 +91,7 @@ class StructuredExtractionService:
         settings: Settings | None = None,
         layout_provider: LayoutParsingProviderProtocol | None = None,
         extraction_provider: StructuredExtractionProviderProtocol | None = None,
+        vision_provider: VisionRetryProviderProtocol | None = None,
     ) -> None:
         """注入请求或 worker 级依赖，服务对象不进入 AgentGraphState。"""
 
@@ -82,8 +104,38 @@ class StructuredExtractionService:
         self.extraction_provider = extraction_provider or build_structured_extraction_provider(
             settings=self.settings
         )
+        self.vision_provider = vision_provider or build_vision_retry_provider(
+            settings=self.settings
+        )
         self.repository = StructuredExtractionRepository(db)
         self.file_repository = FileExtractionRepository(db, user_id)
+
+    @property
+    def model_identity(self) -> str:
+        """把字段映射、基础 OCR 与二次视觉模型纳入缓存身份。"""
+
+        vision_name = (
+            self.vision_provider.model_name if self.vision_provider.enabled else "disabled"
+        )
+        raw = "|".join(
+            [
+                self.extraction_provider.model_name,
+                f"{self.layout_provider.name}@{self.layout_provider.version}",
+                self.settings.pp_structure_text_detection_model,
+                self.settings.pp_structure_text_recognition_model,
+                f"preprocess={self.settings.pp_structure_use_doc_preprocessor}",
+                f"table={self.settings.pp_structure_use_table_recognition}",
+                f"formula={self.settings.pp_structure_use_formula_recognition}",
+                f"chart={self.settings.pp_structure_use_chart_recognition}",
+                f"seal={self.settings.pp_structure_use_seal_recognition}",
+                f"region={self.settings.pp_structure_use_region_detection}",
+                vision_name,
+            ]
+        )
+        if len(raw) <= 160:
+            return raw
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+        return f"{self.extraction_provider.model_name[:80]}|cfg:{digest}"
 
     def enqueue(self, tool_input: StructuredImageExtractionInput) -> dict[str, Any]:
         """校验授权文件，创建或复用运行，并提交独立推理队列。"""
@@ -145,7 +197,7 @@ class StructuredExtractionService:
             document_version_id=version.id,
             schema_fingerprint=fingerprint,
             provider=self.layout_provider.name,
-            model_name=self.extraction_provider.model_name,
+            model_name=self.model_identity,
             prompt_version=self.settings.structured_extraction_prompt_version,
             retry_strategy=tool_input.retry_strategy,
         )
@@ -170,7 +222,7 @@ class StructuredExtractionService:
             document_version_id=version.id,
             schema_fingerprint=fingerprint,
             provider=self.layout_provider.name,
-            model_name=self.extraction_provider.model_name,
+            model_name=self.model_identity,
             prompt_version=self.settings.structured_extraction_prompt_version,
             agent_run_id=self.agent_run_id,
         )
@@ -263,22 +315,42 @@ class StructuredExtractionService:
         }
         if run.retry_strategy == "VISION_CROP":
             if not self._vision_retry_available():
-                raise RuntimeError("当前部署未授权结构化抽取发送局部图片。")
-            image_url = self._targeted_crop_data_url(
+                raise RuntimeError("当前部署未启用可用的视觉二次识别 Provider。")
+            crop = self._targeted_crop(
                 run=run,
                 source_path=source_path,
                 content_type=source_content_type,
             )
-            candidates = self._extract_candidates_with_fallback(
-                run=run,
-                extraction_arguments=extraction_arguments,
-                image_url=image_url,
-            )
+            vision_elements: list[EvidenceElement] = []
+            if self.vision_provider.enabled and not self.vision_provider.is_external:
+                recognition = self.vision_provider.recognize(image_url=crop.data_url)
+                vision_elements = self._vision_evidence_elements(
+                    run=run,
+                    layout_extraction_run_id=layout_run.id,
+                    crop=crop,
+                    recognition=recognition,
+                )
+                if not vision_elements:
+                    raise RuntimeError("PaddleOCR-VL 未返回可用于字段映射的文本块。")
+                candidates = self._extract_candidates_with_fallback(
+                    run=run,
+                    extraction_arguments={
+                        **extraction_arguments,
+                        "elements": vision_elements,
+                    },
+                )
+            else:
+                candidates = self._extract_candidates_with_fallback(
+                    run=run,
+                    extraction_arguments=extraction_arguments,
+                    image_url=crop.data_url,
+                )
             elements.extend(
                 self.repository.append_vision_candidate_evidence(
                     run=run,
                     layout_extraction_run_id=layout_run.id,
                     candidates=candidates,
+                    vision_elements=vision_elements,
                 )
             )
         else:
@@ -429,12 +501,17 @@ class StructuredExtractionService:
                         "page_number": row.page_number,
                     }
                 )
+        can_retry_unlocated = bool(
+            self._vision_supports_unlocated_retry()
+            and self._single_layout_page_number(run) is not None
+        )
+        retry_keys = low_confidence_keys if can_retry_unlocated else located_retry_keys
         retryable = bool(
             run.retry_strategy == "INITIAL"
             and run.quality_band == "MEDIUM"
-            and located_retry_keys
-            and len(located_retry_pages) == 1
-            and len(located_retry_keys) <= self.settings.structured_extraction_max_retry_fields
+            and retry_keys
+            and (can_retry_unlocated or len(located_retry_pages) == 1)
+            and len(retry_keys) <= self.settings.structured_extraction_max_retry_fields
             and self._vision_retry_available()
         )
         result = StructuredExtractionResult(
@@ -449,7 +526,7 @@ class StructuredExtractionService:
             quality_band=str(run.quality_band or "LOW"),
             retryable=retryable,
             recommended_retry_strategy="VISION_CROP" if retryable else "NONE",
-            low_confidence_field_keys=(located_retry_keys if retryable else low_confidence_keys)[:20],
+            low_confidence_field_keys=(retry_keys if retryable else low_confidence_keys)[:20],
             original_unchanged=True,
         )
         if run.retry_strategy != "INITIAL":
@@ -604,11 +681,16 @@ class StructuredExtractionService:
             for _, field in normalized_rows
             if field.key in low_keys and field.page_number and _valid_bbox(field.bbox)
         }
+        can_retry_unlocated = bool(
+            self._vision_supports_unlocated_retry()
+            and self._single_layout_page_number(run) is not None
+        )
+        retry_keys = low_keys if can_retry_unlocated else located_retry_keys
         has_bounded_vision_retry = bool(
             run.retry_strategy == "INITIAL"
-            and located_retry_keys
-            and len(located_retry_pages) == 1
-            and len(located_retry_keys) <= self.settings.structured_extraction_max_retry_fields
+            and retry_keys
+            and (can_retry_unlocated or len(located_retry_pages) == 1)
+            and len(retry_keys) <= self.settings.structured_extraction_max_retry_fields
             and self._vision_retry_available()
         )
         if not candidate_records:
@@ -635,7 +717,7 @@ class StructuredExtractionService:
                 quality_band=quality_band,
                 retryable=retryable,
                 recommended_retry_strategy="VISION_CROP" if retryable else "NONE",
-                low_confidence_field_keys=(located_retry_keys if retryable else low_keys)[:20],
+                low_confidence_field_keys=(retry_keys if retryable else low_keys)[:20],
                 original_unchanged=True,
             ),
             normalized_rows,
@@ -724,22 +806,52 @@ class StructuredExtractionService:
                 raise ValueError("PDF 文件无法安全读取，请检查格式后重试。") from exc
 
     def _vision_retry_available(self) -> bool:
-        """局部图片只有在部署显式授权且 Provider 支持时才能离开文件边界。"""
+        """本地视觉可直接使用；外部多模态仍必须取得部署级显式授权。"""
 
+        vision_provider = getattr(self, "vision_provider", None)
+        if (
+            vision_provider is not None
+            and vision_provider.enabled
+            and not vision_provider.is_external
+        ):
+            return True
         return bool(
             getattr(self.settings, "structured_extraction_external_images_authorized", False)
             and getattr(self.extraction_provider, "supports_vision_retry", False)
             and hasattr(self.extraction_provider, "extract_with_image")
         )
 
-    def _targeted_crop_data_url(
+    def _vision_supports_unlocated_retry(self) -> bool:
+        vision_provider = getattr(self, "vision_provider", None)
+        return bool(
+            vision_provider is not None
+            and vision_provider.enabled
+            and not vision_provider.is_external
+            and vision_provider.supports_unlocated_retry
+        )
+
+    def _single_layout_page_number(self, run: StructuredExtractionRun) -> int | None:
+        if not run.layout_extraction_run_id:
+            return None
+        page_numbers = [
+            int(row[0])
+            for row in (
+                self.db.query(DocumentPage.page_number)
+                .filter(DocumentPage.extraction_run_id == run.layout_extraction_run_id)
+                .distinct()
+                .all()
+            )
+        ]
+        return page_numbers[0] if len(page_numbers) == 1 else None
+
+    def _targeted_crop(
         self,
         *,
         run: StructuredExtractionRun,
         source_path: Path,
         content_type: str,
-    ) -> str:
-        """只使用父运行持久化 bbox 生成局部 PNG；Planner 无法提供坐标或路径。"""
+    ) -> _VisionCrop:
+        """只用持久化事实裁剪；缺失字段仅允许在单页本地 VLM 中回退整页。"""
 
         if not run.parent_run_id or not run.target_field_keys_json:
             raise RuntimeError("局部视觉增强缺少父运行或目标字段。")
@@ -752,53 +864,188 @@ class StructuredExtractionService:
             .all()
         )
         located = [row for row in rows if row.page_number and _valid_bbox(row.bbox_json)]
-        if not located:
+        unlocated = [
+            row for row in rows if not (row.page_number and _valid_bbox(row.bbox_json))
+        ]
+        parent = self.db.get(StructuredExtractionRun, run.parent_run_id)
+        single_page = self._single_layout_page_number(parent) if parent is not None else None
+        full_page = bool(unlocated)
+        if full_page and (not self._vision_supports_unlocated_retry() or single_page is None):
+            raise RuntimeError("缺失字段无法安全定位到唯一页面，已保留初始识别结果。")
+        if not located and not full_page:
             raise RuntimeError("低置信度字段没有可用于局部增强的持久化 bbox。")
         page_numbers = {int(row.page_number) for row in located}
-        if len(page_numbers) != 1:
+        if full_page:
+            page_number = int(single_page)
+        elif len(page_numbers) != 1:
             raise RuntimeError("局部视觉增强目标跨页，已保留初始识别结果。")
-        page_number = next(iter(page_numbers))
+        else:
+            page_number = next(iter(page_numbers))
+        page = (
+            self.db.query(DocumentPage)
+            .filter(
+                DocumentPage.extraction_run_id == parent.layout_extraction_run_id,
+                DocumentPage.page_number == page_number,
+            )
+            .one_or_none()
+            if parent is not None and parent.layout_extraction_run_id
+            else None
+        )
         if content_type == "application/pdf":
             image = _render_pdf_page(source_path=source_path, page_number=page_number)
-            parent = self.db.get(StructuredExtractionRun, run.parent_run_id)
-            page = (
-                self.db.query(DocumentPage)
-                .filter(
-                    DocumentPage.extraction_run_id == parent.layout_extraction_run_id,
-                    DocumentPage.page_number == page_number,
-                )
-                .one_or_none()
-                if parent is not None and parent.layout_extraction_run_id
-                else None
-            )
-            metadata = dict(page.metadata_json or {}) if page is not None else {}
-            source_width = float(metadata.get("width") or image.width)
-            source_height = float(metadata.get("height") or image.height)
-            scale_x = image.width / max(1.0, source_width)
-            scale_y = image.height / max(1.0, source_height)
         else:
-            image = Image.open(source_path).convert("RGB")
-            scale_x = scale_y = 1.0
-        boxes = [dict(row.bbox_json or {}) for row in located]
-        left = min(float(box["left"]) for box in boxes) * scale_x
-        top = min(float(box["top"]) for box in boxes) * scale_y
-        right = max(float(box["right"]) for box in boxes) * scale_x
-        bottom = max(float(box["bottom"]) for box in boxes) * scale_y
-        padding = 24
-        crop = image.crop(
-            (
-                max(0, int(left) - padding),
-                max(0, int(top) - padding),
-                min(image.width, int(right) + padding),
-                min(image.height, int(bottom) + padding),
-            )
+            with Image.open(source_path) as source_image:
+                frame_count = int(getattr(source_image, "n_frames", 1) or 1)
+                if page_number < 1 or page_number > frame_count:
+                    raise RuntimeError("局部增强页码超出多页图片范围。")
+                source_image.seek(page_number - 1)
+                image = source_image.convert("RGB")
+        metadata = dict(page.metadata_json or {}) if page is not None else {}
+        source_width = float(metadata.get("width") or image.width)
+        source_height = float(metadata.get("height") or image.height)
+        image = _limit_image_pixels(
+            image,
+            maximum=int(
+                getattr(
+                    getattr(self, "settings", None),
+                    "pp_structure_max_image_pixels",
+                    24_000_000,
+                )
+            ),
         )
+        scale_x = image.width / max(1.0, source_width)
+        scale_y = image.height / max(1.0, source_height)
+        if full_page:
+            crop_left = crop_top = 0
+            crop = image
+        else:
+            boxes = [dict(row.bbox_json or {}) for row in located]
+            left = min(float(box["left"]) for box in boxes) * scale_x
+            top = min(float(box["top"]) for box in boxes) * scale_y
+            right = max(float(box["right"]) for box in boxes) * scale_x
+            bottom = max(float(box["bottom"]) for box in boxes) * scale_y
+            padding = 24
+            crop_left = max(0, int(left) - padding)
+            crop_top = max(0, int(top) - padding)
+            crop = image.crop(
+                (
+                    crop_left,
+                    crop_top,
+                    min(image.width, int(right) + padding),
+                    min(image.height, int(bottom) + padding),
+                )
+            )
         if crop.width <= 0 or crop.height <= 0:
             raise RuntimeError("局部视觉增强 bbox 无效。")
+        resize_factor = (
+            1.0
+            if full_page
+            else float(
+                getattr(
+                    getattr(self, "settings", None),
+                    "structured_extraction_vision_crop_upscale",
+                    2.0,
+                )
+            )
+        )
+        if resize_factor > 1.0:
+            maximum_pixels = int(
+                getattr(
+                    getattr(self, "settings", None),
+                    "pp_structure_max_image_pixels",
+                    24_000_000,
+                )
+            )
+            resize_factor = min(
+                resize_factor,
+                (maximum_pixels / max(1, crop.width * crop.height)) ** 0.5,
+            )
+            crop = crop.resize(
+                (int(crop.width * resize_factor), int(crop.height * resize_factor)),
+                Image.Resampling.LANCZOS,
+            )
         buffer = io.BytesIO()
         crop.save(buffer, format="PNG", optimize=True)
         encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-        return f"data:image/png;base64,{encoded}"
+        return _VisionCrop(
+            data_url=f"data:image/png;base64,{encoded}",
+            page_number=page_number,
+            image_left=float(crop_left),
+            image_top=float(crop_top),
+            page_to_image_scale_x=scale_x,
+            page_to_image_scale_y=scale_y,
+            resize_factor=resize_factor,
+            page_width=source_width,
+            page_height=source_height,
+        )
+
+    def _targeted_crop_data_url(
+        self,
+        *,
+        run: StructuredExtractionRun,
+        source_path: Path,
+        content_type: str,
+    ) -> str:
+        """兼容既有内部测试和调用点；新代码使用带坐标变换的 `_targeted_crop`。"""
+
+        return self._targeted_crop(
+            run=run,
+            source_path=source_path,
+            content_type=content_type,
+        ).data_url
+
+    def _vision_evidence_elements(
+        self,
+        *,
+        run: StructuredExtractionRun,
+        layout_extraction_run_id: str,
+        crop: _VisionCrop,
+        recognition: VisionRecognitionResult,
+    ) -> list[EvidenceElement]:
+        """把 VLM 输入图坐标确定性映射回父页面坐标，不持久化 SDK 对象。"""
+
+        elements: list[EvidenceElement] = []
+        for index, block in enumerate(recognition.blocks):
+            bbox = {
+                "left": max(
+                    0.0,
+                    (crop.image_left + block.bbox["left"] / crop.resize_factor)
+                    / crop.page_to_image_scale_x,
+                ),
+                "top": max(
+                    0.0,
+                    (crop.image_top + block.bbox["top"] / crop.resize_factor)
+                    / crop.page_to_image_scale_y,
+                ),
+                "right": min(
+                    crop.page_width,
+                    (crop.image_left + block.bbox["right"] / crop.resize_factor)
+                    / crop.page_to_image_scale_x,
+                ),
+                "bottom": min(
+                    crop.page_height,
+                    (crop.image_top + block.bbox["bottom"] / crop.resize_factor)
+                    / crop.page_to_image_scale_y,
+                ),
+            }
+            if bbox["right"] <= bbox["left"] or bbox["bottom"] <= bbox["top"]:
+                continue
+            elements.append(
+                EvidenceElement(
+                    id=f"vision-transient:{index}",
+                    document_id=run.document_id,
+                    extraction_run_id=layout_extraction_run_id,
+                    text=block.text,
+                    page_number=crop.page_number,
+                    bbox=bbox,
+                    metadata={
+                        "element_type": block.label,
+                        "source": self.vision_provider.name,
+                        "confidence": None,
+                    },
+                )
+            )
+        return elements
 
 
 def _valid_bbox(value: Any) -> bool:
@@ -836,6 +1083,19 @@ def _render_pdf_page(*, source_path: Path, page_number: int) -> Image.Image:
         return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
 
 
+def _limit_image_pixels(image: Image.Image, *, maximum: int) -> Image.Image:
+    """等比限制内存图片像素，防止异常 PDF 页面或放大裁剪耗尽 worker 内存。"""
+
+    pixels = image.width * image.height
+    if pixels <= maximum:
+        return image
+    factor = (maximum / max(1, pixels)) ** 0.5
+    return image.resize(
+        (max(1, int(image.width * factor)), max(1, int(image.height * factor))),
+        Image.Resampling.LANCZOS,
+    )
+
+
 def structured_extraction_fingerprint(tool_input: StructuredImageExtractionInput) -> str:
     """为动态 Schema、记录模式和重试目标生成稳定指纹。"""
 
@@ -867,6 +1127,14 @@ def _layout_config_fingerprint(
             provider.version,
             settings.pp_structure_pipeline_config,
             settings.pp_structure_device,
+            settings.pp_structure_text_detection_model,
+            settings.pp_structure_text_recognition_model,
+            str(settings.pp_structure_use_doc_preprocessor),
+            str(settings.pp_structure_use_table_recognition),
+            str(settings.pp_structure_use_formula_recognition),
+            str(settings.pp_structure_use_chart_recognition),
+            str(settings.pp_structure_use_seal_recognition),
+            str(settings.pp_structure_use_region_detection),
         ]
     )
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()

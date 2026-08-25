@@ -26,6 +26,8 @@ DEFAULT_LOG_RETENTION_DAYS = 7
 DEFAULT_OCR_LLM_FALLBACK_QUALITY_THRESHOLD = 0.68
 DEFAULT_PP_STRUCTURE_MAX_IMAGE_PIXELS = 24_000_000
 DEFAULT_PP_STRUCTURE_MAX_PDF_PAGES = 50
+DEFAULT_PP_STRUCTURE_TEXT_DETECTION_MODEL = "PP-OCRv6_medium_det"
+DEFAULT_PP_STRUCTURE_TEXT_RECOGNITION_MODEL = "PP-OCRv6_medium_rec"
 DEFAULT_STRUCTURED_EXTRACTION_MAX_FIELDS = 40
 DEFAULT_STRUCTURED_EXTRACTION_MAX_RETRY_FIELDS = 20
 DEFAULT_STRUCTURED_EXTRACTION_MAX_RECORDS = 1000
@@ -183,6 +185,13 @@ class Settings(BaseModel):
     pp_structure_device: str = "cpu"
     pp_structure_pipeline_config: str = "PP-StructureV3"
     pp_structure_model_source: str = "BOS"
+    pp_structure_text_detection_model: str = (
+        DEFAULT_PP_STRUCTURE_TEXT_DETECTION_MODEL
+    )
+    pp_structure_text_recognition_model: str = (
+        DEFAULT_PP_STRUCTURE_TEXT_RECOGNITION_MODEL
+    )
+    pp_structure_use_doc_preprocessor: bool = True
     pp_structure_use_table_recognition: bool = False
     pp_structure_use_formula_recognition: bool = False
     pp_structure_use_chart_recognition: bool = False
@@ -203,6 +212,13 @@ class Settings(BaseModel):
     structured_extraction_high_confidence: float = 0.85
     structured_extraction_retry_confidence: float = 0.65
     structured_extraction_external_images_authorized: bool = False
+    structured_extraction_vision_provider: str = "disabled"
+    structured_extraction_vision_crop_upscale: float = 2.0
+    paddleocr_vl_pipeline_version: str = "v1.6"
+    paddleocr_vl_model_name: str = "PaddleOCR-VL-1.6-0.9B"
+    paddleocr_vl_backend: str = "native"
+    paddleocr_vl_device: str = "cpu"
+    paddleocr_vl_max_new_tokens: int = 4096
     docling_enabled: bool = True
     docling_formats: tuple[str, ...] = DEFAULT_DOCLING_FORMATS
     docling_ocr_enabled: bool = False
@@ -619,6 +635,20 @@ def get_settings() -> Settings:
         ).strip()
         or "PP-StructureV3",
         pp_structure_model_source=os.getenv("PP_STRUCTURE_MODEL_SOURCE", "BOS").strip() or "BOS",
+        pp_structure_text_detection_model=os.getenv(
+            "PP_STRUCTURE_TEXT_DETECTION_MODEL",
+            DEFAULT_PP_STRUCTURE_TEXT_DETECTION_MODEL,
+        ).strip()
+        or DEFAULT_PP_STRUCTURE_TEXT_DETECTION_MODEL,
+        pp_structure_text_recognition_model=os.getenv(
+            "PP_STRUCTURE_TEXT_RECOGNITION_MODEL",
+            DEFAULT_PP_STRUCTURE_TEXT_RECOGNITION_MODEL,
+        ).strip()
+        or DEFAULT_PP_STRUCTURE_TEXT_RECOGNITION_MODEL,
+        pp_structure_use_doc_preprocessor=os.getenv(
+            "PP_STRUCTURE_USE_DOC_PREPROCESSOR", "true"
+        ).lower()
+        == "true",
         # CPU Worker 默认只加载字段抽取必需的版面与 OCR 模型；重型专项模型必须显式开启。
         pp_structure_use_table_recognition=os.getenv(
             "PP_STRUCTURE_USE_TABLE_RECOGNITION", "false"
@@ -707,6 +737,34 @@ def get_settings() -> Settings:
             "STRUCTURED_EXTRACTION_EXTERNAL_IMAGES_AUTHORIZED", "false"
         ).lower()
         == "true",
+        structured_extraction_vision_provider=_choice(
+            os.getenv("STRUCTURED_EXTRACTION_VISION_PROVIDER", "disabled"),
+            allowed={"disabled", "paddleocr_vl"},
+            default="disabled",
+        ),
+        structured_extraction_vision_crop_upscale=max(
+            1.0,
+            min(4.0, float(os.getenv("STRUCTURED_EXTRACTION_VISION_CROP_UPSCALE", "2.0"))),
+        ),
+        paddleocr_vl_pipeline_version=_choice(
+            os.getenv("PADDLEOCR_VL_PIPELINE_VERSION", "v1.6"),
+            allowed={"v1.6"},
+            default="v1.6",
+            normalize=lambda item: str(item).strip().lower(),
+        ),
+        paddleocr_vl_model_name=os.getenv(
+            "PADDLEOCR_VL_MODEL_NAME", "PaddleOCR-VL-1.6-0.9B"
+        ).strip()
+        or "PaddleOCR-VL-1.6-0.9B",
+        paddleocr_vl_backend=_choice(
+            os.getenv("PADDLEOCR_VL_BACKEND", "native"),
+            allowed={"native"},
+            default="native",
+        ),
+        paddleocr_vl_device=os.getenv("PADDLEOCR_VL_DEVICE", "cpu").strip() or "cpu",
+        paddleocr_vl_max_new_tokens=_bounded_int_env(
+            "PADDLEOCR_VL_MAX_NEW_TOKENS", 4096, minimum=256, maximum=16384
+        ),
         docling_enabled=os.getenv("DOCLING_ENABLED", "true").lower() == "true",
         docling_formats=tuple(
             item.strip().lower().lstrip(".")
