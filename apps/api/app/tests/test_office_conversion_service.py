@@ -18,6 +18,7 @@ from app.db.models import Document, DocumentArtifact
 from app.modules.files.office_conversion import (
     LegacyOfficeConversionService,
     OfficeConversionError,
+    _replace_with_retry,
     libreoffice_profile_uri,
     resolve_libreoffice_executable,
 )
@@ -209,6 +210,29 @@ def test_doc_conversion_stages_output_on_target_volume_before_atomic_replace(
     staged_path, final_path = replace_calls[0]
     assert staged_path.name.endswith(".part")
     assert staged_path.parent == final_path.parent
+
+
+def test_derivative_staging_name_stays_short_for_long_target_name(tmp_path):
+    """临时文件名不能重复长目标名，否则合法目标也会超过 Windows 路径限制。"""
+
+    target_name = f"{'a' * 64}.docx"
+    # 最终路径保持在传统 Windows MAX_PATH 内；旧实现把 target_name、PID 和
+    # 纳秒时间戳再次拼到临时名后才会越界，短随机名则仍可正常原子提交。
+    padding_length = max(
+        1,
+        245 - len(str(tmp_path.resolve())) - len(target_name) - 2,
+    )
+    target_parent = tmp_path / ("p" * padding_length)
+    target_parent.mkdir()
+    source_path = tmp_path / "converted.docx"
+    source_path.write_bytes(b"converted-office-content")
+    target_path = target_parent / target_name
+
+    _replace_with_retry(source_path, target_path)
+
+    assert target_path.read_bytes() == b"converted-office-content"
+    assert not source_path.exists()
+    assert not list(tmp_path.rglob(".fa-*.part"))
 
 
 def test_same_content_across_documents_reuses_physical_artifact(monkeypatch, tmp_path):

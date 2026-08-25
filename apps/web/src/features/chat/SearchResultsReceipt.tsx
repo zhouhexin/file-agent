@@ -25,9 +25,6 @@ function SearchResultCard({
   onOpenAttachment?: (file: ChatAttachment) => void;
   onOpenDocument?: (documentId: string, filename: string) => void;
 }) {
-  // root_key 是已配置受管目录的逻辑标识，不是服务器路径；与相对路径一起展示，
-  // 才能在多个受管目录存在同名同相对路径时保持可区分。
-  const logicalPath = [file.root_key, file.relative_path].filter(Boolean).join(' / ');
   const categoryLabel =
     file.category_path && file.category_path.length > 0
       ? file.category_path.join(' / ')
@@ -65,9 +62,6 @@ function SearchResultCard({
             <span className="search-result-tier">已验证相关</span>
           ) : null}
         </div>
-        {logicalPath ? (
-          <span className="search-result-relative-path">位置：{logicalPath}</span>
-        ) : null}
         {file.match_reasons.length > 0 ? (
           <span className="search-result-match-reason">
             匹配依据：{file.match_reasons.join('；')}

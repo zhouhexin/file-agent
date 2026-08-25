@@ -517,21 +517,34 @@ def _replace_with_retry(source: Path, target: Path) -> None:
 
     last_error: OSError | None = None
     for attempt in range(3):
-        temporary = target.with_name(
-            f".{target.name}.{os.getpid()}.{time.time_ns()}.part"
-        )
+        temporary: Path | None = None
+        temporary_fd: int | None = None
         try:
-            with source.open("rb") as source_handle, temporary.open("xb") as target_handle:
-                shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
-                target_handle.flush()
-                os.fsync(target_handle.fileno())
+            # 不能把包含转换配置哈希的完整目标文件名再次拼进临时文件名；在
+            # Windows 深层 storage 目录中，这会让原本合法的目标路径超过 MAX_PATH。
+            # mkstemp 既保证同目录同卷，也用固定短前后缀避免路径长度随目标名增长。
+            temporary_fd, temporary_name = tempfile.mkstemp(
+                prefix=".fa-",
+                suffix=".part",
+                dir=target.parent,
+            )
+            temporary = Path(temporary_name)
+            with os.fdopen(temporary_fd, "wb") as target_handle:
+                temporary_fd = None
+                with source.open("rb") as source_handle:
+                    shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+                    target_handle.flush()
+                    os.fsync(target_handle.fileno())
             # temporary 与 target 位于同一目录，因此 Windows 上不会发生跨盘符移动。
             os.replace(temporary, target)
             source.unlink(missing_ok=True)
             return
         except OSError as exc:
             last_error = exc
-            temporary.unlink(missing_ok=True)
+            if temporary_fd is not None:
+                os.close(temporary_fd)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
             if attempt < 2:
                 time.sleep(0.1 * (attempt + 1))
     raise OfficeConversionError("DERIVATIVE_WRITE_FAILED", "无法写入 DOCX 派生件。", retryable=True) from last_error
