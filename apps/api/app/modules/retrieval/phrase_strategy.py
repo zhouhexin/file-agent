@@ -539,7 +539,10 @@ def _tiered_user_message(
 
 
 def mark_metadata_results_as_possible(
-    *, result: dict[str, Any], parsed_query: Any
+    *,
+    result: dict[str, Any],
+    parsed_query: Any,
+    protected_phrases: list[str] | None = None,
 ) -> dict[str, Any]:
     """把摘要级降级结果显式标记为候选，禁止伪装成正文已验证结果。
 
@@ -555,7 +558,12 @@ def mark_metadata_results_as_possible(
         list(getattr(parsed_query, "supporting_topic_terms", []) or [])
     )
     relation_mode = str(getattr(parsed_query, "relation_mode", ""))
-    if relation_mode != "LITERAL" or not required or not supporting:
+    protected = _unique_terms(list(protected_phrases or []))
+    force_semantic_fallback = bool(protected)
+    if (
+        not force_semantic_fallback
+        and (relation_mode != "LITERAL" or not required or not supporting)
+    ):
         return result
 
     candidates: list[dict[str, Any]] = []
@@ -565,7 +573,11 @@ def mark_metadata_results_as_possible(
         item = {**raw_item, "relevance_tier": "POSSIBLE"}
         item["match_reasons"] = _append_reason(
             item.get("match_reasons"),
-            f"当前仅有文件名、分类或摘要线索，尚未在原文确认“{'、'.join(required)}”与“{'、'.join(supporting)}”",
+            (
+                f"当前仅有文件名、分类或摘要线索，完整短语“{'、'.join(protected)}”仍需查看原文确认"
+                if force_semantic_fallback
+                else f"当前仅有文件名、分类或摘要线索，尚未在原文确认“{'、'.join(required)}”与“{'、'.join(supporting)}”"
+            ),
         )
         candidates.append(item)
     message = _tiered_user_message(

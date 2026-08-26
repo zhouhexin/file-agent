@@ -273,3 +273,41 @@ def test_summary_fallback_returns_same_results_for_equivalent_related_phrases():
         assert result_sets == [[relevant.id], [relevant.id], [relevant.id]]
     finally:
         db.close()
+
+
+def test_summary_fallback_requires_complete_protected_phrase():
+    """摘要降级不能用单独“工作”替代用户要求的完整“工作总结”。"""
+
+    db = _db_session()
+    try:
+        complete = _add_working_copy(
+            db,
+            suffix="i",
+            user_id="user-a",
+            filename="西安理工大学2025年工作总结.docx",
+            overview="本文件为学校2025年工作总结。",
+            category_path=["学校", "综合", "工作总结"],
+        )
+        _add_working_copy(
+            db,
+            suffix="j",
+            user_id="user-a",
+            filename="日常工作安排.docx",
+            overview="本文件介绍本周工作安排和具体任务。",
+            category_path=["学校", "行政", "工作安排"],
+        )
+        db.commit()
+
+        payload = WorkingCopySummarySearchService(
+            db=db,
+            user_id="user-a",
+        ).search(
+            query="帮我找学校的工作总结",
+            required_phrases=["工作总结"],
+        )
+
+        assert [item["document_id"] for item in payload["results"]] == [
+            complete.id
+        ]
+    finally:
+        db.close()

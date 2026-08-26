@@ -453,6 +453,12 @@ def _search_handler(
         requested_document_ids = list(
             getattr(tool_input, "document_ids", []) or []
         )
+        semantic_plan = getattr(tool_input, "semantic_plan", None)
+        protected_phrases = (
+            semantic_plan.protected_phrases()
+            if semantic_plan is not None
+            else []
+        )
         log_event(
             "retrieval.request.started",
             tool_name="hybrid-search",
@@ -604,12 +610,23 @@ def _search_handler(
             ).search(
                 query=search_query,
                 document_ids=explicit_document_ids,
+                required_phrases=protected_phrases,
             )
             # 摘要降级不能将“涉及”类查询表述为原文已确认；只保留候选发现能力。
             result = mark_metadata_results_as_possible(
                 result=result,
                 parsed_query=fallback_parsed,
+                protected_phrases=protected_phrases,
             )
+            if semantic_plan is not None:
+                from app.modules.retrieval.semantic_plan import (
+                    apply_semantic_result_plan,
+                )
+
+                result = apply_semantic_result_plan(
+                    result=result,
+                    plan=semantic_plan,
+                )
             log_event(
                 "retrieval.summary_fallback.completed",
                 level="WARNING" if not result.get("results") else "INFO",
@@ -817,6 +834,7 @@ def _search_handler(
                     ).search(
                         query=search_query,
                         document_ids=explicit_document_ids,
+                        required_phrases=protected_phrases,
                     )
                     from app.modules.retrieval.phrase_strategy import (
                         mark_metadata_results_as_possible,
@@ -825,7 +843,17 @@ def _search_handler(
                     result = mark_metadata_results_as_possible(
                         result=result,
                         parsed_query=parsed,
+                        protected_phrases=protected_phrases,
                     )
+                    if semantic_plan is not None:
+                        from app.modules.retrieval.semantic_plan import (
+                            apply_semantic_result_plan,
+                        )
+
+                        result = apply_semantic_result_plan(
+                            result=result,
+                            plan=semantic_plan,
+                        )
                 result["partial"] = True
                 result["user_message"] = (
                     result.get("user_message")
@@ -1113,6 +1141,12 @@ def _effective_search_conditions(
         for item in list(getattr(tool_input, "phrases", []) or [])
         if str(item).strip()
     ]
+    semantic_plan = getattr(tool_input, "semantic_plan", None)
+    semantic_phrases = (
+        semantic_plan.protected_phrases()
+        if semantic_plan is not None
+        else []
+    )
     conditions: list[dict[str, str]] = [
         {
             "label": "检索内容",
@@ -1151,9 +1185,29 @@ def _effective_search_conditions(
                 "source": "backend",
             }
         )
+    if semantic_phrases:
+        conditions.extend(
+            [
+                {
+                    "label": "完整核心短语",
+                    "value": "、".join(semantic_phrases),
+                    "condition_type": "semantic",
+                    "status": "APPLIED",
+                    "source": "backend",
+                },
+                {
+                    "label": "机构层级",
+                    "value": str(semantic_plan.scope.organization_level),
+                    "condition_type": "scope",
+                    "status": "APPLIED",
+                    "source": "backend",
+                },
+            ]
+        )
     normalized_query = re.sub(r"\s+", "", query).casefold()
     normalized_phrases = {
-        re.sub(r"\s+", "", value).casefold() for value in phrases
+        re.sub(r"\s+", "", value).casefold()
+        for value in [*phrases, *semantic_phrases]
     }
     for raw in list(getattr(tool_input, "interpreted_conditions", []) or []):
         item = raw.model_dump() if isinstance(raw, BaseModel) else dict(raw)
@@ -1379,6 +1433,78 @@ def _intersect_file_search_results(
     }
 
 
+def _intersect_required_semantic_results(
+    *,
+    original_query: str,
+    payloads: list[dict[str, Any]],
+) -> Dict[str, Any]:
+    """对结构化计划的必需短语结果求文件级交集。"""
+
+    if not payloads:
+        return {
+            "ok": True,
+            "kind": "workspace_file_search",
+            "query": original_query,
+            "total_returned": 0,
+            "partial": False,
+            "results": [],
+            "user_message": "未找到相关文件。",
+        }
+    result_maps = [
+        {
+            str(
+                item.get("working_copy_id")
+                or item.get("document_version_id")
+                or item.get("document_id")
+                or ""
+            ): item
+            for item in payload.get("results", [])
+            if isinstance(item, dict)
+        }
+        for payload in payloads
+    ]
+    shared_ids = set(result_maps[0])
+    for result_map in result_maps[1:]:
+        shared_ids.intersection_update(result_map)
+    ordered_results = [
+        item
+        for result_id, item in result_maps[0].items()
+        if result_id and result_id in shared_ids
+    ]
+    partial = any(bool(payload.get("partial")) for payload in payloads)
+    log_event(
+        "retrieval.strategy.intersection_completed",
+        level="WARNING" if partial or not ordered_results else "INFO",
+        tool_name="hybrid-search",
+        status="DEGRADED" if partial else "COMPLETED",
+        required_result_set_count=len(result_maps),
+        intersection_result_count=len(ordered_results),
+        partial=partial,
+        message="结构化必需短语文件交集计算完成",
+    )
+    return {
+        "ok": True,
+        "kind": "workspace_file_search",
+        "query": original_query,
+        "total_returned": len(ordered_results),
+        "partial": partial,
+        "candidate_limit_reached": any(
+            bool(payload.get("candidate_limit_reached"))
+            for payload in payloads
+        ),
+        "results": ordered_results,
+        "user_message": (
+            f"找到 {len(ordered_results)} 个相关文件。"
+            if ordered_results
+            else (
+                "暂未找到相关文件，部分正文索引当前不可用。"
+                if partial
+                else "未找到相关文件。"
+            )
+        ),
+    }
+
+
 def _execute_controlled_file_search(
     *,
     db: Any,
@@ -1414,6 +1540,7 @@ def _execute_controlled_file_search(
         search_service=search_service,
         tokenizer=tokenizer,
     )
+    semantic_plan = getattr(tool_input, "semantic_plan", None)
     explicit_mode = str(getattr(tool_input, "match_mode", "AUTO") or "AUTO")
     explicit_phrases = list(getattr(tool_input, "phrases", []) or [])
     if explicit_mode != "AUTO" and explicit_phrases:
@@ -1448,6 +1575,45 @@ def _execute_controlled_file_search(
     supporting_topic_terms = list(
         getattr(parsed, "supporting_topic_terms", []) or []
     )
+    if semantic_plan is not None:
+        # 模型只声明完整短语和机构层级；每个必需短语都由同一个受控检索服务
+        # 独立召回，再在文件 ID 上求交集。交集完成前不得应用普通 30 份上限。
+        required_constraints = [
+            item
+            for item in [
+                *list(semantic_plan.core_topics),
+                *list(semantic_plan.scope.organization_terms),
+            ]
+            if item.required
+        ]
+        payloads = [
+            strategy.search(
+                original_query=search_query,
+                parsed_query=parsed,
+                scope=scope,
+                phrases=[constraint.phrase],
+                require_body_evidence=False,
+                unbounded_candidates=True,
+            )
+            for constraint in required_constraints
+        ]
+        result = _intersect_required_semantic_results(
+            original_query=search_query,
+            payloads=payloads,
+        )
+        from app.modules.retrieval.semantic_plan import apply_semantic_result_plan
+
+        log_event(
+            "retrieval.strategy.selected",
+            tool_name="hybrid-search",
+            status="COMPLETED",
+            strategy="llm_structured_semantic_plan",
+            required_phrase_count=len(required_constraints),
+            organization_level=semantic_plan.scope.organization_level,
+            group_count=len(semantic_plan.group_by),
+            message="采用受控结构化语义计划执行完整短语检索",
+        )
+        return apply_semantic_result_plan(result=result, plan=semantic_plan)
     from app.modules.retrieval.event_collection import (
         EventCollectionSearchService,
         resolve_event_collection_request,

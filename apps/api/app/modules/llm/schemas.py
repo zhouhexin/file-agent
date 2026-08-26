@@ -10,6 +10,7 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.modules.agent.planner_contracts import CapabilitySuggestionDraft
+from app.modules.retrieval.semantic_plan import FileSearchSemanticPlan
 
 ALLOWED_TARGET_SCOPES = {
     "unspecified",
@@ -53,6 +54,7 @@ class UserIntentPlan(BaseModel):
     managed_filename_contains: Optional[str] = None
     managed_extension: Optional[str] = None
     managed_query: Optional[str] = None
+    file_search_plan: Optional[FileSearchSemanticPlan] = None
 
     @field_validator("target_scope")
     @classmethod

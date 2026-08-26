@@ -2722,6 +2722,16 @@ def _workspace_file_search_from_results(tool_results: List[Dict[str, Any]]) -> D
             "results": [
                 item for item in result.get("results", []) if isinstance(item, dict)
             ],
+            "semantic_plan": (
+                result.get("semantic_plan")
+                if isinstance(result.get("semantic_plan"), dict)
+                else {}
+            ),
+            "result_groups": [
+                item
+                for item in result.get("result_groups", [])
+                if isinstance(item, dict)
+            ],
             "trash_restore_selection": (
                 result.get("trash_restore_selection")
                 if isinstance(result.get("trash_restore_selection"), dict)
@@ -3015,6 +3025,16 @@ def _build_workspace_file_search_response(payload: Dict[str, Any]) -> str:
             ]
     else:
         lines = [f"找到 {len(results)} 个相关文件："]
+    result_groups = [
+        item
+        for item in payload.get("result_groups", [])
+        if isinstance(item, dict)
+    ]
+    if result_groups:
+        lines.extend(_format_semantic_search_groups(result_groups))
+        if completeness_message:
+            lines.append(completeness_message)
+        return "\n".join(lines)
     for index, item in enumerate(results, start=1):
         filename = str(item.get("filename") or "未命名文件")
         category_path = "/".join(str(value) for value in item.get("category_path", []) if value)
@@ -3033,6 +3053,47 @@ def _build_workspace_file_search_response(payload: Dict[str, Any]) -> str:
     if completeness_message:
         lines.append(completeness_message)
     return "\n".join(lines)
+
+
+def _format_semantic_search_groups(
+    groups: List[Dict[str, Any]],
+) -> List[str]:
+    """按后端已确定的机构、主题和年份分组展示文件结果。"""
+
+    organization_labels = {
+        "UNIVERSITY": "学校层面",
+        "COLLEGE": "学院层面",
+        "DEPARTMENT": "部门层面",
+        "SPECIAL_TOPIC": "专项工作",
+    }
+    lines: List[str] = []
+    item_index = 0
+    for group in groups:
+        fields = [str(value) for value in group.get("group_by", [])]
+        values = [str(value) for value in group.get("group_values", [])]
+        labels: List[str] = []
+        for field, value in zip(fields, values):
+            labels.append(
+                organization_labels.get(value, value)
+                if field == "organization_level"
+                else value
+            )
+        lines.append(f"\n### {' / '.join(labels)}")
+        for item in group.get("results", []):
+            if not isinstance(item, dict):
+                continue
+            item_index += 1
+            filename = str(item.get("filename") or "未命名文件")
+            relative_path = str(item.get("relative_path") or "").strip()
+            marker = (
+                "【可能相关】"
+                if str(item.get("relevance_tier") or "") == "POSSIBLE"
+                else ""
+            )
+            lines.append(f"{item_index}. {filename}{marker}")
+            if relative_path and relative_path != filename:
+                lines.append(f"   路径：{relative_path}")
+    return lines
 
 
 def _format_managed_file_tree(files: List[Dict[str, Any]]) -> List[str]:

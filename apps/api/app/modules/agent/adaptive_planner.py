@@ -32,6 +32,12 @@ hybrid-search 属于发现型 Tool：首次计划只执行检索，观察命中�
 观察的 result_status=\"POSSIBLE_ONLY\" 表示仅有未验证候选；此时不得调用 evidence-answer
 读取这些候选，也不得把它们描述为相关事实。可以 FINISH 展示候选、调整查询或请求用户补充条件。
 重新检索必须改变 query、match_mode 或 phrases，不能重复相同输入。
+首次调用 hybrid-search 时应优先在 literal_input.semantic_plan 中表达完整主题：
+- “学校的工作总结”的 core_topics 使用完整“工作总结”，不得拆成“工作”和“总结”；
+- 此处“学校”默认是当前学校工作区，不是每份文件必须包含的字面词；scope.organization_level 使用
+  ANY，可偏好 UNIVERSITY，并按 organization_level、business_topic、year 分组；
+- 只有“只找学校层面/校级”才把 organization_level 设为 UNIVERSITY；明确的学院或部门名称才放入
+  organization_terms；不得在 semantic_plan 中生成路径、SQL、document_id 或文件事实。
 当前消息包含完整文件名时，该名称是不能放宽的文件范围；不得借用上一轮 search_context 扩大范围。
 询问“分类为何成立、为什么归到某类”时读取 read-document-classifications；询问正文与某主题的关系、
 文件内容、总结或具体事实时使用 evidence-answer。需要先确定文件时先 hybrid-search，观察真实

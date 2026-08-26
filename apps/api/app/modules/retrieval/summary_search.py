@@ -59,6 +59,7 @@ class WorkingCopySummarySearchService:
         query: str,
         document_ids: list[str] | None = None,
         limit: int = 10,
+        required_phrases: list[str] | None = None,
     ) -> dict[str, Any]:
         """返回按相关度排序的工作副本，不暴露原始文件名和内部处理状态。"""
 
@@ -68,6 +69,11 @@ class WorkingCopySummarySearchService:
         cleaned_query = normalize_file_search_query(query)
         normalized_query = _normalize_text(cleaned_query)
         terms = _query_terms(cleaned_query)
+        protected_phrases = [
+            _normalize_text(value)
+            for value in list(required_phrases or [])
+            if _normalize_text(value)
+        ]
         if not normalized_query or not terms:
             log_event(
                 "retrieval.summary_search.completed",
@@ -95,6 +101,7 @@ class WorkingCopySummarySearchService:
                 suggestion=suggestion,
                 normalized_query=normalized_query,
                 terms=terms,
+                required_phrases=protected_phrases,
             )
             if scored is not None:
                 ranked.append(scored)
@@ -112,6 +119,7 @@ class WorkingCopySummarySearchService:
             workspace_id=self.workspace_id,
             cleaned_query_chars=len(cleaned_query),
             query_term_count=len(terms),
+            protected_phrase_count=len(protected_phrases),
             scoped_document_count=len(document_ids or []),
             candidate_count=len(candidates),
             result_count=len(result_rows),
@@ -193,6 +201,7 @@ def _score_candidate(
     suggestion: DocumentCategorySuggestion | None,
     normalized_query: str,
     terms: list[str],
+    required_phrases: list[str] | None = None,
 ) -> tuple[float, dict[str, Any]] | None:
     """按最终文件名、分类和普通摘要计算可解释的确定性得分。"""
 
@@ -207,6 +216,14 @@ def _score_candidate(
     )
     category_path = [str(item) for item in (suggestion.category_path_json if suggestion else [])]
     category_text = _normalize_text(" ".join(category_path))
+    # 降级链路仍可使用 n-gram 参与排序，但所有必需短语必须先在同一文件的
+    # 文件名、摘要或分类中连续出现，不能让单独“工作”替代“工作总结”。
+    searchable_text = " ".join([filename_text, summary_text, category_text])
+    if any(
+        phrase not in searchable_text
+        for phrase in list(required_phrases or [])
+    ):
+        return None
     score = 0.0
     reasons: list[str] = []
 

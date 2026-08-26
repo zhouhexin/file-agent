@@ -734,20 +734,27 @@ class Stage1DocumentRecallService:
         # LEFT JOIN，否则两组一对多记录会相乘，候选很少也可能超过 SQL 超时。
         # 受管根和源文件都是一对一关系，可在基础查询中读取安全逻辑位置；
         # 绝不向检索结果透传容器绝对路径。
-        base_rows = (
-            self.db.query(WorkingCopy, Document, ManagedFile, ManagedRoot)
-            .join(Document, Document.id == WorkingCopy.document_id)
-            # 逻辑原始路径用于让同名文件可区分；外连接兼容历史工作副本和
-            # SQLite 测试数据中尚未补齐 ManagedFile 的记录，绝不因此丢失结果。
-            .outerjoin(ManagedFile, ManagedFile.id == WorkingCopy.managed_file_id)
-            .outerjoin(ManagedRoot, ManagedRoot.id == ManagedFile.root_id)
-            .filter(
-                WorkingCopy.id.in_(wc_ids),
-                WorkingCopy.workspace_id == self.workspace_id,
-                WorkingCopy.status == "ACTIVE",
+        # 取消交集前候选上限后，单个巨大 IN 查询容易触发 PostgreSQL statement
+        # timeout。显示字段只读富化按固定批次执行，既保留完整候选，也避免一次
+        # JOIN 扫描数百个工作副本。
+        batch_size = 100
+        base_rows = []
+        for offset in range(0, len(wc_ids), batch_size):
+            batch_ids = wc_ids[offset : offset + batch_size]
+            base_rows.extend(
+                self.db.query(WorkingCopy, Document, ManagedFile, ManagedRoot)
+                .join(Document, Document.id == WorkingCopy.document_id)
+                # 逻辑原始路径用于让同名文件可区分；外连接兼容历史工作副本和
+                # SQLite 测试数据中尚未补齐 ManagedFile 的记录，绝不因此丢失结果。
+                .outerjoin(ManagedFile, ManagedFile.id == WorkingCopy.managed_file_id)
+                .outerjoin(ManagedRoot, ManagedRoot.id == ManagedFile.root_id)
+                .filter(
+                    WorkingCopy.id.in_(batch_ids),
+                    WorkingCopy.workspace_id == self.workspace_id,
+                    WorkingCopy.status == "ACTIVE",
+                )
+                .all()
             )
-            .all()
-        )
         version_pairs = list(
             dict.fromkeys(
                 (str(document.id), str(working_copy.current_version_id))
@@ -755,39 +762,39 @@ class Stage1DocumentRecallService:
                 if working_copy.current_version_id
             )
         )
-        summaries = (
-            self.db.query(DocumentSummary)
-            .filter(
-                tuple_(
-                    DocumentSummary.document_id,
-                    DocumentSummary.document_version_id,
-                ).in_(version_pairs),
-                DocumentSummary.status == "COMPLETED",
+        summaries = []
+        suggestions = []
+        for offset in range(0, len(version_pairs), batch_size):
+            batch_pairs = version_pairs[offset : offset + batch_size]
+            summaries.extend(
+                self.db.query(DocumentSummary)
+                .filter(
+                    tuple_(
+                        DocumentSummary.document_id,
+                        DocumentSummary.document_version_id,
+                    ).in_(batch_pairs),
+                    DocumentSummary.status == "COMPLETED",
+                )
+                .order_by(DocumentSummary.updated_at.desc())
+                .all()
             )
-            .order_by(DocumentSummary.updated_at.desc())
-            .all()
-            if version_pairs
-            else []
-        )
-        suggestions = (
-            self.db.query(DocumentCategorySuggestion)
-            .filter(
-                tuple_(
-                    DocumentCategorySuggestion.document_id,
-                    DocumentCategorySuggestion.document_version_id,
-                ).in_(version_pairs),
-                DocumentCategorySuggestion.status.in_(
-                    ["SUGGESTED", "AUTO_APPLIED", "CONFIRMED"]
-                ),
+            suggestions.extend(
+                self.db.query(DocumentCategorySuggestion)
+                .filter(
+                    tuple_(
+                        DocumentCategorySuggestion.document_id,
+                        DocumentCategorySuggestion.document_version_id,
+                    ).in_(batch_pairs),
+                    DocumentCategorySuggestion.status.in_(
+                        ["SUGGESTED", "AUTO_APPLIED", "CONFIRMED"]
+                    ),
+                )
+                .order_by(
+                    DocumentCategorySuggestion.rank.asc(),
+                    DocumentCategorySuggestion.updated_at.desc(),
+                )
+                .all()
             )
-            .order_by(
-                DocumentCategorySuggestion.rank.asc(),
-                DocumentCategorySuggestion.updated_at.desc(),
-            )
-            .all()
-            if version_pairs
-            else []
-        )
         summary_by_version: dict[tuple[str, str], DocumentSummary] = {}
         for summary in summaries:
             summary_by_version.setdefault(

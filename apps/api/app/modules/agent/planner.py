@@ -30,6 +30,10 @@ from app.modules.file_lifecycle.conversation_intents import (
     is_target_only_rename_request,
 )
 from app.modules.llm.schemas import UserIntentPlan
+from app.modules.retrieval.semantic_plan import (
+    FileSearchSemanticPlan,
+    build_deterministic_semantic_plan,
+)
 
 
 FORBIDDEN_INPUT_KEYS = {
@@ -1045,6 +1049,7 @@ def build_plan_from_user_intent(
             response_style=intent_plan.response_style,
             clarification_question=intent_plan.clarification_question,
             llm_intent_plan=intent_plan.model_dump(),
+            semantic_plan=intent_plan.file_search_plan,
         )
     if _has_explicit_filename_lookup_intent(message) and not attachments:
         return _file_search_plan(
@@ -1686,10 +1691,16 @@ def _file_search_plan(
     response_style: str = "concise",
     clarification_question: str | None = None,
     llm_intent_plan: Dict[str, Any] | None = None,
+    semantic_plan: FileSearchSemanticPlan | None = None,
 ) -> PlannerOutput:
     """生成面向当前用户工作副本的摘要优先文件检索计划。"""
 
     scoped_document_ids = document_ids or []
+    # LLM 可通过严格 schema 选择完整核心短语；模型关闭或未提供计划时，只对
+    # 后端能够确定识别的常见复合文种生成保护计划，不能把任意猜测传给 Tool。
+    effective_semantic_plan = semantic_plan or build_deterministic_semantic_plan(
+        query
+    )
     log_event(
         "retrieval.planner.file_search_plan",
         status="COMPLETED",
@@ -1697,6 +1708,7 @@ def _file_search_plan(
         query_chars=len(str(query or "")),
         scoped_document_count=len(scoped_document_ids),
         response_style=response_style,
+        semantic_plan_enabled=effective_semantic_plan is not None,
         has_clarification_question=bool(clarification_question),
         source=(
             str((llm_intent_plan or {}).get("source") or "")
@@ -1721,7 +1733,17 @@ def _file_search_plan(
                 "step_id": "step-file-search",
                 "skill": "file-search",
                 "tool_name": "hybrid-search",
-                "input": {"query": query, "document_ids": scoped_document_ids},
+                "input": {
+                    "query": query,
+                    "document_ids": scoped_document_ids,
+                    **(
+                        {
+                            "semantic_plan": effective_semantic_plan.model_dump()
+                        }
+                        if effective_semantic_plan is not None
+                        else {}
+                    ),
+                },
                 "requires_confirmation": False,
                 "risk_level": "low",
                 "expected_outputs": ["ranked_working_copies"],

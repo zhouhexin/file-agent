@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.modules.retrieval.semantic_plan import FileSearchSemanticPlan
+
 
 class ToolInputValidationError(ValueError):
     """Tool 输入参数未通过 schema 校验时抛出。"""
@@ -206,12 +208,14 @@ class SearchConditionInput(StrictToolInput):
 class SearchToolInput(StrictToolInput):
     """检索类 Tool 的输入。
 
-    普通 Planner 只提供 query 和 document_ids。其余字段只允许后端在用户解决已持久化
-    歧义选择后生成，不能由前端直接提交短语数组绕过选择校验。
+    普通 Planner 提供 query、document_ids 和经过 schema 校验的 semantic_plan。
+    match_mode、phrases 等续跑字段只允许后端在用户解决已持久化歧义选择后生成，
+    不能由前端直接提交短语数组绕过选择校验。
     """
 
     query: str = Field(min_length=1, max_length=500)
     document_ids: List[str] = Field(default_factory=list)
+    semantic_plan: FileSearchSemanticPlan | None = None
     match_mode: Literal["AUTO", "LITERAL", "RELATED", "BROAD"] = "AUTO"
     phrases: List[str] = Field(default_factory=list, max_length=8)
     require_body_evidence: bool | None = None

@@ -142,6 +142,8 @@ class WorkspaceFileSearchToolOutput(GenericToolOutput):
     possible_count: int | None = Field(default=None, ge=0)
     partial: bool = False
     results: list[dict[str, Any]] = Field(default_factory=list)
+    semantic_plan: dict[str, Any] | None = None
+    result_groups: list[dict[str, Any]] = Field(default_factory=list)
     document_ids: list[str] = Field(default_factory=list, max_length=100)
     effective_conditions: list[SearchEffectiveCondition] = Field(
         default_factory=list,

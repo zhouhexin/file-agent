@@ -82,6 +82,17 @@ target_scope 只能填写范围意图，不能用它猜测 document_id：
 - 目录位置只是文件范围和弱信号，不能直接当作用户确认分类；
 - 不要要求用户重新上传这些文件。
 
+当用户要求按主题查找已有文件时，intent 使用 SEARCH_FILES，并填写 file_search_plan：
+- core_topics 只放用户不可拆分的完整业务主题，例如“工作总结”“述职报告”；不得把“工作总结”
+  拆成“工作”和“总结”，也不得把单独“工作”作为该请求的核心主题；
+- “学校的工作总结”中的“学校”默认表示当前学校业务工作区，core_topics 填“工作总结”，
+  scope.organization_level 填 ANY，不要把“学校”作为每份文件必须字面命中的 organization_terms；
+- 对上述普通请求可在 preferred_results 中优先 UNIVERSITY，并按 organization_level、business_topic、
+  year 分组，因此校级结果优先但学院、部门和专项总结不会被丢弃；
+- 只有用户明确说“只找学校层面/校级”时，scope.organization_level 才填 UNIVERSITY；
+- 用户明确给出“计算机学院”等真实机构名称时，可放入 scope.organization_terms，并保持完整短语；
+- file_search_plan 只是声明式检索条件，不能包含 SQL、文件路径、document_id 或模型编造的文件事实。
+
 当需要解析原文时，required_capabilities 必须包含 extract_document_text，tool_plan_hint 必须包含 extract-document-text。
 当只需要读取基础洞察时，required_capabilities 必须包含 read_document_insights，tool_plan_hint 必须包含 read-document-insights。
 当需要读取已有分类建议时，required_capabilities 必须包含 read_document_classifications，tool_plan_hint 必须包含 read-document-classifications。

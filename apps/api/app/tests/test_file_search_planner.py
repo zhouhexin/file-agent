@@ -14,6 +14,7 @@ from app.modules.agent.planner import DeterministicPlanner, build_plan_from_user
 from app.modules.agent.service import AgentRuntimeService
 from app.modules.agent.state import ToolInvocationRecord
 from app.modules.llm.schemas import UserIntentPlan
+from app.modules.retrieval.semantic_plan import FileSearchSemanticPlan
 
 
 def test_deterministic_planner_routes_natural_language_file_search():
@@ -74,6 +75,31 @@ def test_relative_time_work_summary_routes_to_hybrid_search_not_directory_list()
 
     assert plan.intent == "SEARCH_FILES"
     assert plan.steps[0].tool_name == "hybrid-search"
+
+
+def test_school_work_summary_builds_protected_grouped_semantic_plan():
+    """“工作总结”必须作为完整主题，普通“学校”只表示业务域和排序偏好。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conversation-school-summary",
+        user_id="user-school-summary",
+        message_id="message-school-summary",
+        message="帮我找学校的工作总结",
+        attachments=[],
+    )
+
+    semantic_plan = FileSearchSemanticPlan.model_validate(
+        plan.steps[0].input["semantic_plan"]
+    )
+    assert [item.phrase for item in semantic_plan.core_topics] == ["工作总结"]
+    assert semantic_plan.scope.organization_level == "ANY"
+    assert semantic_plan.scope.organization_terms == []
+    assert semantic_plan.preferred_results[0].organization_level == "UNIVERSITY"
+    assert semantic_plan.group_by == [
+        "organization_level",
+        "business_topic",
+        "year",
+    ]
 
 
 def test_deterministic_planner_routes_list_and_article_search_phrases():
@@ -227,6 +253,49 @@ def test_llm_search_intent_is_converted_to_controlled_search_plan():
     assert plan.steps[0].input["query"] == "干部考察结果报告"
 
 
+def test_llm_search_plan_is_passed_to_tool_after_schema_validation():
+    """LLM 选择关键词时只能通过严格语义计划进入检索 Tool。"""
+
+    plan = build_plan_from_user_intent(
+        intent_plan=UserIntentPlan.model_validate(
+            {
+                "intent": "SEARCH_FILES",
+                "user_goal": "查找学校工作总结",
+                "required_capabilities": ["file_search"],
+                "tool_plan_hint": ["hybrid-search"],
+                "managed_query": "学校的工作总结",
+                "file_search_plan": {
+                    "core_topics": [
+                        {
+                            "phrase": "工作总结",
+                            "required": True,
+                            "match_mode": "EXACT_PHRASE",
+                        }
+                    ],
+                    "scope": {
+                        "type": "CURRENT_SCHOOL_WORKSPACE",
+                        "organization_level": "ANY",
+                        "organization_terms": [],
+                    },
+                    "preferred_results": [
+                        {"organization_level": "UNIVERSITY", "boost": 1.0}
+                    ],
+                    "group_by": ["organization_level", "year"],
+                    "response_style": "GROUPED_FILE_LIST",
+                },
+            }
+        ),
+        message="帮我找学校的工作总结",
+        attachments=[],
+    )
+
+    semantic_plan = plan.steps[0].input["semantic_plan"]
+    assert semantic_plan["core_topics"][0]["phrase"] == "工作总结"
+    assert "工作" not in [
+        item["phrase"] for item in semantic_plan["core_topics"]
+    ]
+
+
 def test_relative_time_search_overrides_llm_directory_list_misclassification():
     """相对时间检索不能因模型误判而退化为展示整个受管目录。"""
 
@@ -281,6 +350,12 @@ def test_explicit_year_file_search_overrides_llm_summary_misclassification():
 
     assert plan.intent == "SEARCH_FILES"
     assert plan.steps[0].tool_name == "hybrid-search"
+    semantic_plan = FileSearchSemanticPlan.model_validate(
+        plan.steps[0].input["semantic_plan"]
+    )
+    assert [
+        item.phrase for item in semantic_plan.scope.organization_terms
+    ] == ["计算机学院"]
 
 
 def test_work_summary_search_is_not_treated_as_document_summary():
