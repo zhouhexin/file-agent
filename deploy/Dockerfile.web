@@ -7,8 +7,9 @@ WORKDIR /app/apps/web
 
 COPY apps/web/package.json apps/web/package-lock.json ./
 
+ARG NPM_REGISTRY=https://registry.npmmirror.com
 RUN --mount=type=cache,target=/root/.npm \
-    npm ci --prefer-offline --no-audit --fund=false
+    npm ci --prefer-offline --no-audit --fund=false --registry="${NPM_REGISTRY}"
 COPY apps/web/ ./
 
 ARG VITE_API_BASE_URL=/api

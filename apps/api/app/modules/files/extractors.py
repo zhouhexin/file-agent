@@ -14,7 +14,6 @@ from typing import Any, Dict, List
 from app.core.config import get_settings
 from app.modules.files.docling_parser import docling_runtime_version, try_parse_with_docling
 from app.modules.ocr.service import build_default_ocr_service
-from app.modules.spreadsheet_analysis.conversion import SpreadsheetConversionError, convert_xls_to_xlsx
 
 
 class PDFExtractorUnavailableError(RuntimeError):
@@ -252,33 +251,13 @@ def _extract_excel_text(file_path: Path) -> Dict[str, Any]:
 
 
 def _extract_legacy_xls_text(file_path: Path) -> Dict[str, Any]:
-    """把旧版 XLS 隔离转换为临时 XLSX 后再读取，禁止直接解析原件。"""
+    """拒绝绕过统一 Resolver 临时转换 XLS；生产调用必须先取得持久化 XLSX。"""
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        try:
-            converted_path = convert_xls_to_xlsx(
-                source_path=file_path,
-                output_dir=Path(temp_dir),
-            )
-        except SpreadsheetConversionError as exc:
-            return _failed(
-                "excel-xls",
-                exc.code,
-                exc.message,
-            )
-
-        result = _extract_excel_text(converted_path)
-
-    if not result.get("ok"):
-        result["extractor"] = "excel-xls-converted"
-        return result
-
-    result["extractor"] = "excel-xls-converted"
-    for page in result.get("pages", []):
-        metadata = page.setdefault("metadata", {})
-        metadata["converted_from"] = ".xls"
-        metadata["converter"] = "libreoffice"
-    return result
+    return _failed(
+        "excel-xls",
+        "XLS_PERSISTENT_DERIVATIVE_REQUIRED",
+        "旧版 XLS 必须先生成可追溯的持久化 XLSX 派生件后才能读取。",
+    )
 
 
 def _extract_docx_text(file_path: Path) -> Dict[str, Any]:

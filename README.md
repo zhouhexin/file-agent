@@ -28,6 +28,8 @@ File Agent 不是传统网盘，也不是只会问答的知识库系统。用户
 - `docs/neo4j-graph-classification-v2-implementation-plan.md`：真实图谱验证、相似文件语义召回和 Shadow 评测方案。
 - `docs/runbook.md`：本地启动、验证和当前可用接口。
 - `docs/file-agent-manual-smoke-test.md`：整项目真实文件系统手工烟测步骤、通过标准和记录模板。
+- `docs/windows11-full-cpu-docker-deployment-plan.md`：Windows 11、6 核/32GB、全图片能力 CPU 容器部署方案。
+- `deploy/README.md`：联网构建、完整离线镜像导出/导入和生产运维命令。
 
 ## 本地运行
 
@@ -59,7 +61,7 @@ python -m pytest
 文件生命周期固定使用三层名词：`受管原始目录`保存不可变原始文件，`工作副本目录`承载 Agent 的增删改查，`回收站目录`保存可恢复的工作副本删除结果。重命名和移动只改变工作副本路径，不新增 `DocumentVersion`；原始文件始终不变。普通用户可以在 `/chat` 通过自然语言处理同名冲突、移入回收站和恢复文件，所有物理动作都必须先展示并确认 OperationPlan。
 所有用户共用唯一物理工作目录：受管资料和上传归档每个文件只导入一份，固定保存于 `shared/<root_key>`，不再按用户 default workspace 复制。所有普通用户可以检索和读取共享 `ACTIVE` 工作副本；用户 default workspace 仍只保存并隔离会话、个人附件上下文、上传来源、反馈和审计。共享目录上的改名、移动、回收站和恢复计划会明确提示其影响范围，仍须由发起用户确认。
 服务端结构化日志默认保存到 `LOG_DIR=./logs`，按天生成 `file-agent-YYYY-MM-DD.log`，启动时会删除超过 `LOG_RETENTION_DAYS=7` 天的日志。
-旧版 `.xls` 不再通过 `xlrd` 直读：系统必须先用 LibreOffice/`soffice` 在隔离临时目录和独立 profile 中转换为临时 `.xlsx`，校验输出后再由 `openpyxl` 解析全部工作表。转换器缺失或输出无效时返回结构化失败，原 `.xls` 字节不变，临时 `.xlsx` 不登记为上传原件。
+旧版 `.doc/.xls` 不再通过不可靠的旧格式直读：系统使用 LibreOffice/`soffice` 在隔离目录和独立 profile 中转换，经 OOXML 与对应解析器校验后，发布为关联 `DocumentVersion` 的 `CONVERTED_DOCX/CONVERTED_XLSX` 持久化派生件。正文抽取、Profile、统计分析、公式校验和重命名分析复用同一派生件；转换器缺失且没有有效历史派生件时返回结构化失败，原件字节始终不变。
 上传采用分块流式写入，`UPLOAD_MAX_FILE_SIZE_MB` 是可按部署容量调整的资源保护上限，默认 1024 MB，并非固定业务限制。当前阶段只执行扩展名、基础 MIME、宏和加密风险检查，不实现、也不宣称已执行病毒扫描。
 PDF、DOCX 默认启用本地 Docling 结构化解析，并把文档元素和位置写入 `document_elements`；Docling 不可用时自动回退现有解析器，扫描件仍由现有 OCR 链路处理。
 文件重命名统一生成 `RENAME_WORKING_COPIES` OperationPlan，确认后由工作副本执行器执行；旧的受管原始文件 Native/F2 执行通道和上传暂存重命名通道不再对 Agent 开放。

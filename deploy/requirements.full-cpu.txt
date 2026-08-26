@@ -1,0 +1,13 @@
+# Windows 11 / Linux container 全功能 CPU 镜像依赖。
+# 生产镜像固定重量级运行时版本，避免包升级后模型仓库与缓存布局漂移。
+-r ../requirements.txt
+-r ../requirements-graph.txt
+
+docling==2.120.3
+huggingface-hub==1.28.0
+paddlepaddle==3.3.1
+paddlex[ocr]==3.7.2
+paddleocr[doc-parser]==3.7.0
+sentence-transformers==5.7.0
+neo4j==6.2.0
+neo4j-graphrag==1.18.0

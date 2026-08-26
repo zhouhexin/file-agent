@@ -223,6 +223,10 @@ class DocumentVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     document: Mapped[Document] = relationship(back_populates="versions", foreign_keys=[document_id])
+    artifacts: Mapped[List["DocumentArtifact"]] = relationship(
+        back_populates="document_version",
+        foreign_keys="DocumentArtifact.document_version_id",
+    )
 
 
 class DocumentArtifact(Base):
@@ -237,10 +241,24 @@ class DocumentArtifact(Base):
             "converter_config_hash",
             name="uq_document_artifacts_source_config",
         ),
+        UniqueConstraint(
+            "document_version_id",
+            "artifact_type",
+            "source_sha256",
+            "converter_config_hash",
+            name="uq_document_artifacts_version_source_config",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     document_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False, index=True)
+    # 历史 DOC 派生件迁移期间允许为空；所有新 Office 派生件必须显式绑定内容版本。
+    document_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("document_versions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     artifact_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     storage_backend: Mapped[str] = mapped_column(String(40), nullable=False, default="local")
     storage_path: Mapped[str] = mapped_column(Text, nullable=False)
@@ -251,10 +269,19 @@ class DocumentArtifact(Base):
     converter_name: Mapped[str] = mapped_column(String(80), nullable=False)
     converter_version: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     converter_config_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    metadata_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+        default=dict,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
     document: Mapped[Document] = relationship(back_populates="artifacts")
+    document_version: Mapped[Optional[DocumentVersion]] = relationship(
+        back_populates="artifacts",
+        foreign_keys=[document_version_id],
+    )
 
 
 class DocumentInsight(Base):

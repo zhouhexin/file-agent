@@ -267,6 +267,12 @@ retrieval_filename_trgm_candidate_limit: int = 20
 retrieval_filename_trgm_similarity_threshold: float = 0.25
 ```
 
+候选上限只适用于普通单条件检索。聊天检索把请求解析为“机构范围 × 文件主题”或
+其他需要先分别召回、再按文件 ID 取交集的两个完整条件时，两侧文件级索引召回、
+Chunk 补召回和受管源侧召回都不得应用文件数量上限，避免真实交集文件因单侧排名
+低于前 30 名而提前丢失。该例外只作用于交集计算前的候选文件集合；Chunk 详情与
+证据投影仍保持既有上限，最终结果超过 20 份时仍由聊天入口请求用户确认是否全部展示。
+
 #### 4.1.6 测试（测试先行）
 
 文件：`apps/api/app/tests/test_document_search_profile_service.py`

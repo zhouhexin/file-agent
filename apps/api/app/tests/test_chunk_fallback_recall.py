@@ -222,6 +222,46 @@ def test_search_respects_inactive_working_copies():
         db.close()
 
 
+def test_fallback_recall_can_keep_all_versions_before_intersection():
+    """交集专用 Chunk 补召回不应用版本数和 Chunk 数候选上限。"""
+
+    db = _db_session()
+    try:
+        for index in range(12):
+            _setup_indexed_doc(
+                db,
+                suffix=f"all-{index}",
+                user_id="user1",
+                workspace_id="ws1",
+                chunk_text="学校年度工作总结",
+            )
+        db.commit()
+
+        service = DocumentChunkLexicalSearchService(
+            db=db,
+            user_id="user1",
+            workspace_id="ws1",
+        )
+        bounded = service.fallback_recall(
+            query="工作总结",
+            workspace_id="ws1",
+            max_versions=3,
+            limit_chunks=3,
+        )
+        unbounded = service.fallback_recall(
+            query="工作总结",
+            workspace_id="ws1",
+            max_versions=3,
+            limit_chunks=3,
+            unbounded_candidates=True,
+        )
+
+        assert len(bounded) == 3
+        assert len(unbounded) == 12
+    finally:
+        db.close()
+
+
 def test_evidence_projector_returns_page_number():
     """EvidenceProjector 返回 PDF 页码。"""
 

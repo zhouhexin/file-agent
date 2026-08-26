@@ -197,6 +197,7 @@ class ManagedSourceAnalysisService:
             extraction = _extract_managed_source_document(
                 db=self.db,
                 document=document,
+                document_version=version,
                 source_path=path,
             )
             extraction = _prepare_image_metadata_extraction(
@@ -558,12 +559,14 @@ def _extract_managed_source_document(
     *,
     db: Session,
     document: Document,
+    document_version: DocumentVersion,
     source_path: Path,
 ) -> dict[str, Any]:
-    """通过统一可读源解析受管原件，使旧 DOC 复用显式 LibreOffice 配置。"""
+    """通过统一可读源解析受管原件，使旧 DOC/XLS 复用版本级持久化派生件。"""
 
     readable_source = ReadableDocumentSourceResolver(db=db).resolve(
         document=document,
+        document_version=document_version,
         original_path=source_path,
     )
     extraction = extract_document_text(

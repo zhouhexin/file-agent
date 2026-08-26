@@ -906,6 +906,7 @@ def test_persist_changeset_records_docx_derivative_creation_and_reuse():
             "page_count": 1,
             "categories": [],
             "conversion_artifact_id": "artifact-id",
+            "conversion_artifact_type": "CONVERTED_DOCX",
             "conversion_converter": "libreoffice",
             "conversion_converter_version": "test",
             "conversion_source_format": "doc",
@@ -928,11 +929,31 @@ def test_persist_changeset_records_docx_derivative_creation_and_reuse():
         assert len(reused_items) == 1
         assert reused_items[0].after_value_json == {
             "artifact_id": "artifact-id",
+            "artifact_type": "CONVERTED_DOCX",
             "converter": "libreoffice",
             "converter_version": "test",
             "source_format": "doc",
             "parsed_format": "docx",
         }
+
+        xls_result = {
+            **base_result,
+            "conversion_artifact_type": "CONVERTED_XLSX",
+            "conversion_source_format": "xls",
+            "conversion_parsed_format": "xlsx",
+            "conversion_reused": False,
+        }
+        persist_changeset_from_document_results(
+            db=db,
+            run=run,
+            document_results=[xls_result],
+        )
+        assert (
+            db.query(ChangeItem)
+            .filter(ChangeItem.change_type == "XLSX_DERIVATIVE_CREATED")
+            .count()
+            == 1
+        )
     finally:
         db.close()
         app.dependency_overrides.clear()

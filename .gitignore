@@ -6,6 +6,8 @@
 !deploy/.env.production.example
 __pycache__/
 .pytest_cache/
+.t[0-9a-f]*/
+fa-pytest-*/
 .venv/
 node_modules/
 dist/
@@ -14,4 +16,7 @@ build/
 *.tsbuildinfo
 storage/
 logs/
+data/build-model-cache/
+file-agent-offline-images/
+.docker-temp/
 *.log

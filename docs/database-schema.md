@@ -432,12 +432,13 @@ create table document_pages (
 
 ### 4.9 document_versions
 
-当前实现先以不可变 `Document.id + sha256` 作为源文件版本，并使用下表保存可跨解析运行复用的旧版 Office 派生件。后续正式引入 `document_versions` 时，再把 `document_artifacts.document_id` 平滑扩展为版本关联。
+当前实现使用 `DocumentVersion + source_sha256 + converter_config_hash` 标识旧版 Office 派生件谱系；历史记录迁移期允许 `document_version_id` 为空，但所有新 `.doc/.xls` 转换都必须关联明确版本。
 
 ```sql
 create table document_artifacts (
   id varchar(36) primary key,
   document_id varchar(36) not null references documents(id),
+  document_version_id varchar(36) null references document_versions(id) on delete cascade,
   artifact_type varchar(50) not null,
   storage_backend varchar(40) not null default 'local',
   storage_path text not null,
@@ -448,13 +449,15 @@ create table document_artifacts (
   converter_name varchar(80) not null,
   converter_version varchar(120) not null default '',
   converter_config_hash varchar(64) not null,
+  metadata_json jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique (document_id, artifact_type, source_sha256, converter_config_hash)
+  unique (document_id, artifact_type, source_sha256, converter_config_hash),
+  unique (document_version_id, artifact_type, source_sha256, converter_config_hash)
 );
 ```
 
-`CONVERTED_DOCX` 记录只保存相对 `FILE_STORAGE_ROOT` 的路径。相同源哈希和转换指纹可以跨 Document 复用同一物理文件，但每个 Document 必须保留独立记录；最后一个引用删除后才能删除物理派生件。
+`CONVERTED_DOCX` 和 `CONVERTED_XLSX` 只保存相对 `FILE_STORAGE_ROOT` 的路径。相同源哈希和转换指纹可以跨 DocumentVersion 复用同一物理文件，但每个版本必须保留独立记录；最后一个引用删除后才能删除物理派生件。
 
 ```sql
 create table document_versions (

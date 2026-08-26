@@ -1,7 +1,8 @@
 ﻿[CmdletBinding()]
 param(
     [string]$PackageZip,
-    [switch]$SkipGitPull
+    [switch]$SkipGitPull,
+    [switch]$UsePrebuiltImages
 )
 
 $ErrorActionPreference = "Stop"
@@ -103,6 +104,40 @@ try {
         git pull
     }
 
-    docker compose --env-file $EnvFile -f $ComposeFile up -d --build
+    docker compose --env-file $EnvFile -f $ComposeFile config --quiet
+
+    if ($UsePrebuiltImages) {
+        Write-Host "使用已导入的完整离线镜像。" -ForegroundColor Cyan
+    } else {
+        Write-Host "重新构建应用镜像并核对预下载模型；首次执行耗时较长。" -ForegroundColor Cyan
+        docker compose --env-file $EnvFile -f $ComposeFile pull postgres neo4j
+        docker compose --env-file $EnvFile -f $ComposeFile build api gateway
+    }
+
+    # migrate 是一次性容器；更新时必须重新创建，不能复用上一次的已完成状态。
+    docker compose --env-file $EnvFile -f $ComposeFile rm -f migrate 2>$null
+    if ($UsePrebuiltImages) {
+        docker compose --env-file $EnvFile -f $ComposeFile up -d --no-build --pull never
+    } else {
+        docker compose --env-file $EnvFile -f $ComposeFile up -d --no-build
+    }
+
+    Write-Host "等待更新后的 API 健康检查..." -ForegroundColor Cyan
+    $healthy = $false
+    for ($i = 1; $i -le 36; $i++) {
+        $apiContainer = docker compose --env-file $EnvFile -f $ComposeFile ps -q api
+        if ($apiContainer) {
+            $health = docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' $apiContainer
+            if ($health -eq "healthy") { $healthy = $true; break }
+        }
+        Start-Sleep -Seconds 5
+    }
+    if (-not $healthy) {
+        docker compose --env-file $EnvFile -f $ComposeFile logs --tail 120 api
+        throw "更新后的 API 未通过健康检查。"
+    }
+    docker compose --env-file $EnvFile -f $ComposeFile exec -T api `
+        python /app/deploy/scripts/verify_runtime.py --managed-root
+    if ($LASTEXITCODE -ne 0) { throw "更新后的容器依赖、模型或受管目录校验失败。" }
     docker compose --env-file $EnvFile -f $ComposeFile ps
 } finally { Pop-Location }

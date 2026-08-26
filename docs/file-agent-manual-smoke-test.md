@@ -170,7 +170,7 @@ PYTHONPATH=apps/api \
 ```
 
 如果目标环境没有 LibreOffice，必须把 `.doc`、`.xls` 用例记为“环境阻塞”，不能记为通过，也不能用
-`xlrd` 或文件名推断替代真实 `.xls -> 临时 .xlsx -> openpyxl` 验证。
+`xlrd` 或文件名推断替代真实 `.xls -> CONVERTED_XLSX -> openpyxl` 验证。
 
 ## 5. 启动顺序
 
@@ -437,7 +437,7 @@ curl -sS http://127.0.0.1:8000/api/working-copies/<working_copy_id>/versions \
 通过标准：
 
 - `.doc` 生成可追溯的 `.docx` 派生件，重新读取可以复用。
-- `.xls` 使用独立输入、输出和 LibreOffice profile 转为临时 `.xlsx`。
+- `.xls` 使用独立输入、输出和 LibreOffice profile 转换，并发布为版本级持久化 `.xlsx` 派生件。
 - `.xls` 的全部 Sheet 都可以读取，不能只读取第一个 Sheet。
 - 临时 `.xlsx` 不登记为新的上传原件或 DocumentVersion。
 - 原 `.doc`、`.xls` 字节不变。

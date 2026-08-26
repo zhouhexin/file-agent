@@ -332,14 +332,21 @@ class RenameSuggestionService:
                     extraction_result,
                 )
             document = self.db.get(Document, document_id)
+            source_repository = FileExtractionRepository(self.db, self.user_id)
             resolved_source = (
-                FileExtractionRepository(self.db, self.user_id).resolve_original_file_for_document(document)
+                source_repository.resolve_original_file_for_document(document)
                 if document is not None
                 else {"ok": False}
+            )
+            document_version = (
+                source_repository.get_current_document_version(document=document)
+                if document is not None
+                else None
             )
             readable_source = (
                 self.readable_source_resolver.resolve(
                     document=document,
+                    document_version=document_version,
                     original_path=resolved_source["file_path"],
                     purpose="rename",
                 )
@@ -492,10 +499,12 @@ class RenameSuggestionService:
         repository = FileExtractionRepository(self.db, self.user_id)
         parser_config_hash = self.readable_source_resolver.expected_parser_config_hash(
             document=resolution.document,
+            document_version=resolution.document_version,
             purpose="rename",
         )
         reusable = repository.get_latest_successful_extraction(
             document_id=resolution.document.id,
+            document_version_id=resolution.document_version.id,
             parser_config_hash=parser_config_hash,
         )
         if reusable is None:
@@ -518,6 +527,7 @@ class RenameSuggestionService:
             try:
                 readable_source = self.readable_source_resolver.resolve(
                     document=resolution.document,
+                    document_version=resolution.document_version,
                     original_path=resolved["file_path"],
                     purpose="rename",
                 )
@@ -531,6 +541,7 @@ class RenameSuggestionService:
                 # 单个损坏文件不能中断整个重命名批次；异常需落入解析运行和逐文件回执。
                 run = repository.create_extraction_run(
                     document_id=resolution.document.id,
+                    document_version_id=resolution.document_version.id,
                     extractor="file-rename",
                     parser_config_hash=parser_config_hash or "",
                 )
@@ -555,6 +566,7 @@ class RenameSuggestionService:
                 )
             run = repository.create_extraction_run(
                 document_id=resolution.document.id,
+                document_version_id=resolution.document_version.id,
                 extractor=extraction["extractor"],
                 parser_name=extraction.get("parser_name", ""),
                 parser_version=extraction.get("parser_version", ""),
@@ -568,6 +580,7 @@ class RenameSuggestionService:
                 )
                 reusable = repository.get_latest_successful_extraction(
                     document_id=resolution.document.id,
+                    document_version_id=resolution.document_version.id,
                     parser_config_hash=run.parser_config_hash,
                 )
             else:

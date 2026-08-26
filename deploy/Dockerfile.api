@@ -3,42 +3,111 @@
 FROM python:3.11-slim
 
 ARG MCP_FILESYSTEM_VERSION=2026.1.14
-ARG INSTALL_GRAPH_DEPENDENCIES=false
+ARG MODEL_PRELOAD=true
+ARG APT_DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian
+ARG APT_SECURITY_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian-security
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG HF_ENDPOINT=https://hf-mirror.com
+ARG DOCLING_MODEL_GIT_BASE=https://hf-mirror.com
+ARG GRAPH_EMBEDDING_BUILD_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/apps/api \
     FILE_STORAGE_ROOT=/data/uploads \
-    LOG_DIR=/data/logs
+    LOG_DIR=/data/logs \
+    FILE_AGENT_MODEL_ROOT=/opt/file-agent/models \
+    DOCLING_ARTIFACTS_PATH=/opt/file-agent/models/docling \
+    GRAPH_EMBEDDING_MODEL_PATH=/opt/file-agent/models/document-embedding \
+    PADDLE_PDX_CACHE_HOME=/opt/file-agent/models/paddlex \
+    PADDLE_PDX_MODEL_SOURCE=BOS \
+    PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=False \
+    PADDLE_PDX_CPU_NUM_THREADS=4 \
+    OMP_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    HF_HOME=/opt/file-agent/models/huggingface \
+    HF_ENDPOINT=${HF_ENDPOINT} \
+    DOCLING_MODEL_GIT_BASE=${DOCLING_MODEL_GIT_BASE} \
+    PIP_INDEX_URL=${PIP_INDEX_URL} \
+    GRAPH_EMBEDDING_BUILD_MODEL=${GRAPH_EMBEDDING_BUILD_MODEL} \
+    REQUIRE_PRELOADED_MODELS=true
 
 WORKDIR /app
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update \
+    sed -i \
+        -e "s|http://deb.debian.org/debian-security|${APT_SECURITY_MIRROR}|g" \
+        -e "s|http://deb.debian.org/debian|${APT_DEBIAN_MIRROR}|g" \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         libreoffice-writer \
         libreoffice-calc \
         ca-certificates \
+        fontconfig \
+        fonts-noto-cjk \
+        libgl1 \
+        libglib2.0-0 \
+        libgomp1 \
+        git \
+        git-lfs \
         nodejs \
         npm \
-    && npm install -g "@modelcontextprotocol/server-filesystem@${MCP_FILESYSTEM_VERSION}" \
+    && npm install -g --registry="${NPM_REGISTRY}" "@modelcontextprotocol/server-filesystem@${MCP_FILESYSTEM_VERSION}" \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
 COPY requirements-graph.txt /app/requirements-graph.txt
+COPY deploy/requirements.full-cpu.txt /app/deploy/requirements.full-cpu.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install --upgrade pip \
-    && python -m pip install --prefer-binary -r /app/requirements.txt \
-    && if [ "$INSTALL_GRAPH_DEPENDENCIES" = "true" ]; then \
-         python -m pip install --prefer-binary -r /app/requirements-graph.txt; \
-       fi
+    && python -m pip install --prefer-binary -r /app/deploy/requirements.full-cpu.txt
 
 COPY . /app
 
-RUN chmod +x /app/deploy/entrypoint.api.sh
+# 本地缓存只通过命名构建上下文和白名单导入；未配置时使用 deploy/empty-model-cache。
+RUN --mount=type=bind,from=local-model-cache,source=.,target=/mnt/local-model-cache,ro \
+    mkdir -p /opt/file-agent/models \
+    && if [ "$MODEL_PRELOAD" = "true" ]; then \
+         python /app/deploy/scripts/preload_models.py import-cache; \
+       fi
+
+# 每个模型组件独占一层。网络短暂失败后重建可复用此前成功组件，不从 Docling 重新开始。
+RUN --mount=type=cache,target=/var/cache/file-agent-model-downloads,sharing=locked \
+    if [ "$MODEL_PRELOAD" = "true" ]; then \
+      python /app/deploy/scripts/preload_models.py docling; \
+    fi
+
+RUN if [ "$MODEL_PRELOAD" = "true" ]; then \
+      python /app/deploy/scripts/preload_models.py paddleocr; \
+    fi
+
+RUN if [ "$MODEL_PRELOAD" = "true" ]; then \
+      python /app/deploy/scripts/preload_models.py pp-structure; \
+    fi
+
+RUN if [ "$MODEL_PRELOAD" = "true" ]; then \
+      python /app/deploy/scripts/preload_models.py paddleocr-vl; \
+    fi
+
+RUN if [ "$MODEL_PRELOAD" = "true" ]; then \
+      python /app/deploy/scripts/preload_models.py embedding; \
+    fi
+
+RUN if [ "$MODEL_PRELOAD" = "true" ]; then \
+      python /app/deploy/scripts/preload_models.py finalize; \
+    fi \
+    && chmod +x /app/deploy/entrypoint.api.sh
+
+# 模型在构建阶段已经固化；运行期不得依赖 Hugging Face/Transformers 临时下载。
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
 
 EXPOSE 8000
 

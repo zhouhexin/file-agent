@@ -33,11 +33,15 @@ class FileSearchPhraseStrategyService:
         scope: Any,
         phrases: list[str] | tuple[str, ...],
         require_body_evidence: bool,
+        unbounded_candidates: bool = False,
     ) -> dict[str, Any]:
         """按完整短语逐项搜索并按工作副本去重。
 
         `require_body_evidence=false` 时也只允许完整短语命中文件名、摘要、分类或正文，
         不保留仅由拆词 OR 产生的文件级候选。
+
+        `unbounded_candidates=true` 只供“两个完整条件分别召回后取交集”的上层策略使用，
+        防止任一侧先被普通候选上限截断。它不改变最终大结果集的展示确认规则。
         """
 
         unique_phrases = list(dict.fromkeys(str(item).strip() for item in phrases if str(item).strip()))[:8]
@@ -47,6 +51,7 @@ class FileSearchPhraseStrategyService:
             status="RUNNING",
             phrase_count=len(unique_phrases),
             require_body_evidence=require_body_evidence,
+            unbounded_candidates=unbounded_candidates,
             message="受控短语检索开始",
         )
         merged: dict[str, dict[str, Any]] = {}
@@ -75,6 +80,7 @@ class FileSearchPhraseStrategyService:
                     exact_phrase=phrase,
                     require_body_evidence=require_body_evidence,
                     include_internal_match_flags=True,
+                    unbounded_candidates=unbounded_candidates,
                 )
             except SQLAlchemyError as exc:
                 # TwoStageFileSearchService 已用 savepoint 隔离每段 SQL。单个正式

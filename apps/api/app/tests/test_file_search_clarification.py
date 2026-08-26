@@ -194,9 +194,13 @@ class _FakeSchoolScopeSearch:
 
     def __init__(self) -> None:
         self.phrases: list[str] = []
+        self.unbounded_candidate_flags: list[bool] = []
 
-    def search(self, *, exact_phrase: str, **_kwargs):
+    def search(self, *, exact_phrase: str, **kwargs):
         self.phrases.append(exact_phrase)
+        self.unbounded_candidate_flags.append(
+            bool(kwargs.get("unbounded_candidates"))
+        )
         target = {
             "working_copy_id": "wc-school-summary",
             "document_id": "doc-school-summary",
@@ -545,6 +549,7 @@ def test_school_possessive_query_requires_school_scope_and_topic_intersection():
     )
 
     assert search.phrases == ["工作总结", "学校", "本校", "全校"]
+    assert search.unbounded_candidate_flags == [True, True, True, True]
     assert [item["document_id"] for item in result["results"]] == [
         "doc-school-summary"
     ]

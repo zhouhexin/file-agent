@@ -7,12 +7,13 @@ from io import BytesIO
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import pytest
 
 from app.core import config
 from app.db.models import Document, DocumentArtifact, DocumentElement, DocumentExtractionRun, DocumentPage
 from app.modules.files.extractors import extract_document_text
 from app.modules.files.extraction_repository import FileExtractionRepository
-from app.modules.files.docling_parser import try_parse_with_docling
+from app.modules.files.docling_parser import _build_converter, try_parse_with_docling
 from app.modules.agent.tool_registry import ToolRegistry
 from app.tests.helpers import clear_overrides, client_with_database
 
@@ -153,6 +154,18 @@ def _upload_doc(client: TestClient, headers: dict[str, str]) -> str:
         "/api/files/upload",
         headers=headers,
         files={"file": ("legacy-notice.doc", b"legacy-doc-content", "application/msword")},
+    )
+    assert response.status_code == 202
+    return response.json()["document_id"]
+
+
+def _upload_xls(client: TestClient, headers: dict[str, str]) -> str:
+    """上传一个由确定性 LibreOffice fake 转换的旧版 XLS 占位文件。"""
+
+    response = client.post(
+        "/api/files/upload",
+        headers=headers,
+        files={"file": ("住宿清单.xls", b"legacy-xls-content", "application/vnd.ms-excel")},
     )
     assert response.status_code == 202
     return response.json()["document_id"]
@@ -575,6 +588,19 @@ def test_docling_adapter_serializes_document_elements(monkeypatch, tmp_path):
     assert result["pages"][0]["text"] == "关于做好测试工作的通知"
 
 
+def test_docling_converter_rejects_missing_preloaded_artifact_directory(monkeypatch, tmp_path):
+    """显式模型目录缺失时必须启动失败，不能在运行期回退为临时下载。"""
+
+    missing_path = tmp_path / "missing-docling-models"
+    monkeypatch.setenv("DOCLING_ARTIFACTS_PATH", str(missing_path))
+    _build_converter.cache_clear()
+    try:
+        with pytest.raises(RuntimeError, match="DOCLING_ARTIFACTS_PATH"):
+            _build_converter(False)
+    finally:
+        _build_converter.cache_clear()
+
+
 def test_extraction_repository_persists_structured_elements(tmp_path, monkeypatch):
     """结构化元素必须和解析运行一起写入并可按配置指纹复用。"""
 
@@ -625,76 +651,120 @@ def test_extraction_repository_persists_structured_elements(tmp_path, monkeypatc
         clear_overrides()
 
 
-def test_extract_document_text_always_converts_xls_before_reading(monkeypatch, tmp_path):
-    """旧版 XLS 必须先转换临时 XLSX，并完整读取所有工作表。"""
+def test_extract_document_text_persists_xlsx_and_reuses_it_on_reprocess(monkeypatch, tmp_path):
+    """XLS 正文首次读取创建持久化 XLSX，重新解析复用且完整保留 Sheet 坐标。"""
 
-    xls_path = tmp_path / "奖学金汇总.xls"
-    xls_path.write_bytes(b"legacy-xls")
-    original_bytes = xls_path.read_bytes()
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
+    config.get_settings.cache_clear()
+    executable = tmp_path / "soffice"
+    executable.write_bytes(b"")
+    conversion_calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "app.modules.files.office_conversion.resolve_libreoffice_executable",
+        lambda **_: executable,
+    )
+    monkeypatch.setattr(
+        "app.modules.files.office_conversion.libreoffice_runtime_version",
+        lambda _: "LibreOffice Test 1.0",
+    )
 
-    def fake_converter(*, source_path, output_dir):
-        """模拟 LibreOffice 在隔离目录生成包含多工作表的临时文件。"""
+    def fake_convert(command: list[str], *, timeout_seconds: int):
+        """模拟 LibreOffice 输出包含多工作表的合法 XLSX。"""
 
-        assert source_path == xls_path
-        converted_path = output_dir / "source.xlsx"
+        conversion_calls.append(command)
+        output_dir = Path(command[command.index("--outdir") + 1])
         workbook = __import__("openpyxl").Workbook()
         worksheet = workbook.active
         worksheet.title = "汇总"
-        worksheet.append(["姓名", "等级"])
-        worksheet.append(["赵六", "一等奖"])
+        worksheet.append(["姓名", "费用"])
+        worksheet.append(["赵六", 120])
         detail_sheet = workbook.create_sheet("明细")
         detail_sheet.append(["学号", "姓名"])
         detail_sheet.append(["2026001", "赵六"])
-        workbook.save(converted_path)
-        return converted_path
+        workbook.save(output_dir / "source.xlsx")
+        return subprocess.CompletedProcess(command, 0, stdout=b"converted", stderr=b"")
 
-    monkeypatch.setattr("app.modules.files.extractors.convert_xls_to_xlsx", fake_converter)
+    monkeypatch.setattr("app.modules.files.office_conversion.run_libreoffice_command", fake_convert)
+    client, SessionLocal = client_with_database()
+    headers = _auth_header(client, "legacy-xls-extractor")
+    document_id = _upload_xls(client, headers)
+    db = SessionLocal()
+    try:
+        user_id = client.get("/api/auth/me", headers=headers).json()["id"]
+        registry = ToolRegistry(db=db, user_id=user_id)
 
-    result = extract_document_text(
-        file_path=xls_path,
-        filename="奖学金汇总.xls",
-        content_type="application/vnd.ms-excel",
-    )
+        first = registry.invoke("extract-document-text", {"document_id": document_id})
+        second = registry.invoke(
+            "extract-document-text",
+            {"document_id": document_id, "force_reprocess": True},
+        )
+        profile = registry.invoke("profile-spreadsheet", {"document_id": document_id})
+        validation = registry.invoke("validate-spreadsheet", {"document_id": document_id})
+        analysis = registry.invoke(
+            "analyze-spreadsheet",
+            {"document_id": document_id, "question": "赵六的总费用是多少"},
+        )
 
-    assert result["ok"] is True
-    assert result["status"] == "COMPLETED"
-    assert result["extractor"] == "excel-xls-converted"
-    assert [page["sheet_name"] for page in result["pages"]] == ["汇总", "明细"]
-    # 临时 XLSX 的每个非空行必须携带真实坐标，供阶段三 Evidence 精确引用。
-    assert result["pages"][0]["metadata"]["line_cell_ranges"] == [
-        {"line_index": 0, "row_number": 1, "cell_range": "A1:B1"},
-        {"line_index": 1, "row_number": 2, "cell_range": "A2:B2"},
-    ]
-    assert result["pages"][1]["metadata"]["used_cell_range"] == "A1:B2"
-    assert "赵六\t一等奖" in result["pages"][0]["text"]
-    assert result["pages"][0]["metadata"]["converted_from"] == ".xls"
-    assert xls_path.read_bytes() == original_bytes
+        assert first.output_json["ok"] is True
+        assert first.output_json["conversion_artifact_type"] == "CONVERTED_XLSX"
+        assert first.output_json["conversion_reused"] is False
+        assert second.output_json["conversion_reused"] is True
+        assert profile.output_json["ok"] is True
+        assert profile.output_json["file_type"] == ".xls"
+        assert profile.output_json["conversion_artifact_type"] == "CONVERTED_XLSX"
+        assert profile.output_json["conversion_reused"] is True
+        assert validation.output_json["ok"] is True
+        assert validation.output_json["file_type"] == ".xls"
+        assert validation.output_json["conversion_artifact_type"] == "CONVERTED_XLSX"
+        assert validation.output_json["conversion_reused"] is True
+        assert analysis.output_json["ok"] is True
+        assert analysis.output_json["status"] in {"COMPLETED", "NEEDS_CLARIFICATION"}
+        assert analysis.output_json["conversion_artifact_type"] == "CONVERTED_XLSX"
+        assert analysis.output_json["conversion_reused"] is True
+        assert len(conversion_calls) == 1
+        assert [page["sheet_name"] for page in first.output_json["pages"]] == ["汇总", "明细"]
+        page = db.query(DocumentPage).filter(DocumentPage.sheet_name == "汇总").first()
+        assert page.metadata_json["line_cell_ranges"] == [
+            {"line_index": 0, "row_number": 1, "cell_range": "A1:B1"},
+            {"line_index": 1, "row_number": 2, "cell_range": "A2:B2"},
+        ]
+        artifact = db.query(DocumentArtifact).one()
+        assert artifact.document_version_id is not None
+        assert Path(tmp_path / artifact.storage_path).is_file()
+    finally:
+        db.close()
+        clear_overrides()
+        config.get_settings.cache_clear()
 
 
 def test_extract_document_text_returns_structured_xls_conversion_failure(monkeypatch, tmp_path):
     """LibreOffice 转换失败必须保留稳定错误码，不能回退为文件名正文。"""
 
-    xls_path = tmp_path / "损坏表格.xls"
-    xls_path.write_bytes(b"broken-xls")
-
-    def fail_conversion(**_kwargs):
-        """模拟转换器不可用。"""
-
-        from app.modules.spreadsheet_analysis.conversion import SpreadsheetConversionError
-
-        raise SpreadsheetConversionError("XLS_CONVERTER_NOT_AVAILABLE", "未找到 LibreOffice。")
-
-    monkeypatch.setattr("app.modules.files.extractors.convert_xls_to_xlsx", fail_conversion)
-
-    result = extract_document_text(
-        file_path=xls_path,
-        filename=xls_path.name,
-        content_type="application/vnd.ms-excel",
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path))
+    config.get_settings.cache_clear()
+    monkeypatch.setattr(
+        "app.modules.files.office_conversion.resolve_libreoffice_executable",
+        lambda **_: None,
     )
+    client, SessionLocal = client_with_database()
+    headers = _auth_header(client, "broken-xls-extractor")
+    document_id = _upload_xls(client, headers)
+    db = SessionLocal()
+    try:
+        user_id = client.get("/api/auth/me", headers=headers).json()["id"]
+        result = ToolRegistry(db=db, user_id=user_id).invoke(
+            "extract-document-text",
+            {"document_id": document_id},
+        )
 
-    assert result["ok"] is False
-    assert result["status"] == "FAILED"
-    assert result["error"]["code"] == "XLS_CONVERTER_NOT_AVAILABLE"
+        assert result.output_json["ok"] is False
+        assert result.output_json["status"] == "FAILED"
+        assert result.output_json["error"]["code"] == "LIBREOFFICE_NOT_AVAILABLE"
+        assert db.query(DocumentArtifact).count() == 0
+    finally:
+        db.close()
+        clear_overrides()
+        config.get_settings.cache_clear()
 
 
 def test_extract_image_uses_injected_ocr_service(monkeypatch, tmp_path):

@@ -598,7 +598,7 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python scripts/build_
 
 ```text
 read-original-file：读取当前用户上传原始文件的安全元信息，不返回本地路径或二进制内容
-extract-document-text：解析 txt/md/csv/xls/xlsx/doc/docx/pdf/image，并将文本写入 document_pages；旧版 `.xls` 必须先通过 LibreOffice 隔离转换为临时 `.xlsx`，再由 openpyxl 解析，不覆盖原件
+extract-document-text：解析 txt/md/csv/xls/xlsx/doc/docx/pdf/image，并将文本写入 document_pages；旧版 `.doc/.xls` 先通过 LibreOffice 隔离转换并发布为版本级持久化派生件，再由对应解析器读取，不覆盖原件
 ```
 
 旧版 `.doc` 使用“持久派生件”链路：首次读取时通过 LibreOffice Headless 转换为 `.docx`，保存到
@@ -606,9 +606,10 @@ extract-document-text：解析 txt/md/csv/xls/xlsx/doc/docx/pdf/image，并将�
 问答和重命名字段提取复用同一派生件；原始下载与真实改名仍操作 `.doc` 原件。用户说“重新解析”时
 复用有效派生件，只重建解析结果；说“重新转换”时才同时绕过派生件缓存。
 
-旧版 `.xls` 使用同一 LibreOffice 安全边界，但转换结果只存在于单次解析的独立临时目录：输入副本、
-输出目录和 LibreOffice profile 相互隔离，输出必须通过 OOXML 和 openpyxl 校验后才能读取。临时
-`.xlsx` 不登记为新原件或 DocumentVersion，退出解析后清理；原 `.xls` 字节始终不变。
+旧版 `.xls` 使用同一 LibreOffice 安全边界：输入副本、输出目录和 LibreOffice profile 相互隔离，输出
+必须通过 OOXML 和 openpyxl 双重校验后，原子发布到 `FILE_STORAGE_ROOT/derivatives/office/`，并以
+`CONVERTED_XLSX` 关联当前 `DocumentVersion`。正文抽取、Profile、统计分析和公式校验复用同一派生件；
+派生件不是新上传原件，原 `.xls` 字节始终不变。
 
 配置：
 
@@ -632,8 +633,9 @@ Linux:   使用系统包管理器安装 libreoffice，默认发现 /usr/bin/soff
 ```
 
 `LIBREOFFICE_EXECUTABLE` 留空时按“PATH -> 平台默认目录”查找。Windows 优先 `soffice.com`，便于获得
-可靠退出码；路径包含空格无需手工加引号。LibreOffice 不可用或转换失败时，`.doc` 可按既有规则使用
-受控纯文本降级；`.xls` 不允许用文件名或其他库冒充完整正文解析，必须返回结构化转换失败，且不会覆盖原件。
+可靠退出码；路径包含空格无需手工加引号。LibreOffice 暂时不可用时，系统仍可复用同规则且通过完整
+校验的历史派生件；必须新转换却不可用时，`.doc` 可按既有规则受控降级，`.xls` 返回结构化失败，不能
+用文件名或其他库冒充完整正文解析，也不会覆盖原件。
 
 PDF、Excel、doc/docx 和图片 OCR 依赖：
 
@@ -647,7 +649,7 @@ textutil 或 LibreOffice
 LibreOffice（旧版 .doc 和 .xls 转换所需；.xls 不再使用 xlrd）
 ```
 
-图片 OCR 和扫描 PDF OCR 默认使用 PaddleOCR CPU Provider；旧版 `.doc` 优先使用 LibreOffice 生成持久化 `.docx` 派生件，失败后再使用现有纯文本回退；旧版 `.xls` 必须由 LibreOffice 转为临时 `.xlsx` 后交给 openpyxl。如果缺少依赖或 OCR/转换引擎不可用，Tool 会返回结构化错误，不会读取任意路径。
+图片 OCR 和扫描 PDF OCR 默认使用 PaddleOCR CPU Provider；旧版 `.doc` 优先使用 LibreOffice 生成持久化 `.docx` 派生件，失败后再使用现有纯文本回退；旧版 `.xls` 由 LibreOffice 生成持久化 `.xlsx` 派生件后交给 openpyxl，并由各表格 Tool 复用。如果缺少依赖、没有可复用派生件或转换失败，Tool 会返回结构化错误，不会读取任意路径。
 
 当前对话触发解析已支持多个附件顺序执行。单个文件 Tool 异常会记录为该文件的失败 `document_results.errors`，后续文件继续处理；并发执行、LangGraph map/reduce、步骤级重试和恢复后续单独实现。
 
@@ -752,13 +754,9 @@ WORKING_COPY_STORAGE_ROOT/<working_root_relative_path>/<new_basename>
 /opt/homebrew/anaconda3/envs/py311/bin/python -m pip install -r requirements-graph.txt
 ```
 
-服务器构建镜像时配置：
-
-```text
-INSTALL_GRAPH_DEPENDENCIES=true
-```
-
-Neo4j 服务可以由独立主机或独立部署栈提供；当前生产 compose 不强制创建 Neo4j 容器。连接配置：
+Windows 11 全功能 CPU 生产部署使用 `deploy/docker-compose.production.yml`，该 Compose 已安装图谱依赖、
+预下载 384 维本地 embedding 模型，并启动 Neo4j 5.26 Community 和独立 `graph-worker`。其他部署形态仍可
+使用独立 Neo4j 主机。连接配置：
 
 ```text
 GRAPH_CLASSIFICATION_ENABLED=true
@@ -1002,6 +1000,10 @@ Shadow 到真实执行的反馈闭环。这里的“正式上线”指功能具�
 Docker Compose 部署时，只创建并维护 `deploy/.env`：它由 `deploy/.env.production.example` 复制生成，
 包含真实密码、受管目录和服务地址，绝不能提交 Git。直接在服务器运行 API 与 worker 时，使用仓库根
 目录的 `.env`；根目录 `.env.example` 仅作字段模板，不填写真实值。
+
+当前正式部署模板面向 Windows 11、6 核 CPU、32GB 内存，受管目录为 `E:/workdata`，并启用全部本地图片
+结构化抽取能力。详细资源、模型固化、联网构建和离线导入步骤见
+`docs/windows11-full-cpu-docker-deployment-plan.md` 与 `deploy/README.md`。
 
 生产部署至少核对以下配置：
 

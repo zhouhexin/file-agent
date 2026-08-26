@@ -553,7 +553,7 @@ When LLM is enabled and the user asks for uploaded-file summary or basic file in
 
 When LLM is enabled and the user asks to read original content, parse PDF/Excel, or OCR an image, the same endpoint may return:
 
-Current `extract-document-text` supports `txt/md/csv/xls/xlsx/doc/docx/pdf/image`. Legacy `.xls` files are converted to a temporary `.xlsx` derivative with LibreOffice before `openpyxl` reads sheet text.
+Current `extract-document-text` supports `txt/md/csv/xls/xlsx/doc/docx/pdf/image`. Legacy `.doc/.xls` files are converted by LibreOffice into versioned persistent `CONVERTED_DOCX/CONVERTED_XLSX` artifacts before downstream parsers read them; valid artifacts are reused across extraction and spreadsheet tools without modifying the original file.
 
 ```json
 {
@@ -579,7 +579,7 @@ Current `extract-document-text` supports `txt/md/csv/xls/xlsx/doc/docx/pdf/image
 }
 ```
 
-The per-file structured result is persisted in `agent_runs.graph_state_json.document_results` for run snapshot and receipt generation. Category suggestions are calculated from full `document_pages.text_content`, not the 300-character `text_preview`. Category suggestions are also persisted in `document_classification_runs` and `document_category_suggestions`; they remain suggestions and are not official `document_categories` until user confirmation. The same run creates a real `change_sets` row and `change_items` rows for `TEXT_EXTRACTED`, `DOCUMENT_PAGES_CREATED`, `CATEGORY_SUGGESTED`, and `DOCUMENT_PROCESSING_FAILED`. When an existing successful extraction is reused, ChangeSet records `TEXT_REUSED`, `DOCUMENT_PAGES_REUSED`, and `CATEGORY_SUGGESTION_REUSED`; users can force a new extraction by saying “重新解析 / 重新读取 / 重新处理 / 重跑”. Legacy `.doc` conversion additionally records `DOCX_DERIVATIVE_CREATED` or `DOCX_DERIVATIVE_REUSED`. “重新解析” keeps a valid DOCX derivative, while “重新转换” sets both `force_reprocess` and `force_reconvert`.
+The per-file structured result is persisted in `agent_runs.graph_state_json.document_results` for run snapshot and receipt generation. Category suggestions are calculated from full `document_pages.text_content`, not the 300-character `text_preview`. Category suggestions are also persisted in `document_classification_runs` and `document_category_suggestions`; they remain suggestions and are not official `document_categories` until user confirmation. The same run creates a real `change_sets` row and `change_items` rows for `TEXT_EXTRACTED`, `DOCUMENT_PAGES_CREATED`, `CATEGORY_SUGGESTED`, and `DOCUMENT_PROCESSING_FAILED`. When an existing successful extraction is reused, ChangeSet records `TEXT_REUSED`, `DOCUMENT_PAGES_REUSED`, and `CATEGORY_SUGGESTION_REUSED`; users can force a new extraction by saying “重新解析 / 重新读取 / 重新处理 / 重跑”. Legacy Office conversion additionally records `DOCX_DERIVATIVE_CREATED/REUSED` or `XLSX_DERIVATIVE_CREATED/REUSED`. “重新解析” keeps a valid derivative, while “重新转换” sets both `force_reprocess` and `force_reconvert`.
 
 ```json
 [
@@ -1065,6 +1065,11 @@ when document recall is insufficient, make one bounded document_chunks lexical f
 search chunks only inside the bounded candidate versions, then validate Evidence and permissions
 merge deterministically and return user-safe file cards
 ```
+
+聊天入口识别出“机构范围 × 文件主题”等双条件交集检索时，两个条件必须各自完成
+无文件数量上限的受控召回后再按稳定文件 ID 求交集，不能先各截取 30 份候选。
+这不取消普通单条件检索的候选上限，也不取消 Chunk 详情/证据限制；交集结果超过
+20 份时仍返回结果数量确认卡，用户确认“全部展示”后才展示完整文件列表。
 
 Response:
 

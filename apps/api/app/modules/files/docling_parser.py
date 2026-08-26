@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from functools import lru_cache
+import os
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,12 @@ def _build_converter(ocr_enabled: bool) -> Any:
 
     pdf_options = PdfPipelineOptions()
     pdf_options.do_ocr = ocr_enabled
+    artifacts_path = os.getenv("DOCLING_ARTIFACTS_PATH", "").strip()
+    if artifacts_path:
+        resolved_artifacts_path = Path(artifacts_path).expanduser()
+        if not resolved_artifacts_path.is_dir():
+            raise RuntimeError("DOCLING_ARTIFACTS_PATH 不存在或不是目录。")
+        pdf_options.artifacts_path = resolved_artifacts_path
     return DocumentConverter(
         format_options={
             InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options),

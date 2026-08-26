@@ -613,7 +613,7 @@ F2_EXPECTED_VERSION=<固定测试版本>
 
 - 批量建议逐文件隔离。
 - 受管文件快照和 document_pages 复用。
-- 旧版 `.xls` 必须采用 `LibreOffice Headless 隔离转换为临时 .xlsx -> openpyxl`，转换隔离、超时、输出校验和原件保护边界与 `.doc -> .docx` 一致；不得继续使用 `xlrd` 直读。LibreOffice 缺失或转换失败时返回结构化失败，结构化文件名回退只能生成待确认命名建议，不能冒充正文解析成功。
+- 旧版 `.xls` 必须采用 `LibreOffice Headless 隔离转换 -> 版本级 CONVERTED_XLSX -> openpyxl`，转换隔离、超时、输出校验、持久化复用和原件保护边界与 `.doc -> .docx` 一致；不得继续使用 `xlrd` 直读。LibreOffice 缺失且没有有效历史派生件，或转换失败时返回结构化失败；结构化文件名回退只能生成待确认命名建议，不能冒充正文解析成功。
 - READY 项创建真实 OperationPlan。
 - 计划 before/after、SHA-256 和证据完整。
 - 隐藏文件和目录被拒绝。

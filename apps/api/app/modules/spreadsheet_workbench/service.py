@@ -12,7 +12,6 @@ from typing import Any
 import openpyxl
 from openpyxl.cell.cell import Cell
 
-from app.modules.spreadsheet_analysis.conversion import prepared_spreadsheet_path
 from app.modules.spreadsheet_analysis.profiler import (
     SUPPORTED_SPREADSHEET_SUFFIXES,
     profile_workbook,
@@ -41,10 +40,12 @@ class SpreadsheetWorkbenchService:
         document_id: str,
         filename: str,
         file_path: Path,
+        original_file_type: str | None = None,
     ) -> dict[str, Any]:
         """返回工作簿或分隔文本表格的安全结构摘要。"""
 
         suffix = file_path.suffix.lower()
+        display_suffix = original_file_type or suffix
         if suffix not in SUPPORTED_SPREADSHEET_SUFFIXES:
             return _failed(
                 kind="spreadsheet_profile",
@@ -71,11 +72,11 @@ class SpreadsheetWorkbenchService:
                 message=f"无法读取表格结构：{exc}",
             )
 
-        warnings = _macro_warnings(filename=filename, suffix=suffix)
+        warnings = _macro_warnings(filename=filename, suffix=display_suffix)
         return SpreadsheetProfileResult(
             document_id=document_id,
             filename=filename,
-            file_type=suffix,
+            file_type=display_suffix,
             sheets=[
                 {
                     "sheet_id": sheet.sheet_id,
@@ -95,10 +96,12 @@ class SpreadsheetWorkbenchService:
         document_id: str,
         filename: str,
         file_path: Path,
+        original_file_type: str | None = None,
     ) -> dict[str, Any]:
         """扫描公式错误、宏风险和基础结构问题；不重算公式、不保存文件。"""
 
         suffix = file_path.suffix.lower()
+        display_suffix = original_file_type or suffix
         if suffix not in SUPPORTED_SPREADSHEET_SUFFIXES:
             return _failed(
                 kind="spreadsheet_validation",
@@ -113,6 +116,7 @@ class SpreadsheetWorkbenchService:
             document_id=document_id,
             filename=filename,
             file_path=file_path,
+            original_file_type=display_suffix,
         )
         if not profile_result.get("ok"):
             return _failed(
@@ -157,7 +161,7 @@ class SpreadsheetWorkbenchService:
             status=status,
             document_id=document_id,
             filename=filename,
-            file_type=suffix,
+            file_type=display_suffix,
             formula_errors=formula_errors,
             warnings=warnings,
             summary={
@@ -171,32 +175,33 @@ class SpreadsheetWorkbenchService:
 def _scan_excel_formula_errors(*, file_path: Path) -> list[FormulaError]:
     """用 data_only=False 读取公式文本，避免保存时丢失公式。"""
 
-    with prepared_spreadsheet_path(file_path=file_path) as readable_path:
-        workbook = openpyxl.load_workbook(
-            filename=readable_path,
-            read_only=True,
-            data_only=False,
-            keep_links=True,
-        )
-        try:
-            errors: list[FormulaError] = []
-            for worksheet in workbook.worksheets:
-                for row in worksheet.iter_rows():
-                    for cell in row:
-                        error = _formula_error_from_cell(cell)
-                        if error is None:
-                            continue
-                        errors.append(
-                            FormulaError(
-                                sheet_name=worksheet.title,
-                                cell=cell.coordinate,
-                                error=error,
-                                formula=str(cell.value or ""),
-                            )
+    if file_path.suffix.lower() == ".xls":
+        raise ValueError("旧版 XLS 必须先由 Tool handler 解析为持久化 XLSX 派生件。")
+    workbook = openpyxl.load_workbook(
+        filename=file_path,
+        read_only=True,
+        data_only=False,
+        keep_links=True,
+    )
+    try:
+        errors: list[FormulaError] = []
+        for worksheet in workbook.worksheets:
+            for row in worksheet.iter_rows():
+                for cell in row:
+                    error = _formula_error_from_cell(cell)
+                    if error is None:
+                        continue
+                    errors.append(
+                        FormulaError(
+                            sheet_name=worksheet.title,
+                            cell=cell.coordinate,
+                            error=error,
+                            formula=str(cell.value or ""),
                         )
-            return errors
-        finally:
-            workbook.close()
+                    )
+        return errors
+    finally:
+        workbook.close()
 
 
 def _formula_error_from_cell(cell: Cell) -> str | None:

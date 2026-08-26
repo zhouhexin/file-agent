@@ -175,9 +175,9 @@ workspace 仍只用于登录后的会话、上传来源、反馈与审计；它�
 
 当前阶段不实现病毒扫描引擎，不得把基础格式检查描述为已经完成病毒扫描；只保留后续安全扫描适配器
 边界。旧版 `.xls` 不允许使用 `xlrd` 直接解析，必须与旧版 `.doc -> .docx` 使用相同的受控转换
-边界：通过 LibreOffice Headless、独立临时目录和独立进程 profile 转换为临时 `.xlsx`，校验转换结果
-后再交给 `openpyxl` 读取全部工作表和单元格。临时 `.xlsx` 只是解析中间件，不得覆盖原 `.xls`，
-也不得被误记为新的上传原件。
+边界：通过 LibreOffice Headless、独立临时目录和独立进程 profile 转换，经校验后原子发布为关联
+`DocumentVersion` 的持久化 `CONVERTED_XLSX` 派生件，再交给 `openpyxl` 读取全部工作表和单元格。
+派生件不得覆盖原 `.xls`，也不得被误记为新的上传原件。
 
 上传、导入和分类阶段的普通文档摘要与分类主题摘要默认必须使用本地 CPU-only 抽取式 Provider，当前
 实现采用 Jieba 分词和有候选上限的 LexRank 句子排序，不调用外部模型、不要求 GPU。全局
@@ -226,7 +226,7 @@ MVP 推荐实现：
 - 数据库：PostgreSQL + pgvector。
 - 文件存储：第一版本地 `storage/`，通过 StorageService 抽象。
 - 异步任务：第一版 FastAPI BackgroundTasks，后续 Redis + Celery/RQ。
-- 文档解析：PDF、DOCX 默认优先使用本地 Docling 生成结构化文档元素，并保留 `python-docx`、`PyMuPDF` 作为失败回退；TXT/MD/CSV 直接读取，XLSX 使用 `openpyxl`；旧版 `.xls` 必须先通过 LibreOffice 在隔离临时目录转换为临时 `.xlsx`，再用 `openpyxl` 读取，不再使用 `xlrd` 直读；旧版 `.doc` 通过 LibreOffice 转换为 `.docx` 派生件后抽取正文，并保留既有失败降级边界。扫描件 OCR 默认仍由现有 PaddleOCR/LLM OCR 兜底负责，避免与 Docling 重复 OCR。
+- 文档解析：PDF、DOCX 默认优先使用本地 Docling 生成结构化文档元素，并保留 `python-docx`、`PyMuPDF` 作为失败回退；TXT/MD/CSV 直接读取，XLSX 使用 `openpyxl`；旧版 `.xls/.doc` 必须先通过 LibreOffice 在隔离目录转换、校验并发布为关联 `DocumentVersion` 的持久化 `.xlsx/.docx` 派生件，再由对应解析器读取，不再使用 `xlrd` 直读；旧版 `.doc` 保留既有失败降级边界。扫描件 OCR 默认仍由现有 PaddleOCR/LLM OCR 兜底负责，避免与 Docling 重复 OCR。
 - 大模型与 embedding：OpenAI 兼容接口，默认外部联网和外部检索关闭。
 - Python 包管理：使用用户当前已经配置好的 Python 环境；可以用 `pyproject.toml` 记录依赖和工具配置，但不得强制切换到 `uv`、Poetry、Conda 或新建虚拟环境，除非用户后续明确要求。
 - 测试：pytest；LLM 和 embedding 测试必须使用 deterministic fake。
@@ -864,8 +864,9 @@ OperationPlan。活动工作副本统一使用 `RENAME_WORKING_COPIES`、`MOVE_W
 回复覆盖即直接执行受审计的覆盖，不再二次确认；只有用户选择同时保留后，后端才可以在扩展名前生成
 稳定版本后缀并继续等待现有计划确认，同时校验文件系统、工作副本索引和同批目标。
 
-旧版 `.xls` 必须使用 LibreOffice Headless 转换为隔离的临时 `.xlsx` 后再由 `openpyxl` 解析，流程的
-进程隔离、超时、输出校验、原件保护和错误降级边界必须与 `.doc -> .docx` 转换一致；不得保留
+旧版 `.xls` 必须使用 LibreOffice Headless 在隔离目录转换，经校验后发布为版本级持久化 `.xlsx`
+派生件，再由 `openpyxl` 解析；进程隔离、超时、输出校验、原件保护和错误降级边界必须与
+`.doc -> .docx` 转换一致；正文抽取、Profile、统计分析和质量校验必须复用同一派生件，不得保留
 `xlrd` 直读主路径。LibreOffice 不可用或转换失败时必须返回结构化失败，不得把文件名推断伪装成
 完整解析结果。表格正文解析失败时，只允许 `.xls/.xlsx/.xlsm/.csv/.tsv` 使用高结构化文件名回退
 生成待确认的重命名建议；解析失败仍必须落库，文件名回退只能用于命名，不得作为正文、分类或事实证据。

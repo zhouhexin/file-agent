@@ -10,6 +10,7 @@ import hashlib
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Type
 
 from fastapi import HTTPException
@@ -88,7 +89,11 @@ from app.modules.classification.conversation_decision import (
 from app.modules.chunks.service import DocumentIndexService
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text, extraction_config_hash
-from app.modules.files.readable_source import ReadableDocumentSourceResolver, apply_readable_source_metadata
+from app.modules.files.readable_source import (
+    ReadableDocumentSource,
+    ReadableDocumentSourceResolver,
+    apply_readable_source_metadata,
+)
 from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
 from app.modules.file_rename.uploaded_review_service import (
     UploadedRenameReviewResolutionService,
@@ -1577,6 +1582,8 @@ def _execute_controlled_file_search(
                 scope=scope,
                 phrases=list(group.phrases),
                 require_body_evidence=False,
+                # 交集必须基于两侧完整文件集合计算，不能先各截取 30 份。
+                unbounded_candidates=True,
             )
             if topic_phrase:
                 topic_result = strategy.search(
@@ -1585,6 +1592,7 @@ def _execute_controlled_file_search(
                     scope=scope,
                     phrases=[topic_phrase],
                     require_body_evidence=False,
+                    unbounded_candidates=True,
                 )
                 return _intersect_file_search_results(
                     original_query=search_query,
@@ -1634,6 +1642,8 @@ def _execute_controlled_file_search(
             scope=scope,
             phrases=[topic_phrase],
             require_body_evidence=False,
+            # 只取消交集前候选文件上限；最终批量展示仍由确认门控制。
+            unbounded_candidates=True,
         )
         entity_result = strategy.search(
             original_query=search_query,
@@ -1643,6 +1653,7 @@ def _execute_controlled_file_search(
             # 而被丢弃，否则学校级查询会混入任意学院的同主题文件。
             phrases=list(expand_scope_entity_phrases(entity_phrase)),
             require_body_evidence=False,
+            unbounded_candidates=True,
         )
         return _intersect_file_search_results(
             original_query=search_query,
@@ -3041,13 +3052,20 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
 
         force_reprocess = bool(getattr(tool_input, "force_reprocess", False))
         force_reconvert = bool(getattr(tool_input, "force_reconvert", False))
+        # 显式重新转换不能复用旧页面，否则 Tool 会报告执行成功但根本不读取新派生件。
+        force_reprocess = force_reprocess or force_reconvert
+        document_version = repository.get_current_document_version(document=document)
         readable_source_resolver = ReadableDocumentSourceResolver(db=db)
-        expected_parser_config_hash = readable_source_resolver.expected_parser_config_hash(document=document)
+        expected_parser_config_hash = readable_source_resolver.expected_parser_config_hash(
+            document=document,
+            document_version=document_version,
+        )
         reusable = (
             None
             if force_reprocess
             else repository.get_latest_successful_extraction(
                 document_id=document.id,
+                document_version_id=document_version.id if document_version else None,
                 parser_config_hash=expected_parser_config_hash,
             )
         )
@@ -3083,11 +3101,13 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
                 "read_profile": _read_profile_from_persisted_pages(extractor=run.extractor, pages=reusable["pages"]),
                 "structured_element_count": len(reusable.get("elements", [])),
                 "conversion_artifact_id": persisted_metadata.get("conversion_artifact_id"),
+                "conversion_artifact_type": persisted_metadata.get("conversion_artifact_type"),
                 "conversion_reused": None,
                 "conversion_source_format": persisted_metadata.get("source_format"),
                 "conversion_parsed_format": persisted_metadata.get("parsed_format"),
                 "conversion_converter": persisted_metadata.get("converter"),
                 "conversion_converter_version": persisted_metadata.get("converter_version"),
+                "conversion_config_hash": persisted_metadata.get("conversion_config_hash"),
                 "search_status": "READY" if index_result.get("ok") else "NEEDS_REVIEW",
                 "chunk_count": int(index_result.get("chunk_count") or 0),
                 "evidence_count": int(index_result.get("evidence_count") or 0),
@@ -3125,6 +3145,7 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
 
         readable_source = readable_source_resolver.resolve(
             document=document,
+            document_version=document_version,
             original_path=resolved["file_path"],
             force_reconvert=force_reconvert,
         )
@@ -3136,6 +3157,7 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
         extraction = apply_readable_source_metadata(extraction, source=readable_source)
         run = repository.create_extraction_run(
             document_id=document.id,
+            document_version_id=document_version.id if document_version else None,
             extractor=extraction["extractor"],
             parser_name=extraction.get("parser_name", ""),
             parser_version=extraction.get("parser_version", ""),
@@ -3199,11 +3221,13 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
             "read_profile": extraction.get("read_profile"),
             "structured_element_count": len(extraction.get("elements", [])),
             "conversion_artifact_id": extraction.get("conversion_artifact_id"),
+            "conversion_artifact_type": extraction.get("conversion_artifact_type"),
             "conversion_reused": extraction.get("conversion_reused"),
             "conversion_source_format": extraction.get("conversion_source_format"),
             "conversion_parsed_format": extraction.get("conversion_parsed_format"),
             "conversion_converter": extraction.get("conversion_converter"),
             "conversion_converter_version": extraction.get("conversion_converter_version"),
+            "conversion_config_hash": extraction.get("conversion_config_hash"),
             "search_status": "READY" if index_result.get("ok") else "NEEDS_REVIEW",
             "chunk_count": int(index_result.get("chunk_count") or 0),
             "evidence_count": int(index_result.get("evidence_count") or 0),
@@ -3380,6 +3404,54 @@ def _tool(
         handler=handler,
     )
 
+def _attach_spreadsheet_conversion_metadata(
+    *,
+    result: Dict[str, Any],
+    source: ReadableDocumentSource,
+) -> Dict[str, Any]:
+    """把受控派生件事实加入表格 Tool 输出，不暴露任何服务器路径。"""
+
+    projected = dict(result)
+    projected.update(
+        {
+            "conversion_artifact_id": source.artifact_id,
+            "conversion_artifact_type": source.artifact_type,
+            "conversion_reused": source.reused if source.converted else None,
+            "conversion_source_format": source.source_format,
+            "conversion_parsed_format": source.parsed_format,
+            "conversion_converter": source.converter_name,
+            "conversion_converter_version": source.converter_version,
+            "conversion_config_hash": source.converter_config_hash,
+            "original_unchanged": True,
+        }
+    )
+    return projected
+
+
+def _spreadsheet_conversion_failure(
+    *,
+    kind: str,
+    document_id: str,
+    source: ReadableDocumentSource,
+) -> Dict[str, Any]:
+    """将 XLS 持久化转换失败投影为稳定 Tool 错误，禁止回退到文件名事实。"""
+
+    error = dict(source.conversion_error or {})
+    return {
+        "kind": kind,
+        "ok": False,
+        "status": "FAILED",
+        "document_id": document_id,
+        "original_unchanged": True,
+        "error": {
+            "code": str(error.get("code") or "XLS_CONVERSION_FAILED"),
+            "message": str(error.get("message") or "无法生成可读取的 XLSX 派生件。"),
+            "retryable": bool(error.get("retryable", True)),
+            "user_action_required": False,
+        },
+    }
+
+
 def _analyze_spreadsheet_handler(
     db: Any,
     user_id: str | None,
@@ -3425,13 +3497,27 @@ def _analyze_spreadsheet_handler(
             )
 
         document = resolved["document"]
+        document_version = repository.get_current_document_version(document=document)
+        readable_source = ReadableDocumentSourceResolver(db=db).resolve(
+            document=document,
+            document_version=document_version,
+            original_path=resolved["file_path"],
+            purpose="spreadsheet-analysis",
+        )
+        if readable_source.conversion_error and not readable_source.converted:
+            return _spreadsheet_conversion_failure(
+                kind="spreadsheet_analysis",
+                document_id=document_id,
+                source=readable_source,
+            )
         question = str(getattr(tool_input, "question"))
         result = SpreadsheetAnalysisService().analyze(
             document_id=str(document.id),
             filename=str(document.original_filename),
-            file_path=resolved["file_path"],
+            file_path=readable_source.parse_path,
             question=question,
         )
+        result = _attach_spreadsheet_conversion_metadata(result=result, source=readable_source)
         conversation_id = conversation_id_getter() if conversation_id_getter else None
         if result.get("ok") and result.get("status") == "COMPLETED" and conversation_id and user_id:
             result["qa_answer_id"] = EvidenceAnswerService(
@@ -3492,15 +3578,31 @@ def _spreadsheet_workbench_handler(db: Any, user_id: str | None, *, action: str)
             )
 
         document = resolved["document"]
+        document_version = repository.get_current_document_version(document=document)
+        readable_source = ReadableDocumentSourceResolver(db=db).resolve(
+            document=document,
+            document_version=document_version,
+            original_path=resolved["file_path"],
+            purpose=f"spreadsheet-{action}",
+        )
+        if readable_source.conversion_error and not readable_source.converted:
+            return _spreadsheet_conversion_failure(
+                kind=f"spreadsheet_{action}",
+                document_id=document_id,
+                source=readable_source,
+            )
         service = SpreadsheetWorkbenchService()
         kwargs = {
             "document_id": str(document.id),
             "filename": str(document.original_filename),
-            "file_path": resolved["file_path"],
+            "file_path": readable_source.parse_path,
+            "original_file_type": Path(document.original_filename).suffix.lower(),
         }
         if action == "profile":
-            return service.profile(**kwargs)
-        return service.validate(**kwargs)
+            result = service.profile(**kwargs)
+        else:
+            result = service.validate(**kwargs)
+        return _attach_spreadsheet_conversion_metadata(result=result, source=readable_source)
 
     return handler
 
@@ -3627,9 +3729,9 @@ def _build_mvp_tools(
             "analyze-spreadsheet",
             "Analyze an uploaded XLS/XLSX/XLSM/CSV/TSV spreadsheet through a validated read-only query plan.",
             SpreadsheetAnalysisInput,
+            True,
             False,
-            False,
-            [],
+            ["document_artifacts"],
             _analyze_spreadsheet_handler(
                 db,
                 user_id,
@@ -3643,9 +3745,9 @@ def _build_mvp_tools(
             "profile-spreadsheet",
             "Read spreadsheet workbook, sheet and column schema without modifying the original file.",
             SpreadsheetDocumentInput,
+            True,
             False,
-            False,
-            [],
+            ["document_artifacts"],
             _spreadsheet_workbench_handler(db, user_id, action="profile"),
             output_model=SpreadsheetToolOutput,
             adaptive_ready=True,
@@ -3654,9 +3756,9 @@ def _build_mvp_tools(
             "validate-spreadsheet",
             "Scan spreadsheet formula errors and structural warnings without modifying the original file.",
             SpreadsheetDocumentInput,
+            True,
             False,
-            False,
-            [],
+            ["document_artifacts"],
             _spreadsheet_workbench_handler(db, user_id, action="validation"),
             output_model=SpreadsheetToolOutput,
             adaptive_ready=True,

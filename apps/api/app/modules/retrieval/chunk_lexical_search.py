@@ -210,11 +210,13 @@ class DocumentChunkLexicalSearchService:
         max_versions: int = MAX_FALLBACK_VERSION_AGGREGATIONS,
         limit_chunks: int = 30,
         exact_phrase_override: str | None = None,
+        unbounded_candidates: bool = False,
     ) -> list[dict[str, Any]]:
         """全局 Chunk GIN 候选补召回。
 
         阶段四第一阶段文档召回候选不足时调用。
-        联结当前用户 ACTIVE 工作副本的当前版本，按版本聚合，最多补充 max_versions 个版本。
+        联结当前用户 ACTIVE 工作副本的当前版本并按版本聚合。普通检索最多补充
+        max_versions 个版本；交集专用召回不在此处截断文件集合。
         只返回 document_version_id、最佳 Chunk ID、位置和分数，不返回正文。
         """
         if not query:
@@ -229,25 +231,33 @@ class DocumentChunkLexicalSearchService:
         exact_phrase = exact_phrase_override or exact_short_chinese_phrase(query)
         exact_search_text = exact_phrase
 
-        max_versions = max(1, min(int(max_versions), 50))
-        limit_chunks = max(1, min(int(limit_chunks), 100))
+        safe_max_versions = (
+            None
+            if unbounded_candidates
+            else max(1, min(int(max_versions), 50))
+        )
+        safe_limit_chunks = (
+            None
+            if unbounded_candidates
+            else max(1, min(int(limit_chunks), 100))
+        )
 
         if self.db.bind is not None and self.db.bind.dialect.name == "postgresql":
             return self._fallback_postgresql(
                 tokens=tokens, workspace_id=workspace_id,
-                max_versions=max_versions, limit_chunks=limit_chunks,
+                max_versions=safe_max_versions, limit_chunks=safe_limit_chunks,
                 exact_search_text=exact_search_text,
             )
         return self._fallback_deterministic(
             tokens=tokens, workspace_id=workspace_id,
-            max_versions=max_versions, limit_chunks=limit_chunks,
+            max_versions=safe_max_versions, limit_chunks=safe_limit_chunks,
             exact_phrase=exact_phrase,
             exact_search_text=exact_search_text,
         )
 
     def _fallback_postgresql(
         self, *, tokens: list[str], workspace_id: str,
-        max_versions: int, limit_chunks: int,
+        max_versions: int | None, limit_chunks: int | None,
         exact_search_text: str | None = None,
     ) -> list[dict[str, Any]]:
         """PostgreSQL 全局 Chunk GIN 补召回。
@@ -308,24 +318,26 @@ class DocumentChunkLexicalSearchService:
             )
         if self.workspace_id is None:
             ranked_query = ranked_query.filter(Document.user_id == self.user_id)
-        candidate_limit = (
-            min(max(limit_chunks * 10, limit_chunks), 300)
-            if exact_search_text
-            else limit_chunks
+        ranked_query = ranked_query.order_by(
+            rank.desc(), DocumentChunk.chunk_index.asc()
         )
-        ranked_chunks = (
-            ranked_query
-            .order_by(rank.desc(), DocumentChunk.chunk_index.asc())
-            .limit(candidate_limit)
-            .all()
-        )
+        if limit_chunks is not None:
+            candidate_limit = (
+                min(max(limit_chunks * 10, limit_chunks), 300)
+                if exact_search_text
+                else limit_chunks
+            )
+            ranked_query = ranked_query.limit(candidate_limit)
+        ranked_chunks = ranked_query.all()
         if exact_search_text:
             normalized_phrase = exact_search_text.lower()
             ranked_chunks = [
                 row
                 for row in ranked_chunks
                 if normalized_phrase in str(row[0].text_content or "").lower()
-            ][:limit_chunks]
+            ]
+            if limit_chunks is not None:
+                ranked_chunks = ranked_chunks[:limit_chunks]
 
         # 按版本聚合
         version_map: dict[str, dict[str, Any]] = {}
@@ -333,7 +345,7 @@ class DocumentChunkLexicalSearchService:
             version_id = chunk.document_version_id
             if version_id in version_map:
                 continue
-            if len(version_map) >= max_versions:
+            if max_versions is not None and len(version_map) >= max_versions:
                 break
             version_map[version_id] = _safe_result(
                 chunk, score=float(fts_rank or 0.0),
@@ -343,7 +355,7 @@ class DocumentChunkLexicalSearchService:
 
     def _fallback_deterministic(
         self, *, tokens: list[str], workspace_id: str,
-        max_versions: int, limit_chunks: int,
+        max_versions: int | None, limit_chunks: int | None,
         exact_phrase: str | None = None,
         exact_search_text: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -392,11 +404,12 @@ class DocumentChunkLexicalSearchService:
 
         # 按版本聚合
         version_map: dict[str, dict[str, Any]] = {}
-        for score, chunk in ranked[:limit_chunks]:
+        bounded_ranked = ranked if limit_chunks is None else ranked[:limit_chunks]
+        for score, chunk in bounded_ranked:
             version_id = chunk.document_version_id
             if version_id in version_map:
                 continue
-            if len(version_map) >= max_versions:
+            if max_versions is not None and len(version_map) >= max_versions:
                 break
             version_map[version_id] = _safe_result(chunk, score=score)
 

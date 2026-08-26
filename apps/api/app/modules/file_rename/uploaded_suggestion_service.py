@@ -363,10 +363,13 @@ class UploadedRenameSuggestionService:
                     },
                     extraction_result,
                 )
-            resolved_source = FileExtractionRepository(self.db, self.user_id).resolve_original_file_for_document(document)
+            source_repository = FileExtractionRepository(self.db, self.user_id)
+            resolved_source = source_repository.resolve_original_file_for_document(document)
+            document_version = source_repository.get_current_document_version(document=document)
             readable_source = (
                 self.readable_source_resolver.resolve(
                     document=document,
+                    document_version=document_version,
                     original_path=resolved_source["file_path"],
                     purpose="rename",
                 )
@@ -495,12 +498,15 @@ class UploadedRenameSuggestionService:
         """生成或复用 document_pages，并只把轻量摘要返回给 Graph State。"""
 
         repository = FileExtractionRepository(self.db, self.user_id)
+        document_version = repository.get_current_document_version(document=document)
         parser_config_hash = self.readable_source_resolver.expected_parser_config_hash(
             document=document,
+            document_version=document_version,
             purpose="rename",
         )
         reusable = repository.get_latest_successful_extraction(
             document_id=document.id,
+            document_version_id=document_version.id if document_version else None,
             parser_config_hash=parser_config_hash,
         )
         reused = reusable is not None
@@ -514,6 +520,7 @@ class UploadedRenameSuggestionService:
             try:
                 readable_source = self.readable_source_resolver.resolve(
                     document=document,
+                    document_version=document_version,
                     original_path=resolved["file_path"],
                     purpose="rename",
                 )
@@ -526,6 +533,7 @@ class UploadedRenameSuggestionService:
             except Exception as exc:
                 run = repository.create_extraction_run(
                     document_id=document.id,
+                    document_version_id=document_version.id if document_version else None,
                     extractor="uploaded-file-rename",
                     parser_config_hash=parser_config_hash,
                 )
@@ -538,6 +546,7 @@ class UploadedRenameSuggestionService:
                 ), [], []
             run = repository.create_extraction_run(
                 document_id=document.id,
+                document_version_id=document_version.id if document_version else None,
                 extractor=str(extraction.get("extractor") or "uploaded-file-rename"),
                 parser_name=str(extraction.get("parser_name") or ""),
                 parser_version=str(extraction.get("parser_version") or ""),
@@ -562,6 +571,7 @@ class UploadedRenameSuggestionService:
             )
             reusable = repository.get_latest_successful_extraction(
                 document_id=document.id,
+                document_version_id=document_version.id if document_version else None,
                 parser_config_hash=run.parser_config_hash,
             )
         if reusable is None:

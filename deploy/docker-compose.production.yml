@@ -1,5 +1,62 @@
 name: file-agent
 
+x-api-build: &api-build
+  context: ..
+  dockerfile: deploy/Dockerfile.api
+  args:
+    MODEL_PRELOAD: ${MODEL_PRELOAD:-true}
+    APT_DEBIAN_MIRROR: ${APT_DEBIAN_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/debian}
+    APT_SECURITY_MIRROR: ${APT_SECURITY_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/debian-security}
+    NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+    PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+    HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+    DOCLING_MODEL_GIT_BASE: ${DOCLING_MODEL_GIT_BASE:-https://hf-mirror.com}
+    GRAPH_EMBEDDING_BUILD_MODEL: ${GRAPH_EMBEDDING_BUILD_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
+  additional_contexts:
+    local-model-cache: ${LOCAL_MODEL_CACHE_CONTEXT:-./empty-model-cache}
+
+x-common-environment: &common-environment
+  DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  AUTO_CREATE_TABLES: "false"
+  FILE_STORAGE_ROOT: /data/uploads
+  LOG_DIR: /data/logs
+  TZ: Asia/Shanghai
+  FILE_AGENT_MODEL_ROOT: /opt/file-agent/models
+  DOCLING_ARTIFACTS_PATH: /opt/file-agent/models/docling
+  GRAPH_EMBEDDING_MODEL_PATH: /opt/file-agent/models/document-embedding
+  PADDLE_PDX_CACHE_HOME: /opt/file-agent/models/paddlex
+  PADDLE_PDX_MODEL_SOURCE: BOS
+  PADDLE_PDX_CPU_NUM_THREADS: "4"
+  PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT: "False"
+  PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "True"
+  OMP_NUM_THREADS: "4"
+  MKL_NUM_THREADS: "4"
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  REQUIRE_PRELOADED_MODELS: ${REQUIRE_PRELOADED_MODELS:-true}
+  MANAGED_ROOT_WORKDATA: /managed/workdata
+  MCP_FILESYSTEM_ROOT: /managed/workdata
+
+x-api-volumes: &api-volumes
+  - ../data/uploads:/data/uploads
+  - ../data/logs:/data/logs
+  - "${MANAGED_ROOT_HOST_PATH:-E:/workdata}:/managed/workdata:${MANAGED_ROOT_VOLUME_MODE:-ro}"
+
+x-python-service: &python-service
+  image: file-agent-api-full-cpu:${FILE_AGENT_IMAGE_TAG:-20260826}
+  build: *api-build
+  restart: unless-stopped
+  env_file: [.env]
+  volumes: *api-volumes
+  networks: [internal]
+  pids_limit: 1024
+
+x-worker-depends: &worker-depends
+  postgres:
+    condition: service_healthy
+  migrate:
+    condition: service_completed_successfully
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -8,6 +65,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: Asia/Shanghai
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -15,76 +73,168 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
+    mem_limit: 3g
     networks: [internal]
 
-  api:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.api
-      args:
-        INSTALL_GRAPH_DEPENDENCIES: ${INSTALL_GRAPH_DEPENDENCIES:-false}
+  neo4j:
+    image: neo4j:5.26-community
     restart: unless-stopped
-    env_file: [.env]
     environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      AUTO_CREATE_TABLES: "false"
-      FILE_STORAGE_ROOT: /data/uploads
-      LOG_DIR: /data/logs
-      APP_RUNTIME: api
-      MCP_FILESYSTEM_ENABLED: ${MCP_FILESYSTEM_ENABLED:-false}
-      MCP_FILESYSTEM_ROOT: ${MCP_FILESYSTEM_ROOT:-/managed/workdata}
-      MCP_FILESYSTEM_COMMAND: ${MCP_FILESYSTEM_COMMAND:-/usr/local/bin/mcp-server-filesystem}
-      MCP_FILESYSTEM_TIMEOUT_SECONDS: ${MCP_FILESYSTEM_TIMEOUT_SECONDS:-45}
-      MCP_FILESYSTEM_MAX_OUTPUT_CHARS: ${MCP_FILESYSTEM_MAX_OUTPUT_CHARS:-50000}
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be configured}
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 2G
+      NEO4J_server_memory_pagecache_size: 512m
+      NEO4J_server_default__listen__address: 0.0.0.0
+      TZ: Asia/Shanghai
     volumes:
-      - ../data/uploads:/data/uploads
-      - ../data/logs:/data/logs
-      - ../models:/models:ro
-      - E:/workdata:/managed/workdata:${MANAGED_ROOT_VOLUME_MODE:-ro}
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -a bolt://127.0.0.1:7687 -u neo4j -p \"$${NEO4J_AUTH#*/}\" 'RETURN 1;' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    mem_limit: 3g
+    networks: [internal]
+
+  migrate:
+    <<: *python-service
+    restart: "no"
+    environment:
+      <<: *common-environment
+      APP_RUNTIME: migrate
     depends_on:
       postgres:
         condition: service_healthy
+    mem_limit: 2g
+
+  api:
+    <<: *python-service
+    environment:
+      <<: *common-environment
+      APP_RUNTIME: api
+      MCP_FILESYSTEM_ENABLED: ${MCP_FILESYSTEM_ENABLED:-false}
+      MCP_FILESYSTEM_COMMAND: ${MCP_FILESYSTEM_COMMAND:-/usr/local/bin/mcp-server-filesystem}
+      MCP_FILESYSTEM_TIMEOUT_SECONDS: ${MCP_FILESYSTEM_TIMEOUT_SECONDS:-45}
+      MCP_FILESYSTEM_MAX_OUTPUT_CHARS: ${MCP_FILESYSTEM_MAX_OUTPUT_CHARS:-50000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     expose: ["8000"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).read()"]
       interval: 10s
       timeout: 5s
-      retries: 12
-      start_period: 20s
-    networks: [internal]
+      retries: 18
+      start_period: 30s
+    mem_limit: 4g
 
-  filesystem-worker:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.api
-      args:
-        INSTALL_GRAPH_DEPENDENCIES: ${INSTALL_GRAPH_DEPENDENCIES:-false}
-    restart: unless-stopped
-    env_file: [.env]
+  scheduler:
+    <<: *python-service
     environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      AUTO_CREATE_TABLES: "false"
-      FILE_STORAGE_ROOT: /data/uploads
-      LOG_DIR: /data/logs
+      <<: *common-environment
+      APP_RUNTIME: scheduler
+    depends_on: *worker-depends
+    mem_limit: 1g
+
+  watcher:
+    <<: *python-service
+    environment:
+      <<: *common-environment
+      APP_RUNTIME: watcher
+      FILESYSTEM_WATCHER_POLL_SECONDS: ${FILESYSTEM_WATCHER_POLL_SECONDS:-3}
+    depends_on: *worker-depends
+    mem_limit: 1g
+
+  reconcile-scan-worker:
+    <<: *python-service
+    environment:
+      <<: *common-environment
       APP_RUNTIME: filesystem-worker
-      FILESYSTEM_WORKER_ID: filesystem-worker-1
-      FILESYSTEM_WORKER_POLL_SECONDS: 3
-    volumes:
-      - ../data/uploads:/data/uploads
-      - ../data/logs:/data/logs
-      - ../models:/models:ro
-      - E:/workdata:/managed/workdata:${MANAGED_ROOT_VOLUME_MODE:-ro}
+      FILESYSTEM_WORKER_ID: reconcile-scan-worker
+      FILESYSTEM_WORKER_QUEUES: RECONCILE,SCAN
+    depends_on: *worker-depends
+    mem_limit: 2g
+
+  lifecycle-worker:
+    <<: *python-service
+    environment:
+      <<: *common-environment
+      APP_RUNTIME: filesystem-worker
+      FILESYSTEM_WORKER_ID: lifecycle-worker
+      FILESYSTEM_WORKER_QUEUES: DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION
+    depends_on: *worker-depends
+    mem_limit: 2g
+
+  source-analysis-worker:
+    <<: *python-service
+    environment:
+      <<: *common-environment
+      APP_RUNTIME: filesystem-worker
+      FILESYSTEM_WORKER_ID: source-analysis-worker
+      FILESYSTEM_WORKER_QUEUES: SOURCE_ANALYSIS
+      MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY: "1"
+    depends_on: *worker-depends
+    mem_limit: 5g
+
+  materialize-worker:
+    <<: *python-service
+    environment:
+      <<: *common-environment
+      APP_RUNTIME: filesystem-worker
+      FILESYSTEM_WORKER_ID: materialize-worker
+      FILESYSTEM_WORKER_QUEUES: MATERIALIZE,IMPORT
+    depends_on: *worker-depends
+    mem_limit: 2g
+
+  analysis-worker:
+    <<: *python-service
+    environment:
+      <<: *common-environment
+      APP_RUNTIME: filesystem-worker
+      FILESYSTEM_WORKER_ID: analysis-worker
+      FILESYSTEM_WORKER_QUEUES: ANALYSIS
+    depends_on: *worker-depends
+    mem_limit: 4g
+
+  structured-extraction-worker:
+    <<: *python-service
+    environment:
+      <<: *common-environment
+      APP_RUNTIME: filesystem-worker
+      FILESYSTEM_WORKER_ID: structured-extraction-worker
+      FILESYSTEM_WORKER_QUEUES: STRUCTURED_EXTRACTION
+      STRUCTURED_EXTRACTION_WORKER_CONCURRENCY: "1"
+    depends_on: *worker-depends
+    mem_limit: 12g
+
+  graph-worker:
+    <<: *python-service
+    environment:
+      <<: *common-environment
+      APP_RUNTIME: filesystem-worker
+      FILESYSTEM_WORKER_ID: graph-worker
+      FILESYSTEM_WORKER_QUEUES: GRAPH
     depends_on:
       postgres:
         condition: service_healthy
-    networks: [internal]
+      neo4j:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    mem_limit: 5g
 
   gateway:
+    image: file-agent-web:${FILE_AGENT_IMAGE_TAG:-20260826}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.web
       args:
         VITE_API_BASE_URL: /api
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
     restart: unless-stopped
     env_file: [.env]
     environment:
@@ -99,6 +249,7 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    mem_limit: 512m
     networks: [internal]
 
 networks:
@@ -107,5 +258,7 @@ networks:
 
 volumes:
   postgres_data:
+  neo4j_data:
+  neo4j_logs:
   caddy_data:
   caddy_config:

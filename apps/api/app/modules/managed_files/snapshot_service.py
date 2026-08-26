@@ -12,7 +12,15 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import Document, FileObject, ManagedFile, ManagedFileSnapshot, ManagedRoot, User
+from app.db.models import (
+    Document,
+    DocumentVersion,
+    FileObject,
+    ManagedFile,
+    ManagedFileSnapshot,
+    ManagedRoot,
+    User,
+)
 from app.modules.files.content_types import infer_content_type
 from app.modules.managed_files.path_policy import resolve_managed_relative_path
 from app.modules.managed_files.snapshot_repository import ManagedFileSnapshotRepository
@@ -23,6 +31,7 @@ class ManagedSnapshotResolution:
     """一次受管文件快照创建或复用的结果。"""
 
     document: Document
+    document_version: DocumentVersion
     snapshot: ManagedFileSnapshot
     snapshot_status: str
     source_sha256: str
@@ -68,8 +77,10 @@ class ManagedFileSnapshotService:
             if document is None:
                 raise RuntimeError("快照关联的 Document 不存在。")
             self._ensure_snapshot_file(document=document, source_path=source_path, source_sha256=source_sha256)
+            document_version = self._ensure_document_version(document=document)
             return ManagedSnapshotResolution(
                 document=document,
+                document_version=document_version,
                 snapshot=existing,
                 snapshot_status="REUSED",
                 source_sha256=source_sha256,
@@ -96,6 +107,7 @@ class ManagedFileSnapshotService:
                 source_size_bytes=source_stat_after.st_size,
                 source_modified_at=managed_file.modified_at,
             )
+            document_version = self._ensure_document_version(document=document)
         except Exception:
             if target_path is not None:
                 target_path.unlink(missing_ok=True)
@@ -103,6 +115,7 @@ class ManagedFileSnapshotService:
             raise
         return ManagedSnapshotResolution(
             document=document,
+            document_version=document_version,
             snapshot=snapshot,
             snapshot_status="CREATED",
             source_sha256=source_sha256,
@@ -155,6 +168,48 @@ class ManagedFileSnapshotService:
             _remove_empty_parents(target_path.parent, stop_at=self.storage_root)
             raise
         return target_path
+
+    def _ensure_document_version(self, *, document: Document) -> DocumentVersion:
+        """让历史受管快照也具备派生件、页面和证据可追溯的内容版本。"""
+
+        existing = (
+            self.db.query(DocumentVersion)
+            .filter(
+                DocumentVersion.document_id == document.id,
+                DocumentVersion.sha256 == document.sha256,
+            )
+            .order_by(DocumentVersion.version_number.desc())
+            .first()
+        )
+        if existing is not None:
+            return existing
+        latest = (
+            self.db.query(DocumentVersion)
+            .filter(DocumentVersion.document_id == document.id)
+            .order_by(DocumentVersion.version_number.desc())
+            .first()
+        )
+        file_object = (
+            self.db.query(FileObject)
+            .filter(FileObject.document_id == document.id, FileObject.storage_backend == "local")
+            .order_by(FileObject.created_at.asc())
+            .one()
+        )
+        version = DocumentVersion(
+            document_id=document.id,
+            version_number=(latest.version_number + 1 if latest is not None else 1),
+            storage_tier="MANAGED_SNAPSHOT",
+            storage_path=file_object.storage_path,
+            filename=document.original_filename,
+            content_type=document.content_type,
+            size_bytes=document.size_bytes,
+            sha256=document.sha256,
+            source_type="MANAGED_SNAPSHOT",
+            created_by=self.user_id,
+        )
+        self.db.add(version)
+        self.db.flush()
+        return version
 
     def cleanup_created_snapshot(self, *, document: Document) -> None:
         """清理当前事务回滚后可能残留的快照文件。"""

@@ -93,6 +93,7 @@ class TwoStageFileSearchService:
         exact_phrase: str | None = None,
         require_body_evidence: bool = False,
         include_internal_match_flags: bool = False,
+        unbounded_candidates: bool = False,
     ) -> dict[str, Any]:
         """执行两阶段检索，并在退出前恢复请求事务原有的 SQL 超时。"""
 
@@ -107,6 +108,7 @@ class TwoStageFileSearchService:
                 exact_phrase=exact_phrase,
                 require_body_evidence=require_body_evidence,
                 include_internal_match_flags=include_internal_match_flags,
+                unbounded_candidates=unbounded_candidates,
             )
         previous_timeout = self._apply_postgresql_statement_timeout()
         try:
@@ -117,6 +119,7 @@ class TwoStageFileSearchService:
                 exact_phrase=exact_phrase,
                 require_body_evidence=require_body_evidence,
                 include_internal_match_flags=include_internal_match_flags,
+                unbounded_candidates=unbounded_candidates,
             )
         finally:
             # SET LOCAL 的作用域是外层数据库事务而不是 savepoint。文件检索与 Agent
@@ -133,6 +136,7 @@ class TwoStageFileSearchService:
         exact_phrase: str | None = None,
         require_body_evidence: bool = False,
         include_internal_match_flags: bool = False,
+        unbounded_candidates: bool = False,
     ) -> dict[str, Any]:
         """在已设置检索专用超时的上下文中执行确定性融合。"""
 
@@ -158,6 +162,7 @@ class TwoStageFileSearchService:
             ),
             query_fingerprint=query_fingerprint,
             scope_mode=scope_mode,
+            unbounded_candidates=unbounded_candidates,
             message="两阶段文件检索开始",
         )
         if not query or not (parsed_query and parsed_query.cleaned):
@@ -188,7 +193,9 @@ class TwoStageFileSearchService:
         try:
             with self.db.begin_nested():
                 stage1_candidates = self.stage1.recall(
-                    parsed_query=parsed_query, scope=scope,
+                    parsed_query=parsed_query,
+                    scope=scope,
+                    unbounded_candidates=unbounded_candidates,
                 )
         except Exception as exc:
             log_event(
@@ -219,10 +226,14 @@ class TwoStageFileSearchService:
         candidate_limit = min(int(self.config.retrieval_document_candidate_limit), 50)
         # 候选达到保护上限时，系统无法证明是否仍有未进入精查阶段的匹配文件。
         # 该事实必须显式传给完整性回执，不能只作为内部性能参数静默丢弃。
-        candidate_limit_reached = len(stage1_candidates) >= candidate_limit
+        candidate_limit_reached = (
+            False
+            if unbounded_candidates
+            else len(stage1_candidates) >= candidate_limit
+        )
         chunk_degraded = False
         fallback_count = 0
-        if exact_phrase or len(stage1_candidates) < candidate_limit:
+        if exact_phrase or unbounded_candidates or len(stage1_candidates) < candidate_limit:
             fallback_started_at = time.perf_counter()
             try:
                 with self.db.begin_nested():
@@ -238,12 +249,18 @@ class TwoStageFileSearchService:
                             workspace_id=self.workspace_id,
                             max_versions=10,
                             exact_phrase_override=exact_phrase,
+                            unbounded_candidates=unbounded_candidates,
                         )
                     fallback_count = len(fallback_versions)
                     enriched_fallback = self.stage1.enrich_fallback_versions(
                         fallback_versions=fallback_versions,
                         scope=scope,
                     )
+                    if exact_phrase:
+                        # 全局 Chunk 补召回已经逐条验证了连续正文短语；即使该文件未进入
+                        # 有界精查详情，也必须保留这一事实供短语门槛和交集计算使用。
+                        for candidate in enriched_fallback:
+                            candidate["_body_phrase_hit"] = True
                     # 连续短语的正文命中比文件级宽泛候选更可靠，必须优先进入二阶段；
                     # 否则大量摘要 OR 候选可能挤掉真正含有完整短语的文件。
                     stage1_candidates = (
@@ -484,6 +501,7 @@ class TwoStageFileSearchService:
                         parsed_query=parsed_query,
                         scope=scope,
                         limit=candidate_limit,
+                        unbounded_candidates=unbounded_candidates,
                         # 短语策略需要源侧同样提供连续正文命中，不能只让工作
                         # 副本分支执行该约束，否则双范围结果会出现分级不一致。
                         exact_phrase=exact_phrase,
@@ -770,7 +788,7 @@ class TwoStageFileSearchService:
                     "match_reasons": reasons,
                     "match_location": match_location,
                     "evidence_preview": evidence_preview,
-                    "_body_phrase_hit": chunk_score > 0,
+                    "_body_phrase_hit": bool(c.get("_body_phrase_hit")) or chunk_score > 0,
                     "_score": fused_score,
                     # 普通检索的基础词法结果仍需上层策略完成相关性分级；不应
                     # 因为有文件名或摘要命中就自动触发批量工作副本物化。

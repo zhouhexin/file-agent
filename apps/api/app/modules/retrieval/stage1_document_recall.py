@@ -54,18 +54,34 @@ class Stage1DocumentRecallService:
         self.config = config or _DefaultConfig()
         self.tokenizer = tokenizer
 
-    def recall(self, *, parsed_query: Any, scope: Any) -> list[dict]:
+    def recall(
+        self,
+        *,
+        parsed_query: Any,
+        scope: Any,
+        unbounded_candidates: bool = False,
+    ) -> list[dict]:
         """执行第一阶段召回，返回候选列表。
 
         返回的结构化候选包含 working_copy_id、document_version_id、score、hit_source。
-        候选收敛后调用 enrich() 补齐显示字段。
+        候选收敛后调用 enrich() 补齐显示字段。普通检索继续使用配置上限；只有
+        上层明确执行“两个完整条件先分别召回、再取交集”时才允许无界候选，避免
+        在取交集前丢掉排名靠后的真实交集文件。
         """
         if self.db.bind.dialect.name == "postgresql":
-            candidates = self._recall_postgresql(parsed_query, scope)
+            candidates = self._recall_postgresql(
+                parsed_query,
+                scope,
+                unbounded_candidates=unbounded_candidates,
+            )
         else:
-            candidates = self._recall_deterministic(parsed_query, scope)
+            candidates = self._recall_deterministic(
+                parsed_query,
+                scope,
+                unbounded_candidates=unbounded_candidates,
+            )
 
-        # 去重 + 上限
+        # 去重；普通检索随后应用上限，交集专用召回保留完整候选集合。
         seen = {}
         for c in candidates:
             wc_id = c.get("working_copy_id")
@@ -73,7 +89,8 @@ class Stage1DocumentRecallService:
                 seen[wc_id] = c
         result = list(seen.values())
         result.sort(key=lambda x: -x.get("_score", 0.0))
-        result = result[: self.config.retrieval_document_candidate_limit]
+        if not unbounded_candidates:
+            result = result[: self.config.retrieval_document_candidate_limit]
 
         # 富化
         return self._enrich(result, scope=scope)
@@ -190,7 +207,11 @@ class Stage1DocumentRecallService:
         return [WorkingCopy.document_id.in_(document_ids)]
 
     def _recall_postgresql(
-        self, parsed_query: Any, scope: Any
+        self,
+        parsed_query: Any,
+        scope: Any,
+        *,
+        unbounded_candidates: bool = False,
     ) -> list[dict]:
         """PostgreSQL 索引召回。
 
@@ -210,6 +231,7 @@ class Stage1DocumentRecallService:
                 short_phrase,
                 parsed_query,
                 scope,
+                unbounded_candidates=unbounded_candidates,
             )
 
         candidates = []
@@ -228,6 +250,7 @@ class Stage1DocumentRecallService:
             query_text,
             parsed_query,
             scope,
+            unbounded_candidates=unbounded_candidates,
         )
         for c in filename_phrase:
             wc_id = c.get("working_copy_id")
@@ -236,7 +259,11 @@ class Stage1DocumentRecallService:
                 candidates.append(c)
 
         # 3. GIN 主召回
-        gin = self._gin_search(query_text, scope)
+        gin = self._gin_search(
+            query_text,
+            scope,
+            unbounded_candidates=unbounded_candidates,
+        )
         for c in gin:
             wc_id = c.get("working_copy_id")
             if wc_id and wc_id not in seen_wc_ids:
@@ -246,8 +273,15 @@ class Stage1DocumentRecallService:
         # 4. 如果候选不足且查询达最小长度，启用 pg_trgm 补召回
         trgm_min = getattr(self.config, "retrieval_filename_trgm_min_chars", 4)
         candidate_limit = getattr(self.config, "retrieval_document_candidate_limit", 30)
-        if len(candidates) < candidate_limit and len(query_text) >= trgm_min:
-            trgm = self._trgm_search(query_text, scope)
+        if (
+            (unbounded_candidates or len(candidates) < candidate_limit)
+            and len(query_text) >= trgm_min
+        ):
+            trgm = self._trgm_search(
+                query_text,
+                scope,
+                unbounded_candidates=unbounded_candidates,
+            )
             for c in trgm:
                 wc_id = c.get("working_copy_id")
                 if wc_id and wc_id not in seen_wc_ids:
@@ -292,6 +326,8 @@ class Stage1DocumentRecallService:
         query_text: str,
         parsed_query: Any,
         scope: Any,
+        *,
+        unbounded_candidates: bool = False,
     ) -> list[dict]:
         """用文件名 pg_trgm 索引连续匹配完整短语，并优先保留显式年份命中。
 
@@ -323,7 +359,7 @@ class Stage1DocumentRecallService:
         ordering = [DocumentSearchProfile.normalized_filename.asc()]
         if year_match is not None:
             ordering.insert(0, score.desc())
-        rows = (
+        query = (
             self.db.query(
                 DocumentSearchProfile.working_copy_id,
                 DocumentSearchProfile.document_id,
@@ -337,9 +373,10 @@ class Stage1DocumentRecallService:
                 *self._scope_predicates(scope),
             )
             .order_by(*ordering)
-            .limit(self.config.retrieval_document_candidate_limit)
-            .all()
         )
+        if not unbounded_candidates:
+            query = query.limit(self.config.retrieval_document_candidate_limit)
+        rows = query.all()
         return [
             {
                 "working_copy_id": row.working_copy_id,
@@ -356,6 +393,8 @@ class Stage1DocumentRecallService:
         phrase: str,
         parsed_query: Any,
         scope: Any,
+        *,
+        unbounded_candidates: bool = False,
     ) -> list[dict]:
         """在有索引的文件名和瘦投影中连续匹配短中文实体。
 
@@ -386,7 +425,7 @@ class Stage1DocumentRecallService:
             else sa.case((filename_match, 2.1), else_=1.0)
         )
         ordering = [score.desc(), DocumentSearchProfile.normalized_filename.asc()]
-        profile_rows = (
+        profile_query = (
             self.db.query(
                 DocumentSearchProfile.working_copy_id,
                 DocumentSearchProfile.document_id,
@@ -405,9 +444,12 @@ class Stage1DocumentRecallService:
                 *self._scope_predicates(scope),
             )
             .order_by(*ordering)
-            .limit(self.config.retrieval_document_candidate_limit)
-            .all()
         )
+        if not unbounded_candidates:
+            profile_query = profile_query.limit(
+                self.config.retrieval_document_candidate_limit
+            )
+        profile_rows = profile_query.all()
         results = [
             {
                 "working_copy_id": row.working_copy_id,
@@ -424,7 +466,7 @@ class Stage1DocumentRecallService:
         # 历史瘦投影可能只含文件名和摘要，而正文 Chunk 已经完整建立。短人名
         # 必须同时从带 pg_trgm 索引的 Chunk 连续召回，否则“正文有该人员”仍会
         # 被第一阶段挡掉，第二阶段没有机会验证证据。
-        chunk_rows = (
+        chunk_query = (
             self.db.query(
                 WorkingCopy.id.label("working_copy_id"),
                 WorkingCopy.document_id,
@@ -450,9 +492,12 @@ class Stage1DocumentRecallService:
                 WorkingCopy.document_id,
                 WorkingCopy.current_version_id,
             )
-            .limit(self.config.retrieval_document_candidate_limit)
-            .all()
         )
+        if not unbounded_candidates:
+            chunk_query = chunk_query.limit(
+                self.config.retrieval_document_candidate_limit
+            )
+        chunk_rows = chunk_query.all()
         for row in chunk_rows:
             if str(row.working_copy_id) in seen_working_copy_ids:
                 continue
@@ -467,7 +512,13 @@ class Stage1DocumentRecallService:
             )
         return results
 
-    def _gin_search(self, query_text: str, scope: Any) -> list[dict]:
+    def _gin_search(
+        self,
+        query_text: str,
+        scope: Any,
+        *,
+        unbounded_candidates: bool = False,
+    ) -> list[dict]:
         """search_vector GIN 索引召回。
 
         仅 PostgreSQL 下生效；SQLite 退化为 deterministic 分词匹配。
@@ -490,7 +541,7 @@ class Stage1DocumentRecallService:
         ts_query_text = " | ".join(terms)
         ts_query = sa.func.websearch_to_tsquery("simple", ts_query_text)
 
-        rows = (
+        query = (
             self.db.query(
                 DocumentSearchProfile.working_copy_id,
                 DocumentSearchProfile.document_id,
@@ -506,9 +557,10 @@ class Stage1DocumentRecallService:
                 *self._scope_predicates(scope),
             )
             .order_by(sa.desc("score"))
-            .limit(self.config.retrieval_document_candidate_limit)
-            .all()
         )
+        if not unbounded_candidates:
+            query = query.limit(self.config.retrieval_document_candidate_limit)
+        rows = query.all()
         return [
             {
                 "working_copy_id": r.working_copy_id,
@@ -520,7 +572,13 @@ class Stage1DocumentRecallService:
             for r in rows
         ]
 
-    def _trgm_search(self, query_text: str, scope: Any) -> list[dict]:
+    def _trgm_search(
+        self,
+        query_text: str,
+        scope: Any,
+        *,
+        unbounded_candidates: bool = False,
+    ) -> list[dict]:
         """受限 pg_trgm 补召回。仅 PostgreSQL 下生效。"""
         if self.db.bind.dialect.name != "postgresql":
             return []
@@ -546,7 +604,7 @@ class Stage1DocumentRecallService:
         )
         similarity = sa.func.similarity(DocumentSearchProfile.normalized_filename, normalized)
 
-        rows = (
+        query = (
             self.db.query(
                 DocumentSearchProfile.working_copy_id,
                 DocumentSearchProfile.document_id,
@@ -561,9 +619,10 @@ class Stage1DocumentRecallService:
                 *self._scope_predicates(scope),
             )
             .order_by(sa.desc("score"))
-            .limit(limit)
-            .all()
         )
+        if not unbounded_candidates:
+            query = query.limit(limit)
+        rows = query.all()
         return [
             {
                 "working_copy_id": r.working_copy_id,
@@ -607,7 +666,11 @@ class Stage1DocumentRecallService:
         return results
 
     def _recall_deterministic(
-        self, parsed_query: Any, scope: Any
+        self,
+        parsed_query: Any,
+        scope: Any,
+        *,
+        unbounded_candidates: bool = False,
     ) -> list[dict]:
         """SQLite deterministic 降级：完全在应用层匹配。"""
         query_text = parsed_query.cleaned if hasattr(parsed_query, "cleaned") else ""
@@ -619,6 +682,7 @@ class Stage1DocumentRecallService:
                 short_phrase,
                 parsed_query,
                 scope,
+                unbounded_candidates=unbounded_candidates,
             )
 
         terms = self._get_terms(query_text)

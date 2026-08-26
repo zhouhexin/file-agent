@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
-from app.db.models import Document, DocumentArtifact
+from app.db.models import Document, DocumentArtifact, DocumentVersion
 from app.modules.files.office_conversion import (
     LegacyOfficeConversionService,
     OfficeConversionError,
@@ -45,9 +45,29 @@ def _document(*, source_path: Path, document_id: str) -> Document:
         user_id=f"user-{document_id}",
         workspace_id=None,
         original_filename=source_path.name,
-        content_type="application/msword",
+        content_type=(
+            "application/vnd.ms-excel"
+            if source_path.suffix.lower() == ".xls"
+            else "application/msword"
+        ),
         size_bytes=len(content),
         sha256=hashlib.sha256(content).hexdigest(),
+    )
+
+
+def _version(*, document: Document, source_path: Path) -> DocumentVersion:
+    """构造与原件哈希一致的明确内容版本，保护派生件谱系边界。"""
+
+    return DocumentVersion(
+        document_id=document.id,
+        version_number=1,
+        storage_tier="UPLOAD",
+        storage_path=f"originals/{source_path.name}",
+        filename=source_path.name,
+        content_type=document.content_type,
+        size_bytes=document.size_bytes,
+        sha256=document.sha256,
+        source_type="UPLOAD",
     )
 
 
@@ -63,6 +83,27 @@ def _fake_converter(calls: list[list[str]]):
         converted.add_heading("关于开展测试工作的通知", level=0)
         converted.add_paragraph("这是转换后的正文。")
         converted.save(output_dir / "source.docx")
+        return subprocess.CompletedProcess(command, 0, stdout=b"converted", stderr=b"")
+
+    return run
+
+
+def _fake_xls_converter(calls: list[list[str]]):
+    """返回会生成合法多 Sheet XLSX 的确定性 LibreOffice fake。"""
+
+    def run(command: list[str], *, timeout_seconds: int):
+        """记录参数并生成供 openpyxl 双重校验的工作簿。"""
+
+        calls.append(command)
+        assert Path(command[-1]).name == "source.xls"
+        assert any(str(item).startswith("-env:UserInstallation=file:") for item in command)
+        output_dir = Path(command[command.index("--outdir") + 1])
+        workbook = __import__("openpyxl").Workbook()
+        workbook.active.title = "汇总"
+        workbook.active.append(["姓名", "金额"])
+        workbook.active.append(["张三", 100])
+        workbook.create_sheet("明细").append(["学号", "姓名"])
+        workbook.save(output_dir / "source.xlsx")
         return subprocess.CompletedProcess(command, 0, stdout=b"converted", stderr=b"")
 
     return run
@@ -268,6 +309,145 @@ def test_same_content_across_documents_reuses_physical_artifact(monkeypatch, tmp
     artifacts = db.query(DocumentArtifact).order_by(DocumentArtifact.document_id).all()
     assert [item.document_id for item in artifacts] == ["document-a", "document-b"]
     assert len({item.storage_path for item in artifacts}) == 1
+
+
+def test_xls_conversion_creates_versioned_persistent_artifact_and_reuses_it(
+    monkeypatch,
+    tmp_path,
+):
+    """XLS 首次转换必须持久化 XLSX，后续读取复用且原件字节保持不变。"""
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "storage"))
+    source_path = tmp_path / "住宿清单.xls"
+    source_path.write_bytes(b"legacy-xls-content")
+    original_bytes = source_path.read_bytes()
+    executable = tmp_path / "soffice"
+    executable.write_bytes(b"")
+    db = _session()
+    document = _document(source_path=source_path, document_id="document-xls")
+    version = _version(document=document, source_path=source_path)
+    db.add_all([document, version])
+    db.flush()
+    calls: list[list[str]] = []
+    service = LegacyOfficeConversionService(
+        db=db,
+        storage_root=tmp_path / "storage",
+        executable=executable,
+        command_runner=_fake_xls_converter(calls),
+        converter_version="LibreOffice Test 1.0",
+    )
+
+    first = service.get_or_create_xlsx(
+        document=document,
+        document_version=version,
+        source_path=source_path,
+    )
+    second = service.get_or_create_xlsx(
+        document=document,
+        document_version=version,
+        source_path=source_path,
+    )
+
+    assert first.reused is False
+    assert second.reused is True
+    assert first.storage_path == second.storage_path
+    assert first.file_path.suffix == ".xlsx"
+    assert first.file_path.is_file()
+    assert source_path.read_bytes() == original_bytes
+    assert len(calls) == 1
+    artifact = db.query(DocumentArtifact).one()
+    assert artifact.artifact_type == "CONVERTED_XLSX"
+    assert artifact.document_version_id == version.id
+    assert artifact.metadata_json["source_format"] == "xls"
+    assert artifact.metadata_json["parsed_format"] == "xlsx"
+
+
+def test_xls_reuses_valid_persistent_artifact_when_libreoffice_is_unavailable(
+    monkeypatch,
+    tmp_path,
+):
+    """转换器临时不可用时仍应复用同规则且通过校验的持久化 XLSX。"""
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "storage"))
+    source_path = tmp_path / "住宿清单.xls"
+    source_path.write_bytes(b"legacy-xls-content")
+    executable = tmp_path / "soffice"
+    executable.write_bytes(b"")
+    db = _session()
+    document = _document(source_path=source_path, document_id="document-xls-offline")
+    version = _version(document=document, source_path=source_path)
+    db.add_all([document, version])
+    db.flush()
+    online_service = LegacyOfficeConversionService(
+        db=db,
+        storage_root=tmp_path / "storage",
+        executable=executable,
+        command_runner=_fake_xls_converter([]),
+        converter_version="LibreOffice Test 1.0",
+    )
+    created = online_service.get_or_create_xlsx(
+        document=document,
+        document_version=version,
+        source_path=source_path,
+    )
+    monkeypatch.setattr(
+        "app.modules.files.office_conversion.resolve_libreoffice_executable",
+        lambda **_: None,
+    )
+
+    offline_service = LegacyOfficeConversionService(
+        db=db,
+        storage_root=tmp_path / "storage",
+    )
+    reused = offline_service.get_or_create_xlsx(
+        document=document,
+        document_version=version,
+        source_path=source_path,
+    )
+
+    assert reused.reused is True
+    assert reused.artifact_id == created.artifact_id
+    assert reused.converter_config_hash == created.converter_config_hash
+
+
+def test_xls_conversion_rejects_invalid_persistent_xlsx(monkeypatch, tmp_path):
+    """LibreOffice 成功退出但 XLSX 结构无效时不得登记持久化派生件。"""
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "storage"))
+    source_path = tmp_path / "损坏表格.xls"
+    source_path.write_bytes(b"legacy-xls-content")
+    executable = tmp_path / "soffice"
+    executable.write_bytes(b"")
+    db = _session()
+    document = _document(source_path=source_path, document_id="document-xls-invalid")
+    version = _version(document=document, source_path=source_path)
+    db.add_all([document, version])
+    db.flush()
+
+    def invalid_output(command: list[str], *, timeout_seconds: int):
+        """生成伪装为 XLSX 的无效输出。"""
+
+        output_dir = Path(command[command.index("--outdir") + 1])
+        (output_dir / "source.xlsx").write_bytes(b"not-a-zip")
+        return subprocess.CompletedProcess(command, 0, stdout=b"converted", stderr=b"")
+
+    service = LegacyOfficeConversionService(
+        db=db,
+        storage_root=tmp_path / "storage",
+        executable=executable,
+        command_runner=invalid_output,
+        converter_version="LibreOffice Test 1.0",
+    )
+
+    with pytest.raises(OfficeConversionError) as exc_info:
+        service.get_or_create_xlsx(
+            document=document,
+            document_version=version,
+            source_path=source_path,
+        )
+
+    assert exc_info.value.code == "XLSX_CONVERSION_OUTPUT_INVALID"
+    assert db.query(DocumentArtifact).count() == 0
 
 
 def test_doc_conversion_rejects_missing_output(monkeypatch, tmp_path):

@@ -10,7 +10,6 @@ from typing import Any, Iterable, Sequence
 
 import openpyxl
 
-from .conversion import prepared_spreadsheet_path
 from .schemas import ColumnProfile, ColumnType, SheetProfile, WorkbookProfile
 
 
@@ -33,9 +32,10 @@ def profile_workbook(
 
     if suffix in {".csv", ".tsv"}:
         sheets = [_profile_delimited_text(file_path=file_path, suffix=suffix)]
+    elif suffix == ".xls":
+        raise ValueError("旧版 XLS 必须先由 Tool handler 解析为持久化 XLSX 派生件。")
     else:
-        with prepared_spreadsheet_path(file_path=file_path) as readable_path:
-            sheets = _profile_excel(file_path=readable_path)
+        sheets = _profile_excel(file_path=file_path)
 
     if not sheets:
         raise ValueError("工作簿中没有可分析的工作表。")

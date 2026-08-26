@@ -9,6 +9,8 @@ __pycache__
 *.py[cod]
 .pytest_cache
 .mypy_cache
+.t[0-9a-f]*/
+fa-pytest-*/
 
 node_modules
 apps/web/node_modules

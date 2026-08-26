@@ -192,18 +192,28 @@ def _append_items_for_result(
     category_change_type = "CATEGORY_SUGGESTION_REUSED" if result.get("classification_reused") else "CATEGORY_SUGGESTED"
 
     if result.get("conversion_artifact_id") and isinstance(result.get("conversion_reused"), bool):
+        artifact_type = str(
+            result.get("conversion_artifact_type")
+            or (
+                "CONVERTED_XLSX"
+                if str(result.get("conversion_source_format") or "").lower() == "xls"
+                else "CONVERTED_DOCX"
+            )
+        )
+        derivative_prefix = "XLSX" if artifact_type == "CONVERTED_XLSX" else "DOCX"
         repository.create_item(
             changeset_id=changeset_id,
             target_type="document_artifact",
             target_id=str(result.get("conversion_artifact_id")),
             target_document_id=document_id,
             change_type=(
-                "DOCX_DERIVATIVE_REUSED"
+                f"{derivative_prefix}_DERIVATIVE_REUSED"
                 if result.get("conversion_reused")
-                else "DOCX_DERIVATIVE_CREATED"
+                else f"{derivative_prefix}_DERIVATIVE_CREATED"
             ),
             after_value={
                 "artifact_id": str(result.get("conversion_artifact_id")),
+                "artifact_type": artifact_type,
                 "converter": str(result.get("conversion_converter") or ""),
                 "converter_version": str(result.get("conversion_converter_version") or ""),
                 "source_format": str(result.get("conversion_source_format") or "doc"),

@@ -220,6 +220,32 @@ class FileExtractionRepository:
             return _error("UNSAFE_STORAGE_PATH", "文件存储路径越界，已拒绝读取。")
         return _error("FILE_NOT_FOUND_ON_DISK", "本地文件不存在。")
 
+    def get_current_document_version(self, *, document: Document) -> DocumentVersion | None:
+        """解析当前可读内容版本，优先使用活动工作副本固化的 current_version_id。"""
+
+        working_copy = (
+            self.db.query(WorkingCopy)
+            .filter(
+                WorkingCopy.document_id == document.id,
+                WorkingCopy.status == "ACTIVE",
+                WorkingCopy.current_version_id.isnot(None),
+            )
+            .order_by(WorkingCopy.updated_at.desc())
+            .first()
+        )
+        if working_copy is not None:
+            version = self.db.get(DocumentVersion, working_copy.current_version_id)
+            if version is not None:
+                return version
+        # 上传来源和受管源逻辑 Document 可能没有活动工作副本；按版本号选择最新
+        # 内容版本，但转换服务仍会再次校验磁盘 SHA，不能仅凭“最新”复用派生件。
+        return (
+            self.db.query(DocumentVersion)
+            .filter(DocumentVersion.document_id == document.id)
+            .order_by(DocumentVersion.version_number.desc(), DocumentVersion.created_at.desc())
+            .first()
+        )
+
     def create_extraction_run(
         self,
         *,
@@ -259,6 +285,7 @@ class FileExtractionRepository:
         self,
         *,
         document_id: str,
+        document_version_id: str | None = None,
         parser_config_hash: str | None = None,
     ) -> Dict[str, Any] | None:
         """读取同一文件最近一次成功解析结果，用于避免重复解析和重复写页。"""
@@ -269,6 +296,8 @@ class FileExtractionRepository:
         )
         if parser_config_hash is not None:
             query = query.filter(DocumentExtractionRun.parser_config_hash == parser_config_hash)
+        if document_version_id is not None:
+            query = query.filter(DocumentExtractionRun.document_version_id == document_version_id)
         run = (
             query
             .order_by(DocumentExtractionRun.updated_at.desc())

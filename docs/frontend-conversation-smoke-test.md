@@ -86,7 +86,7 @@ Git commit：
 | UI-F10 | 加密 PDF | 需要密码 | 加密风险和停止解析 |
 | UI-F11 | `.xlsm` | 宏标记 | 宏风险提示、不执行宏 |
 | UI-F12 | `.doc` | 可由 LibreOffice 转换 | 旧 Word 完整读取 |
-| UI-F13 | `.xls` | 两个以上 Sheet | `.xls -> 临时 .xlsx` 完整读取 |
+| UI-F13 | `.xls` | 两个以上 Sheet | `.xls -> CONVERTED_XLSX` 持久化派生件完整读取并复用 |
 
 ## 4. 页面烟测用例
 

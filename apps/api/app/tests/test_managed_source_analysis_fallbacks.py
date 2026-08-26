@@ -89,8 +89,9 @@ def test_managed_source_doc_uses_readable_source_resolver(monkeypatch, tmp_path)
         def __init__(self, *, db):
             calls["db"] = db
 
-        def resolve(self, *, document, original_path):
+        def resolve(self, *, document, document_version, original_path):
             calls["document"] = document
+            calls["document_version"] = document_version
             calls["original_path"] = original_path
             return SimpleNamespace(
                 parse_path=converted_path,
@@ -112,15 +113,18 @@ def test_managed_source_doc_uses_readable_source_resolver(monkeypatch, tmp_path)
         lambda extraction, *, source: {**extraction, "converted": source.parse_filename},
     )
     document = SimpleNamespace(id="managed-doc")
+    document_version = SimpleNamespace(id="managed-version")
 
     result = source_analysis._extract_managed_source_document(
         db="db-session",
         document=document,
+        document_version=document_version,
         source_path=source_path,
     )
 
     assert calls["db"] == "db-session"
     assert calls["document"] is document
+    assert calls["document_version"] is document_version
     assert calls["original_path"] == source_path
     assert calls["parse_input"][0] == converted_path
     assert calls["parse_input"][1] == "流程.docx"

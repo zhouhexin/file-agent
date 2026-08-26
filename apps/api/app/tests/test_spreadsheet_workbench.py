@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-import subprocess
 
 import openpyxl
-import pytest
 
-from app.modules.spreadsheet_analysis.conversion import SpreadsheetConversionError, convert_xls_to_xlsx
 from app.modules.spreadsheet_analysis.profiler import profile_workbook
 from app.modules.spreadsheet_workbench.service import SpreadsheetWorkbenchService
 
@@ -55,110 +52,28 @@ def test_workbench_profile_returns_safe_sheet_schema(tmp_path: Path) -> None:
     assert "file_path" not in result
 
 
-def test_workbench_profile_converts_xls_before_openpyxl(monkeypatch, tmp_path: Path) -> None:
-    """表格工作台读取 xls 时必须先转换为 xlsx，不能直接交给 openpyxl。"""
+def test_workbench_profile_consumes_persistent_xlsx_for_original_xls(tmp_path: Path) -> None:
+    """表格工作台只消费已解析的持久化 XLSX，同时对外保留原始 XLS 类型。"""
 
-    path = tmp_path / "科研成果.xls"
-    path.write_bytes(b"legacy-xls")
-
-    def fake_converter(*, source_path, output_dir, timeout_seconds=60):
-        """模拟转换器产出 openpyxl 可读取的 xlsx 文件。"""
-
-        assert source_path == path
-        converted_path = output_dir / "科研成果.xlsx"
-        workbook = openpyxl.Workbook()
-        worksheet = workbook.active
-        worksheet.title = "成果"
-        worksheet.append(["教师", "资助金额"])
-        worksheet.append(["张三", 100])
-        workbook.save(converted_path)
-        return converted_path
-
-    monkeypatch.setattr("app.modules.spreadsheet_analysis.conversion.convert_xls_to_xlsx", fake_converter)
+    path = tmp_path / "persistent-derivative.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "成果"
+    worksheet.append(["教师", "资助金额"])
+    worksheet.append(["张三", 100])
+    workbook.save(path)
 
     result = SpreadsheetWorkbenchService().profile(
         document_id="doc-xls",
-        filename=path.name,
+        filename="科研成果.xls",
         file_path=path,
+        original_file_type=".xls",
     )
 
     assert result["ok"] is True
     assert result["file_type"] == ".xls"
     assert result["sheets"][0]["sheet_name"] == "成果"
     assert result["sheets"][0]["columns"][1]["name"] == "资助金额"
-
-
-def test_xls_conversion_uses_isolated_profile_and_validates_output(monkeypatch, tmp_path: Path) -> None:
-    """XLS 转换必须复制到隔离输入目录，并使用独立 LibreOffice profile。"""
-
-    source = tmp_path / "原始表格.xls"
-    source.write_bytes(b"immutable-xls")
-    original_bytes = source.read_bytes()
-    executable = tmp_path / "soffice"
-    executable.write_bytes(b"")
-    observed: dict[str, object] = {}
-
-    def fake_run(command: list[str], *, timeout_seconds: int):
-        """模拟 LibreOffice 输出合法 XLSX，并记录隔离参数。"""
-
-        observed["command"] = command
-        observed["timeout_seconds"] = timeout_seconds
-        isolated_source = Path(command[-1])
-        assert isolated_source.name == "source.xls"
-        assert isolated_source != source
-        assert isolated_source.read_bytes() == original_bytes
-        output_dir = Path(command[command.index("--outdir") + 1])
-        workbook = openpyxl.Workbook()
-        workbook.active.append(["姓名", "金额"])
-        workbook.save(output_dir / "source.xlsx")
-        return subprocess.CompletedProcess(command, 0, stdout=b"converted", stderr=b"")
-
-    monkeypatch.setattr(
-        "app.modules.spreadsheet_analysis.conversion.resolve_libreoffice_executable",
-        lambda **_kwargs: executable,
-    )
-    monkeypatch.setattr(
-        "app.modules.spreadsheet_analysis.conversion.run_libreoffice_command",
-        fake_run,
-    )
-
-    converted = convert_xls_to_xlsx(source_path=source, output_dir=tmp_path / "conversion")
-
-    command = observed["command"]
-    assert isinstance(command, list)
-    assert any(str(item).startswith("-env:UserInstallation=file:") for item in command)
-    assert converted.name == "source.xlsx"
-    assert source.read_bytes() == original_bytes
-
-
-def test_xls_conversion_rejects_invalid_xlsx_output(monkeypatch, tmp_path: Path) -> None:
-    """LibreOffice 成功退出但产物无效时必须返回结构化错误。"""
-
-    source = tmp_path / "损坏表格.xls"
-    source.write_bytes(b"legacy-xls")
-    executable = tmp_path / "soffice"
-    executable.write_bytes(b"")
-
-    def fake_run(command: list[str], *, timeout_seconds: int):
-        """生成伪装成 XLSX 的无效文件。"""
-
-        output_dir = Path(command[command.index("--outdir") + 1])
-        (output_dir / "source.xlsx").write_bytes(b"not-a-zip")
-        return subprocess.CompletedProcess(command, 0, stdout=b"converted", stderr=b"")
-
-    monkeypatch.setattr(
-        "app.modules.spreadsheet_analysis.conversion.resolve_libreoffice_executable",
-        lambda **_kwargs: executable,
-    )
-    monkeypatch.setattr(
-        "app.modules.spreadsheet_analysis.conversion.run_libreoffice_command",
-        fake_run,
-    )
-
-    with pytest.raises(SpreadsheetConversionError) as exc_info:
-        convert_xls_to_xlsx(source_path=source, output_dir=tmp_path / "conversion")
-
-    assert exc_info.value.code == "XLSX_CONVERSION_OUTPUT_INVALID"
 
 
 def test_workbench_validate_detects_formula_error_literals(tmp_path: Path) -> None:

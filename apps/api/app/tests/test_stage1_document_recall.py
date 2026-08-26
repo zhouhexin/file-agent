@@ -215,6 +215,38 @@ def test_candidate_limit_is_enforced():
         db.close()
 
 
+def test_unbounded_candidates_bypass_limit_before_intersection():
+    """交集专用召回应返回全部文件，不能先被默认 30 份上限截断。"""
+
+    db = _db_session()
+    try:
+        for index in range(35):
+            _setup_profile(
+                db,
+                suffix=f"unbounded-{index}",
+                user_id="user1",
+                filename=f"学校工作总结{index:02d}.docx",
+                summary_text="学校年度工作总结",
+            )
+        db.commit()
+
+        service = Stage1DocumentRecallService(
+            db=db,
+            user_id="user1",
+            workspace_id="ws-user1",
+            config=_FakeConfig(),
+        )
+        result = service.recall(
+            parsed_query=_FakeParsedQuery(cleaned="工作总结"),
+            scope=_FakeScope(),
+            unbounded_candidates=True,
+        )
+
+        assert len(result) == 35
+    finally:
+        db.close()
+
+
 def test_filename_phrase_with_explicit_year_survives_noisy_candidate_limit():
     """文件名明确命中机构和年份时，不能被超过上限的旧年份候选挤掉。"""
 

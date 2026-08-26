@@ -34,7 +34,7 @@ class ManagedSourceSearchResult:
 
 
 class ManagedSourceSearchService:
-    """以源侧文件级资料和正文分块执行有界、只读的词法召回。"""
+    """以源侧文件级资料和正文分块执行只读的词法召回。"""
 
     def __init__(self, *, db: Session, workspace_id: str, tokenizer: Any) -> None:
         """保存已校验的共享工作区与 CPU 分词器。"""
@@ -50,6 +50,7 @@ class ManagedSourceSearchService:
         scope: Any,
         limit: int = 30,
         exact_phrase: str | None = None,
+        unbounded_candidates: bool = False,
     ) -> dict[str, Any]:
         """返回未被活动工作副本覆盖的当前源文件结果。
 
@@ -66,7 +67,11 @@ class ManagedSourceSearchService:
         if not terms:
             return {"results": [], "pending_count": 0, "failed_count": 0, "eligible_count": 0}
 
-        safe_limit = max(1, min(int(limit), 100))
+        safe_limit = (
+            None
+            if unbounded_candidates
+            else max(1, min(int(limit), 100))
+        )
         # 受管原始目录属于唯一共享文件域；新目录在首次命中前没有
         # ``WorkingCopyRoot`` 是正常状态，因此这里绝不能依赖工作副本根映射。
         # root_key/相对路径仅作为逻辑说明，绝不返回 container_path。
@@ -107,7 +112,9 @@ class ManagedSourceSearchService:
                     ManagedFileSearchProfile.normalized_filename == normalized_filename,
                     source_chunk_match,
                 )
-            ).limit(max(safe_limit * 3, 50))
+            )
+            if safe_limit is not None:
+                base = base.limit(max(safe_limit * 3, 50))
         rows = base.all()
         # 同一查询最多保留有限候选，但不能对每一份候选再单独查询工作副本或正文
         # Chunk；首次访问受管目录时这会放大为 N+1 数据库访问，反而掩盖掉“无需
@@ -203,8 +210,9 @@ class ManagedSourceSearchService:
                 )
             )
         results.sort(key=lambda item: (-item.score, str(item.payload.get("managed_file_revision_id") or "")))
+        bounded_results = results if safe_limit is None else results[:safe_limit]
         return {
-            "results": [item.payload for item in results[:safe_limit]],
+            "results": [item.payload for item in bounded_results],
             "pending_count": pending_count,
             "failed_count": failed_count,
             "eligible_count": len(rows),

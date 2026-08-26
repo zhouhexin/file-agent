@@ -20,7 +20,7 @@ def test_managed_source_and_structured_extraction_heads_are_merged() -> None:
 
     scripts = _migration_scripts()
 
-    assert scripts.get_heads() == ["20260825_0001"]
+    assert scripts.get_heads() == ["20260826_0001"]
     merge_revision = scripts.get_revision("20260825_0001")
     assert merge_revision is not None
     assert set(merge_revision.down_revision) == {
@@ -35,11 +35,12 @@ def test_merge_head_contains_both_feature_migration_paths() -> None:
     scripts = _migration_scripts()
     revision_ids = {
         item.revision
-        for item in scripts.iterate_revisions("20260825_0001", "20260730_0001")
+        for item in scripts.iterate_revisions("20260826_0001", "20260730_0001")
     }
 
     assert {
         "20260813_0001",
         "20260824_0001",
         "20260825_0001",
+        "20260826_0001",
     } <= revision_ids

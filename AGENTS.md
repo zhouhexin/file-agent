@@ -134,7 +134,7 @@ MVP 推荐实现：
 - 数据库：PostgreSQL + pgvector。
 - 文件存储：第一版本地 `storage/`，通过 StorageService 抽象。
 - 异步任务：第一版 FastAPI BackgroundTasks，后续 Redis + Celery/RQ。
-- 文档解析：`python-docx`、`openpyxl`、`pdfplumber` 或 `PyMuPDF`，TXT/MD/CSV 直接读取；旧版 `.doc` 通过 macOS `textutil` 或服务器 LibreOffice 转换后抽取正文。
+- 文档解析：`python-docx`、`openpyxl`、`pdfplumber` 或 `PyMuPDF`，TXT/MD/CSV 直接读取；旧版 `.doc/.xls` 通过服务器 LibreOffice 在隔离目录转换、校验并发布为关联 `DocumentVersion` 的持久化 `.docx/.xlsx` 派生件后读取，原件不得覆盖。
 - 大模型与 embedding：OpenAI 兼容接口，默认外部联网和外部检索关闭。
 - Python 包管理：使用用户当前已经配置好的 Python 环境；可以用 `pyproject.toml` 记录依赖和工具配置，但不得强制切换到 `uv`、Poetry、Conda 或新建虚拟环境，除非用户后续明确要求。
 - 测试：pytest；LLM 和 embedding 测试必须使用 deterministic fake。
