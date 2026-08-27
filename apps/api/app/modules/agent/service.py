@@ -27,16 +27,13 @@ from app.modules.agent.runtime import AgentRuntimeContext
 from app.modules.agent.state import AgentRunResult, ToolInvocationRecord
 from app.modules.agent.tool_registry import ToolRegistry
 from app.core.logging import log_context, log_event
-from app.modules.classification.classifier_service import DocumentClassificationService
+from app.modules.classification.runtime_factory import ClassificationRuntimeFactory
 from app.modules.classification.llm_judge import LLMClassificationJudge
 from app.modules.llm.client import OpenAICompatibleLLMClient
 from app.modules.llm.document_summary import LLMDocumentSummaryService
 from app.modules.llm.receipt_summary import LLMReceiptSummaryService
 from app.modules.llm.service import LLMIntentService
-from app.modules.knowledge_graph.classification_context import (
-    build_graph_classification_context,
-    get_graph_repository,
-)
+from app.modules.knowledge_graph.classification_context import get_graph_repository
 from app.modules.knowledge_graph.semantic_context import (
     NoOpSemanticClassificationContext,
     build_semantic_classification_context,
@@ -218,10 +215,6 @@ class AgentRuntimeService:
         """为单次 AgentRun 构造运行时依赖，避免服务对象进入 State。"""
 
         settings = get_settings()
-        llm_judge = _build_classification_judge(settings)
-        graph_context = build_graph_classification_context(settings)
-        semantic_context = _build_semantic_context(settings)
-        graph_mode = _graph_mode_for_user(settings=settings, user_id=user_id)
         registry = self.registry_factory(db, user_id)
         # 单元测试可注入只实现 invoke 的轻量 Registry；Catalog 仍从真实白名单定义构造，
         # 避免测试 fake 被迫复制生产元数据接口。
@@ -239,14 +232,9 @@ class AgentRuntimeService:
             registry=registry,
             context_loader=AgentContextLoader(db),
             llm_intent_service=self.llm_intent_service,
-            classification_service=DocumentClassificationService(
+            classification_service=ClassificationRuntimeFactory(settings).create(
                 db=db,
-                llm_judge=llm_judge,
-                mode=settings.llm_classification_mode,
-                graph_context=graph_context,
-                graph_top_k=settings.graph_classification_top_k,
-                graph_mode=graph_mode,
-                semantic_context=semantic_context,
+                user_id=user_id,
             ),
             document_summary_service=self.document_summary_service
             or _build_document_summary_service(settings=settings, db=db),

@@ -76,6 +76,12 @@ DEFAULT_WORKING_COPY_IMPORT_BATCH_SIZE = 100
 DEFAULT_WORKING_COPY_OPERATION_BATCH_SIZE = 20
 DEFAULT_TRASH_RETENTION_DAYS = 30
 DEFAULT_INITIAL_ORGANIZATION_CONFIDENCE = 0.60
+DEFAULT_AUTO_CLASSIFICATION_POLICY_VERSION = "auto-placement-v1"
+DEFAULT_AUTO_CLASSIFICATION_CALIBRATION_VERSION = "unpublished"
+DEFAULT_AUTO_CLASSIFICATION_TARGET_PRECISION = 0.99
+DEFAULT_AUTO_CLASSIFICATION_GLOBAL_FALLBACK_POLICY = "conservative-v1"
+DEFAULT_AUTO_CLASSIFICATION_FALLBACK_THRESHOLD = 0.90
+DEFAULT_AUTO_CLASSIFICATION_FALLBACK_MARGIN = 0.20
 DEFAULT_UPLOAD_MAX_FILE_SIZE_MB = 1024
 DEFAULT_UPLOAD_CHUNK_SIZE_BYTES = 1024 * 1024
 DEFAULT_DOCUMENT_CHUNK_MAX_CHARS = 1200
@@ -159,6 +165,20 @@ class Settings(BaseModel):
     evidence_answer_cache_enabled: bool = True
     initial_working_copy_organization_enabled: bool = True
     initial_organization_confidence: float = DEFAULT_INITIAL_ORGANIZATION_CONFIDENCE
+    # 自动主分类与首次物理落位采用两个独立开关；默认仅做 Shadow 审计，避免
+    # 未经校准的启发式分数在升级后直接改变用户文件路径。
+    auto_primary_classification_enabled: bool = False
+    auto_initial_placement_enabled: bool = False
+    auto_classification_shadow_mode: bool = True
+    auto_classification_policy_version: str = DEFAULT_AUTO_CLASSIFICATION_POLICY_VERSION
+    auto_classification_calibration_version: str = DEFAULT_AUTO_CLASSIFICATION_CALIBRATION_VERSION
+    auto_classification_target_precision: float = DEFAULT_AUTO_CLASSIFICATION_TARGET_PRECISION
+    auto_classification_full_taxonomy_enabled: bool = True
+    auto_classification_global_fallback_policy: str = (
+        DEFAULT_AUTO_CLASSIFICATION_GLOBAL_FALLBACK_POLICY
+    )
+    auto_classification_fallback_threshold: float = DEFAULT_AUTO_CLASSIFICATION_FALLBACK_THRESHOLD
+    auto_classification_fallback_margin: float = DEFAULT_AUTO_CLASSIFICATION_FALLBACK_MARGIN
     upload_max_file_size_mb: int = DEFAULT_UPLOAD_MAX_FILE_SIZE_MB
     upload_chunk_size_bytes: int = DEFAULT_UPLOAD_CHUNK_SIZE_BYTES
     upload_allowed_extensions: tuple[str, ...] = DEFAULT_UPLOAD_ALLOWED_EXTENSIONS
@@ -549,6 +569,66 @@ def get_settings() -> Settings:
                     os.getenv(
                         "INITIAL_ORGANIZATION_CONFIDENCE",
                         str(DEFAULT_INITIAL_ORGANIZATION_CONFIDENCE),
+                    )
+                ),
+            ),
+        ),
+        auto_primary_classification_enabled=os.getenv(
+            "AUTO_PRIMARY_CLASSIFICATION_ENABLED", "false"
+        ).lower() == "true",
+        auto_initial_placement_enabled=os.getenv(
+            "AUTO_INITIAL_PLACEMENT_ENABLED", "false"
+        ).lower() == "true",
+        auto_classification_shadow_mode=os.getenv(
+            "AUTO_CLASSIFICATION_SHADOW_MODE", "true"
+        ).lower() == "true",
+        auto_classification_policy_version=os.getenv(
+            "AUTO_CLASSIFICATION_POLICY_VERSION",
+            DEFAULT_AUTO_CLASSIFICATION_POLICY_VERSION,
+        ).strip() or DEFAULT_AUTO_CLASSIFICATION_POLICY_VERSION,
+        auto_classification_calibration_version=os.getenv(
+            "AUTO_CLASSIFICATION_CALIBRATION_VERSION",
+            DEFAULT_AUTO_CLASSIFICATION_CALIBRATION_VERSION,
+        ).strip() or DEFAULT_AUTO_CLASSIFICATION_CALIBRATION_VERSION,
+        auto_classification_target_precision=max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    os.getenv(
+                        "AUTO_CLASSIFICATION_TARGET_PRECISION",
+                        str(DEFAULT_AUTO_CLASSIFICATION_TARGET_PRECISION),
+                    )
+                ),
+            ),
+        ),
+        auto_classification_full_taxonomy_enabled=os.getenv(
+            "AUTO_CLASSIFICATION_FULL_TAXONOMY_ENABLED", "true"
+        ).lower() == "true",
+        auto_classification_global_fallback_policy=os.getenv(
+            "AUTO_CLASSIFICATION_GLOBAL_FALLBACK_POLICY",
+            DEFAULT_AUTO_CLASSIFICATION_GLOBAL_FALLBACK_POLICY,
+        ).strip() or DEFAULT_AUTO_CLASSIFICATION_GLOBAL_FALLBACK_POLICY,
+        auto_classification_fallback_threshold=max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    os.getenv(
+                        "AUTO_CLASSIFICATION_FALLBACK_THRESHOLD",
+                        str(DEFAULT_AUTO_CLASSIFICATION_FALLBACK_THRESHOLD),
+                    )
+                ),
+            ),
+        ),
+        auto_classification_fallback_margin=max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    os.getenv(
+                        "AUTO_CLASSIFICATION_FALLBACK_MARGIN",
+                        str(DEFAULT_AUTO_CLASSIFICATION_FALLBACK_MARGIN),
                     )
                 ),
             ),

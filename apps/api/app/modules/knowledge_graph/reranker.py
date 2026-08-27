@@ -122,6 +122,7 @@ def _apply_support(
         negative_penalty=negative_penalty,
     )
     category["candidate_scores"] = {
+        **dict(category.get("candidate_scores") or {}),
         "rule": round(rule_score, 4),
         "semantic": round(semantic_score, 4),
         "graph": round(graph_score, 4),

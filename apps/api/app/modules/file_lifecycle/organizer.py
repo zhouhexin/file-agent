@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.db.models import Document, DocumentClassificationSummary, DocumentVersion, ManagedFile
-from app.modules.classification.classifier_service import DocumentClassificationService
+from app.modules.classification.runtime_factory import ClassificationRuntimeFactory
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 
 
@@ -123,7 +123,10 @@ class InitialWorkingCopyOrganizer:
         classification_result: dict[str, Any] = {}
         if extraction_result and extraction_result.get("status") == "COMPLETED":
             try:
-                classification_result = DocumentClassificationService(db=self.db).classify(
+                classification_result = ClassificationRuntimeFactory(self.settings).create(
+                    db=self.db,
+                    user_id=self.user_id,
+                ).classify(
                     document_id=document.id,
                     document_version_id=version.id,
                     extraction_run_id=str(extraction_result.get("extraction_run_id") or ""),

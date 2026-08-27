@@ -1715,6 +1715,23 @@ POST /api/trash-entries/{trash_entry_id}/restore-plan
 
 工作副本高风险计划使用 `RENAME_WORKING_COPIES`、`MOVE_WORKING_COPIES`、`TRASH_WORKING_COPIES` 和 `RESTORE_WORKING_COPIES`。创建请求只能提交 `working_copy_id` 和目标逻辑字段，后端必须从数据库重建 before/version/SHA-256 快照；确认后逐文件执行并写 ChangeSet。任何响应不得返回三个目录的宿主机绝对路径。
 
+### 19.1 主分类目录只读接口
+
+```text
+GET /api/classification/organization/tree
+GET /api/classification/organization/files?category_id={stable_id}&scope=descendants&page=1&page_size=20
+```
+
+`tree` 按当前 taxonomy 返回父子节点、直接文件数和包含后代的去重文件数，并在树首部增加
+`category_id=__needs_review__` 的虚拟“待复核”节点。计数和清单只包含共享工作区的 `ACTIVE`
+工作副本；活动主分类只认当前版本的 `PRIMARY + AUTO_APPLIED/CONFIRMED` 关系。建议分类、
+已拒绝关系、`ORGANIZING` 文件和 Shadow 组织决策不得参与计数。
+
+`files` 支持 `scope=direct|descendants` 和服务端分页。传入 `__needs_review__` 等价于读取当前版本
+最新的非 Shadow `NEEDS_REVIEW` 组织决策。响应只包含稳定业务 ID、逻辑相对路径、分类状态、
+复核原因码和时间等安全字段，不返回绝对路径、策略阈值、正文或模型内部输入。接口为只读；移动、
+改名、删除等操作仍必须创建并确认 OperationPlan。
+
 ## 20. Adaptive Planner Admin APIs
 
 ### 20.1 List Capability Suggestions

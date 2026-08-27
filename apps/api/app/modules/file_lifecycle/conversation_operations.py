@@ -290,7 +290,7 @@ class ConversationalWorkingCopyPlanService:
                     DocumentCategory.working_copy_id == working_copy.id,
                     DocumentCategory.document_version_id
                     == working_copy.current_version_id,
-                    DocumentCategory.status == "CONFIRMED",
+                    DocumentCategory.status.in_(["AUTO_APPLIED", "CONFIRMED"]),
                     DocumentCategory.relation_role != "DOCUMENT_TYPE",
                 )
                 .order_by(

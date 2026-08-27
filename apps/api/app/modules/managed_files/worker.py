@@ -37,7 +37,7 @@ from app.modules.file_lifecycle.repository import FileLifecycleRepository
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.changesets.service import persist_changeset_from_document_results
-from app.modules.classification.classifier_service import DocumentClassificationService
+from app.modules.classification.runtime_factory import ClassificationRuntimeFactory
 from app.modules.classification.graph_outbox import (
     ClassificationGraphOutboxService,
 )
@@ -1540,7 +1540,10 @@ def _process_managed_file_classification_job(*, db: Session, job: FilesystemJob)
     job.progress_current = 0
     db.flush()
     registry = ToolRegistry(db=db, user_id=user_id)
-    classification_service = DocumentClassificationService(db=db)
+    classification_service = ClassificationRuntimeFactory().create(
+        db=db,
+        user_id=user_id,
+    )
     document_results: list[dict] = []
     for managed_file, root in rows:
         try:

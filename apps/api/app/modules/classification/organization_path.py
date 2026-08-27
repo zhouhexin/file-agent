@@ -50,7 +50,7 @@ class CategoryOrganizationPathResolver:
     ) -> CategoryOrganizationTarget:
         """校验正式关系和当前 taxonomy 后生成目标相对路径。"""
 
-        if relation.status != "CONFIRMED":
+        if relation.status not in {"AUTO_APPLIED", "CONFIRMED"}:
             raise CategoryOrganizationPathError("文件分类尚未确认。")
         if (
             relation.working_copy_id != working_copy.id
@@ -58,15 +58,34 @@ class CategoryOrganizationPathResolver:
             or relation.document_version_id != working_copy.current_version_id
         ):
             raise CategoryOrganizationPathError("分类与当前文件版本不一致，请重新确认。")
+        return self.resolve_category(
+            category_id=relation.category_id,
+            taxonomy_key=relation.taxonomy_key,
+            taxonomy_version=relation.taxonomy_version,
+            working_copy=working_copy,
+            working_root=working_root,
+        )
+
+    def resolve_category(
+        self,
+        *,
+        category_id: str,
+        taxonomy_key: str,
+        taxonomy_version: str,
+        working_copy: WorkingCopy,
+        working_root: WorkingCopyRoot,
+    ) -> CategoryOrganizationTarget:
+        """从经过策略门槛的稳定分类 ID 解析首次发布目标。"""
+
         taxonomy = load_default_taxonomy()
         if (
-            relation.taxonomy_key != taxonomy.key
-            or relation.taxonomy_version != taxonomy.version
+            taxonomy_key != taxonomy.key
+            or taxonomy_version != taxonomy.version
         ):
             raise CategoryOrganizationPathError(
                 "分类目录版本已经更新，请重新确认整理目标。"
             )
-        node = _find_category(taxonomy.categories, relation.category_id)
+        node = _find_category(taxonomy.categories, category_id)
         if node is None:
             raise CategoryOrganizationPathError("当前分类目录中不存在该分类。")
         if not node.organization_path:
@@ -83,7 +102,7 @@ class CategoryOrganizationPathResolver:
         # 这里只触发安全校验，不创建目录或产生物理副作用。
         self.storage.working_copy_path(target_storage_path)
         return CategoryOrganizationTarget(
-            category_id=relation.category_id,
+            category_id=category_id,
             taxonomy_key=taxonomy.key,
             taxonomy_version=taxonomy.version,
             organization_path=tuple(node.organization_path),

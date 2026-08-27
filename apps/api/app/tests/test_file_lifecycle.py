@@ -17,6 +17,7 @@ from app.db.models import (
     DocumentChunk,
     DocumentExtractionRun,
     DocumentIndexRun,
+    DocumentOrganizationDecision,
     DocumentSearchProfile,
     DocumentSummary,
     DocumentVersion,
@@ -192,6 +193,121 @@ def test_upload_is_archived_then_imported_by_separate_jobs(monkeypatch, tmp_path
         ).all()
         assert archive_messages
         assert all(message.role == "SYSTEM_AUDIT" for message in archive_messages)
+    finally:
+        db.close()
+
+
+def test_confidence_gated_upload_is_first_published_to_taxonomy_path(monkeypatch, tmp_path):
+    """高可靠新上传必须从隐藏 ORGANIZING 一次发布到 taxonomy 主分类目录。"""
+
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_INITIAL_PLACEMENT_ENABLED", "true")
+    monkeypatch.setenv("AUTO_CLASSIFICATION_SHADOW_MODE", "false")
+    monkeypatch.setenv("AUTO_CLASSIFICATION_FALLBACK_MARGIN", "0.01")
+    config.get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "auto-placement-owner")
+    filename = "学校会议纪要研究决定议题.txt"
+    content = "学校会议纪要。会议围绕议题进行研究，研究决定通过有关事项。".encode()
+    upload = _upload(client, headers, filename=filename, content=content)
+
+    processed = [
+        process_next_filesystem_job(
+            session_factory=SessionLocal,
+            worker_id="lifecycle-test",
+        )
+        for _ in range(3)
+    ]
+    db = SessionLocal()
+    try:
+        organizing = db.query(WorkingCopy).one()
+        assert organizing.status == "ORGANIZING"
+        assert ".internal" in organizing.relative_path
+        assert all(
+            item["id"] != organizing.id
+            for item in client.get("/api/working-copies", headers=headers).json()
+        )
+        assert client.get(
+            f"/api/working-copies/{organizing.id}", headers=headers
+        ).status_code == 404
+    finally:
+        db.close()
+    processed.extend(_drain(SessionLocal))
+
+    assert len(processed) == 4
+    status = client.get(
+        f"/api/uploads/{upload['upload_document_version_id']}/archive-status",
+        headers=headers,
+    ).json()
+    db = SessionLocal()
+    try:
+        working_copy = db.get(WorkingCopy, status["working_copy_id"])
+        version = db.get(DocumentVersion, working_copy.current_version_id)
+        relation = db.query(DocumentCategory).filter_by(working_copy_id=working_copy.id).one()
+        decision = db.query(DocumentOrganizationDecision).filter_by(
+            working_copy_id=working_copy.id
+        ).one()
+        path_record = db.query(WorkingCopyPathRecord).filter_by(
+            working_copy_id=working_copy.id
+        ).one()
+        managed_file = db.get(ManagedFile, working_copy.managed_file_id)
+
+        assert working_copy.status == "ACTIVE"
+        assert working_copy.relative_path == f"学校/行政综合管理类/会议纪要/{filename}"
+        assert version.storage_path.endswith(working_copy.relative_path)
+        assert relation.status == "AUTO_APPLIED"
+        assert relation.relation_role == "PRIMARY"
+        assert relation.source == "auto_placement_policy"
+        assert decision.decision == "AUTO_ORGANIZED"
+        assert decision.feature_snapshot_json["shadow_only"] is False
+        assert path_record.operation_type == "INITIAL_AUTO_PLACEMENT"
+        assert (tmp_path / "working" / version.storage_path).read_bytes() == content
+        # taxonomy 只决定工作副本首次发布位置，不得重写内部保护原件路径。
+        assert managed_file.relative_path.startswith("uploads/")
+        assert "学校/行政综合管理类/会议纪要" not in managed_file.relative_path
+        assert (tmp_path / "originals" / managed_file.relative_path).read_bytes() == content
+    finally:
+        db.close()
+
+
+def test_rejected_auto_classification_publishes_active_neutral_copy(monkeypatch, tmp_path):
+    """无法可靠分类的安全文件仍应可用，只把主分类状态留给人工复核。"""
+
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_INITIAL_PLACEMENT_ENABLED", "true")
+    monkeypatch.setenv("AUTO_CLASSIFICATION_SHADOW_MODE", "false")
+    config.get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "review-placement-owner")
+    upload = _upload(
+        client,
+        headers,
+        filename="普通材料.txt",
+        content="这是一份没有明确业务主题的普通材料。".encode(),
+    )
+
+    _drain(SessionLocal)
+
+    status = client.get(
+        f"/api/uploads/{upload['upload_document_version_id']}/archive-status",
+        headers=headers,
+    ).json()
+    db = SessionLocal()
+    try:
+        working_copy = db.get(WorkingCopy, status["working_copy_id"])
+        decision = db.query(DocumentOrganizationDecision).filter_by(
+            working_copy_id=working_copy.id
+        ).one()
+        assert working_copy.status == "ACTIVE"
+        assert working_copy.relative_path.endswith("普通材料.txt")
+        assert decision.decision == "NEEDS_REVIEW"
+        assert "OTHER_CATEGORY" in decision.reason_codes_json
+        assert db.query(DocumentCategory).filter_by(working_copy_id=working_copy.id).count() == 0
+        # 待复核不等于不可用，普通详情入口必须继续返回该活动副本。
+        response = client.get(f"/api/working-copies/{working_copy.id}", headers=headers)
+        assert response.status_code == 200
     finally:
         db.close()
         clear_overrides()

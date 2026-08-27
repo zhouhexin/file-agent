@@ -2,8 +2,8 @@
 
 > 日期：2026-08-26  
 > 最近更新：2026-08-27  
-> 状态：方案设计，尚未实施  
-> 当前授权边界：仅讨论并固化方案；未授权修改代码、数据库迁移、配置或运行数据  
+> 状态：核心后端链路已实施，默认 Shadow，分类树与异常复核 UI 待实施
+> 当前授权边界：已按用户 2026-08-27 指令开始开发；生产真实落位仍须完成校准与灰度验收
 > 适用范围：新上传文件首次整理、主分类选择、工作副本首次发布和异常复核  
 > 核心目标：大多数文件无需用户确认即可准确存入主分类目录，仅让极少数真正不确定的文件进入复核
 
@@ -1094,3 +1094,34 @@ time_to_active_p50/p95
 - 原始文件内容、名称和归档位置均未改变。
 - 已成为 `ACTIVE` 的工作副本后续移动仍强制 OperationPlan。
 - 关闭功能开关后可以立即停止新的自动落位，且不会破坏既有文件。
+
+## 21. 2026-08-27 实施记录
+
+本次已完成核心后端闭环：
+
+- 新增统一 `ClassificationRuntimeFactory`，上传 Worker、受管源侧分析、批量分类和 Agent 使用同一组 LLM、图谱、语义与灰度配置。
+- 分类候选现在显式区分文件名/标题信号与正文信号，并保存摘要/全文 Top1 一致性特征。
+- 新增确定性 `AutoPlacementPolicy`、稳定原因码、冷启动保守阈值和 Shadow 决策快照。
+- 新增 `document_organization_decisions` ORM、Alembic 迁移和幂等仓储；`document_categories` 的活动唯一约束扩展到 `AUTO_APPLIED` 与 `CONFIRMED`。
+- 只有 `AUTO_PRIMARY_CLASSIFICATION_ENABLED=true`、`AUTO_INITIAL_PLACEMENT_ENABLED=true` 且 `AUTO_CLASSIFICATION_SHADOW_MODE=false` 时，新上传归档副本才进入 `ORGANIZING`。
+- `ORGANIZING` 副本不进入普通列表、详情、下载、检索或附件范围；分类完成后一次原子发布。
+- 门槛通过时发布到 taxonomy `organization_path`，创建 `AUTO_APPLIED + PRIMARY` 关系、路径记录、ChangeItem 和图谱 Outbox。
+- 门槛未通过或解析失败时发布到中性路径，工作副本保持 `ACTIVE`，组织决策为 `NEEDS_REVIEW`，不创建正式主分类关系。
+- 已经 `ACTIVE` 的历史文件只执行 Shadow 回放，不允许通过该链路静默移动；后续移动仍走 OperationPlan。
+- StorageService 支持“文件系统已发布、数据库待收敛”场景的同哈希幂等重试，不覆盖不同内容。
+- 新增主分类树和文件清单只读接口，只聚合共享工作区中的 `ACTIVE` 文件；分类计数只认
+  `AUTO_APPLIED` / `CONFIRMED + PRIMARY` 当前版本关系，并提供服务端分页和父节点后代范围查询。
+- 新增“待复核”虚拟节点：只读取当前版本最新的非 Shadow `NEEDS_REVIEW` 决策，既不创建物理目录，
+  也不让 `ORGANIZING` 文件提前出现在页面。
+- 前端新增 `/files` 文件分类页，提供 taxonomy 树、分类状态、待复核原因、分页和受控下载入口；
+  页面不提供直接拖动、移动或改名能力，后续路径变更仍必须回到聊天生成 OperationPlan。
+
+当前仍未完成、不能据此宣称全方案交付的内容：
+
+- 冻结人工标注集、校准器训练、逐分类阈值和 99% 精度统计。
+- admin/ops Shadow 抽检报表、线上指标和按流量灰度控制台。
+- 分类证据/摘要行展开、父节点“仅本级”切换、批量复核和基于 OperationPlan 的拖拽预览。
+- 用户明确“只保存不整理”到 `SKIPPED` 的消息级参数贯通。
+
+因此部署默认值仍为“自动主分类关闭、首次落位关闭、Shadow 开启”。在校准版本仍为
+`unpublished` 时，不建议生产环境退出 Shadow。

@@ -17,6 +17,7 @@ File Agent 不是传统网盘，也不是只会问答的知识库系统。用户
 - `docs/langgraph-framework-decision.md`：选择 LangGraph 作为 Agent Runtime 底层编排框架的架构决策。
 - `docs/file-rename-llm-validation-implementation-plan.md`：重命名差异风险、LLM 证据校验、降级和验收计划。
 - `docs/classification-topic-summary-implementation-plan.md`：分类主题摘要优先的候选召回、原文证据校验、开源选型和Shadow上线方案。
+- `docs/2026-08-26-confidence-gated-auto-classification-initial-placement-plan.md`：新上传文件在 `ACTIVE` 前进行高置信主分类、首次落位和主动拒识的实施依据。
 - `docs/managed-original-working-copy-trash-implementation-plan.md`：受管原始目录、工作副本目录、回收站目录、重复上传确认和异步归档导入方案。
 - `docs/stage-4-low-resource-two-stage-retrieval-plan.md`：阶段四 CPU-only 两阶段文件检索的边界、数据流与验收依据。
 - `docs/stage-5-llm-efficient-evidence-answer-plan.md`：阶段五准确性优先的 LLM 证据回答、引用校验、缓存、前端和验收计划。
@@ -65,7 +66,7 @@ python -m pytest
 上传采用分块流式写入，`UPLOAD_MAX_FILE_SIZE_MB` 是可按部署容量调整的资源保护上限，默认 1024 MB，并非固定业务限制。当前阶段只执行扩展名、基础 MIME、宏和加密风险检查，不实现、也不宣称已执行病毒扫描。
 PDF、DOCX 默认启用本地 Docling 结构化解析，并把文档元素和位置写入 `document_elements`；Docling 不可用时自动回退现有解析器，扫描件仍由现有 OCR 链路处理。
 文件重命名统一生成 `RENAME_WORKING_COPIES` OperationPlan，确认后由工作副本执行器执行；旧的受管原始文件 Native/F2 执行通道和上传暂存重命名通道不再对 Agent 开放。
-上传附件通过查重后由独立 worker 归档到受管原始目录；`IMPORT` worker 以一次源文件读取完成哈希和原子复制，按 `shared/<root_key>/<源相对路径>` 登记 `ACTIVE` 工作副本，随后由 `ANALYSIS` worker 异步完成正文解析、双摘要、分类和 Chunk 索引。普通受管目录在启动扫描后先由 `SOURCE_ANALYSIS` 建立只读正文与证据索引，每个修订 READY 后自动创建低优先级 `MATERIALIZE` 任务，最终把全部文件同步到共享工作目录。同步未完成期间，检索合并活动工作副本和未物化源侧索引；用户命中的既有物化任务会被提升优先级，同一文件不并发复制。同步不会因不同目录中的同名文件停顿，也不会生成“待整理/待确认”物理目录；同名歧义只在上传、查询或实际使用相关文件时提示选择。后台双摘要默认使用 CPU-only Jieba + LexRank。普通用户不展示内部状态、Skill 或 Tool。对话找文件默认使用 CPU-only 两阶段检索，精确问答仍必须回到原文取证。后续重命名、移动和删除计划必须以 `working_copy_id` 为对象，不能再修改受管原始目录。
+上传附件通过查重后由独立 worker 归档到受管原始目录；安全默认配置下，`IMPORT` worker 以一次源文件读取完成哈希和原子复制，按 `shared/<root_key>/<源相对路径>` 登记 `ACTIVE` 工作副本，随后由 `ANALYSIS` worker 异步完成正文解析、双摘要、分类和 Chunk 索引。置信门控自动落位默认只运行 Shadow；完成离线校准后，可显式开启两个自动分类开关并退出 Shadow，使新上传副本先进入普通用户不可见的 `ORGANIZING`，通过门槛后首次发布到 taxonomy 目录并写 `AUTO_APPLIED`，拒识文件则发布到中性路径并保持 `ACTIVE + NEEDS_REVIEW`。已经 `ACTIVE` 的文件绝不由该链路静默移动。普通受管目录在启动扫描后先由 `SOURCE_ANALYSIS` 建立只读正文与证据索引，每个修订 READY 后自动创建低优先级 `MATERIALIZE` 任务，最终把全部文件同步到共享工作目录。同步未完成期间，检索合并活动工作副本和未物化源侧索引；用户命中的既有物化任务会被提升优先级，同一文件不并发复制。同步不会因不同目录中的同名文件停顿，也不会生成“待整理/待确认”物理目录；同名歧义只在上传、查询或实际使用相关文件时提示选择。后台双摘要默认使用 CPU-only Jieba + LexRank。普通用户不展示内部状态、Skill 或 Tool。对话找文件默认使用 CPU-only 两阶段检索，精确问答仍必须回到原文取证。后续重命名、移动和删除计划必须以 `working_copy_id` 为对象，不能再修改受管原始目录。
 每个成功解析的工作副本内容版本会在发布前幂等建立 Chunk/Evidence。当前无 GPU 部署使用 Jieba + PostgreSQL `simple` FTS/GIN + `pg_trgm` 的 CPU 词法索引；`embedding vector(1536)` 只保留空扩展槽，默认 `EMBEDDING_ENABLED=false`，不会下载向量模型或要求应用服务器安装 GPU。后续可接独立 GPU provider 异步回填，不改变已有 Chunk、Evidence 和引用 ID。
 默认不启用真实 LLM 调用；如需让对话阶段使用大模型理解用户需求，请在 `.env` 中配置 `LLM_ENABLED=true`、`LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_CHAT_MODEL`。当前 LLM 客户端使用 OpenAI-compatible Chat Completions 接口。
 LLM 启用后，Adaptive Planner 默认运行在 `ADAPTIVE_PLANNER_MODE=shadow`：Legacy Planner 继续产生用户可见结果，Adaptive Planner 只能引用本次 `CatalogSnapshot` 中已启用的 Tool/Skill 并进行只读对比，不会产生第二次 Tool 调用。当前每次 AgentRun 最多规划 3 轮、实际调用 5 次 Tool；高风险步骤遇到确认边界会暂停而不是跳过。现有 Catalog 无法满足明确目标时，可以生成去重、脱敏的能力建议，由 ops/admin 在 `/admin/capability-suggestions` 评审；建议不会自动创建代码或启用 Tool/Skill。

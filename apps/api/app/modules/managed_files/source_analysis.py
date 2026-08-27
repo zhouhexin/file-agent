@@ -41,7 +41,7 @@ from app.db.models import (
 )
 from app.modules.chunks.service import DocumentIndexService, INDEX_VERSION
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
-from app.modules.classification.classifier_service import DocumentClassificationService
+from app.modules.classification.runtime_factory import ClassificationRuntimeFactory
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text
 from app.modules.files.readable_source import (
@@ -242,7 +242,10 @@ class ManagedSourceAnalysisService:
                     "index_run_id": None,
                 }
             else:
-                classification = DocumentClassificationService(db=self.db).classify(
+                classification = ClassificationRuntimeFactory(self.settings).create(
+                    db=self.db,
+                    user_id=str(owner_id),
+                ).classify(
                     document_id=document.id,
                     document_version_id=version.id,
                     extraction_run_id=run.id,

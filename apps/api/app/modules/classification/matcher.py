@@ -43,6 +43,8 @@ class CategoryCandidate:
     name: str
     rule_score: float
     matched_signals: list[str]
+    matched_title_signals: list[str]
+    matched_content_signals: list[str]
     negative_signals: list[str]
     candidate_reason: str
     taxonomy_key: str
@@ -101,7 +103,14 @@ def recall_category_candidates(
     for category in flatten_category_paths(taxonomy):
         if len(category.path) == 1:
             continue
-        score, matched_signals, negative_signals, reasons = _score_category_candidate(
+        (
+            score,
+            matched_signals,
+            matched_title_signals,
+            matched_content_signals,
+            negative_signals,
+            reasons,
+        ) = _score_category_candidate(
             category=category,
             title_text=title_text,
             body_text=body_text,
@@ -115,6 +124,8 @@ def recall_category_candidates(
                 name="/".join(category.path),
                 rule_score=round(score, 4),
                 matched_signals=matched_signals,
+                matched_title_signals=matched_title_signals,
+                matched_content_signals=matched_content_signals,
                 negative_signals=negative_signals,
                 candidate_reason="；".join(reasons),
                 taxonomy_key=taxonomy.key,
@@ -141,6 +152,20 @@ def match_document_text(text: str, taxonomy: Taxonomy) -> list[dict[str, Any]]:
 
     matches = [_candidate_to_category(candidate) for candidate in candidates]
     return _dedupe_and_remove_shorter_embedded_matches(matches)
+
+
+def match_document_features(
+    document_features: DocumentFeatures,
+    taxonomy: Taxonomy,
+) -> list[dict[str, Any]]:
+    """按文件名和正文分离的特征生成建议，供自动落位区分证据来源。"""
+
+    candidates = recall_category_candidates(document_features, taxonomy, limit=5)
+    if not candidates:
+        return [_other_category(taxonomy)]
+    return _dedupe_and_remove_shorter_embedded_matches(
+        [_candidate_to_category(candidate) for candidate in candidates]
+    )
 
 
 def _dedupe_and_remove_shorter_embedded_matches(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -185,7 +210,7 @@ def _score_category_candidate(
     category: FlattenedCategory,
     title_text: str,
     body_text: str,
-) -> tuple[float, list[str], list[str], list[str]]:
+) -> tuple[float, list[str], list[str], list[str], list[str], list[str]]:
     """计算分类候选召回分数，并记录命中信号。"""
 
     title_signals = _unique_signals(
@@ -206,7 +231,7 @@ def _score_category_candidate(
     ]
     matched_signals = _unique_signals([*matched_title, *matched_body, *matched_examples])
     if not matched_signals:
-        return 0.0, [], negative_signals, []
+        return 0.0, [], [], [], negative_signals, []
 
     score = 0.0
     if category.name in title_text:
@@ -237,7 +262,14 @@ def _score_category_candidate(
         reasons.append(f"示例命中：{'、'.join(matched_examples[:2])}")
     if negative_signals:
         reasons.append(f"负向信号降分：{'、'.join(negative_signals[:5])}")
-    return max(0.0, score), matched_signals, negative_signals, reasons
+    return (
+        max(0.0, score),
+        matched_signals,
+        _unique_signals(matched_title),
+        _unique_signals([*matched_body, *matched_examples]),
+        negative_signals,
+        reasons,
+    )
 
 
 def _candidate_to_category(candidate: CategoryCandidate) -> dict[str, Any]:
@@ -253,7 +285,15 @@ def _candidate_to_category(candidate: CategoryCandidate) -> dict[str, Any]:
         "evidence": candidate.matched_signals[:5],
         "rule_score": candidate.rule_score,
         "matched_signals": candidate.matched_signals,
+        "matched_title_signals": candidate.matched_title_signals,
+        "matched_content_signals": candidate.matched_content_signals,
         "negative_signals": candidate.negative_signals,
+        "candidate_scores": {
+            "rule": candidate.rule_score,
+            "matched_title_signals": candidate.matched_title_signals,
+            "matched_content_signals": candidate.matched_content_signals,
+            "negative_signals": candidate.negative_signals,
+        },
         "taxonomy_key": candidate.taxonomy_key,
         "taxonomy_version": candidate.taxonomy_version,
         "candidate_reason": candidate.candidate_reason,

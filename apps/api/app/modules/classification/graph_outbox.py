@@ -132,7 +132,7 @@ class ClassificationGraphOutboxService:
                 taxonomy_version=relation.taxonomy_version,
                 category_id=relation.category_id,
             )
-            if relation.status == "CONFIRMED":
+            if relation.status in {"AUTO_APPLIED", "CONFIRMED"}:
                 working_copy = self.db.get(WorkingCopy, relation.working_copy_id)
                 version = self.db.get(DocumentVersion, relation.document_version_id)
                 if working_copy is None or version is None:

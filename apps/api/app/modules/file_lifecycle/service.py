@@ -27,6 +27,7 @@ from app.db.models import (
     Document,
     DocumentExtractionRun,
     DocumentIndexRun,
+    DocumentOrganizationDecision,
     DocumentSearchProfile,
     DocumentVersion,
     FileObject,
@@ -71,6 +72,12 @@ from app.modules.file_lifecycle.risk import inspect_basic_file_risks
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.path_policy import resolve_managed_relative_path
 from app.modules.classification.service import persist_document_results_classifications
+from app.modules.classification.auto_placement_policy import AutoPlacementPolicy
+from app.modules.classification.organization_path import (
+    CategoryOrganizationPathError,
+    CategoryOrganizationPathResolver,
+)
+from app.modules.classification.organization_repository import OrganizationDecisionRepository
 from app.modules.chunks.service import DocumentIndexService, INDEX_VERSION
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.content_types import infer_content_type
@@ -1105,36 +1112,53 @@ class FileLifecycleJobProcessor:
             self.db.add(version)
             self.db.flush()
 
-            path_resolution = self._working_path_resolution(
-                working_root=working_root,
+            gated_initial_placement = self._gated_initial_placement_enabled(
+                payload=payload,
                 managed_file=managed_file,
-                preferred_relative_path=managed_file.relative_path,
             )
-            relative_path = path_resolution.relative_path
-            filename = path_resolution.filename
-            final_storage_relative_path = f"{working_root.relative_storage_path}/{relative_path}"
-            publish_started_at = time.perf_counter()
-            final_target, final_target_created = self.storage.publish_working_copy(
-                staged_relative_path=staged_relative_path,
-                target_relative_path=final_storage_relative_path,
-                expected_sha256=source_sha256,
-                staged_hash_verified=True,
-            )
-            log_event(
-                "working_copy.import.publish_completed",
-                document_id=document.id,
-                status="COMPLETED",
-                duration_ms=int((time.perf_counter() - publish_started_at) * 1000),
-                managed_file_id=managed_file.id,
-                root_id=managed_file.root_id,
-                message="工作副本原子发布完成",
-            )
+            if gated_initial_placement:
+                # 隐藏期路径仅用于 Worker 定位，不是用户可见归档结果；最终路径必须在
+                # 分类门槛和 taxonomy 安全路径校验后由同一 StorageService 原子发布。
+                root_prefix = f"{working_root.relative_storage_path}/"
+                relative_path = staged_relative_path.removeprefix(root_prefix)
+                filename = self.storage.sanitize_filename(managed_file.filename)
+                path_resolution = InitialWorkingPathResolution(
+                    relative_path=relative_path,
+                    filename=filename,
+                )
+            else:
+                path_resolution = self._working_path_resolution(
+                    working_root=working_root,
+                    managed_file=managed_file,
+                    preferred_relative_path=managed_file.relative_path,
+                )
+                relative_path = path_resolution.relative_path
+                filename = path_resolution.filename
+                final_storage_relative_path = f"{working_root.relative_storage_path}/{relative_path}"
+                publish_started_at = time.perf_counter()
+                final_target, final_target_created = self.storage.publish_working_copy(
+                    staged_relative_path=staged_relative_path,
+                    target_relative_path=final_storage_relative_path,
+                    expected_sha256=source_sha256,
+                    staged_hash_verified=True,
+                )
+                log_event(
+                    "working_copy.import.publish_completed",
+                    document_id=document.id,
+                    status="COMPLETED",
+                    duration_ms=int((time.perf_counter() - publish_started_at) * 1000),
+                    managed_file_id=managed_file.id,
+                    root_id=managed_file.root_id,
+                    message="工作副本原子发布完成",
+                )
 
             document.original_filename = filename
             document.ingest_status = "INGESTED"
-            version.storage_path = final_storage_relative_path
+            version.storage_path = (
+                staged_relative_path if gated_initial_placement else final_storage_relative_path
+            )
             version.filename = filename
-            file_object.storage_path = final_storage_relative_path
+            file_object.storage_path = version.storage_path
             working_copy = WorkingCopy(
                 working_copy_root_id=working_root.id,
                 workspace_id=workspace_id,
@@ -1148,7 +1172,7 @@ class FileLifecycleJobProcessor:
                 content_sha256=source_sha256,
                 imported_source_sha256=source_sha256,
                 is_primary_import=True,
-                status="ACTIVE",
+                status="ORGANIZING" if gated_initial_placement else "ACTIVE",
                 sync_status="SYNCED",
             )
             self.db.add(working_copy)
@@ -1157,7 +1181,8 @@ class FileLifecycleJobProcessor:
             working_copy.current_version_id = version.id
             working_root.status = "READY"
             working_root.last_imported_at = utcnow()
-            DocumentSearchProfileService(db=self.db).upsert_current_profile(working_copy.id)
+            if not gated_initial_placement:
+                DocumentSearchProfileService(db=self.db).upsert_current_profile(working_copy.id)
 
             changeset, _ = create_lifecycle_audit(
                 db=self.db,
@@ -1165,8 +1190,16 @@ class FileLifecycleJobProcessor:
                 workspace_id=workspace_id,
                 conversation_id=self._conversation_for_upload(managed_file),
                 tool_name="working-copy-fast-import",
-                message_content=f"文件“{filename}”已进入共享工作目录，后台分析任务已排队。",
-                change_type="WORKING_COPY_IMPORTED",
+                message_content=(
+                    f"文件“{filename}”正在完成首次分类整理。"
+                    if gated_initial_placement
+                    else f"文件“{filename}”已进入共享工作目录，后台分析任务已排队。"
+                ),
+                change_type=(
+                    "WORKING_COPY_ORGANIZING"
+                    if gated_initial_placement
+                    else "WORKING_COPY_IMPORTED"
+                ),
                 target_type="working_copy",
                 target_id=working_copy.id,
                 target_document_id=document.id,
@@ -1175,15 +1208,15 @@ class FileLifecycleJobProcessor:
                     "managed_file_id": managed_file.id,
                     "relative_path": relative_path,
                     "document_version_id": version.id,
-                    "analysis_status": "PENDING",
+                    "analysis_status": "ORGANIZING" if gated_initial_placement else "PENDING",
                     "storage_collision": path_resolution.storage_collision,
                     "managed_original_unchanged": True,
                 },
                 graph_document_results=[],
                 visible_in_conversation=False,
             )
-            self.db.add(
-                WorkingCopyPathRecord(
+            if not gated_initial_placement:
+                self.db.add(WorkingCopyPathRecord(
                     working_copy_id=working_copy.id,
                     sequence_number=1,
                     operation_type="INITIAL_IMPORT",
@@ -1197,8 +1230,7 @@ class FileLifecycleJobProcessor:
                     changeset_id=changeset.id,
                     status="COMPLETED",
                     executed_by=user_id,
-                )
-            )
+                ))
             analysis_job = (
                 None
                 if bool(payload.get("skip_document_analysis"))
@@ -1220,6 +1252,7 @@ class FileLifecycleJobProcessor:
                     "filename": filename,
                     "relative_path": relative_path,
                     "analysis_job_id": analysis_job.id if analysis_job is not None else None,
+                    "working_copy_status": working_copy.status,
                 },
             )
         except Exception:
@@ -1532,17 +1565,49 @@ class FileLifecycleJobProcessor:
             or working_copy is None
             or document is None
             or version is None
-            or working_copy.status != "ACTIVE"
+            or working_copy.status not in {"ACTIVE", "ORGANIZING"}
             or working_copy.current_version_id != version.id
             or working_copy.document_id != document.id
         ):
-            raise RuntimeError("ANALYZE_DOCUMENT_VERSION 缺少有效活动工作副本或版本")
+            raise RuntimeError("ANALYZE_DOCUMENT_VERSION 缺少有效工作副本或版本")
         result = self._ensure_existing_working_copy_search_artifacts(
             working_copy=working_copy,
             managed_file=managed_file,
         )
         organization_decision = result.pop("_organization_decision", None)
         if result.get("status") != "READY":
+            if working_copy.status == "ORGANIZING":
+                changeset, _ = create_lifecycle_audit(
+                    db=self.db,
+                    user_id=document.user_id,
+                    workspace_id=document.workspace_id,
+                    conversation_id=self._conversation_for_upload(managed_file),
+                    tool_name="document-background-analysis",
+                    message_content=(
+                        f"文件“{working_copy.filename}”已安全发布；正文暂未成功解析，"
+                        "主分类需要确认。"
+                    ),
+                    change_type="AUTO_ORGANIZATION_REVIEW_REQUIRED",
+                    target_type="working_copy",
+                    target_id=working_copy.id,
+                    target_document_id=document.id,
+                    after_value={
+                        "working_copy_id": working_copy.id,
+                        "analysis_status": result.get("status"),
+                        "organization_decision": "NEEDS_REVIEW",
+                    },
+                    graph_document_results=[],
+                    visible_in_conversation=True,
+                )
+                self._finalize_initial_organization(
+                    working_copy=working_copy,
+                    managed_file=managed_file,
+                    document=document,
+                    version=version,
+                    organization_decision=None,
+                    changeset=changeset,
+                    extraction_status="FAILED",
+                )
             # 可判定的“不支持/需人工处理”属于业务终态，不应把同一文件无意义重跑三次。
             # 只有实际异常才交给 worker 的最多三次失败重试机制。
             FilesystemJobQueue(self.db).mark_completed(
@@ -1616,6 +1681,23 @@ class FileLifecycleJobProcessor:
                 agent_run_id=changeset.agent_run_id,
                 document_results=graph_document_results,
             )
+        self._finalize_initial_organization(
+            working_copy=working_copy,
+            managed_file=managed_file,
+            document=document,
+            version=version,
+            organization_decision=(
+                organization_decision
+                if isinstance(organization_decision, InitialOrganizationDecision)
+                else None
+            ),
+            changeset=changeset,
+            extraction_status=(
+                str((organization_decision.extraction_result or {}).get("status") or "FAILED")
+                if isinstance(organization_decision, InitialOrganizationDecision)
+                else "FAILED"
+            ),
+        )
         if pending_decision and pending_decision.get("reason") == "LOW_CONFIDENCE_RENAME":
             self.db.add(
                 FileRenameReviewItem(
@@ -1660,6 +1742,229 @@ class FileLifecycleJobProcessor:
                 **result,
             },
         )
+
+    def _finalize_initial_organization(
+        self,
+        *,
+        working_copy: WorkingCopy,
+        managed_file: ManagedFile,
+        document: Document,
+        version: DocumentVersion,
+        organization_decision: InitialOrganizationDecision | None,
+        changeset: ChangeSet,
+        extraction_status: str,
+    ) -> DocumentOrganizationDecision | None:
+        """记录 Shadow 决策，或把隐藏副本首次原子发布到分类/中性路径。
+
+        已经是 ``ACTIVE`` 的历史文件只允许 Shadow 回放，绝不能借此方法后台移动；
+        只有本次上传创建且仍为 ``ORGANIZING`` 的副本可以绕过 OperationPlan 完成
+        一次首次发布。发布后任何路径变化仍由既有高风险操作链路负责。
+        """
+
+        actual_placement = bool(
+            working_copy.status == "ORGANIZING"
+            and self.settings.auto_primary_classification_enabled
+            and self.settings.auto_initial_placement_enabled
+            and not self.settings.auto_classification_shadow_mode
+        )
+        shadow_only = not actual_placement
+        if not actual_placement and not self.settings.auto_classification_shadow_mode:
+            return None
+
+        categories = organization_decision.categories if organization_decision is not None else []
+        risk_status = self._initial_organization_risk_status(managed_file)
+        policy_result = AutoPlacementPolicy(self.settings).evaluate(
+            categories=categories,
+            extraction_status=extraction_status,
+            risk_passed=risk_status in {"PASS", "WARNING"},
+        )
+        repository = OrganizationDecisionRepository(self.db)
+        classification_run, primary_suggestion = repository.latest_classification(
+            agent_run_id=changeset.agent_run_id,
+            document_id=document.id,
+        )
+        reasons = list(policy_result.reason_codes)
+        target_relative_path: str | None = None
+        working_root = self.db.get(WorkingCopyRoot, working_copy.working_copy_root_id)
+        if working_root is None:
+            raise RuntimeError("首次分类整理缺少工作副本根")
+
+        if policy_result.accepted and classification_run is not None and primary_suggestion is not None:
+            try:
+                target = CategoryOrganizationPathResolver(self.storage).resolve_category(
+                    category_id=primary_suggestion.category_id,
+                    taxonomy_key=classification_run.taxonomy_key,
+                    taxonomy_version=classification_run.taxonomy_version,
+                    working_copy=working_copy,
+                    working_root=working_root,
+                )
+                target_relative_path = target.target_relative_path
+                target_path = self.storage.working_copy_path(target.target_storage_path)
+                staged_path = self.storage.working_copy_path(version.storage_path)
+                retry_after_publish = (
+                    not staged_path.exists()
+                    and target_path.is_file()
+                    and self.storage.sha256_file(target_path) == version.sha256
+                )
+                if target_path.exists() and not retry_after_publish:
+                    reasons.append("TARGET_NAME_CONFLICT")
+            except CategoryOrganizationPathError:
+                reasons.append("TARGET_PATH_UNAVAILABLE")
+        elif policy_result.accepted:
+            reasons.append("NO_TAXONOMY_CANDIDATE")
+
+        reasons = list(dict.fromkeys(reasons))
+        evaluated_decision = "AUTO_ORGANIZED" if not reasons else "NEEDS_REVIEW"
+        if shadow_only:
+            return repository.create_or_update_decision(
+                working_copy=working_copy,
+                classification_run=classification_run,
+                primary_suggestion=primary_suggestion,
+                policy_result=policy_result,
+                policy_version=self.settings.auto_classification_policy_version,
+                calibration_version=self.settings.auto_classification_calibration_version,
+                decision=evaluated_decision,
+                reason_codes=reasons,
+                target_relative_path=target_relative_path if not reasons else None,
+                shadow_only=True,
+            )
+
+        if not reasons and target_relative_path:
+            final_relative_path = target_relative_path
+            operation_type = "INITIAL_AUTO_PLACEMENT"
+        else:
+            neutral = self._working_path_resolution(
+                working_root=working_root,
+                managed_file=managed_file,
+                preferred_relative_path=managed_file.relative_path,
+            )
+            final_relative_path = neutral.relative_path
+            operation_type = "INITIAL_NEUTRAL_PLACEMENT"
+
+        final_storage_path = f"{working_root.relative_storage_path}/{final_relative_path}"
+        self.storage.publish_working_copy(
+            staged_relative_path=version.storage_path,
+            target_relative_path=final_storage_path,
+            expected_sha256=version.sha256,
+            staged_hash_verified=False,
+        )
+        before_relative_path = managed_file.relative_path
+        working_copy.relative_path = final_relative_path
+        working_copy.relative_path_hash = hashlib.sha256(
+            final_relative_path.encode("utf-8")
+        ).hexdigest()
+        working_copy.filename = Path(final_relative_path).name
+        working_copy.extension = Path(final_relative_path).suffix.lower()
+        working_copy.status = "ACTIVE"
+        version.storage_path = final_storage_path
+        version.filename = working_copy.filename
+        document.original_filename = working_copy.filename
+        document.ingest_status = "INDEXED" if extraction_status == "COMPLETED" else "INGESTED"
+        file_object = (
+            self.db.query(FileObject)
+            .filter(
+                FileObject.document_id == document.id,
+                FileObject.storage_backend == "working_copy_local",
+            )
+            .order_by(FileObject.created_at.desc())
+            .first()
+        )
+        if file_object is not None:
+            file_object.storage_path = final_storage_path
+
+        path_record = WorkingCopyPathRecord(
+            working_copy_id=working_copy.id,
+            sequence_number=1,
+            operation_type=operation_type,
+            before_relative_path=before_relative_path,
+            after_relative_path=final_relative_path,
+            before_filename=managed_file.filename,
+            after_filename=working_copy.filename,
+            document_version_id=version.id,
+            content_sha256=version.sha256,
+            agent_run_id=changeset.agent_run_id,
+            changeset_id=changeset.id,
+            status="COMPLETED",
+            executed_by=document.user_id,
+        )
+        self.db.add(path_record)
+        self.db.flush()
+
+        decision_row = repository.create_or_update_decision(
+            working_copy=working_copy,
+            classification_run=classification_run,
+            primary_suggestion=primary_suggestion,
+            policy_result=policy_result,
+            policy_version=self.settings.auto_classification_policy_version,
+            calibration_version=self.settings.auto_classification_calibration_version,
+            decision=evaluated_decision,
+            reason_codes=reasons,
+            target_relative_path=final_relative_path,
+            shadow_only=False,
+        )
+        decision_row.path_record_id = path_record.id
+
+        if evaluated_decision == "AUTO_ORGANIZED" and classification_run and primary_suggestion:
+            repository.create_auto_applied_primary(
+                working_copy=working_copy,
+                classification_run=classification_run,
+                suggestion=primary_suggestion,
+            )
+            self.db.add(
+                ChangeItem(
+                    changeset_id=changeset.id,
+                    target_type="document_category",
+                    target_id=primary_suggestion.category_id,
+                    target_document_id=document.id,
+                    change_type="CATEGORY_AUTO_APPLIED",
+                    before_value_json={},
+                    after_value_json={
+                        "working_copy_id": working_copy.id,
+                        "category_id": primary_suggestion.category_id,
+                        "status": "AUTO_APPLIED",
+                    },
+                    source="auto_placement_policy",
+                    confidence=policy_result.calibrated_confidence,
+                    evidence_json={"items": list(primary_suggestion.evidence_json or [])},
+                    execution_status="COMPLETED",
+                )
+            )
+        self.db.add(
+            ChangeItem(
+                changeset_id=changeset.id,
+                target_type="working_copy",
+                target_id=working_copy.id,
+                target_document_id=document.id,
+                change_type=(
+                    "WORKING_COPY_AUTO_ORGANIZED"
+                    if evaluated_decision == "AUTO_ORGANIZED"
+                    else "AUTO_ORGANIZATION_REVIEW_REQUIRED"
+                ),
+                before_value_json={"relative_path": before_relative_path, "status": "ORGANIZING"},
+                after_value_json={
+                    "relative_path": final_relative_path,
+                    "status": "ACTIVE",
+                    "organization_decision": evaluated_decision,
+                    "managed_original_unchanged": True,
+                },
+                source="auto_placement_policy",
+                confidence=policy_result.calibrated_confidence,
+                evidence_json={"reason_codes": reasons},
+                execution_status="COMPLETED",
+            )
+        )
+        DocumentSearchProfileService(db=self.db).upsert_current_profile(working_copy.id)
+        return decision_row
+
+    def _initial_organization_risk_status(self, managed_file: ManagedFile) -> str:
+        """读取上传归档时的基础风险结论；非上传来源按未知风险拒绝自动落位。"""
+
+        if not managed_file.source_upload_version_id:
+            return "UNKNOWN"
+        archive = self.repository.get_archive_by_version(managed_file.source_upload_version_id)
+        if archive is None:
+            return "UNKNOWN"
+        return str((archive.risk_assessment_json or {}).get("status") or "UNKNOWN")
 
     def _ensure_existing_working_copy_search_artifacts(
         self,
@@ -2060,6 +2365,26 @@ class FileLifecycleJobProcessor:
             relative_path=f".internal/import-collisions/{managed_file.id}/{safe_filename}",
             filename=safe_filename,
             storage_collision=True,
+        )
+
+    def _gated_initial_placement_enabled(
+        self,
+        *,
+        payload: dict[str, Any],
+        managed_file: ManagedFile,
+    ) -> bool:
+        """判断本次上传归档是否进入隐藏的首次落位链路。
+
+        受管目录的全量物化已有独立来源目录语义，本阶段不后台重排；复用源侧分析且
+        跳过分析的任务也不能进入 ``ORGANIZING`` 后失去终结节点。
+        """
+
+        return bool(
+            managed_file.source_type == "UPLOAD_ARCHIVE"
+            and not payload.get("skip_document_analysis")
+            and self.settings.auto_primary_classification_enabled
+            and self.settings.auto_initial_placement_enabled
+            and not self.settings.auto_classification_shadow_mode
         )
 
     @staticmethod

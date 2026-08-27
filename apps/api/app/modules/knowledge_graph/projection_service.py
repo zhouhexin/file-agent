@@ -386,7 +386,7 @@ class GraphProjectionService:
                 DocumentVersion.id == DocumentCategory.document_version_id,
             )
             .join(WorkingCopy, WorkingCopy.id == DocumentCategory.working_copy_id)
-            .filter(DocumentCategory.status == "CONFIRMED")
+            .filter(DocumentCategory.status.in_(["AUTO_APPLIED", "CONFIRMED"]))
             .filter(WorkingCopy.status == "ACTIVE")
             .all()
         )

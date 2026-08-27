@@ -1170,6 +1170,41 @@ embedding Provider、异步回填、模型版本与维度管理、pgvector 索�
 理解并找到”。检索卡会同时显示范围、可检索数量和缺口数量；用户应在 `PROCESSING` 或 `PARTIAL`
 状态下等待处理完成或补充条件后再次检索。
 
+### 9.7 置信门控首次自动分类发布
+
+迁移到 `20260827_0001` 后，生产环境必须先保持以下安全默认值：
+
+```dotenv
+AUTO_PRIMARY_CLASSIFICATION_ENABLED=false
+AUTO_INITIAL_PLACEMENT_ENABLED=false
+AUTO_CLASSIFICATION_SHADOW_MODE=true
+AUTO_CLASSIFICATION_POLICY_VERSION=auto-placement-v1
+AUTO_CLASSIFICATION_CALIBRATION_VERSION=unpublished
+AUTO_CLASSIFICATION_TARGET_PRECISION=0.99
+AUTO_CLASSIFICATION_FULL_TAXONOMY_ENABLED=true
+AUTO_CLASSIFICATION_GLOBAL_FALLBACK_POLICY=conservative-v1
+AUTO_CLASSIFICATION_FALLBACK_THRESHOLD=0.90
+AUTO_CLASSIFICATION_FALLBACK_MARGIN=0.20
+```
+
+Shadow 会写 `document_organization_decisions`，但不会移动已有 `ACTIVE` 文件，也不会创建
+`AUTO_APPLIED` 关系。运维抽检必须排除 `feature_snapshot_json.shadow_only=true` 的结果，或将其单独
+作为“如果启用会怎样”的回放数据统计。
+
+只有冻结评测集达到方案中的精度门槛、校准版本已经发布且同名冲突/失败恢复测试通过后，才允许按以下
+顺序灰度新上传文件：
+
+1. 先设置已发布的 `AUTO_CLASSIFICATION_CALIBRATION_VERSION`，保持 Shadow 观察。
+2. 开启 `AUTO_PRIMARY_CLASSIFICATION_ENABLED=true`，仍保持首次物理落位关闭。
+3. 小流量实例同时设置 `AUTO_INITIAL_PLACEMENT_ENABLED=true` 和
+   `AUTO_CLASSIFICATION_SHADOW_MODE=false`；此时只有新上传归档进入 `ORGANIZING`。
+4. 观察 `AUTO_ORGANIZED`、`NEEDS_REVIEW`、`TARGET_NAME_CONFLICT`、失败率和
+   `ORGANIZING -> ACTIVE` 时延，再逐步扩大实例或流量。
+
+紧急停止新的自动落位只需把 `AUTO_INITIAL_PLACEMENT_ENABLED=false` 或
+`AUTO_PRIMARY_CLASSIFICATION_ENABLED=false` 并重启 Worker。该操作不会移动或回写既有
+`AUTO_APPLIED` 文件；既有活动文件的后续路径变化仍必须经过 OperationPlan。
+
 ## 10. 当前限制
 
 - 当前已接入 OpenAI-compatible LLM 意图理解；默认 `LLM_ENABLED=false` 时仍使用 `DeterministicPlanner`。

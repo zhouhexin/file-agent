@@ -898,8 +898,8 @@ class DocumentCategory(Base):
             "category_id",
             "relation_role",
             unique=True,
-            postgresql_where=text("status = 'CONFIRMED'"),
-            sqlite_where=text("status = 'CONFIRMED'"),
+            postgresql_where=text("status IN ('AUTO_APPLIED', 'CONFIRMED')"),
+            sqlite_where=text("status IN ('AUTO_APPLIED', 'CONFIRMED')"),
         ),
         Index(
             "uq_document_categories_active_primary",
@@ -907,10 +907,10 @@ class DocumentCategory(Base):
             "document_version_id",
             unique=True,
             postgresql_where=text(
-                "status = 'CONFIRMED' AND relation_role = 'PRIMARY'"
+                "status IN ('AUTO_APPLIED', 'CONFIRMED') AND relation_role = 'PRIMARY'"
             ),
             sqlite_where=text(
-                "status = 'CONFIRMED' AND relation_role = 'PRIMARY'"
+                "status IN ('AUTO_APPLIED', 'CONFIRMED') AND relation_role = 'PRIMARY'"
             ),
         ),
     )
@@ -1737,6 +1737,53 @@ class WorkingCopyPathRecord(Base):
     executed_by: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class DocumentOrganizationDecision(Base):
+    """新文件首次主分类和物理落位的版本化审计事实。
+
+    该表不保存正文、绝对路径或用户权限信息；Shadow 运行同样写入决策快照，
+    但不会创建 ``AUTO_APPLIED`` 关系或路径审计记录。
+    """
+
+    __tablename__ = "document_organization_decisions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    working_copy_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("working_copies.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    classification_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_classification_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    primary_suggestion_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_category_suggestions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    category_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    taxonomy_key: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    taxonomy_version: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    classifier_version: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    calibration_version: Mapped[str] = mapped_column(String(80), nullable=False, default="unpublished")
+    policy_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    decision: Mapped[str] = mapped_column(String(40), nullable=False, default="PENDING", index=True)
+    calibrated_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    required_threshold: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    top_margin: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    required_margin: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    feature_snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    reason_codes_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    target_relative_path_snapshot: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    path_record_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("working_copy_path_records.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False, unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DocumentSearchProfile(Base):

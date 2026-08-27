@@ -1,4 +1,4 @@
-// 应用入口：管理登录态、首次引导跳转和三个轻量视图（login/chat/getting-started）。
+// 应用入口：管理登录态、首次引导跳转、文件分类页和运维视图。
 // 不引入 React Router，仅使用 window.history + currentPath 状态。
 
 import { useEffect, useMemo, useState } from 'react';
@@ -10,6 +10,7 @@ import { FailedFilesPage } from './features/admin/FailedFilesPage';
 import { CapabilitySuggestionsPage } from './features/admin/CapabilitySuggestionsPage';
 import { AgentRunsPage } from './features/admin/AgentRunsPage';
 import { ChatPage } from './features/chat/ChatPage';
+import { ClassificationFilesPage } from './features/files/ClassificationFilesPage';
 import { OnboardingPage } from './features/onboarding/OnboardingPage';
 import './features/chat/chat.css';
 import type { User } from './types';
@@ -18,6 +19,7 @@ type AppPath =
   | '/login'
   | '/chat'
   | '/getting-started'
+  | '/files'
   | '/admin/failed-files'
   | '/admin/agent-runs'
   | '/admin/capability-suggestions';
@@ -30,6 +32,9 @@ function readInitialPath(): AppPath {
   }
   if (pathname === '/login') {
     return '/login';
+  }
+  if (pathname === '/files') {
+    return '/files';
   }
   if (pathname === '/admin/failed-files') {
     return '/admin/failed-files';
@@ -140,6 +145,12 @@ export function App() {
     setCurrentPath('/getting-started');
   }
 
+  function openFiles() {
+    // 文件目录对所有登录用户开放，数据范围由后端固定为共享活动工作区。
+    pushPath('/files');
+    setCurrentPath('/files');
+  }
+
   function openFailedFiles() {
     // 失败文件页只对 ops/admin 展示入口，后端仍会再次执行角色校验。
     pushPath('/admin/failed-files');
@@ -190,6 +201,10 @@ export function App() {
     );
   }
 
+  if (currentPath === '/files') {
+    return <ClassificationFilesPage token={token} onBack={openChat} />;
+  }
+
   if (
     currentPath === '/admin/failed-files'
     && ['ops', 'admin'].includes(currentUser.role)
@@ -223,6 +238,7 @@ export function App() {
       user={currentUser}
       onLogout={handleLogout}
       onOpenOnboarding={openOnboarding}
+      onOpenFiles={openFiles}
       onOpenFailedFiles={openFailedFiles}
       onOpenAgentRuns={openAgentRuns}
       onOpenCapabilitySuggestions={openCapabilitySuggestions}
