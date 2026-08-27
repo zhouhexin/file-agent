@@ -1,0 +1,910 @@
+# 高精度主分类自动落位与少量异常复核实施方案
+
+> 日期：2026-08-26  
+> 最近更新：2026-08-27  
+> 状态：方案设计，尚未实施  
+> 当前授权边界：仅讨论并固化方案；未授权修改代码、数据库迁移、配置或运行数据  
+> 适用范围：新上传文件首次整理、主分类选择、工作副本首次发布和异常复核  
+> 核心目标：大多数文件无需用户确认即可准确存入主分类目录，仅让极少数真正不确定的文件进入复核
+
+## 1. 结论
+
+本阶段推荐采用“**多标签分类 + 唯一主分类决策 + 高精度自动落位 + 主动拒识**”流程，而不是让用户逐文件确认，也不是把当前分类器给出的最高分直接当成存储目录。
+
+具体规则如下：
+
+1. 上传原件继续写入内部不可变保护存储，分类、摘要和工作副本整理都不得修改原件；用户所说的上传归档结果以工作副本路径为准。
+2. 工作副本先处于用户不可见的 `ORGANIZING` 状态，完成解析、OCR、正文分类和证据校验后再首次发布。
+3. 通过自动落位门槛的文件，直接以 `AUTO_APPLIED` 主分类发布到 taxonomy 配置的 `organization_path`，不要求用户确认。
+4. 未通过门槛的文件不强行分类，也不进入用户可见的“待确认”物理目录；它们保留在中性上传路径并进入逻辑复核队列。
+5. 工作副本一旦成为 `ACTIVE`，之后再移动、改名、覆盖、删除等仍必须走 `OperationPlan` 和用户确认。
+6. 自动落位只改变首次工作副本发布位置，不改变上传文件名，不覆盖同名文件，不自动创建新的 taxonomy 分类路径。
+
+这套方案把用户确认集中到四类少数异常：语义歧义、解析质量不足、分类证据不足、目标路径冲突。正常文件不打扰用户。
+
+## 2. 与现有方案的关系
+
+当前 `agent.md`、`docs/automatic-organization-conversational-access-implementation-plan.md` 和阶段 6 方案中包含“分类建议不自动移动工作副本”“只有用户确认后才形成正式分类关系”等旧约束。
+
+本方案依据当前用户明确要求，对这些约束作如下窄范围调整：
+
+- 仅对**新文件成为 `ACTIVE` 之前的首次工作副本发布**允许自动主分类落位。
+- 自动关系状态必须是 `AUTO_APPLIED`，不得伪装成用户确认的 `CONFIRMED`。
+- 已经 `ACTIVE` 的历史文件、后续分类纠正和任何再次移动，继续遵守现有 `OperationPlan` 规则。
+- 原件保护、受管原始目录只读、文件名不自动变更、禁止覆盖、路径审计和逐文件回执规则不变。
+
+本文必须统一术语：**“上传归档”是用户业务动作，指上传产生的工作副本首次存放到主分类目录；不是把文件保存到内部原件目录。** 内部不可变原件只承担内容保护和版本追溯，不是普通用户看到或选择的归档结果。
+
+### 2.1 上传归档、首次落位与后续移动边界
+
+```text
+内部准备阶段：上传暂存、风险检查和不可变原件保护
+-> 仅为后续工作副本提供安全内容来源
+-> 不属于用户所说的“上传归档”
+
+上传归档阶段：创建隐藏 ORGANIZING 工作副本并完成分类
+-> 高可靠：工作副本首次落位到 taxonomy 主分类 organization_path
+-> 待复核：工作副本首次落位到中性工作副本路径
+-> 这是用户所说的“上传归档”
+
+后续移动阶段：工作副本已经 ACTIVE 后改变现有目录
+-> 必须 OperationPlan + 用户确认
+```
+
+对应的强制动作边界为：
+
+| 对象/阶段 | 业务含义 | 是否按主分类存放 | 是否需要用户确认 | 后续规则 |
+|---|---|---:|---:|---|
+| 上传暂存与内部原件保护 | 系统内部安全和追溯准备 | 否 | 否 | 普通用户不把它视为归档结果 |
+| 隐藏 `ORGANIZING` 工作副本 | 上传归档尚在处理 | 尚未决定 | 否 | 完成决策前普通用户不可操作 |
+| 高可靠工作副本首次落位 | 上传归档到主分类目录 | 是 | 否 | 发布为 `ACTIVE + AUTO_ORGANIZED` |
+| 待复核工作副本首次落位 | 上传归档暂不能确定主分类 | 否，先放中性路径 | 否 | 发布为 `ACTIVE + NEEDS_REVIEW` |
+| `ACTIVE` 工作副本改变目录 | 上传归档后的后续移动 | 按确认目标 | 是 | 仅确认后的 OperationPlan 执行 |
+
+因此，方案中的两个关键边界是：
+
+```text
+隐藏 ORGANIZING 工作副本 -> 主分类目录：上传归档的首次落位，自动策略可执行
+ACTIVE 工作副本 -> 另一个目录：归档完成后的后续移动，必须 OperationPlan + 用户确认
+```
+
+内部原件保护仍然存在，但只能作为上述流程的底层安全前置条件。分类结果决定的是工作副本上传归档位置，不决定内部原件保护位置。
+
+正式实施时，应同步更新上述旧文档中的对应段落，避免实现依据相互冲突。
+
+## 3. 当前分类实际上使用什么方法
+
+### 3.1 上传后台分类的当前主路径
+
+当前上传后的自动整理不是监督学习分类模型，主要由以下步骤组成：
+
+```text
+DocumentPage 完整正文
+-> 本地 CPU 抽取式分类主题摘要
+-> taxonomy v2 规则候选匹配
+-> 原文证据定位
+-> 多标签 SUGGESTED 建议
+-> 启发式分数选一个展示用 primary_category
+```
+
+具体实现特点：
+
+- 默认 `DOCUMENT_SUMMARY_PROVIDER=extractive`、`CLASSIFICATION_SUMMARY_PROVIDER=extractive`。
+- 摘要使用 Jieba 分词和带候选上限的 LexRank 句子排序，不调用外部模型，也不要求 GPU。
+- 分类候选来自 taxonomy 节点的名称、别名、正向信号、负向信号和示例等规则匹配。
+- 默认启用分类主题摘要时，候选匹配主要使用“文件名 + 分类主题摘要”；服务仍会读取完整 `document_pages`，并回到完整原文定位证据。
+- 非“其他”分类如果找不到真实引用，会降级为 `NEEDS_REVIEW`。
+- `matcher.py` 当前的置信度计算为启发式映射，近似为 `0.45 + rule_score × 0.5`，最高截断到 `0.95`；它不是经过标注数据校准的真实正确概率。
+- 当前首次整理使用 `INITIAL_ORGANIZATION_CONFIDENCE=0.60` 选择一个非“其他”、非自由路径、有证据的候选作为展示用主分类，但并不会据此移动工作副本。
+- 分类建议持久化到 `document_classification_runs` 和 `document_category_suggestions`，状态为 `SUGGESTED`，不会自动写入正式 `document_categories`。
+
+### 3.2 LLM 与图谱当前是否参与
+
+- `LLM_CLASSIFICATION_MODE` 默认是 `rule_only`，因此默认不使用 LLM 做最终分类裁决。
+- 即使启用 LLM，当前 Judge 也只能优先从 taxonomy 候选中选择；自由路径默认关闭，自由路径结果只能进入 `NEEDS_REVIEW`。
+- 图谱分类当前默认模式是 `shadow`，只记录差异，不改变用户可见分类结果。
+- Agent 交互链路可以按配置注入图谱、语义召回和受限 LLM Judge。
+- 但上传后台的 `InitialWorkingCopyOrganizer` 当前直接构造 `DocumentClassificationService(db=self.db)`，没有注入 Agent 运行时使用的 LLM Judge、图谱上下文和语义上下文。因此上传自动分类当前实质上仍是“本地摘要 + 规则匹配 + 原文证据验证”。
+
+### 3.3 当前方法的优点与不足
+
+优点：
+
+- 本地可运行、成本低、可解释、可定位证据。
+- 外部模型不可用时仍能稳定工作。
+- taxonomy 约束明确，不会随意生成目录。
+
+不足：
+
+- 规则分数不是校准概率，`0.60` 不能解释为“60% 正确”，更不能作为自动移动阈值。
+- 默认先对分类摘要做候选匹配，摘要可能遗漏决定分类的局部正文。
+- 当前主分类只是取满足条件的第一个候选，没有完整处理 Top1/Top2 差距、类别冲突、解析质量和路径冲突。
+- 图谱和语义能力处于 shadow 或未注入上传链路，尚未真正提升首次自动分类。
+- 缺少按类别评估的自动落位精度、覆盖率和用户纠错率。
+
+因此，不建议直接把当前 `primary_category` 接到物理目录移动上。
+
+## 4. 产品目标与非目标
+
+### 4.1 目标
+
+- 自动落位文件的离线精度目标不低于 99%，覆盖率在满足精度后逐步提升。
+- 用户只处理真正需要判断的少量文件，目标复核率控制在 1%～10%，最终值由真实数据决定。
+- 同批文件互不阻塞，一个文件失败不影响其他文件自动整理。
+- 每个自动决策都有正文证据、规则版本、taxonomy 版本、分数快照和原因码。
+- 用户纠正能够进入反馈集，用于后续离线校准，但不得直接在线改权重或改 taxonomy。
+
+### 4.2 非目标
+
+- 不自动重命名文件。
+- 不覆盖或删除原件、工作副本。
+- 不允许 LLM 创建并立即使用新的物理分类目录。
+- 不对既有 `ACTIVE` 文件进行无确认批量搬迁。
+- 不以“用户没有纠正”推断分类正确。
+- 不承诺所有文件都必须自动分类；系统必须允许拒识。
+
+## 5. 推荐业务流程
+
+### 5.1 总体流程
+
+```text
+用户上传文件并输入任务文字
+-> 隔离、格式/MIME/宏/加密风险检查
+-> 原件写入内部不可变保护存储，用于版本追溯
+-> 建立隐藏 ORGANIZING 工作副本
+-> 解析/OCR，生成 DocumentPage 和结构化元素
+-> 生成普通摘要与分类主题摘要
+-> 多路召回 taxonomy 候选
+-> 候选重排与受限语义裁决
+-> 回到完整原文验证证据
+-> AutoPlacementPolicy 选择主分类或主动拒识
+   -> 通过：工作副本发布到 taxonomy organization_path，状态 AUTO_APPLIED，上传归档完成
+   -> 拒识：工作副本发布到中性路径，状态 NEEDS_REVIEW；文件已可用，但主分类归档待复核
+-> 原子切换为 ACTIVE
+-> 建立 Chunk、Evidence、检索投影
+-> 返回批次统计和逐文件回执
+```
+
+### 5.2 为什么先分类再 ACTIVE
+
+当前实现先按来源路径创建并发布 `ACTIVE` 工作副本，再异步分析。若随后根据分类结果移动，就会成为对已生效共享文件的高风险移动，必须要求用户确认。
+
+新流程把解析和分类放在隐藏的 `ORGANIZING` 阶段。文件还没有以用户可操作路径正式发布，所以最终目录属于首次落位，而不是事后搬迁。这样同时满足：
+
+- 普通文件无需确认。
+- 用户不会短暂看到文件出现在错误目录后又被移动。
+- 后续任何位置变化仍有 OperationPlan 安全边界。
+
+### 5.3 用户显式意图
+
+- 用户说“分类、归类、整理、按主分类保存”等任务时启用自动主分类落位。
+- 用户明确说“只保存”“不要整理”“位置保持不变”时跳过自动落位，直接发布到中性上传路径。
+- 当前阶段仍要求附件消息包含明确任务文字，不允许空文字附件触发系统猜测。
+
+## 6. 分类与主分类决策架构
+
+必须把“生成候选”和“允许自动落位”拆成两个独立层：
+
+```text
+DocumentClassificationService
+  输出：多标签候选、规则/语义/图谱特征、正文证据
+
+AutoPlacementPolicy
+  输入：候选 + 解析质量 + 证据质量 + 路径检查 + 版本信息
+  输出：AUTO_ORGANIZED 或 NEEDS_REVIEW
+```
+
+`DocumentClassificationService` 不能直接移动文件；`AutoPlacementPolicy` 也不能自由构造路径。最终路径只能由 taxonomy 中稳定分类 ID 对应的 `organization_path` 解析。
+
+### 6.1 候选召回改进
+
+建议把当前单一“分类摘要优先”改为多路候选并集：
+
+1. 完整正文规则召回。
+2. 分类主题摘要规则召回。
+3. 标题和文件名弱信号召回。
+4. 本地语义相似度候选。
+5. 可信人工确认关系提供的图谱支持。
+
+合并后统一返回 Top N 候选。文件名、当前目录和来源路径只能是弱信号，不能单独满足自动落位条件。
+
+### 6.2 候选排序特征
+
+建议保留并记录以下特征，而不是过早折算成一个不可解释的置信度：
+
+- `rule_score_fulltext`
+- `rule_score_summary`
+- `semantic_score`
+- `graph_score`
+- `confirmed_support`
+- `negative_penalty`
+- `evidence_item_count`
+- `independent_signal_count`
+- `evidence_coverage`
+- `parse_quality`
+- `ocr_quality`
+- `top1_top2_margin`
+- `summary_fulltext_agreement`
+- `llm_candidate_agreement`，仅在显式启用受限 LLM 时存在
+
+图谱、语义和 LLM 都只能增强候选排序；没有正文证据时不得单独触发自动落位。
+
+### 6.3 LLM 的推荐使用方式
+
+默认部署可继续不调用外部 LLM。若后续显式启用分类 LLM：
+
+- 只对规则和语义结果存在轻微分歧的边界样本调用，减少成本和正文外发。
+- 只能从现有 taxonomy 候选中选择，不允许自由路径自动落位。
+- 返回引用必须在完整原文中二次验证。
+- LLM、规则和语义明显冲突时进入 `NEEDS_REVIEW`，而不是相信任一单方。
+- 外部发送文件内容仍遵守项目配置和用户授权边界。
+
+## 7. 自动落位门槛
+
+### 7.1 必须全部满足的硬条件
+
+一个文件只有同时满足以下条件才能自动落位：
+
+1. 文件风险检查通过，未检测到加密、宏风险或不支持格式。
+2. 解析/OCR 成功，正文达到最低有效内容量，解析质量合格。
+3. 主候选属于当前已发布的 taxonomy，具有稳定 `category_id` 和安全 `organization_path`。
+4. 主候选不是“其他”，不是 `llm_free_path`，状态不是 `NEEDS_REVIEW`。
+5. 至少存在可定位到页码、Sheet/单元格或段落的真实正文引用。
+6. 至少命中两个独立内容信号；只有文件名、目录名或元数据命中时不允许自动落位。
+7. 不存在命中的强负向信号。
+8. 校准后的 Top1 正确概率达到该类别的自动阈值。
+9. Top1 与 Top2 的校准概率差达到该类别的最小间隔。
+10. 全文分类与摘要分类不发生实质冲突。
+11. 目标路径通过路径穿越、安全根和 taxonomy 版本校验。
+12. 目标目录不存在同名冲突；禁止覆盖，禁止为绕开确认而自动加后缀。
+13. 分类器、taxonomy、校准器和策略版本均已发布且未被禁用。
+
+任一条件不满足都应主动拒识，不得“选择最接近的目录”。
+
+### 7.2 拒识原因码
+
+建议至少提供以下稳定原因码：
+
+```text
+PARSE_FAILED
+OCR_QUALITY_LOW
+CONTENT_TOO_SHORT
+NO_TAXONOMY_CANDIDATE
+OTHER_CATEGORY
+FREE_PATH_NOT_ALLOWED
+EVIDENCE_MISSING
+FILENAME_ONLY_SIGNAL
+NEGATIVE_SIGNAL_CONFLICT
+TOP_SCORE_BELOW_THRESHOLD
+TOP_MARGIN_TOO_SMALL
+SUMMARY_FULLTEXT_CONFLICT
+MODEL_DISAGREEMENT
+TARGET_PATH_UNAVAILABLE
+TARGET_NAME_CONFLICT
+POLICY_VERSION_UNAVAILABLE
+USER_OPTED_OUT
+```
+
+普通用户只看易懂说明，例如“正文同时涉及两个业务主题，需要确认主分类”；admin/ops 才查看分数和内部原因码。
+
+## 8. 置信度校准与阈值
+
+### 8.1 不直接使用当前 0.60
+
+当前 `0.60` 是启发式分数阈值，不具备概率含义。新功能不得简单改成 `0.90` 或 `0.95` 后就上线，因为未经校准的高分仍可能系统性出错。
+
+### 8.2 建立标注评测集
+
+从学校真实文件类型中构建冻结评测集，至少覆盖：
+
+- 每个主要业务分类。
+- 泛化文件名，如“通知”“汇总表”“审批表”“材料”等。
+- 同时涉及多个主题的文件。
+- 扫描件、表格、旧版 Office 和解析失败样本。
+- 文件名与正文冲突样本。
+- “其他”和 taxonomy 未覆盖样本。
+- 同名文件、相似文件和跨年度模板。
+
+标注至少包含：主分类、可接受的次级分类、证据位置、是否应该拒识。评测集应按内容哈希去重，并按文件族分组切分，避免同一模板的不同副本同时出现在训练集和测试集。
+
+### 8.3 校准模型
+
+第一版建议用 CPU 可运行、可解释的校准层，例如逻辑回归或 Isotonic Regression，把第 6.2 节特征映射为“Top1 是否正确”的校准概率。
+
+要求：
+
+- 分类候选模型与校准模型分版本管理。
+- 全局阈值只作为兜底，主要分类使用按类别阈值。
+- 样本不足的类别默认不允许自动落位，只能进入 shadow 或复核。
+- 阈值以“达到目标精度”为第一目标，覆盖率为第二目标。
+- 建议上线门槛为自动落位精度不低于 99%，并同时报告样本量和置信区间。
+
+### 8.4 冷启动策略
+
+没有足够标注数据时，先使用极保守的白名单策略：
+
+- 只开放证据模式稳定、误判成本低、离线回放表现明确的类别。
+- 要求正文出现多个独立强信号、无负向信号、Top1/Top2 间隔明显。
+- 其余类别只生成建议，不自动落位。
+- 先 shadow 记录“如果启用会怎样”，人工抽检后再逐类开放。
+
+这比用一个未经验证的全局高分阈值更安全。
+
+## 9. 主分类、多标签与状态语义
+
+### 9.1 多标签继续保留
+
+一个文件仍可有多个业务分类、文档类型、年份、关键词和实体。物理目录只由一个 `PRIMARY` 业务分类决定，其余标签继续作为检索和对话访问依据。
+
+### 9.2 状态不能混用
+
+- `SUGGESTED`：分类器建议，尚未成为主分类事实。
+- `AUTO_APPLIED`：自动策略达到发布门槛并用于首次落位。
+- `CONFIRMED`：用户明确接受或更正后的分类。
+- `REJECTED`：用户明确拒绝或已被更正替代。
+- `NEEDS_REVIEW`：当前无法可靠自动决定。
+
+自动决策不得写成 `CONFIRMED`；用户未纠正也不得自动提升为 `CONFIRMED`。
+
+这里的 `NEEDS_REVIEW` 是**组织决策状态**，不是工作副本不可用状态。后续实现必须严格分开两个状态域：
+
+```text
+工作副本可用状态：working_copy.status
+分类组织决策状态：document_organization_decision.decision
+```
+
+对于已经安全归档、能够发布但未通过自动分类门槛的普通文件，必须同时满足：
+
+```text
+working_copy.status = ACTIVE
+document_organization_decision.decision = NEEDS_REVIEW
+```
+
+不得因为主分类待复核，就把工作副本状态设置成不可检索、不可读取或不可操作。`NEEDS_REVIEW` 只表示“不能把候选主分类当成已经生效的客观分类”，不表示“文件不可用”。
+
+### 9.3 后续纠正
+
+用户纠正自动主分类时：
+
+1. 写入追加式分类反馈，原自动决策不得静默删除。
+2. 逻辑分类关系可更新为用户确认结果。
+3. 因文件已经 `ACTIVE`，若需要改变物理目录，必须生成 `MOVE_WORKING_COPIES` OperationPlan。
+4. 用户确认后再执行移动并写路径审计和 ChangeSet。
+
+由于只有极少数自动拒识或误判文件需要纠正，OperationPlan 不会成为大批量日常负担。
+
+## 10. 存储与生命周期设计
+
+### 10.1 上传暂存与内部不可变原件保护层
+
+上传文件必须先经过上传暂存/隔离，再把通过基础检查的内容写入内部不可变原件保护存储。例如：
+
+```text
+上传暂存/隔离：quarantine/<upload_session_or_batch>/...
+内部保护原件：uploads/<year>/<month>/<document_version_id>/<original_filename>
+```
+
+这里的内部 `uploads/...` 只是一种底层原件保护命名空间，**不是本文业务语义中的“上传归档目录”**。上传归档结果必须看工作副本路径。实现和回执中应明确区分：
+
+```text
+original_storage_relative_path  # 内部不可变原件保护路径，不作为用户归档结果
+working_copy_relative_path      # 用户上传归档后的可操作工作副本路径
+```
+
+内部原件保护的强制规则：
+
+1. 内部原件保护发生在主分类决策之前，路径由日期、稳定版本 ID 和安全原文件名等确定性信息生成，不读取分类结果。
+2. 该步骤是系统内部安全前置步骤，不是用户所说的上传归档，不单独向用户展示为一个归档目录。
+3. 保存完成后必须记录内容哈希、Document、DocumentVersion、内部路径和来源批次，工作副本通过稳定版本关系追溯到该原件。
+4. 分类、摘要、OCR、索引、分类确认、工作副本移动或改名都不得改变内部保护原件。
+5. 普通用户搜索返回的是可操作 `ACTIVE` 工作副本及其版本信息；内部保护原件不作为第二个重复文件出现在普通搜索结果中。
+6. 读取、下载或证据回答可以通过版本关系读取被授权内容，但不能向普通用户暴露服务器内部原件绝对路径。
+7. 如果内部原件写入或哈希校验失败，不得继续把对应工作副本发布为 `ACTIVE`。
+8. 相同内容重复上传时，可以按既有查重策略复用稳定内容对象或现有工作副本，但不得移动、改名或覆盖此前的内部保护原件；本次上传事实仍应保留必要审计。
+
+主分类决定的是下一节“上传归档工作副本”的首次发布路径，不影响内部原件保护位置，也不改变原件文件名、哈希或版本身份。
+
+### 10.2 上传归档的工作副本层
+
+工作副本可用状态与组织决策状态必须采用两条独立状态轴，不得混用：
+
+```text
+工作副本生命周期：
+IMPORTING -> ORGANIZING -> ACTIVE
+                         -> FAILED
+ACTIVE -> TRASHED
+
+组织决策：
+PENDING -> AUTO_ORGANIZED
+        -> NEEDS_REVIEW
+        -> SKIPPED
+        -> FAILED
+```
+
+- `ORGANIZING` 文件不得出现在普通用户文件列表、搜索结果和可操作附件候选中。
+- 隐藏工作副本必须关联已经成功保存的内部保护原件和确定的 `DocumentVersion`；不能把上传暂存文件直接当作长期工作副本来源。
+- 自动通过后，工作副本以原文件名发布到 `organization_path/<original_filename>`；该动作就是上传文件按主分类完成归档。
+- 主动拒识后，工作副本以原文件名发布到 taxonomy 中性的工作副本路径，工作副本状态设为 `ACTIVE`，同时把组织决策记录为 `NEEDS_REVIEW`；这表示上传文件已经可检索和使用，但“归档到主分类”尚待复核。
+- 不创建用户可见的“待确认”物理目录。
+- 单个失败不得阻止同批其他文件进入 `ACTIVE`。
+
+强制不变量：
+
+1. `ACTIVE + AUTO_ORGANIZED` 和 `ACTIVE + NEEDS_REVIEW` 都是正常可用文件。
+2. `NEEDS_REVIEW` 不得阻止文件进入普通搜索索引。
+3. `NEEDS_REVIEW` 不得阻止用户读取、预览、下载、总结、比较、引用或选择该文件。
+4. 分类待复核不能成为扩大或缩小文件访问权限的依据；访问权限仍由共享工作区和用户权限规则决定。
+5. 只有隔离风险、文件尚未发布、发布失败或文件已进入回收站时，才允许从普通检索和普通操作候选中排除。
+
+### 10.3 逻辑复核文件的检索与操作规则
+
+“逻辑复核队列”必须实现为对 `document_organization_decisions`、分类建议和工作副本状态的查询投影，不是独立文件存储区，也不是访问隔离区。加入复核队列不能改变工作副本的物理可用性。
+
+后续代码必须严格遵守下表：
+
+| 组合状态 | 普通检索 | 读取/预览/下载 | 总结/比较/引用 | 低风险分析 | 移动/改名/删除等高风险操作 |
+|---|---:|---:|---:|---:|---:|
+| `ORGANIZING + PENDING` | 否 | 否 | 否 | 仅后台处理 | 否 |
+| `ACTIVE + AUTO_ORGANIZED` | 是 | 是 | 是 | 是 | 必须 OperationPlan |
+| `ACTIVE + NEEDS_REVIEW` | 是 | 是 | 是 | 是 | 必须 OperationPlan |
+| `ACTIVE + SKIPPED` | 是 | 是 | 是 | 是 | 必须 OperationPlan |
+| `QUARANTINED/风险未通过` | 否 | 受限或否 | 否 | 仅受控风险处理 | 否 |
+| `FAILED` 且未发布 | 否 | 仅允许受控原件恢复入口 | 否 | 仅失败诊断 | 否 |
+| `TRASHED` | 普通检索否 | 仅回收站入口 | 否 | 否 | 恢复必须按现有规则执行 |
+
+#### 10.3.1 默认搜索范围
+
+- 普通文件搜索默认必须包含所有有权限的 `ACTIVE` 工作副本，包括 `NEEDS_REVIEW` 和 `SKIPPED` 文件。
+- 文件名、原始标题、正文、摘要、关键词、年份、单位、人物、文号、当前逻辑路径等已成功建立的索引都可以用于召回。
+- `NEEDS_REVIEW` 只能影响分类可信度和排序解释，不能作为默认搜索过滤条件。
+- 搜索结果必须返回稳定 `working_copy_id`，使对话引用和后续操作不依赖可能重复的文件名。
+- 搜索结果应返回 `review_required` 和用户友好的 `review_reason`，但普通用户界面不得暴露内部阈值或数据库对象。
+
+#### 10.3.2 分类搜索的可信度边界
+
+分类搜索必须区分“按相关分类候选召回”和“按已生效分类精确过滤”：
+
+- 用户自然语言搜索“找奖学金相关材料”时，可以让 `SUGGESTED` 或 `NEEDS_REVIEW` 分类作为弱召回信号，但必须降低权重，并在结果中标记“分类待确认”。
+- 用户明确筛选“主分类已经是奖学金的文件”时，只能匹配 `AUTO_APPLIED` 或 `CONFIRMED` 的活动主分类关系。
+- `SUGGESTED`、`NEEDS_REVIEW` 和 `llm_free_path` 不得被描述为文件已经属于该分类。
+- 即使分类候选完全不可用，文件仍应通过文件名、正文、摘要和其他客观索引被找到。
+- 用户选择某个待复核文件后，后续对话必须绑定稳定 ID，不能把多个同名候选正文合并。
+
+#### 10.3.3 可直接执行与必须确认的操作
+
+对 `ACTIVE + NEEDS_REVIEW` 文件，以下操作不因分类待复核而额外要求确认：
+
+```text
+搜索
+读取
+预览
+下载
+摘要
+OCR 或重新解析
+关键词、年份和实体提取
+证据回答
+与其他文件比较
+生成分类或改名建议
+```
+
+以下操作仍按项目统一高风险规则执行，与是否待复核无关：
+
+```text
+移动
+改名
+复制
+覆盖
+删除
+大批量导出
+外部发送
+```
+
+特别是用户在复核队列中确认主分类后：分类反馈可以直接持久化；如果文件已经在中性路径成为 `ACTIVE`，将其移动到分类目录必须先生成 `MOVE_WORKING_COPIES` OperationPlan，用户确认后才能执行。
+
+#### 10.3.4 解析、索引和风险异常
+
+- 解析成功但分类拒识：文件名、元数据、正文、摘要和其他索引均正常可用。
+- 解析失败但文件已安全发布：至少建立文件名、扩展名、大小、时间和来源等元数据索引；文件可被找到、下载和请求重处理，但不得声称支持正文检索或正文证据回答。
+- 正文索引仍在构建：文件可先通过文件名和元数据找到；全文搜索能力就绪后再补充，结果必须展示处理状态。
+- 加密、宏风险、MIME/格式风险或其他尚未通过发布检查的文件继续留在隔离状态，不进入普通搜索，也不能通过普通对话绕过风险检查读取正文。
+- 分类服务、图谱、embedding 或 LLM 不可用时，不得影响已经安全发布文件的文件名和元数据检索。
+
+### 10.4 原子发布与失败恢复
+
+推荐顺序：
+
+1. 数据库锁定工作副本和组织决策。
+2. 再次校验目标路径、同名冲突和分类版本。
+3. 在同一 StorageService 安全根内原子移动隐藏工作副本。
+4. 写 `WorkingCopyPathRecord` 和 ChangeSet。
+5. 更新 `relative_path`、主分类关系和组织决策。
+6. 最后把状态切换为 `ACTIVE`。
+
+若第 3～5 步失败：
+
+- 不得把数据库状态标成已完成。
+- 优先回滚到隐藏路径；无法安全回滚时标记 `NEEDS_REVIEW` 并停止自动重试物理动作。
+- 重试必须通过幂等键复用同一组织决策，不能重复创建关系或路径记录。
+
+若解析或分类失败，为保证文件可用，可以发布到中性上传路径：工作副本记录为 `ACTIVE`，组织决策记录为 `NEEDS_REVIEW`，并按第 10.3.4 节提供与实际处理结果相符的检索能力。不得把分类失败变成整个上传失败，也不得伪造不存在的正文索引。
+
+## 11. 数据库调整
+
+### 11.1 `document_categories`
+
+现有模型和唯一索引只把 `CONFIRMED` 视为活动关系。实施时建议：
+
+- 允许 `status='AUTO_APPLIED'`。
+- 活动主分类唯一约束覆盖 `AUTO_APPLIED` 和 `CONFIRMED`。
+- 保留 `source_suggestion_id`，追溯到产生该结果的建议。
+- 增加或用审计表保存：`calibrated_confidence`、`policy_version`、`calibration_version`、`decision_reason_codes`。
+- `source` 使用明确值，如 `auto_placement_policy`，不能使用 `user_confirmed`。
+- 自动关系不创建 `DocumentCategoryConfirmationSource`；该表仍只保存真实用户确认来源。
+
+### 11.2 新增 `document_organization_decisions`
+
+建议建立独立审计表：
+
+```text
+document_organization_decisions
+- id UUID
+- working_copy_id UUID
+- document_id UUID
+- document_version_id UUID
+- classification_run_id UUID
+- primary_suggestion_id UUID nullable
+- category_id varchar nullable
+- taxonomy_key varchar
+- taxonomy_version varchar
+- classifier_version varchar
+- calibration_version varchar
+- policy_version varchar
+- decision varchar
+  AUTO_ORGANIZED | NEEDS_REVIEW | SKIPPED | FAILED
+- calibrated_confidence numeric nullable
+- required_threshold numeric nullable
+- top_margin numeric nullable
+- required_margin numeric nullable
+- feature_snapshot_json jsonb
+- reason_codes_json jsonb
+- target_relative_path_snapshot text nullable
+- path_record_id UUID nullable
+- idempotency_key varchar unique
+- created_at timestamptz
+- completed_at timestamptz nullable
+```
+
+`feature_snapshot_json` 只保存分数、计数和版本，不保存正文或服务器绝对路径。
+
+### 11.3 路径审计与 ChangeSet
+
+首次自动落位也必须写审计，建议扩展 `change_type`：
+
+```text
+CATEGORY_AUTO_APPLIED
+WORKING_COPY_AUTO_ORGANIZED
+AUTO_ORGANIZATION_REVIEW_REQUIRED
+AUTO_ORGANIZATION_FAILED
+```
+
+`WorkingCopyPathRecord.operation_type` 可使用 `INITIAL_AUTO_PLACEMENT`；其 `operation_plan_id` 和 `operation_confirmation_id` 为空，但必须有关联 ChangeSet、分类运行和系统策略版本。
+
+### 11.4 状态字段和查询约束
+
+数据库模型和仓储查询必须表达以下边界：
+
+- `working_copies.status` 只表达工作副本生命周期和可用性，不保存 `NEEDS_REVIEW` 分类语义。
+- `document_organization_decisions.decision` 保存 `AUTO_ORGANIZED`、`NEEDS_REVIEW`、`SKIPPED` 或 `FAILED`。
+- 普通检索的基础过滤条件是有权限且 `working_copies.status='ACTIVE'`，不得附加 `decision != 'NEEDS_REVIEW'` 之类的排除条件。
+- 复核队列查询使用 `working_copies.status='ACTIVE' AND decision='NEEDS_REVIEW'`，不得复制文件，也不得改变搜索投影状态。
+- 已生效主分类查询只把 `document_categories.status IN ('AUTO_APPLIED', 'CONFIRMED')` 视为活动关系。
+- 分类建议查询与已生效分类查询必须使用不同的仓储方法或显式查询模式，禁止调用方无意中把 `SUGGESTED` 当成正式分类。
+- 搜索投影必须保留 `review_required` 或能够通过批量关联组织决策得到该字段，不能依靠前端逐文件发起查询。
+
+### 11.5 内部保护原件与上传归档工作副本关联约束
+
+内部保护原件和作为上传归档结果的工作副本必须通过稳定业务关系关联，不能仅依靠路径字符串推断：
+
+```text
+上传批次/上传事实
+-> 不可变内容对象或 ManagedFile
+-> Document
+-> DocumentVersion
+-> WorkingCopy.current_version_id
+```
+
+后续实现必须保证：
+
+- `DocumentVersion` 对应的内容哈希能够追溯到内部保护原件。
+- `WorkingCopy` 路径变化不创建虚假的新内部保护原件，也不改变既有 `DocumentVersion` 内容身份。
+- 只有文件内容真正产生新版本时才创建新的内容版本；分类和路径变化本身不创建新内容版本。
+- 普通搜索对同一个上传归档工作副本只返回一项，不能同时把内部保护原件作为另一项重复结果返回。
+- 路径审计必须记录工作副本路径变化，但不得把工作副本路径记录写入内部保护原件的路径字段。
+
+## 12. 服务边界与代码调整建议
+
+建议新增或调整以下模块：
+
+```text
+apps/api/app/modules/classification/
+├─ classifier_service.py          # 多路候选与证据
+├─ auto_placement_policy.py       # 纯决策，不执行文件操作
+├─ calibration.py                 # 校准器加载与概率计算
+├─ organization_path.py           # taxonomy 安全路径解析
+└─ organization_repository.py     # 决策和自动关系持久化
+
+apps/api/app/modules/file_lifecycle/
+├─ organizer.py                   # 编排首次整理
+├─ service.py                     # IMPORTING/ORGANIZING/ACTIVE 生命周期
+└─ repository.py                  # 锁、幂等和状态变更
+```
+
+职责边界：
+
+- 分类服务只能读取持久化正文并输出结构化结果。
+- 策略服务必须是确定性的，相同输入和版本得到相同决策。
+- 路径解析器只能接受 taxonomy 的稳定 ID，不能接受 LLM 输出的任意字符串路径。
+- 文件移动只能通过 StorageService 完成。
+- 所有数据库写入必须由服务层事务和仓储完成，不能由 LLM 或 LangGraph State 直接执行。
+- 上传 worker 与 Agent 交互链路应通过同一个 `ClassificationRuntimeFactory` 构造分类服务，避免两条链路配置不一致。
+
+## 13. API 与前端体验
+
+### 13.1 批次回执
+
+回执顶部只显示用户关心的汇总：
+
+```text
+共处理 100 个文件
+自动整理 96 个
+需要确认 3 个
+处理失败 1 个
+原始文件均未改变
+```
+
+同时仍需提供逐文件明细，可分页或折叠展示，不能只有统计：
+
+- 当前文件名。
+- 自动落位的主分类和逻辑目录。
+- 其他分类标签。
+- 置信度的用户友好表达，不必暴露原始内部阈值。
+- 可定位证据。
+- 是否保持原名、原件是否改变。
+- 待复核原因和下一步操作。
+- 内部原件已受到不可变保护、上传归档工作副本当前首次落位位置，以及内部保护位置不是用户归档目录的用户友好说明。
+
+### 13.2 异常复核列表
+
+只列出 `NEEDS_REVIEW` 文件，按原因分组：
+
+- “可能属于两个分类”。
+- “正文太少或扫描不清”。
+- “目标目录存在同名文件”。
+- “没有匹配到现有分类”。
+
+每项只展示 2～3 个候选、关键证据和“选择主分类/保持中性位置”操作。用户不需要理解 taxonomy 语法、Agent、Tool 或 OperationPlan 内部对象。
+
+### 13.3 用户纠正后的物理移动
+
+复核文件已经以中性路径成为 `ACTIVE` 后，用户选择分类会先形成分类反馈；如需移动工作副本，前端展示精简的 OperationPlan 确认卡。因为该流程只针对少量异常，不会造成批量确认负担。
+
+### 13.4 搜索与文件响应契约
+
+文件列表、搜索结果、附件候选和任务回执应提供等价字段：
+
+```json
+{
+  "working_copy_id": "uuid",
+  "availability_status": "ACTIVE",
+  "organization_decision": "NEEDS_REVIEW",
+  "review_required": true,
+  "review_reasons": ["TOP_MARGIN_TOO_SMALL"],
+  "primary_category_status": "SUGGESTED",
+  "content_index_status": "READY"
+}
+```
+
+强制 API 语义：
+
+- 默认文件列表和默认 `/api/search` 等价能力必须返回有权限的 `ACTIVE + NEEDS_REVIEW` 文件。
+- 普通搜索不得要求调用方显式传入 `include_needs_review=true` 才能找到这些文件。
+- 如果提供 `review_required` 筛选，它只能用于缩小到复核队列，不能改变默认可见性。
+- 如果提供分类状态筛选，必须明确区分 `applied`、`suggested` 和 `all_relevant`，不能用含义模糊的 `classified=true`。
+- 读取、下载、预览和附件选择接口只校验文件可用性与访问权限，不得因 `organization_decision='NEEDS_REVIEW'` 返回禁止访问。
+- 当正文尚未解析或索引失败时，响应必须返回真实 `content_index_status`，不得返回空结果并让用户误以为文件不存在。
+
+## 14. 配置与功能开关
+
+建议新增：
+
+```text
+AUTO_PRIMARY_CLASSIFICATION_ENABLED=false
+AUTO_INITIAL_PLACEMENT_ENABLED=false
+AUTO_CLASSIFICATION_SHADOW_MODE=true
+AUTO_CLASSIFICATION_POLICY_VERSION=auto-placement-v1
+AUTO_CLASSIFICATION_CALIBRATION_VERSION=unpublished
+AUTO_CLASSIFICATION_TARGET_PRECISION=0.99
+AUTO_CLASSIFICATION_GLOBAL_FALLBACK_THRESHOLD=disabled
+```
+
+阈值应来自版本化策略/校准文件，不建议只依赖环境变量中的单个全局分数。
+
+回滚时关闭 `AUTO_INITIAL_PLACEMENT_ENABLED`，新文件恢复发布到中性上传路径；不得自动搬回已经正确落位的 `ACTIVE` 文件。
+
+## 15. 分阶段实施
+
+### 阶段 0：基线与数据集
+
+- 固化现有规则分类输出和配置版本。
+- 采样历史文件，建立去重后的人工标注评测集。
+- 统计各分类的准确率、覆盖率、混淆矩阵和缺失证据率。
+- 为当前 0.60 主分类选择做离线回放，明确它不能直接上线移动。
+
+交付：评测集说明、基线报告、类别白名单候选。
+
+### 阶段 1：统一分类运行时和多路候选
+
+- 建立 `ClassificationRuntimeFactory`，让上传 worker 与 Agent 使用一致配置。
+- 合并全文、分类摘要、语义和图谱候选。
+- 输出完整特征与证据，不改变当前用户结果。
+- 保持图谱增强在 shadow。
+
+交付：候选回放结果、分类链路一致性测试。
+
+### 阶段 2：AutoPlacementPolicy 与 shadow 决策
+
+- 实现纯决策策略、校准器、原因码和版本化配置。
+- 新增 `document_organization_decisions`。
+- 对每个新文件记录“如果启用，将自动落位还是拒识”，但不移动文件。
+- admin/ops 抽检自动候选。
+
+交付：shadow 精度、覆盖率和类别明细报告。
+
+### 阶段 3：隐藏 ORGANIZING 与首次原子发布
+
+- 增加工作副本组织状态和普通用户可见性过滤。
+- 实现安全目标路径校验、同名冲突拒识、原子发布和幂等恢复。
+- 写 `AUTO_APPLIED` 分类关系、路径审计和 ChangeSet。
+- 初期只对白名单类别开启。
+
+交付：端到端自动落位链路。
+
+### 阶段 4：少量异常复核体验
+
+- 增加批次汇总、逐文件详情和异常复核列表。
+- 支持用户选择主分类或保持中性位置。
+- 后续移动继续复用阶段 6 的 OperationPlan 和 confirmed-file-action。
+
+交付：普通用户不感知内部对象的复核闭环。
+
+### 阶段 5：灰度与扩展
+
+- 按 5% -> 20% -> 50% -> 100% 灰度。
+- 同时按类别逐步开放，不一次开放全部分类。
+- 每阶段监控自动覆盖率、人工抽检精度、用户纠错率、路径冲突率和失败恢复率。
+- 任一分类跌破目标精度时只关闭该分类自动落位，不影响其他分类。
+
+## 16. 测试方案
+
+### 16.1 单元测试
+
+- 全文和摘要候选合并、去重、排序。
+- 只有文件名命中时必须拒识。
+- “其他”、自由路径、缺证据、负向信号冲突必须拒识。
+- Top1 低于阈值、Top1/Top2 间隔不足必须拒识。
+- 按类别阈值和策略版本生效。
+- taxonomy 路径穿越和未知分类 ID 必须失败。
+- LLM、embedding 和图谱使用 deterministic fake。
+
+### 16.2 后端集成测试
+
+- 高可靠文件：原件归档不变，工作副本首次发布到主分类目录，正式关系为 `AUTO_APPLIED`。
+- 歧义文件：发布到中性路径，`working_copy.status='ACTIVE'` 且组织决策为 `NEEDS_REVIEW`。
+- 默认搜索能够通过文件名找到 `ACTIVE + NEEDS_REVIEW` 文件，无需显式开启待复核范围。
+- 解析成功的 `ACTIVE + NEEDS_REVIEW` 文件能够通过正文、摘要、关键词、年份和实体检索找到。
+- 分类候选可以参与弱召回，但精确“已生效主分类”过滤不得返回只有建议分类的文件。
+- `ACTIVE + NEEDS_REVIEW` 文件可以读取、预览、下载、总结、比较和引用。
+- 对 `ACTIVE + NEEDS_REVIEW` 文件执行移动、改名或删除仍必须有已确认的 OperationPlan。
+- 解析失败但安全发布的文件仍能通过文件名和元数据找到，正文检索状态明确为不可用或失败。
+- 风险未通过或仍处于 `ORGANIZING` 的文件不能被普通搜索、读取和附件选择接口访问。
+- 上传成功链路必须先完成内部原件保护和哈希校验，再创建或发布工作副本；内部保护失败时不得出现孤立的 `ACTIVE` 工作副本。
+- 上传归档的自动主分类落位改变的是工作副本路径；内部保护原件路径、文件名、内容哈希和 `DocumentVersion` 身份保持不变。
+- 用户确认后续移动、改名或删除时，执行目标只能是 `ACTIVE` 上传归档工作副本，不能命中内部保护原件。
+- 工作副本移动后普通搜索仍只返回同一个稳定 `working_copy_id`，不得把移动前路径或内部保护原件返回为重复文件。
+- 重复上传复用既有内容或工作副本时，不得移动、改名或覆盖此前内部保护原件，并保留本次上传审计。
+- 同批一个文件失败不回滚其他文件。
+- 同名冲突不覆盖、不自动加后缀，进入复核。
+- `ORGANIZING` 文件对普通列表、搜索和下载不可见。
+- 任务重试不重复创建分类关系、路径记录或 ChangeItem。
+- 任一步异常时数据库和物理路径状态一致。
+- 自动落位前后原件 SHA-256 不变。
+- `ACTIVE` 文件后续移动仍必须有已确认 OperationPlan。
+
+### 16.3 前端测试
+
+- 100 个文件中仅 3 个异常时，用户只被要求处理这 3 个。
+- 批次统计和逐文件明细同时存在。
+- 待复核文件会出现在正常搜索结果中，并显示“分类待确认”，不会显示成“文件不可用”。
+- 用户可以直接从搜索结果读取或下载待复核文件，不会被强制先完成分类确认。
+- 精确分类筛选与“相关材料”搜索的结果语义和标识能够清楚区分。
+- 普通用户看不到绝对路径、Tool、Skill、内部阈值和数据库状态。
+- 复核选择与 OperationPlan 确认清晰区分。
+- 分页、筛选和批量查看不会丢失逐文件状态。
+
+### 16.4 离线验收
+
+- 自动落位精度达到目标值，并报告样本量和置信区间。
+- 每个开放类别都有最小有效样本量；不足类别不得自动开放。
+- 100% 自动决策可追溯到 taxonomy、分类器、校准器、策略版本和正文证据。
+- 100% 拒识决策带稳定原因码。
+- 自动落位不产生任何原件内容或文件名变化。
+
+## 17. 监控指标
+
+至少记录：
+
+```text
+auto_placement_coverage
+auto_placement_precision_sampled
+auto_placement_user_correction_rate
+review_rate
+review_reason_distribution
+category_confusion_matrix
+evidence_missing_rate
+summary_fulltext_disagreement_rate
+target_name_conflict_rate
+organization_failure_rate
+organization_retry_rate
+time_to_active_p50/p95
+```
+
+不能把“用户未反馈”直接当作正确率；线上精度需要随机人工抽检或后续真实明确反馈支持。
+
+## 18. 历史文件与 taxonomy 变更
+
+- 既有 `ACTIVE` 文件不因本功能上线而自动移动。
+- 可以对历史文件做 shadow 分类和生成整理建议，但真实移动仍必须走 OperationPlan。
+- taxonomy 新版本发布后，不自动重排已有文件；只有新上传文件使用新版本。
+- 若分类路径被停用，保留历史路径和决策快照，通过受控迁移计划处理，不能后台静默搬迁。
+- 校准模型更新只影响新决策，不回写历史 `AUTO_APPLIED` 记录。
+
+## 19. 推荐开发任务拆分
+
+1. `docs/data` 或受控测试资产中建立脱敏分类评测集和标注规范。
+2. 统一上传与 Agent 的 `ClassificationRuntimeFactory`。
+3. 实现全文/摘要/语义/图谱多路候选和特征输出。
+4. 实现 `AutoPlacementPolicy`、校准器和离线评测命令。
+5. 新增组织决策表、`AUTO_APPLIED` 约束和 Alembic 迁移。
+6. 改造工作副本 `ORGANIZING -> ACTIVE` 生命周期。
+7. 实现 taxonomy 路径首次发布、冲突拒识、幂等恢复和路径审计。
+8. 接入 ChangeSet 和逐文件 UserTaskReceipt。
+9. 实现异常复核 UI 与分类反馈。
+10. 接入既有 OperationPlan 完成异常文件后续移动。
+11. shadow 回放、人工抽检、类别白名单和灰度开关。
+12. 同步更新 `agent.md`、自动整理方案、阶段 6 方案、API 合同、数据库 schema、README 和 runbook。
+
+## 20. 最终验收标准
+
+本方案只有同时满足以下条件才允许全量启用：
+
+- 新文件在 `ACTIVE` 前完成主分类决策，不出现先发布后静默移动。
+- 内部原件保护、上传归档工作副本首次落位和 `ACTIVE` 后续移动在状态、路径字段和审计记录中能够明确区分。
+- 文档和普通用户界面把“上传归档”解释为工作副本首次落位，不能把内部原件保护目录展示成归档结果。
+- 高可靠上传文件的归档结果必须直接位于工作副本主分类 `organization_path` 下。
+- “按主分类存储”作用于上传归档工作副本首次落位；内部保护原件位置不读取分类结果。
+- 内部保护原件不是普通 OperationPlan 的移动、改名、覆盖或删除目标；后续分类操作只能作用于工作副本。
+- 自动落位只使用已发布 taxonomy 的安全 `organization_path`。
+- 自动落位精度达到 99% 目标，且每个开放类别都有足够验证样本。
+- 低置信度、歧义、缺证据、解析失败和路径冲突能够主动拒识。
+- 大批量上传时只有拒识文件需要用户处理，正常文件无需确认。
+- 每个文件都有逐文件回执、证据、分类状态和原件保护说明。
+- 自动分类状态明确为 `AUTO_APPLIED`，不伪造用户确认。
+- 未通过门槛但已安全发布的文件必须是 `ACTIVE + NEEDS_REVIEW`，不得因分类待复核而被隐藏或禁用。
+- 默认文件列表、搜索和附件选择必须包含有权限的 `ACTIVE + NEEDS_REVIEW` 文件。
+- 解析成功的待复核文件可以通过正文、摘要和元数据检索；解析失败的待复核文件至少可以通过文件名和元数据检索，并明确正文索引状态。
+- 待复核文件可以直接读取、预览、下载、总结、比较和引用，不得强迫用户先确认分类。
+- 分类候选只能用于弱召回；精确“已生效主分类”筛选只能使用 `AUTO_APPLIED` 或 `CONFIRMED` 关系。
+- 风险隔离、尚未发布、发布失败和已回收文件仍必须从普通检索与普通操作入口排除。
+- 原始文件内容、名称和归档位置均未改变。
+- 已成为 `ACTIVE` 的工作副本后续移动仍强制 OperationPlan。
+- 关闭功能开关后可以立即停止新的自动落位，且不会破坏既有文件。
