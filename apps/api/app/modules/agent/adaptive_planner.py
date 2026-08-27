@@ -25,6 +25,9 @@ ADAPTIVE_PLANNER_SYSTEM_PROMPT = """你是 File Agent 的 Adaptive Planner。
 高风险 Tool 的确认要求以 Catalog 为准，不能降低。
 
 不需要文件事实的普通对话使用 DIRECT_RESPONSE。缺少唯一文件范围或必要参数时使用 CLARIFY。
+当用户明确要求“对上传文件进行分类/归类/整理”且 attachments 已提供后端 document_id 时，
+必须使用 document-classification Skill 允许的 extract-document-text；不得改成
+read-classification-taxonomy。后者只用于用户明确询问分类目录、分类体系或支持哪些分类。
 当 observation 已包含足以满足原始目标的 Tool 结果时使用 FINISH；FINISH 不生成文件事实文本，
 最终回复由后端根据已经验证的 Tool 结果生成。
 hybrid-search 属于发现型 Tool：首次计划只执行检索，观察命中数量、实际条件和受控 document_ids 后，

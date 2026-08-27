@@ -325,6 +325,92 @@ def test_enabled_adaptive_planner_keeps_exact_filename_as_backend_hard_scope(
     assert result.final_response == "已按完整文件名读取。"
 
 
+def test_enabled_adaptive_planner_keeps_explicit_attachment_classification(
+    monkeypatch,
+    tmp_path,
+):
+    """明确附件分类是后端硬计划，模型不得改成读取分类目录。"""
+
+    from app.core import config
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent",
+    )
+    monkeypatch.setenv("ADAPTIVE_PLANNER_MODE", "enabled")
+    monkeypatch.setenv("ADAPTIVE_PLANNER_ROLLOUT_PERCENT", "100")
+    config.get_settings.cache_clear()
+
+    class MustNotRunAdaptive:
+        """若执行则模拟现场错误路由，测试应在此前固定分类计划。"""
+
+        enabled = True
+
+        def decide(self, **_kwargs):
+            """禁止模型把附件分类改写成分类目录查询。"""
+
+            raise AssertionError("附件分类硬计划不得交给 Adaptive Planner 改写")
+
+    class EnabledLegacyIntent:
+        """仅用于让运行时进入 LLM 模式；预检命中后不应实际调用。"""
+
+        enabled = True
+
+        def understand_user_request(self, **_kwargs):
+            """预检未生效时立即暴露回归。"""
+
+            raise AssertionError("附件分类硬计划不得回退 Legacy LLM")
+
+    class ClassificationRegistry:
+        """返回最小正文解析结果并记录真实 Tool。"""
+
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def invoke(self, tool_name, input_json):
+            """模拟附件正文解析成功。"""
+
+            self.calls.append(tool_name)
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "document_id": input_json["document_id"],
+                    "extraction_run_id": "run-explicit-classification",
+                    "status": "COMPLETED",
+                    "extractor": "plain-text",
+                    "pages": [
+                        {
+                            "page_number": 1,
+                            "text_preview": "教师职称申报材料",
+                            "char_count": 8,
+                        }
+                    ],
+                    "error": None,
+                },
+                status="COMPLETED",
+            )
+
+    registry = ClassificationRegistry()
+    result = AgentRuntimeService(
+        registry_factory=lambda _db, _user_id: registry,
+        llm_intent_service=EnabledLegacyIntent(),
+        adaptive_planner_service=MustNotRunAdaptive(),
+    ).run_message(
+        conversation_id="conv-explicit-classification",
+        user_id="user-explicit-classification",
+        message_id="message-explicit-classification",
+        message="对上传文件进行分类",
+        attachments=[{"document_id": "doc-explicit-classification"}],
+    )
+
+    assert result.intent == "CLASSIFY_FILES"
+    assert registry.calls == ["extract-document-text"]
+    assert "分类建议" in (result.final_response or "")
+
+
 def _db_session():
     """创建包含全部 ORM 模型的隔离 SQLite 会话。"""
 

@@ -25,6 +25,7 @@ from app.modules.agent.planner import (
     build_structured_image_extraction_plan,
     build_workspace_evidence_followup_plan,
     build_plan_from_user_intent,
+    has_explicit_attachment_classification_request,
     has_explicit_filename_content_request,
     has_unscoped_workspace_fact_question,
     is_missing_generated_output_feedback,
@@ -268,6 +269,10 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
             not in {
                 "OUTPUT_NOT_VISIBLE_FEEDBACK",
                 "STRUCTURED_EXTRACTION_UNAVAILABLE",
+                # 用户已经明确要求对后端解析出的附件进行分类时，真实附件范围和
+                # extract-document-text 链路都是确定性硬约束，不能再让模型改选
+                # read-classification-taxonomy 只返回分类目录。
+                "CLASSIFY_FILES",
             }
             and not (
                 (
@@ -661,6 +666,14 @@ def _deterministic_preflight_plan(
         "RESOLVE_RENAME_REVIEW",
         "PREPARE_WORKING_COPY_ACTION",
     }:
+        return plan
+    if (
+        plan.intent == "CLASSIFY_FILES"
+        and attachments
+        and has_explicit_attachment_classification_request(state["message"])
+    ):
+        # 附件分类不是关键词帮助请求。固定保留真实正文解析与分类回执计划，
+        # Adaptive Planner 只处理无法由后端确定的任务编排。
         return plan
     if plan.intent.endswith("_CLASSIFICATION"):
         return plan

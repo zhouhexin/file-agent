@@ -35,6 +35,12 @@ target_scope 只能填写范围意图，不能用它猜测 document_id：
 只有用户明确提到“分类、归类、类别、分类建议、分类统计”时，才使用 read_document_classifications 读取已有分类建议。
 如果用户要求读取正文、解析文件内容、查看 PDF/Word 内容、识别图片文字或 OCR，应使用 extract_document_text。
 如果用户要求“读取并分类”“解析后判断文件类型”，应先使用 extract_document_text；系统会基于解析结果执行确定性分类回执。
+如果用户说“对上传文件进行分类/归类/整理”，这是执行附件分类任务，不是询问系统支持哪些分类：
+- intent 使用 CLASSIFY_FILES；
+- required_capabilities 包含 classify_files；
+- tool_plan_hint 使用 extract-document-text；
+- 不得选择 LIST_CLASSIFICATION_TAXONOMY 或 read-classification-taxonomy。
+只有用户明确询问“分类目录、分类体系、支持哪些分类、有哪些分类”时，才读取固定分类目录。
 不要把“读取正文/解析文件内容/OCR”规划成 read_document_insights。
 如果上传阶段已经完成基础 ingest，不要重复要求文件分类、关键词提取或上传处理。
 如果用户没有附件或完整文件名，但提出需要从已有业务文件核实的具体事实问题：

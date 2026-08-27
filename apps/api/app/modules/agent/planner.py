@@ -144,6 +144,24 @@ def is_structured_image_extraction_request(message: str) -> bool:
         for marker in ("表格", "字段", "JSON", "CSV", "Excel", "结构化")
     )
     return has_image_source and has_extraction_action and has_structured_output
+
+
+def has_explicit_attachment_classification_request(message: str) -> bool:
+    """判断用户是否明确要求执行附件分类，而不是查看分类体系或历史结果。"""
+
+    text = str(message or "")
+    lowered = text.lower()
+    return bool(
+        _has_classification_intent(message=text, lowered=lowered)
+        and not _has_classification_taxonomy_intent(
+            message=text,
+            lowered=lowered,
+        )
+        and not _has_classification_summary_intent(message=text)
+        and not _has_rename_intent(message=text, lowered=lowered)
+    )
+
+
 MANAGED_EXTENSION_ALIASES = {
     "pdf": "pdf",
     ".pdf": "pdf",
@@ -1099,6 +1117,30 @@ def build_plan_from_user_intent(
         or requested_capabilities.intersection(AGENT_CAPABILITY_HINTS)
     ):
         return _capability_help_plan(user_goal=intent_plan.user_goal or message)
+
+    if (
+        attachment_document_ids
+        and has_explicit_attachment_classification_request(message)
+    ):
+        # 用户明确要求“对上传文件进行分类”时，附件范围和动作都已经由后端
+        # 确定。即使 LLM 错误返回分类目录 intent/hint，也必须执行真实正文解析
+        # 和分类建议链路，不能只展示 taxonomy。
+        return _classify_files_plan(
+            user_goal=intent_plan.user_goal or message,
+            document_ids=attachment_document_ids,
+            selected_skills=[
+                "llm-understanding",
+                "document-text-extract",
+                "document-classification",
+                "change-report",
+            ],
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
+            llm_intent_plan=intent_plan.model_dump(),
+            route_source="backend_explicit_attachment_classification",
+            target_scope=intent_plan.target_scope,
+            resolved_scope=resolved_scope,
+        )
 
     if (
         _has_classification_taxonomy_intent(message=message, lowered=lowered)

@@ -1325,6 +1325,52 @@ def test_llm_classification_hint_is_overridden_for_explicit_file_classification(
     assert [step.tool_name for step in plan.steps] == ["extract-document-text"]
 
 
+def test_llm_taxonomy_hint_is_overridden_for_explicit_attachment_classification():
+    """模型误选分类目录时，明确附件分类仍必须执行正文解析与分类链路。"""
+
+    intent_plan = UserIntentPlan(
+        intent="LIST_CLASSIFICATION_TAXONOMY",
+        user_goal="对上传文件进行分类",
+        needs_file_context=False,
+        referenced_document_ids=[],
+        required_capabilities=["read_classification_taxonomy"],
+        tool_plan_hint=["read-classification-taxonomy"],
+        response_style="concise",
+    )
+
+    plan = build_plan_from_user_intent(
+        intent_plan=intent_plan,
+        message="对上传文件进行分类",
+        attachments=[{"document_id": "doc-taxonomy-misroute"}],
+    )
+
+    assert plan.intent == "CLASSIFY_FILES"
+    assert plan.slots["route_source"] == (
+        "backend_explicit_attachment_classification"
+    )
+    assert [step.tool_name for step in plan.steps] == ["extract-document-text"]
+
+
+def test_explicit_taxonomy_question_with_attachment_still_reads_catalog():
+    """用户真的询问分类体系时，即使带附件也不能误启动文件分类。"""
+
+    plan = build_plan_from_user_intent(
+        intent_plan=UserIntentPlan(
+            intent="LIST_CLASSIFICATION_TAXONOMY",
+            user_goal="查看系统分类体系",
+            required_capabilities=["read_classification_taxonomy"],
+            tool_plan_hint=["read-classification-taxonomy"],
+        ),
+        message="查看系统当前支持的文件分类体系",
+        attachments=[{"document_id": "doc-context-only"}],
+    )
+
+    assert plan.intent == "LIST_CLASSIFICATION_TAXONOMY"
+    assert [step.tool_name for step in plan.steps] == [
+        "read-classification-taxonomy"
+    ]
+
+
 def test_llm_classify_intent_without_keyword_uses_classify_plan():
     """工具入口必须以 LLM 结构化 intent 为主，不依赖用户原文包含“分类”关键词。"""
 
