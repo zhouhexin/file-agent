@@ -509,7 +509,7 @@ class UploadLifecycleService:
         return working_copy
 
     def _candidate_accessible(self, *, review: UploadDuplicateReview, candidate: UploadDuplicateCandidate) -> bool:
-        """候选仅在共享目录中且逻辑上属于当前上传用户时才能被选择。"""
+        """候选只要是共享目录中的活动工作副本，就允许任意登录用户选择。"""
 
         working_copy = self.db.get(WorkingCopy, candidate.candidate_working_copy_id) if candidate.candidate_working_copy_id else None
         document = self.db.get(Document, working_copy.document_id) if working_copy else None
@@ -517,7 +517,6 @@ class UploadLifecycleService:
             working_copy
             and document
             and working_copy.workspace_id == get_shared_workspace_id(self.db)
-            and document.user_id == review.user_id
             and working_copy.status == "ACTIVE"
         )
 
@@ -1956,15 +1955,16 @@ class FileLifecycleJobProcessor:
                 working_copy=working_copy,
                 candidate_document=candidate_document,
             )
+            # 近重复候选与精确候选使用同一共享授权边界，不再比较上传用户。
             accessible = (
                 working_copy.workspace_id == get_shared_workspace_id(self.db)
-                and candidate_document.user_id == review.user_id
+                and working_copy.status == "ACTIVE"
             )
             summary = (
                 {"message": "系统检测到高度相似内容", "similarity_bucket": _similarity_bucket(score)}
                 if scope == "CROSS_USER"
                 else {
-                    "message": "检测到当前账号可访问的高度相似文件",
+                    "message": "检测到共享工作目录中可直接使用的高度相似文件",
                     "filename": working_copy.filename,
                     "relative_path": working_copy.relative_path if accessible else None,
                     "similarity_bucket": _similarity_bucket(score),

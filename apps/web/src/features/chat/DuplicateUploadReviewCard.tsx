@@ -76,7 +76,7 @@ export function DuplicateUploadReviewCard({
                 onClick={() => void decide('USE_EXISTING_FILE', candidate.existing_working_copy_id ?? undefined)}
                 type="button"
               >
-                使用已有文件
+                使用现有文件
               </button>
             ) : null}
           </article>

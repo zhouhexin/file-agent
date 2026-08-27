@@ -37,6 +37,7 @@ from app.modules.conversations.schemas import (
     ConversationPagination,
     MessageAttachment,
 )
+from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 
 
@@ -154,16 +155,17 @@ class ConversationRepository:
         if not document_ids:
             return []
 
-        owned_documents = (
-            self.db.query(Document)
-            .filter(Document.id.in_(document_ids), Document.user_id == user_id)
-            .all()
-        )
-        owned_ids = {document.id for document in owned_documents}
+        readable_ids = {
+            document.id
+            for document in self._load_readable_attachment_documents(
+                document_ids=document_ids,
+                user_id=user_id,
+            )
+        }
         return [
             MessageAttachment(document_id=document_id)
             for document_id in document_ids
-            if document_id in owned_ids
+            if document_id in readable_ids
         ]
 
     def get_all_attachment_references(
@@ -192,7 +194,7 @@ class ConversationRepository:
         document_ids = _collect_unique_document_ids(messages=messages)
         if not document_ids:
             return []
-        return self._filter_owned_attachment_references(document_ids=document_ids, user_id=user_id)
+        return self._filter_readable_attachment_references(document_ids=document_ids, user_id=user_id)
 
     def get_filename_matched_attachment_references(
         self,
@@ -222,10 +224,9 @@ class ConversationRepository:
         if not document_ids:
             return []
 
-        documents = (
-            self.db.query(Document)
-            .filter(Document.id.in_(document_ids), Document.user_id == user_id)
-            .all()
+        documents = self._load_readable_attachment_documents(
+            document_ids=document_ids,
+            user_id=user_id,
         )
         documents_by_id = {document.id: document for document in documents}
         normalized_content = _normalize_filename_match_text(content)
@@ -295,7 +296,7 @@ class ConversationRepository:
             break
         if not document_ids:
             return []
-        return self._filter_owned_attachment_references(document_ids=document_ids, user_id=user_id)
+        return self._filter_readable_attachment_references(document_ids=document_ids, user_id=user_id)
 
     def get_latest_upload_lifecycle_attachment_references(
         self,
@@ -330,30 +331,60 @@ class ConversationRepository:
         )
         if row is None:
             return []
-        return self._filter_owned_attachment_references(
+        return self._filter_readable_attachment_references(
             document_ids=[str(row.document_id)],
             user_id=user_id,
         )
 
-    def _filter_owned_attachment_references(
+    def _filter_readable_attachment_references(
         self,
         *,
         document_ids: list[str],
         user_id: str,
     ) -> list[MessageAttachment]:
-        """按当前用户过滤附件引用，防止越权文档进入 Agent 上下文。"""
+        """保留当前用户私有上传和共享工作副本引用，排除其他用户上传暂存。"""
 
-        owned_documents = (
-            self.db.query(Document)
-            .filter(Document.id.in_(document_ids), Document.user_id == user_id)
-            .all()
+        readable_documents = self._load_readable_attachment_documents(
+            document_ids=document_ids,
+            user_id=user_id,
         )
-        owned_ids = {document.id for document in owned_documents}
+        readable_ids = {document.id for document in readable_documents}
         return [
             MessageAttachment(document_id=document_id)
             for document_id in document_ids
-            if document_id in owned_ids
+            if document_id in readable_ids
         ]
+
+    def _load_readable_attachment_documents(
+        self,
+        *,
+        document_ids: list[str],
+        user_id: str,
+    ) -> list[Document]:
+        """加载私有上传来源或共享工作副本文档，不共享其他用户上传暂存。"""
+
+        if not document_ids:
+            return []
+        shared_document_ids = {
+            str(document_id)
+            for (document_id,) in (
+                self.db.query(WorkingCopy.document_id)
+                .filter(
+                    WorkingCopy.document_id.in_(document_ids),
+                    WorkingCopy.workspace_id == get_shared_workspace_id(self.db),
+                    WorkingCopy.status.in_({"ACTIVE", "TRASHED"}),
+                )
+                .all()
+            )
+        }
+        return (
+            self.db.query(Document)
+            .filter(
+                Document.id.in_(document_ids),
+                or_(Document.user_id == user_id, Document.id.in_(shared_document_ids)),
+            )
+            .all()
+        )
 
     def get_conversation_for_user(self, conversation_id: str, user_id: str) -> Conversation:
         """读取当前用户自己的会话，不存在或越权时返回明确错误。"""
@@ -620,10 +651,9 @@ class ConversationRepository:
         }
         if not document_ids:
             return {}
-        documents = (
-            self.db.query(Document)
-            .filter(Document.id.in_(document_ids), Document.user_id == user_id)
-            .all()
+        documents = self._load_readable_attachment_documents(
+            document_ids=list(document_ids),
+            user_id=user_id,
         )
         return {document.id: document for document in documents}
 

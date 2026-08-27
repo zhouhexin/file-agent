@@ -165,11 +165,11 @@ class FileLifecycleRepository:
                 working_copy=working_copy,
                 candidate_document=candidate_document,
             )
+            # 工作副本进入唯一共享工作区后不再按上传用户隔离；上传来源本身仍保持私有。
             can_use_existing = bool(
                 working_copy
                 and candidate_document
                 and working_copy.workspace_id == get_shared_workspace_id(self.db)
-                and candidate_document.user_id == review.user_id
                 and working_copy.status == "ACTIVE"
             )
             if scope == "CROSS_USER":
@@ -183,7 +183,7 @@ class FileLifecycleRepository:
                     "message": (
                         "检测到相同内容的文件此前已删除，是否再次上传？"
                         if is_deleted
-                        else "检测到当前账号可访问的相同文件"
+                        else "检测到共享工作目录中可直接使用的相同文件"
                     ),
                     "filename": working_copy.filename if working_copy else managed_file.filename,
                     "relative_path": working_copy.relative_path if can_use_existing else None,
@@ -235,15 +235,16 @@ class FileLifecycleRepository:
                     working_copy=working_copy,
                     candidate_document=candidate_document,
                 )
+                # 同名活动工作副本属于共享业务事实，所有登录用户都可以直接选择。
                 can_use_existing = bool(
                     working_copy.workspace_id == get_shared_workspace_id(self.db)
-                    and candidate_document.user_id == review.user_id
+                    and working_copy.status == "ACTIVE"
                 )
                 summary = (
                     {"message": "系统检测到同名文件"}
                     if scope == "CROSS_USER"
                     else {
-                        "message": "检测到当前账号可访问的同名文件",
+                        "message": "检测到共享工作目录中可直接使用的同名文件",
                         "filename": working_copy.filename,
                         "relative_path": working_copy.relative_path if can_use_existing else None,
                         "updated_at": working_copy.updated_at.isoformat(),
@@ -273,10 +274,14 @@ class FileLifecycleRepository:
         working_copy: WorkingCopy | None,
         candidate_document: Document | None,
     ) -> str:
-        """根据工作区和用户关系确定候选展示范围。"""
+        """根据共享工作区关系确定候选展示范围，上传来源用户不参与授权。"""
 
-        if candidate_document and candidate_document.user_id == review.user_id:
-            return "SAME_USER"
+        if (
+            working_copy
+            and candidate_document
+            and working_copy.workspace_id == get_shared_workspace_id(self.db)
+        ):
+            return "SAME_WORKSPACE"
         return "CROSS_USER"
 
     def get_or_create_archive_root(self, *, container_path: str) -> ManagedRoot:

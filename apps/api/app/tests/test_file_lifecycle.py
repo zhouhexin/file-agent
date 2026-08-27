@@ -1950,8 +1950,8 @@ def test_encrypted_pdf_archives_original_but_stops_before_working_copy(monkeypat
         clear_overrides()
 
 
-def test_cross_user_duplicate_candidate_is_sanitized(monkeypatch, tmp_path):
-    """跨用户重复候选只能提示存在相同内容，不能暴露文件名、路径或业务 ID。"""
+def test_cross_user_duplicate_can_use_shared_existing_working_copy(monkeypatch, tmp_path):
+    """重复内容命中共享活动工作副本时，任意登录用户都能选择现有文件。"""
 
     _configure(monkeypatch, tmp_path)
     client, SessionLocal = client_with_database()
@@ -1968,12 +1968,47 @@ def test_cross_user_duplicate_candidate_is_sanitized(monkeypatch, tmp_path):
     ).json()
 
     candidate = review["candidates"][0]
-    assert candidate["match_scope"] == "CROSS_USER"
-    assert candidate["existing_working_copy_id"] is None
-    assert candidate["existing_document_id"] is None
-    assert "filename" not in candidate["summary"]
-    assert "relative_path" not in candidate["summary"]
-    assert review["allowed_decisions"] == ["CONTINUE_UPLOAD", "CANCEL_UPLOAD"]
+    assert candidate["match_scope"] == "SAME_WORKSPACE"
+    assert candidate["existing_working_copy_id"]
+    assert candidate["existing_document_id"]
+    assert candidate["summary"]["filename"] == "机密姓名名单.txt"
+    assert candidate["summary"]["relative_path"]
+    assert review["allowed_decisions"] == [
+        "CONTINUE_UPLOAD",
+        "USE_EXISTING_FILE",
+        "CANCEL_UPLOAD",
+    ]
+
+    decision = client.post(
+        f"/api/uploads/{second['upload_document_version_id']}/duplicate-review/decision",
+        headers=second_headers,
+        json={
+            "duplicate_review_id": review["id"],
+            "decision": "USE_EXISTING_FILE",
+            "selected_existing_working_copy_id": candidate["existing_working_copy_id"],
+        },
+    )
+    assert decision.status_code == 202
+    assert decision.json()["selected_existing_document_id"] == candidate["existing_document_id"]
+    assert decision.json()["archive_status"] == "EXISTING_FILE_SELECTED"
+    assert client.get(
+        f"/api/files/{candidate['existing_document_id']}/content",
+        headers=second_headers,
+    ).content == b"cross user duplicate"
+    message = client.post(
+        "/api/conversations/shared-existing-duplicate/messages",
+        headers=second_headers,
+        json={
+            "content": "请读取这个现有文件",
+            "attachments": [{"document_id": candidate["existing_document_id"]}],
+        },
+    )
+    assert message.status_code == 200
+    history = client.get(
+        "/api/conversations/shared-existing-duplicate",
+        headers=second_headers,
+    ).json()
+    assert history["messages"][0]["attachments"][0]["document_id"] == candidate["existing_document_id"]
     clear_overrides()
 
 

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.db.models import Document, DocumentInsight, FileObject, utcnow
+from app.db.models import Document, DocumentInsight, FileObject, WorkingCopy, utcnow
+from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
 
 class FileRepository:
@@ -189,20 +190,34 @@ class FileRepository:
         if not document_ids:
             return
 
-        documents = (
-            self.db.query(Document)
-            .filter(Document.id.in_(document_ids), Document.user_id == user_id)
-            .all()
-        )
-        found_ids = {document.id for document in documents}
+        documents = self.db.query(Document).filter(Document.id.in_(document_ids)).all()
+        # 私有上传暂存仍按用户隔离；进入唯一共享工作区的活动工作副本允许任意登录用户引用。
+        shared_document_ids = {
+            str(document_id)
+            for (document_id,) in (
+                self.db.query(WorkingCopy.document_id)
+                .filter(
+                    WorkingCopy.document_id.in_(document_ids),
+                    WorkingCopy.workspace_id == get_shared_workspace_id(self.db),
+                    WorkingCopy.status == "ACTIVE",
+                )
+                .all()
+            )
+        }
+        accessible_documents = [
+            document
+            for document in documents
+            if document.user_id == user_id or document.id in shared_document_ids
+        ]
+        found_ids = {document.id for document in accessible_documents}
         missing_ids = set(document_ids) - found_ids
         if missing_ids:
             from fastapi import HTTPException
 
             raise HTTPException(status_code=404, detail="Document not found")
 
-        for document in documents:
-            if document.status == "WORKING_COPY":
+        for document in accessible_documents:
+            if document.id in shared_document_ids or document.status == "WORKING_COPY":
                 # 工作副本可以被多条消息引用；消息生命周期不能把它锁成不可操作的上传附件。
                 continue
             if document.status == "USED_IN_MESSAGE":
