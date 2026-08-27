@@ -1,16 +1,27 @@
 // 重复上传确认卡只展示后端脱敏候选，并把用户明确选择提交给独立确认接口。
 import { useEffect, useState } from 'react';
-import { AlertTriangle, FileCheck2 } from 'lucide-react';
+import { AlertTriangle, Eye, FileCheck2 } from 'lucide-react';
 
 import { decideDuplicateReview, getDuplicateReview } from '../../api/client';
 import { formatError } from '../../api/errors';
-import type { DuplicateDecisionResponse, DuplicateReview } from '../../types';
+import type { DuplicateCandidate, DuplicateDecisionResponse, DuplicateReview } from '../../types';
+import { DuplicateComparisonDialog } from './DuplicateComparisonDialog';
 
 type DuplicateUploadReviewCardProps = {
   token: string;
   review: DuplicateReview;
   onResolved: (result: DuplicateDecisionResponse) => void;
 };
+
+function canCompareCandidate(candidate: DuplicateCandidate) {
+  return Boolean(
+    candidate.existing_document_id
+    || (
+      String(candidate.summary.managed_root_key ?? '').trim()
+      && String(candidate.summary.managed_relative_path ?? '').trim()
+    ),
+  );
+}
 
 export function DuplicateUploadReviewCard({
   token,
@@ -20,9 +31,7 @@ export function DuplicateUploadReviewCard({
   // 每张卡只处理一个上传版本，一个文件的等待或失败不能阻塞同批其他文件。
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
-  const hasDeletedExactCandidate = review.candidates.some(
-    (candidate) => candidate.match_type === 'EXACT_SHA256' && candidate.summary.file_status === 'TRASHED',
-  ) && !review.candidates.some((candidate) => candidate.existing_working_copy_id);
+  const [comparisonCandidate, setComparisonCandidate] = useState<DuplicateCandidate | null>(null);
 
   async function decide(
     decision: 'CONTINUE_UPLOAD' | 'USE_EXISTING_FILE' | 'CANCEL_UPLOAD',
@@ -36,6 +45,7 @@ export function DuplicateUploadReviewCard({
         decision,
         selected_existing_working_copy_id: selectedExistingWorkingCopyId ?? null,
       });
+      setComparisonCandidate(null);
       onResolved(result);
     } catch (err) {
       setError(formatError(err));
@@ -49,12 +59,8 @@ export function DuplicateUploadReviewCard({
       <header>
         <AlertTriangle size={18} />
         <div>
-          <strong>{hasDeletedExactCandidate ? '检测到此前已删除的相同文件' : '检测到相同或高度相似文件'}</strong>
-          <span>
-            {hasDeletedExactCandidate
-              ? `“${review.filename}”的相同内容此前已删除，是否再次上传？`
-              : review.filename}
-          </span>
+          <strong>检测到相同或相似文件</strong>
+          <span>{review.filename}</span>
         </div>
       </header>
 
@@ -65,33 +71,58 @@ export function DuplicateUploadReviewCard({
             <div>
               <strong>{String(candidate.summary.message ?? '检测到相似内容')}</strong>
               {candidate.summary.filename ? <span>{String(candidate.summary.filename)}</span> : null}
-              {candidate.summary.relative_path ? <small>{String(candidate.summary.relative_path)}</small> : null}
+              {candidate.summary.relative_path || candidate.summary.managed_relative_path ? (
+                <small>{String(candidate.summary.relative_path ?? candidate.summary.managed_relative_path)}</small>
+              ) : null}
               {candidate.summary.similarity_bucket ? (
                 <small>相似度：{String(candidate.summary.similarity_bucket)}</small>
               ) : null}
             </div>
-            {candidate.existing_working_copy_id && review.allowed_decisions.includes('USE_EXISTING_FILE') ? (
-              <button
-                disabled={submitting}
-                onClick={() => void decide('USE_EXISTING_FILE', candidate.existing_working_copy_id ?? undefined)}
-                type="button"
-              >
-                使用现有文件
-              </button>
-            ) : null}
+            <div className="duplicate-review-candidate-actions">
+              {canCompareCandidate(candidate) ? (
+                <button
+                  className="secondary"
+                  disabled={submitting}
+                  onClick={() => setComparisonCandidate(candidate)}
+                  type="button"
+                >
+                  <Eye size={15} />对比查看
+                </button>
+              ) : null}
+              {candidate.existing_working_copy_id && review.allowed_decisions.includes('USE_EXISTING_FILE') ? (
+                <button
+                  disabled={submitting}
+                  onClick={() => void decide('USE_EXISTING_FILE', candidate.existing_working_copy_id ?? undefined)}
+                  type="button"
+                >
+                  使用现有文件
+                </button>
+              ) : null}
+            </div>
           </article>
         ))}
       </div>
 
       <footer>
         <button disabled={submitting} onClick={() => void decide('CONTINUE_UPLOAD')} type="button">
-          {hasDeletedExactCandidate ? '再次上传' : '继续上传并独立保留'}
+          继续上传并独立保留
         </button>
         <button className="secondary" disabled={submitting} onClick={() => void decide('CANCEL_UPLOAD')} type="button">
           取消本次上传
         </button>
       </footer>
       {error ? <p className="duplicate-review-error">{error}</p> : null}
+      {comparisonCandidate ? (
+        <DuplicateComparisonDialog
+          candidate={comparisonCandidate}
+          decisionError={error}
+          onClose={() => setComparisonCandidate(null)}
+          onDecision={(decision, workingCopyId) => void decide(decision, workingCopyId)}
+          review={review}
+          submitting={submitting}
+          token={token}
+        />
+      ) : null}
     </section>
   );
 }

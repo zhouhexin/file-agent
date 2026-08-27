@@ -315,6 +315,82 @@ def test_get_file_preview_returns_extracted_pages_and_enforces_owner(monkeypatch
     clear_overrides()
 
 
+def test_get_spreadsheet_preview_returns_persisted_cell_region(monkeypatch, tmp_path):
+    """Excel 结构化预览必须分页返回真实坐标，并沿用文档访问控制。"""
+
+    _configure_storage(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    owner = _auth_header(client, "spreadsheet-preview-owner")
+    viewer = _auth_header(client, "spreadsheet-preview-viewer")
+    upload = client.post(
+        "/api/files/upload",
+        headers=owner,
+        files={
+            "file": (
+                "统计表.xlsx",
+                b"xlsx-placeholder",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    ).json()
+    db = SessionLocal()
+    try:
+        document = db.get(Document, upload["document_id"])
+        repository = FileExtractionRepository(db, document.user_id)
+        run = repository.create_extraction_run(document_id=document.id, extractor="excel")
+        repository.complete_extraction_run(
+            run=run,
+            pages=[{
+                "page_number": 1,
+                "sheet_name": "汇总",
+                "text": "姓名\t金额",
+                "metadata": {
+                    "max_row": 20,
+                    "max_column": 3,
+                    "merged_ranges": ["A1:C1"],
+                    "hidden_rows": [],
+                    "hidden_columns": [],
+                    "freeze_panes": "B2",
+                    "structure_complete": True,
+                },
+            }],
+            elements=[{
+                "element_index": 0,
+                "label": "table_cell",
+                "text": "120.00",
+                "page_number": 1,
+                "metadata": {
+                    "sheet_name": "汇总",
+                    "row": 2,
+                    "column": 2,
+                    "address": "B2",
+                    "raw_value": 120,
+                    "display_value": "120.00",
+                    "value_type": "number",
+                    "number_format": "0.00",
+                },
+            }],
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.get(
+        f"/api/files/{upload['document_id']}/spreadsheet-preview?sheet_name=汇总&row_offset=1&row_limit=5",
+        headers=owner,
+    )
+    denied = client.get(
+        f"/api/files/{upload['document_id']}/spreadsheet-preview",
+        headers=viewer,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["selected_sheet"]["cells"][0]["address"] == "B2"
+    assert response.json()["selected_sheet"]["freeze_panes"] == "B2"
+    assert denied.status_code == 404
+    clear_overrides()
+
+
 def test_delete_unsent_upload_cancels_lifecycle_and_cleans_asynchronously(monkeypatch, tmp_path):
     """未发送附件可删除；保留审计记录，但物理暂存由 worker 异步清理。"""
 

@@ -1935,7 +1935,9 @@ class FileLifecycleJobProcessor:
             .limit(100)
             .all()
         )
-        scored: list[tuple[float, WorkingCopy, ManagedFile, Document]] = []
+        scored: list[
+            tuple[float, WorkingCopy | None, ManagedFile, Document | None, ManagedRoot | None]
+        ] = []
         for working_copy, working_root, managed_file, document in rows:
             candidate_path = self.storage.working_copy_path(
                 f"{working_root.relative_storage_path}/{working_copy.relative_path}"
@@ -1945,35 +1947,80 @@ class FileLifecycleJobProcessor:
                 continue
             score = len(source_tokens & candidate_tokens) / max(1, len(source_tokens | candidate_tokens))
             if score >= self.settings.upload_duplicate_similarity_threshold:
-                scored.append((score, working_copy, managed_file, document))
+                scored.append((score, working_copy, managed_file, document, None))
+        source_rows = (
+            self.db.query(ManagedFile, ManagedRoot)
+            .join(ManagedRoot, ManagedFile.root_id == ManagedRoot.id)
+            .outerjoin(WorkingCopy, WorkingCopy.managed_file_id == ManagedFile.id)
+            .filter(
+                ManagedFile.status == "ACTIVE",
+                WorkingCopy.id.is_(None),
+            )
+            .filter(~ManagedFile.id.in_(exact_managed_ids) if exact_managed_ids else ManagedFile.id != "")
+            .order_by(ManagedFile.updated_at.desc())
+            .limit(100)
+            .all()
+        )
+        for managed_file, managed_root in source_rows:
+            try:
+                candidate_path = resolve_managed_relative_path(
+                    root_path=Path(managed_root.container_path),
+                    relative_path=managed_file.relative_path,
+                )
+            except (OSError, ValueError):
+                continue
+            candidate_tokens = _text_tokens(candidate_path, managed_file.filename)
+            if not candidate_tokens:
+                continue
+            score = len(source_tokens & candidate_tokens) / max(1, len(source_tokens | candidate_tokens))
+            if score >= self.settings.upload_duplicate_similarity_threshold:
+                scored.append((score, None, managed_file, None, managed_root))
         scored.sort(key=lambda item: item[0], reverse=True)
         candidates: list[UploadDuplicateCandidate] = []
         remaining = self.settings.upload_duplicate_max_candidates - len(exact)
-        for offset, (score, working_copy, managed_file, candidate_document) in enumerate(scored[:remaining], start=1):
+        for offset, (
+            score,
+            working_copy,
+            managed_file,
+            candidate_document,
+            managed_root,
+        ) in enumerate(scored[:remaining], start=1):
             scope = self.repository._candidate_scope(
                 review=review,
                 working_copy=working_copy,
                 candidate_document=candidate_document,
             )
             # 近重复候选与精确候选使用同一共享授权边界，不再比较上传用户。
-            accessible = (
-                working_copy.workspace_id == get_shared_workspace_id(self.db)
+            accessible = bool(
+                working_copy is not None
+                and working_copy.workspace_id == get_shared_workspace_id(self.db)
                 and working_copy.status == "ACTIVE"
             )
-            summary = (
-                {"message": "系统检测到高度相似内容", "similarity_bucket": _similarity_bucket(score)}
-                if scope == "CROSS_USER"
-                else {
+            if working_copy is None:
+                summary = {
+                    "message": "检测到尚未同步到工作副本的高度相似文件",
+                    "filename": managed_file.filename,
+                    "managed_root_key": managed_root.root_key if managed_root else None,
+                    "managed_relative_path": managed_file.relative_path,
+                    "similarity_bucket": _similarity_bucket(score),
+                    "file_status": "ACTIVE",
+                }
+            elif scope == "CROSS_USER":
+                summary = {
+                    "message": "系统检测到高度相似内容",
+                    "similarity_bucket": _similarity_bucket(score),
+                }
+            else:
+                summary = {
                     "message": "检测到共享工作目录中可直接使用的高度相似文件",
                     "filename": working_copy.filename,
                     "relative_path": working_copy.relative_path if accessible else None,
                     "similarity_bucket": _similarity_bucket(score),
                 }
-            )
             candidate = UploadDuplicateCandidate(
                 duplicate_review_id=review.id,
                 candidate_managed_file_id=managed_file.id,
-                candidate_working_copy_id=working_copy.id,
+                candidate_working_copy_id=working_copy.id if working_copy else None,
                 match_type="NEAR_DUPLICATE",
                 match_scope=scope,
                 similarity_score=score,

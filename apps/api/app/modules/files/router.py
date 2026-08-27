@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,7 @@ from app.modules.files.schemas import (
     FileDeleteResponse,
     FilePreviewResponse,
     FileUploadResponse,
+    SpreadsheetPreviewResponse,
 )
 from app.modules.files.service import FileUploadService
 from app.modules.files.extraction_repository import FileExtractionRepository
@@ -121,4 +122,28 @@ def preview_file(
     return FileUploadService(db).get_preview(
         document_id=document_id,
         current_user=current_user,
+    )
+
+
+@router.get("/{document_id}/spreadsheet-preview", response_model=SpreadsheetPreviewResponse)
+def preview_spreadsheet(
+    document_id: str,
+    sheet_name: str | None = Query(default=None, max_length=255),
+    row_offset: int = Query(default=0, ge=0),
+    row_limit: int = Query(default=100, ge=1, le=200),
+    column_offset: int = Query(default=0, ge=0),
+    column_limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> SpreadsheetPreviewResponse:
+    """返回已解析 Excel 的结构化分页预览，不执行工作簿公式或外部资源。"""
+
+    return FileUploadService(db).get_spreadsheet_preview(
+        document_id=document_id,
+        current_user=current_user,
+        sheet_name=sheet_name,
+        row_offset=row_offset,
+        row_limit=row_limit,
+        column_offset=column_offset,
+        column_limit=column_limit,
     )

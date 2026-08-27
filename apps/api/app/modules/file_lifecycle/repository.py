@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -153,6 +153,15 @@ class FileLifecycleRepository:
             .outerjoin(WorkingCopy, WorkingCopy.managed_file_id == ManagedFile.id)
             .outerjoin(Document, WorkingCopy.document_id == Document.id)
             .filter(ManagedFile.content_sha256 == sha256, ManagedFile.status == "ACTIVE")
+            .filter(
+                or_(
+                    WorkingCopy.id.is_(None),
+                    and_(
+                        WorkingCopy.workspace_id == get_shared_workspace_id(self.db),
+                        WorkingCopy.status == "ACTIVE",
+                    ),
+                )
+            )
             .filter(or_(Document.id.is_(None), Document.id != upload_document_id))
             .order_by(ManagedFile.archived_at.asc(), ManagedFile.created_at.asc())
             .limit(max_candidates)
@@ -172,23 +181,28 @@ class FileLifecycleRepository:
                 and working_copy.workspace_id == get_shared_workspace_id(self.db)
                 and working_copy.status == "ACTIVE"
             )
-            if scope == "CROSS_USER":
+            if working_copy is None:
+                managed_root = self.db.get(ManagedRoot, managed_file.root_id)
+                summary = {
+                    "message": "检测到尚未同步到工作副本的相同文件",
+                    "filename": managed_file.filename,
+                    "managed_root_key": managed_root.root_key if managed_root else None,
+                    "managed_relative_path": managed_file.relative_path,
+                    "similarity_bucket": "100%",
+                    "file_status": "ACTIVE",
+                }
+            elif scope == "CROSS_USER":
                 summary = {
                     "message": "系统检测到相同内容",
                     "similarity_bucket": "100%",
                 }
             else:
-                is_deleted = bool(working_copy and working_copy.status == "TRASHED")
                 summary = {
-                    "message": (
-                        "检测到相同内容的文件此前已删除，是否再次上传？"
-                        if is_deleted
-                        else "检测到共享工作目录中可直接使用的相同文件"
-                    ),
+                    "message": "检测到共享工作目录中可直接使用的相同文件",
                     "filename": working_copy.filename if working_copy else managed_file.filename,
                     "relative_path": working_copy.relative_path if can_use_existing else None,
                     "updated_at": working_copy.updated_at.isoformat() if can_use_existing else None,
-                    "file_status": "TRASHED" if is_deleted else "ACTIVE",
+                    "file_status": "ACTIVE",
                 }
             candidate = UploadDuplicateCandidate(
                 duplicate_review_id=review.id,
@@ -209,13 +223,20 @@ class FileLifecycleRepository:
         if remaining and normalized_filename:
             same_name_rows = (
                 self.db.query(ManagedFile, WorkingCopy, Document)
-                .join(WorkingCopy, WorkingCopy.managed_file_id == ManagedFile.id)
-                .join(Document, WorkingCopy.document_id == Document.id)
+                .outerjoin(WorkingCopy, WorkingCopy.managed_file_id == ManagedFile.id)
+                .outerjoin(Document, WorkingCopy.document_id == Document.id)
                 .filter(
                     ManagedFile.status == "ACTIVE",
-                    WorkingCopy.status == "ACTIVE",
-                    func.lower(WorkingCopy.filename) == normalized_filename,
-                    Document.id != upload_document_id,
+                    or_(
+                        WorkingCopy.id.is_(None),
+                        and_(
+                            WorkingCopy.workspace_id == get_shared_workspace_id(self.db),
+                            WorkingCopy.status == "ACTIVE",
+                        ),
+                    ),
+                    func.lower(func.coalesce(WorkingCopy.filename, ManagedFile.filename))
+                    == normalized_filename,
+                    or_(Document.id.is_(None), Document.id != upload_document_id),
                 )
                 .filter(
                     ~ManagedFile.id.in_(exact_managed_ids)
@@ -237,24 +258,33 @@ class FileLifecycleRepository:
                 )
                 # 同名活动工作副本属于共享业务事实，所有登录用户都可以直接选择。
                 can_use_existing = bool(
-                    working_copy.workspace_id == get_shared_workspace_id(self.db)
+                    working_copy
+                    and working_copy.workspace_id == get_shared_workspace_id(self.db)
                     and working_copy.status == "ACTIVE"
                 )
-                summary = (
-                    {"message": "系统检测到同名文件"}
-                    if scope == "CROSS_USER"
-                    else {
+                if working_copy is None:
+                    managed_root = self.db.get(ManagedRoot, managed_file.root_id)
+                    summary = {
+                        "message": "检测到尚未同步到工作副本的同名文件",
+                        "filename": managed_file.filename,
+                        "managed_root_key": managed_root.root_key if managed_root else None,
+                        "managed_relative_path": managed_file.relative_path,
+                        "file_status": "ACTIVE",
+                    }
+                elif scope == "CROSS_USER":
+                    summary = {"message": "系统检测到同名文件"}
+                else:
+                    summary = {
                         "message": "检测到共享工作目录中可直接使用的同名文件",
                         "filename": working_copy.filename,
                         "relative_path": working_copy.relative_path if can_use_existing else None,
                         "updated_at": working_copy.updated_at.isoformat(),
                         "file_status": "ACTIVE",
                     }
-                )
                 candidate = UploadDuplicateCandidate(
                     duplicate_review_id=review.id,
                     candidate_managed_file_id=managed_file.id,
-                    candidate_working_copy_id=working_copy.id,
+                    candidate_working_copy_id=working_copy.id if working_copy else None,
                     match_type="SAME_FILENAME",
                     match_scope=scope,
                     similarity_score=1.0,

@@ -1713,6 +1713,30 @@ POST /api/trash-entries/{trash_entry_id}/restore-plan
 只存在于回收站，本次上传直接按新文件继续归档和导入，不展示重复确认卡，也不自动恢复或合并已删除文件。
 回收站候选只能由用户明确输入带扩展名的完整文件名后进入独立恢复选择流程。
 
+重复候选是活动共享工作副本时，响应通过 `existing_working_copy_id`、`existing_document_id` 和脱敏
+`summary` 提供当前文件名与逻辑路径；所有用户均可读取该共享文件并选择“使用现有文件”。候选是尚未
+物化的当前受管文件时，`existing_*` 为空，`summary` 只提供受控预览所需的 `managed_root_key`、
+`managed_relative_path` 和当前文件名，前端可以调用既有 `GET /api/managed-files/preview` 对比查看，
+但不得直接提交“使用现有文件”。上传侧继续使用 `GET /api/files/{document_id}/content`；已有正文页的
+Office 文件可以复用 `GET /api/files/{document_id}/preview`，没有正文页时必须明确降级，不能伪造预览。
+查重对比中的 `.docx` 可以在不超过 20 MB 时使用前端 `docx-preview` 本地渲染；必须放入禁止脚本、网络、
+外部 frame 和 object 的沙箱，并移除超链接与非 `data:`/`blob:` 图片来源。`.doc`、`.docm` 和超限 DOCX
+不得进入该本地解析路径。
+
+查重对比中的 `.xlsx` 可以在不超过 25 MB 时使用前端 `exceljs` Web Worker 本地结构化解析。预览必须
+保留 Sheet、真实行列坐标、公式与缓存结果的区别、数字格式和合并区域；不得执行公式、宏、外部链接或
+数据连接。浏览器本地结果只用于用户判断，不能写入 `AgentGraphState` 或替代后端持久化证据。
+
+已完成后台解析的 Excel 可以使用以下只读分页接口读取持久化单元格事实：
+
+```text
+GET /api/files/{document_id}/spreadsheet-preview
+    ?sheet_name=汇总&row_offset=0&row_limit=100&column_offset=0&column_limit=50
+```
+
+接口沿用文件预览访问控制，返回工作表摘要、当前区域单元格、合并范围、隐藏行列、冻结窗格和明确的
+截断提示，不返回存储绝对路径。`row_limit` 最大 200，`column_limit` 最大 100。
+
 工作副本高风险计划使用 `RENAME_WORKING_COPIES`、`MOVE_WORKING_COPIES`、`TRASH_WORKING_COPIES` 和 `RESTORE_WORKING_COPIES`。创建请求只能提交 `working_copy_id` 和目标逻辑字段，后端必须从数据库重建 before/version/SHA-256 快照；确认后逐文件执行并写 ChangeSet。任何响应不得返回三个目录的宿主机绝对路径。
 
 ## 20. Adaptive Planner Admin APIs

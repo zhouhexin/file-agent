@@ -45,6 +45,45 @@ class FakeOcrService:
         }
 
 
+def test_xlsx_extractor_preserves_structured_cell_facts(tmp_path):
+    """Excel 解析必须保留坐标、显示格式、合并区域和未计算公式，不能只生成 TSV。"""
+
+    openpyxl = __import__("openpyxl")
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "汇总"
+    sheet["A1"] = "统计表"
+    sheet.merge_cells("A1:C1")
+    sheet["A2"] = 7
+    sheet["A2"].number_format = "000000"
+    sheet["B2"] = 0.125
+    sheet["B2"].number_format = "0.0%"
+    sheet["C2"] = "=A2*2"
+    sheet.freeze_panes = "B2"
+    sheet.row_dimensions[3].hidden = True
+    path = tmp_path / "structured.xlsx"
+    workbook.save(path)
+    workbook.close()
+
+    result = extract_document_text(
+        file_path=path,
+        filename=path.name,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    assert result["ok"] is True
+    page = result["pages"][0]
+    assert page["metadata"]["merged_ranges"] == ["A1:C1"]
+    assert page["metadata"]["freeze_panes"] == "B2"
+    assert page["metadata"]["hidden_rows"] == [3]
+    cells = {element["metadata"]["address"]: element for element in result["elements"]}
+    assert cells["A2"]["text"] == "000007"
+    assert cells["B2"]["text"] == "12.5%"
+    assert cells["C2"]["metadata"]["formula"] == "=A2*2"
+    assert cells["C2"]["metadata"]["cached_result_available"] is False
+    assert cells["C2"]["text"] == "=A2*2"
+
+
 class _FakeValue:
     """模拟 Docling 枚举值。"""
 

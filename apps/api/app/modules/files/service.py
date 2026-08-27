@@ -25,6 +25,10 @@ from app.modules.files.schemas import (
     FilePreviewResponse,
     FilePreviewSection,
     FileUploadResponse,
+    SpreadsheetCellPreview,
+    SpreadsheetPreviewResponse,
+    SpreadsheetSelectedSheet,
+    SpreadsheetSheetSummary,
 )
 from app.modules.files.content_types import infer_content_type
 
@@ -273,6 +277,125 @@ class FileUploadService:
             content_type=document.content_type,
             sections=sections,
             truncated=truncated,
+        )
+
+    def get_spreadsheet_preview(
+        self,
+        *,
+        document_id: str,
+        current_user: User,
+        sheet_name: str | None,
+        row_offset: int,
+        row_limit: int,
+        column_offset: int,
+        column_limit: int,
+    ) -> SpreadsheetPreviewResponse:
+        """按真实 Sheet 和单元格坐标返回已持久化的 Excel 结构化预览。
+
+        接口只读取成功解析运行中的 ``table_cell`` 元素。浏览器上传草稿的即时预览仍在
+        本地 Worker 中完成，不能借此接口绕过文件生命周期或读取其他用户暂存文件。
+        """
+
+        document = self._get_readable_document(
+            document_id=document_id,
+            current_user=current_user,
+        )
+        if document is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        lifecycle = FileExtractionRepository(
+            self.db,
+            current_user.id,
+        ).resolve_original_file_for_document(document)
+        if not lifecycle.get("ok"):
+            error = lifecycle.get("error") or {}
+            if error.get("code") == "FILE_TRASHED":
+                raise HTTPException(status_code=410, detail=str(error.get("message") or "文件已删除，请先恢复。"))
+            raise HTTPException(status_code=404, detail=str(error.get("message") or "文件不可读取"))
+
+        extraction = FileExtractionRepository(
+            self.db,
+            current_user.id,
+        ).get_latest_successful_extraction(document_id=document.id)
+        if extraction is None:
+            raise HTTPException(status_code=409, detail="Excel 尚未完成结构化解析")
+        sheet_pages = [page for page in extraction["pages"] if page.sheet_name]
+        if not sheet_pages:
+            raise HTTPException(status_code=409, detail="该文件没有可用的 Excel 结构化解析结果")
+        selected_page = next(
+            (page for page in sheet_pages if page.sheet_name == sheet_name),
+            sheet_pages[0] if sheet_name is None else None,
+        )
+        if selected_page is None:
+            raise HTTPException(status_code=404, detail="工作表不存在")
+
+        metadata = dict(selected_page.metadata_json or {})
+        selected_name = str(selected_page.sheet_name)
+        cells: list[SpreadsheetCellPreview] = []
+        row_start = row_offset + 1
+        row_end = row_offset + row_limit
+        column_start = column_offset + 1
+        column_end = column_offset + column_limit
+        for element in extraction["elements"]:
+            if element.label != "table_cell":
+                continue
+            cell = dict(element.metadata_json or {})
+            if str(cell.get("sheet_name") or "") != selected_name:
+                continue
+            row = int(cell.get("row") or 0)
+            column = int(cell.get("column") or 0)
+            if not (row_start <= row <= row_end and column_start <= column <= column_end):
+                continue
+            cells.append(
+                SpreadsheetCellPreview(
+                    row=row,
+                    column=column,
+                    address=str(cell.get("address") or ""),
+                    raw_value=cell.get("raw_value"),
+                    display_value=str(cell.get("display_value") or element.text_content or ""),
+                    value_type=str(cell.get("value_type") or "string"),
+                    formula=cell.get("formula"),
+                    cached_result=cell.get("cached_result"),
+                    cached_result_available=bool(cell.get("cached_result_available")),
+                    number_format=cell.get("number_format"),
+                    merge_range=cell.get("merge_range"),
+                )
+            )
+        cells.sort(key=lambda item: (item.row, item.column))
+
+        sheet_summaries = []
+        for page in sheet_pages:
+            page_metadata = dict(page.metadata_json or {})
+            sheet_summaries.append(
+                SpreadsheetSheetSummary(
+                    name=str(page.sheet_name),
+                    row_count=int(page_metadata.get("max_row") or 0),
+                    column_count=int(page_metadata.get("max_column") or 0),
+                    hidden=str(page_metadata.get("sheet_state") or "visible") != "visible",
+                )
+            )
+        warnings = [str(item) for item in metadata.get("warnings") or []]
+        structure_complete = bool(metadata.get("structure_complete", True))
+        return SpreadsheetPreviewResponse(
+            document_id=document.id,
+            filename=document.original_filename,
+            sheets=sheet_summaries,
+            selected_sheet=SpreadsheetSelectedSheet(
+                name=selected_name,
+                row_count=int(metadata.get("max_row") or 0),
+                column_count=int(metadata.get("max_column") or 0),
+                row_offset=row_offset,
+                row_limit=row_limit,
+                column_offset=column_offset,
+                column_limit=column_limit,
+                merged_ranges=[str(item) for item in metadata.get("merged_ranges") or []],
+                hidden_rows=[int(item) for item in metadata.get("hidden_rows") or []],
+                hidden_columns=[str(item) for item in metadata.get("hidden_columns") or []],
+                freeze_panes=metadata.get("freeze_panes"),
+                structure_complete=structure_complete,
+                cells=cells,
+            ),
+            truncated=not structure_complete,
+            warnings=warnings,
         )
 
     def _get_readable_document(

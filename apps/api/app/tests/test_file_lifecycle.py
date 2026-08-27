@@ -24,6 +24,7 @@ from app.db.models import (
     FileObject,
     FileRenameReviewItem,
     ManagedFile,
+    ManagedRoot,
     Message,
     OperationConfirmation,
     OperationPlan,
@@ -1150,6 +1151,63 @@ def test_duplicate_upload_waits_for_dialog_and_can_use_existing(monkeypatch, tmp
         clear_overrides()
 
 
+def test_duplicate_upload_compares_current_managed_file_without_working_copy(monkeypatch, tmp_path):
+    """尚未物化工作副本的当前受管文件参与查重和受控预览，但不能直接选择使用。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "managed-source-duplicate-owner")
+    content = b"current managed source"
+    source_root = tmp_path / "managed-current"
+    source_root.mkdir()
+    (source_root / "current.txt").write_bytes(content)
+    db = SessionLocal()
+    try:
+        root = ManagedRoot(
+            root_key="current_source",
+            display_name="当前受管文件",
+            container_path=str(source_root),
+            enabled=True,
+            read_only=True,
+        )
+        db.add(root)
+        db.flush()
+        db.add(ManagedFile(
+            root_id=root.id,
+            relative_path="current.txt",
+            filename="current.txt",
+            extension=".txt",
+            size_bytes=len(content),
+            fingerprint=hashlib.sha256(content).hexdigest(),
+            content_sha256=hashlib.sha256(content).hexdigest(),
+            status="ACTIVE",
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    uploaded = _upload(client, headers, "copy.txt", content)
+    process_next_filesystem_job(session_factory=SessionLocal, worker_id="managed-source-duplicate-test")
+    review = client.get(
+        f"/api/uploads/{uploaded['upload_document_version_id']}/duplicate-review",
+        headers=headers,
+    ).json()
+
+    assert review["status"] == "WAITING_CONFIRMATION"
+    assert review["allowed_decisions"] == ["CONTINUE_UPLOAD", "CANCEL_UPLOAD"]
+    assert review["candidates"][0]["existing_working_copy_id"] is None
+    assert review["candidates"][0]["summary"]["managed_root_key"] == "current_source"
+    assert review["candidates"][0]["summary"]["managed_relative_path"] == "current.txt"
+    preview = client.get(
+        "/api/managed-files/preview",
+        headers=headers,
+        params={"root_key": "current_source", "relative_path": "current.txt"},
+    )
+    assert preview.status_code == 200
+    assert preview.content == content
+    clear_overrides()
+
+
 @pytest.mark.parametrize("decision", ["USE_EXISTING_FILE", "CANCEL_UPLOAD"])
 def test_duplicate_upload_cannot_be_cleaned_after_message_lock(monkeypatch, tmp_path, decision):
     """临时上传进入消息后不得再被替换或取消，否则运行中的 Agent 会失去原文件。"""
@@ -1202,8 +1260,8 @@ def test_duplicate_upload_cannot_be_cleaned_after_message_lock(monkeypatch, tmp_
         clear_overrides()
 
 
-def test_duplicate_upload_reports_deleted_match_and_requires_explicit_reupload(monkeypatch, tmp_path):
-    """相同内容只命中已删除文件时必须询问是否再次上传，不能自动复活或合并。"""
+def test_duplicate_upload_ignores_deleted_match_and_creates_new_copy(monkeypatch, tmp_path):
+    """相同内容只存在于回收站时不参与查重，直接按新文件继续上传。"""
 
     _configure(monkeypatch, tmp_path)
     client, SessionLocal = client_with_database()
@@ -1222,26 +1280,15 @@ def test_duplicate_upload_reports_deleted_match_and_requires_explicit_reupload(m
 
     assert review_response.status_code == 200
     review = review_response.json()
-    assert review["status"] == "WAITING_CONFIRMATION"
+    assert review["status"] == "RESOLVED"
     assert review["allowed_decisions"] == ["CONTINUE_UPLOAD", "CANCEL_UPLOAD"]
-    assert review["candidates"][0]["summary"]["file_status"] == "TRASHED"
-    assert "此前已删除" in review["candidates"][0]["summary"]["message"]
-    assert review["candidates"][0]["existing_working_copy_id"] is None
+    assert review["decision"] == "CONTINUE_UPLOAD"
+    assert review["candidates"] == []
 
-    decision = client.post(
-        f"/api/uploads/{second['upload_document_version_id']}/duplicate-review/decision",
-        headers=headers,
-        json={
-            "duplicate_review_id": review["id"],
-            "decision": "CONTINUE_UPLOAD",
-            "selected_existing_working_copy_id": None,
-        },
-    )
-    assert decision.status_code == 202
     _drain(SessionLocal)
     copies = client.get("/api/working-copies", headers=headers).json()
     assert sorted(item["status"] for item in copies) == ["ACTIVE", "TRASHED"]
-    # 用户选择再次上传后形成全新工作副本，已删除副本仍保留在回收站。
+    # 新上传形成全新工作副本，已删除副本仍保留在回收站且没有被自动恢复。
     assert len({item["id"] for item in copies}) == 2
     assert client.get("/api/trash-entries", headers=headers).json()[0]["status"] == "ACTIVE"
     assert first["document_id"] != second["document_id"]

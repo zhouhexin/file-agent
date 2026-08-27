@@ -538,6 +538,43 @@ export type FilePreviewResponse = {
   truncated: boolean;
 };
 
+export type SpreadsheetCellPreview = {
+  row: number;
+  column: number;
+  address: string;
+  raw_value: unknown;
+  display_value: string;
+  value_type: string;
+  formula: string | null;
+  cached_result: unknown;
+  cached_result_available: boolean;
+  number_format: string | null;
+  merge_range: string | null;
+};
+
+export type SpreadsheetPreviewResponse = {
+  document_id: string;
+  filename: string;
+  sheets: Array<{ name: string; row_count: number; column_count: number; hidden: boolean }>;
+  selected_sheet: {
+    name: string;
+    row_count: number;
+    column_count: number;
+    row_offset: number;
+    row_limit: number;
+    column_offset: number;
+    column_limit: number;
+    merged_ranges: string[];
+    hidden_rows: number[];
+    hidden_columns: string[];
+    freeze_panes: string | null;
+    structure_complete: boolean;
+    cells: SpreadsheetCellPreview[];
+  };
+  truncated: boolean;
+  warnings: string[];
+};
+
 export type DuplicateCandidate = {
   id: string;
   match_type: 'EXACT_SHA256' | 'NEAR_DUPLICATE' | string;

@@ -12,6 +12,7 @@ import type {
   DuplicateReview,
   FileSearchClarificationResult,
   FilePreviewResponse,
+  SpreadsheetPreviewResponse,
   FailedFileJob,
   UploadArchiveStatus,
   FilesystemJobResponse,
@@ -264,6 +265,30 @@ export async function getFilePreview(
 ): Promise<FilePreviewResponse> {
   // Office 文件预览只读取后端已解析正文，不把本地存储位置或原始二进制交给页面解析。
   return request<FilePreviewResponse>(`/files/${documentId}/preview`, { token });
+}
+
+export async function getSpreadsheetPreview(
+  token: string,
+  documentId: string,
+  options: {
+    sheetName?: string;
+    rowOffset?: number;
+    rowLimit?: number;
+    columnOffset?: number;
+    columnLimit?: number;
+  } = {},
+): Promise<SpreadsheetPreviewResponse> {
+  // 已入库 Excel 读取后端持久化单元格事实；分页参数不能替代服务端访问控制。
+  const params = new URLSearchParams();
+  if (options.sheetName) params.set('sheet_name', options.sheetName);
+  params.set('row_offset', String(options.rowOffset ?? 0));
+  params.set('row_limit', String(options.rowLimit ?? 100));
+  params.set('column_offset', String(options.columnOffset ?? 0));
+  params.set('column_limit', String(options.columnLimit ?? 50));
+  return request<SpreadsheetPreviewResponse>(
+    `/files/${documentId}/spreadsheet-preview?${params.toString()}`,
+    { token },
+  );
 }
 
 export async function fetchManagedFileBlob(

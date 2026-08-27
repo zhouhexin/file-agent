@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import re
 import shutil
 import subprocess
 import tempfile
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, List
@@ -22,6 +25,9 @@ class PDFExtractorUnavailableError(RuntimeError):
 
 class PDFInvalidDocumentError(RuntimeError):
     """表示 PDF 结构损坏、截断或没有可读取页面。"""
+
+
+EXCEL_MAX_STRUCTURED_CELLS = 100_000
 
 
 def extract_document_text(*, file_path: Path, filename: str, content_type: str, ocr_service: Any = None) -> Dict[str, Any]:
@@ -204,31 +210,115 @@ def _extract_csv_text(file_path: Path) -> str:
 
 
 def _extract_excel_text(file_path: Path) -> Dict[str, Any]:
-    """使用 openpyxl 读取 Excel 文本，并保存每个非空行的真实单元格范围。"""
+    """读取 Excel 单元格事实，同时保留兼容全文检索的工作表文本投影。
+
+    公式视图与缓存值视图必须分开读取；openpyxl 不计算公式，因此缓存缺失时只保存
+    公式和明确的未计算状态，不能把空缓存伪装成真实空值。
+    """
 
     try:
         import openpyxl
     except ImportError:
         return _failed("excel", "EXCEL_EXTRACTOR_NOT_AVAILABLE", "缺少 openpyxl，无法解析 Excel 文件。")
 
-    workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+    formula_workbook = openpyxl.load_workbook(file_path, read_only=False, data_only=False)
+    value_workbook = openpyxl.load_workbook(file_path, read_only=False, data_only=True)
     pages: List[Dict[str, Any]] = []
-    for sheet_index, sheet in enumerate(workbook.worksheets, start=1):
-        lines = []
+    elements: List[Dict[str, Any]] = []
+    element_index = 0
+    for sheet_index, sheet in enumerate(formula_workbook.worksheets, start=1):
+        value_sheet = value_workbook[sheet.title]
+        lines: List[str] = []
         line_cell_ranges: List[Dict[str, Any]] = []
+        merged_ranges = [str(cell_range) for cell_range in sheet.merged_cells.ranges]
+        merge_by_anchor = {
+            (cell_range.min_row, cell_range.min_col): str(cell_range)
+            for cell_range in sheet.merged_cells.ranges
+        }
+        non_empty_coordinates: List[tuple[int, int]] = []
+        sheet_structure_complete = True
         for row in sheet.iter_rows(values_only=False):
-            values = ["" if cell.value is None else str(cell.value) for cell in row]
-            if any(values):
-                lines.append("\t".join(values))
-                non_empty_cells = [cell for cell in row if cell.value is not None]
+            row_values: List[tuple[Any, str]] = []
+            for cell in row:
+                # MergedCell 只是合并区域的从属占位，真实值和证据只属于左上角主格。
+                if cell.__class__.__name__ == "MergedCell":
+                    continue
+                is_formula = cell.data_type == "f"
+                cached_value = value_sheet.cell(row=cell.row, column=cell.column).value if is_formula else None
+                source_value = cell.value
+                if source_value is None and not is_formula:
+                    continue
+                display_source = cached_value if is_formula and cached_value is not None else source_value
+                display_value = _format_excel_display_value(
+                    display_source,
+                    number_format=str(cell.number_format or "General"),
+                    is_formula=is_formula,
+                    formula=str(source_value or "") if is_formula else None,
+                )
+                row_values.append((cell, display_value))
+                non_empty_coordinates.append((int(cell.row), int(cell.column)))
+                serialized_source = None if is_formula else _serialize_excel_value(source_value)
+                serialized_cache = _serialize_excel_value(cached_value) if is_formula and cached_value is not None else None
+                if len(elements) < EXCEL_MAX_STRUCTURED_CELLS:
+                    elements.append(
+                        {
+                            "element_index": element_index,
+                            "label": "table_cell",
+                            "text": display_value,
+                            "page_number": sheet_index,
+                            "bbox": {},
+                            "content_layer": "body",
+                            "parent_ref": f"sheet:{sheet.title}",
+                            "metadata": {
+                                "sheet_name": sheet.title,
+                                "row": int(cell.row),
+                                "column": int(cell.column),
+                                "address": cell.coordinate,
+                                "raw_value": serialized_source,
+                                "display_value": display_value,
+                                "value_type": _excel_value_type(cell=cell, is_formula=is_formula),
+                                "formula": str(source_value) if is_formula else None,
+                                "cached_result": serialized_cache,
+                                "cached_result_available": bool(is_formula and cached_value is not None),
+                                "number_format": str(cell.number_format or "General"),
+                                "merge_range": merge_by_anchor.get((int(cell.row), int(cell.column))),
+                            },
+                        },
+                    )
+                    element_index += 1
+                else:
+                    # 正文投影仍完整生成；只限制数据库逐格事实数量，避免异常工作簿耗尽存储。
+                    sheet_structure_complete = False
+            if row_values:
+                first_cell = row_values[0][0]
+                last_cell = row_values[-1][0]
+                values_by_column = {int(cell.column): value for cell, value in row_values}
+                lines.append(
+                    "\t".join(
+                        values_by_column.get(column, "")
+                        for column in range(int(first_cell.column), int(last_cell.column) + 1)
+                    )
+                )
                 # 坐标直接来自 openpyxl 解析事实，后续 Evidence 不允许根据文本位置猜测单元格。
                 line_cell_ranges.append(
                     {
                         "line_index": len(lines) - 1,
-                        "row_number": int(non_empty_cells[0].row),
-                        "cell_range": f"{non_empty_cells[0].coordinate}:{non_empty_cells[-1].coordinate}",
+                        "row_number": int(first_cell.row),
+                        "cell_range": f"{first_cell.coordinate}:{last_cell.coordinate}",
                     }
                 )
+        used_cell_range = None
+        if non_empty_coordinates:
+            from openpyxl.utils import get_column_letter
+
+            min_row = min(row for row, _ in non_empty_coordinates)
+            max_row = max(row for row, _ in non_empty_coordinates)
+            min_column = min(column for _, column in non_empty_coordinates)
+            max_column = max(column for _, column in non_empty_coordinates)
+            used_cell_range = (
+                f"{get_column_letter(min_column)}{min_row}:"
+                f"{get_column_letter(max_column)}{max_row}"
+            )
         pages.append(
             {
                 "page_number": sheet_index,
@@ -237,17 +327,110 @@ def _extract_excel_text(file_path: Path) -> Dict[str, Any]:
                 "metadata": {
                     "sheet_index": sheet_index,
                     "line_cell_ranges": line_cell_ranges,
-                    "used_cell_range": (
-                        f"{line_cell_ranges[0]['cell_range'].split(':', 1)[0]}:"
-                        f"{line_cell_ranges[-1]['cell_range'].split(':', 1)[1]}"
-                        if line_cell_ranges
-                        else None
+                    "used_cell_range": used_cell_range,
+                    "max_row": int(sheet.max_row or 0),
+                    "max_column": int(sheet.max_column or 0),
+                    "merged_ranges": merged_ranges,
+                    "hidden_rows": [
+                        int(row_number)
+                        for row_number, dimension in sheet.row_dimensions.items()
+                        if dimension.hidden
+                    ],
+                    "hidden_columns": [
+                        str(column_name)
+                        for column_name, dimension in sheet.column_dimensions.items()
+                        if dimension.hidden
+                    ],
+                    "freeze_panes": str(sheet.freeze_panes) if sheet.freeze_panes else None,
+                    "sheet_state": str(sheet.sheet_state or "visible"),
+                    "structure_complete": sheet_structure_complete,
+                    "cell_count": len(non_empty_coordinates),
+                    "warnings": (
+                        []
+                        if sheet_structure_complete
+                        else [f"结构化单元格超过 {EXCEL_MAX_STRUCTURED_CELLS} 个，当前只保留前述范围。"]
                     ),
                 },
             }
         )
-    workbook.close()
-    return _completed("excel", pages)
+    formula_workbook.close()
+    value_workbook.close()
+    return _completed("excel", pages, elements=elements)
+
+
+def _serialize_excel_value(value: Any) -> Any:
+    """把单元格原始值转换成可安全写入 JSON 的确定性标量。"""
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, timedelta):
+        return str(value)
+    if isinstance(value, Decimal):
+        return str(value)
+    return str(value)
+
+
+def _excel_value_type(*, cell: Any, is_formula: bool) -> str:
+    """返回稳定单元格类型，供预览和证据层区分公式、错误与普通数值。"""
+
+    if is_formula:
+        return "formula"
+    if cell.data_type == "e":
+        return "error"
+    if isinstance(cell.value, (datetime, date, time)):
+        return "date"
+    if isinstance(cell.value, bool):
+        return "boolean"
+    if isinstance(cell.value, (int, float, Decimal)):
+        return "number"
+    return "string"
+
+
+def _format_excel_display_value(
+    value: Any,
+    *,
+    number_format: str,
+    is_formula: bool,
+    formula: str | None,
+) -> str:
+    """生成可读的 Excel 显示投影；该函数只格式化已有值，不负责公式计算。"""
+
+    if value is None:
+        return str(formula or "") if is_formula else ""
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat(sep=" ") if isinstance(value, datetime) else value.isoformat()
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if not isinstance(value, (int, float, Decimal)):
+        return str(value)
+
+    pattern = str(number_format or "General").split(";", 1)[0]
+    visible_pattern = re.sub(r"\[[^]]*]", "", pattern)
+    if visible_pattern.lower() == "general":
+        return str(value)
+    numeric_value = float(value)
+    if "%" in visible_pattern:
+        decimals = _excel_decimal_places(visible_pattern)
+        return f"{numeric_value * 100:.{decimals}f}%"
+    decimals = _excel_decimal_places(visible_pattern)
+    use_thousands = "," in visible_pattern
+    integer_pattern = visible_pattern.split(".", 1)[0]
+    zero_width = len(re.sub(r"[^0]", "", integer_pattern))
+    if decimals == 0 and zero_width > 1 and "#" not in integer_pattern and not use_thousands:
+        number_text = f"{int(round(numeric_value)):0{zero_width}d}"
+    else:
+        number_text = f"{numeric_value:,.{decimals}f}" if use_thousands else f"{numeric_value:.{decimals}f}"
+    currency = next((symbol for symbol in ("¥", "￥", "$", "€", "£") if symbol in visible_pattern), "")
+    return f"{currency}{number_text}"
+
+
+def _excel_decimal_places(pattern: str) -> int:
+    """从常见 Excel 数字格式中读取小数位数，忽略颜色、条件和文字字面量。"""
+
+    match = re.search(r"\.([0#]+)", pattern)
+    return len(match.group(1)) if match else 0
 
 
 def _extract_legacy_xls_text(file_path: Path) -> Dict[str, Any]:
