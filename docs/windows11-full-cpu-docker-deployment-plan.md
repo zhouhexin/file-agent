@@ -17,7 +17,8 @@ Windows 宿主机维护多套运行环境。
 
 - Docker Desktop 使用 WSL2 Linux containers，建议分配 5 个 CPU、24GB 内存和不少于 150GB SSD。
 - 结构化抽取只启动一个 worker，同一进程并发固定为 1。
-- SOURCE_ANALYSIS、ANALYSIS、GRAPH 各使用一个 worker；MATERIALIZE 只启动一个 worker。
+- SOURCE_ANALYSIS 与 ANALYSIS 共用一个文档分析 worker；MATERIALIZE、IMPORT 与文件生命周期队列共用
+  一个 I/O worker；GRAPH 保持独立。
 - PaddleOCR-VL 只在本地 OCR/PP-StructureV3 仍存在字段缺失或低置信度时运行，不作为每张图片首选路径。
 - PP-StructureV3 的表格、公式、图表、印章、区域检测和文档预处理全部安装并启用，但由专用慢队列执行。
 - 外部 LLM 默认只接收任务文本、OCR 文本和字段映射请求；原始图片外发保持关闭，除非管理员另行授权。
@@ -38,14 +39,13 @@ watcher
 reconcile-scan-worker
 lifecycle-worker
 source-analysis-worker
-materialize-worker
-analysis-worker
 structured-extraction-worker
 graph-worker
 ```
 
 所有 Python 服务共享 `file-agent-api-full-cpu` 镜像，通过 `APP_RUNTIME` 和
-`FILESYSTEM_WORKER_QUEUES` 隔离职责。数据库迁移只能由一次性 `migrate` 服务执行；API 和 worker
+`FILESYSTEM_WORKER_QUEUES` 隔离职责。五个常驻 worker 分别负责扫描、文件生命周期与物化、文档分析、
+结构化抽取和图谱投影。数据库迁移只能由一次性 `migrate` 服务执行；API 和 worker
 不得在并发启动时重复迁移。Neo4j 与 `graph-worker` 故障时不得阻断 API、扫描、源侧分析和工作副本同步；
 图谱链路恢复后再继续消费可重建投影任务。
 

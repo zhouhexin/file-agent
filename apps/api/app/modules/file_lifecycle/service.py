@@ -73,6 +73,13 @@ from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.path_policy import resolve_managed_relative_path
 from app.modules.classification.service import persist_document_results_classifications
 from app.modules.classification.auto_placement_policy import AutoPlacementPolicy
+from app.modules.classification.freshness import (
+    ClassificationFreshness,
+    classification_refresh_deduplication_key,
+    classification_refresh_priority,
+    current_classification_identity,
+    inspect_managed_source_classification,
+)
 from app.modules.classification.organization_path import (
     CategoryOrganizationPathError,
     CategoryOrganizationPathResolver,
@@ -1253,6 +1260,8 @@ class FileLifecycleJobProcessor:
                     "relative_path": relative_path,
                     "analysis_job_id": analysis_job.id if analysis_job is not None else None,
                     "working_copy_status": working_copy.status,
+                    "agent_run_id": changeset.agent_run_id,
+                    "changeset_id": changeset.id,
                 },
             )
         except Exception:
@@ -1280,6 +1289,71 @@ class FileLifecycleJobProcessor:
         managed_file = self.db.get(ManagedFile, revision.managed_file_id)
         if managed_file is None or managed_file.status != "ACTIVE":
             raise RuntimeError("当前原始文件已不存在，不能物化工作副本")
+        root = self.db.get(ManagedRoot, managed_file.root_id)
+        classification_user_id = str(
+            (root.created_by if root is not None else "")
+            or job.created_by
+            or self.db.query(User.id).order_by(User.created_at.asc()).scalar()
+            or ""
+        )
+        if not classification_user_id or root is None:
+            raise RuntimeError("工作副本物化缺少分类新鲜度校验用户或受管根")
+        identity = current_classification_identity(
+            db=self.db,
+            settings=self.settings,
+            user_id=classification_user_id,
+        )
+        freshness = inspect_managed_source_classification(
+            db=self.db,
+            revision=revision,
+            identity=identity,
+        )
+        if freshness is not ClassificationFreshness.CURRENT:
+            queue = FilesystemJobQueue(self.db)
+            refresh_job = queue.create_job(
+                job_type="REFRESH_MANAGED_SOURCE_CLASSIFICATION",
+                queue_name="SOURCE_ANALYSIS",
+                root_id=root.id,
+                created_by=classification_user_id,
+                priority=classification_refresh_priority(self.settings),
+                deduplication_key=classification_refresh_deduplication_key(
+                    revision_id=revision.id,
+                    identity=identity,
+                ),
+                reuse_completed=True,
+                payload={
+                    "managed_file_revision_id": revision.id,
+                    "user_id": classification_user_id,
+                    "taxonomy_key": identity.taxonomy_key,
+                    "taxonomy_version": identity.taxonomy_version,
+                    "classifier_version": identity.classifier_version,
+                },
+            )
+            refresh_job = queue.promote_pending_job(
+                job=refresh_job,
+                priority=classification_refresh_priority(self.settings),
+            )
+            queue.mark_completed(
+                job=job,
+                result={
+                    "status": "DEFERRED_CLASSIFICATION_REFRESH",
+                    "managed_file_revision_id": revision.id,
+                    "classification_freshness": freshness.value,
+                    "classification_refresh_job_id": refresh_job.id,
+                },
+            )
+            log_event(
+                "working_copy.materialization.classification_refresh_deferred",
+                status="PENDING",
+                managed_file_id=managed_file.id,
+                managed_file_revision_id=revision.id,
+                filesystem_job_id=refresh_job.id,
+                taxonomy_key=identity.taxonomy_key,
+                taxonomy_version=identity.taxonomy_version,
+                classifier_version=identity.classifier_version,
+                message="源分类身份已过期，工作副本物化已延迟",
+            )
+            return
         existing_copy = (
             self.db.query(WorkingCopy)
             .filter(
@@ -1335,12 +1409,42 @@ class FileLifecycleJobProcessor:
         result = dict(job.result_json or {})
         working_copy_id = str(result.get("working_copy_id") or "")
         if working_copy_id:
-            self._reuse_source_analysis_into_working_copy(
+            working_copy = self.db.get(WorkingCopy, working_copy_id)
+            if working_copy is None:
+                raise RuntimeError("工作副本物化结果不存在")
+            document = self.db.get(Document, working_copy.document_id)
+            version = self.db.get(DocumentVersion, working_copy.current_version_id)
+            if document is None or version is None:
+                raise RuntimeError("工作副本物化结果缺少 Document 或 DocumentVersion")
+            changeset = self._initial_import_changeset(
+                working_copy_id=working_copy.id,
+                changeset_id=str(result.get("changeset_id") or "") or None,
+            )
+            organization_decision = self._reuse_source_analysis_into_working_copy(
                 revision=revision,
                 working_copy_id=working_copy_id,
+                classification_agent_run_id=(
+                    changeset.agent_run_id if changeset is not None else None
+                ),
             )
+            decision_row = None
+            if changeset is not None:
+                decision_row = self._finalize_initial_organization(
+                    working_copy=working_copy,
+                    managed_file=managed_file,
+                    document=document,
+                    version=version,
+                    organization_decision=organization_decision,
+                    changeset=changeset,
+                    extraction_status="COMPLETED",
+                )
             result["source_analysis_reused"] = True
             result["source_managed_file_revision_id"] = revision.id
+            result["working_copy_status"] = working_copy.status
+            result["relative_path"] = working_copy.relative_path
+            result["organization_decision"] = (
+                decision_row.decision if decision_row is not None else None
+            )
             # ``_import_working_copy`` 已经以同一任务写入一次完成事件。此处只补充
             # 源侧复用审计，避免同一物化任务产生两条“完成”事件。
             job.result_json = result
@@ -1412,8 +1516,13 @@ class FileLifecycleJobProcessor:
         *,
         revision: ManagedFileRevision,
         working_copy_id: str,
-    ) -> None:
-        """复制源侧持久化派生事实到工作副本版本，不重新读取或转换原始文件。"""
+        classification_agent_run_id: str | None = None,
+    ) -> InitialOrganizationDecision | None:
+        """复制源侧持久化派生事实和分类建议，不重新读取或转换原始文件。
+
+        外部自动导入必须复用已完成的正文分类结果；这里把建议投影到工作副本
+        ``DocumentVersion``，供统一置信度门槛和后续文件详情读取。源文件始终只读。
+        """
 
         from app.db.models import (
             DocumentClassificationSummary,
@@ -1429,6 +1538,14 @@ class FileLifecycleJobProcessor:
         target_version = self.db.get(DocumentVersion, target_copy.current_version_id) if target_copy else None
         if not all([target_copy, source_document, source_version, target_document, target_version]):
             raise RuntimeError("工作副本或源侧分析谱系缺失，不能复用分析结果")
+        organization_decision = self._reuse_source_classification_into_working_copy(
+            source_document=source_document,
+            source_version=source_version,
+            target_document=target_document,
+            target_version=target_version,
+            target_filename=target_copy.filename,
+            agent_run_id=classification_agent_run_id,
+        )
         if self.db.query(DocumentIndexRun.id).filter(
             DocumentIndexRun.document_version_id == target_version.id,
             DocumentIndexRun.status == "COMPLETED",
@@ -1438,7 +1555,7 @@ class FileLifecycleJobProcessor:
             target_version.source_managed_file_revision_id = revision.id
             target_version.source_analysis_run_id = self._latest_source_analysis_run_id(revision.id)
             self.db.flush()
-            return
+            return organization_decision
         source_run = (
             self.db.query(DocumentExtractionRun)
             .filter(
@@ -1551,6 +1668,139 @@ class FileLifecycleJobProcessor:
         target_document.ingest_status = "INDEXED"
         self.db.flush()
         DocumentSearchProfileService(db=self.db).upsert_current_profile(target_copy.id)
+        return organization_decision
+
+    def _reuse_source_classification_into_working_copy(
+        self,
+        *,
+        source_document: Document,
+        source_version: DocumentVersion,
+        target_document: Document,
+        target_version: DocumentVersion,
+        target_filename: str,
+        agent_run_id: str | None,
+    ) -> InitialOrganizationDecision | None:
+        """把最新源侧分类建议转换为工作副本分类运行和首次组织输入。"""
+
+        from app.db.models import DocumentCategorySuggestion, DocumentClassificationRun
+
+        source_run = (
+            self.db.query(DocumentClassificationRun)
+            .filter(
+                DocumentClassificationRun.document_id == source_document.id,
+                DocumentClassificationRun.status == "COMPLETED",
+            )
+            .order_by(DocumentClassificationRun.created_at.desc())
+            .first()
+        )
+        if source_run is None:
+            categories: list[dict[str, Any]] = []
+        else:
+            suggestions = (
+                self.db.query(DocumentCategorySuggestion)
+                .filter(
+                    DocumentCategorySuggestion.classification_run_id == source_run.id,
+                    DocumentCategorySuggestion.document_version_id == source_version.id,
+                )
+                .order_by(
+                    DocumentCategorySuggestion.rank.asc(),
+                    DocumentCategorySuggestion.confidence.desc(),
+                )
+                .all()
+            )
+            categories = [
+                self._classification_category_from_suggestion(source_run, item)
+                for item in suggestions
+            ]
+        if agent_run_id and categories:
+            existing_target_run = (
+                self.db.query(DocumentClassificationRun.id)
+                .filter(
+                    DocumentClassificationRun.agent_run_id == agent_run_id,
+                    DocumentClassificationRun.document_id == target_document.id,
+                )
+                .first()
+            )
+            if existing_target_run is None:
+                persist_document_results_classifications(
+                    db=self.db,
+                    agent_run_id=agent_run_id,
+                    document_results=[
+                        {
+                            "document_id": target_document.id,
+                            "document_version_id": target_version.id,
+                            "filename": target_filename,
+                            "extraction_status": "COMPLETED",
+                            "summary_status": "REUSED",
+                            "categories": categories,
+                            "source": "managed-source-classification-reuse",
+                        }
+                    ],
+                )
+        return InitialOrganizationDecision(
+            filename=target_filename,
+            extraction_result={"status": "COMPLETED"},
+            categories=categories,
+            primary_category=categories[0] if categories else None,
+            document_summary_id=None,
+            classification_summary_id=None,
+            summary_status="REUSED",
+            rename_status="DISABLED",
+            rename_metadata={},
+            summary_metadata={},
+        )
+
+    @staticmethod
+    def _classification_category_from_suggestion(
+        classification_run: Any,
+        suggestion: Any,
+    ) -> dict[str, Any]:
+        """从持久化建议恢复统一门槛所需的完整候选特征。"""
+
+        scores = dict(suggestion.candidate_scores_json or {})
+        return {
+            "name": suggestion.category_name,
+            "category_id": suggestion.category_id,
+            "category_path": list(suggestion.category_path_json or []),
+            "confidence": float(suggestion.confidence or 0),
+            "status": suggestion.status,
+            "source": suggestion.source,
+            "evidence_items": list(suggestion.evidence_json or []),
+            "candidate_scores": scores,
+            "matched_title_signals": list(scores.get("matched_title_signals") or []),
+            "matched_content_signals": list(scores.get("matched_content_signals") or []),
+            "negative_signals": list(scores.get("negative_signals") or []),
+            "summary_fulltext_agreement": scores.get("summary_fulltext_agreement"),
+            "semantic_evidence": dict(suggestion.semantic_evidence_json or {}),
+            "taxonomy_key": suggestion.taxonomy_key,
+            "taxonomy_version": suggestion.taxonomy_version,
+            "classifier_version": classification_run.classifier_version,
+            "reused_from_suggestion_id": suggestion.id,
+        }
+
+    def _initial_import_changeset(
+        self,
+        *,
+        working_copy_id: str,
+        changeset_id: str | None,
+    ) -> ChangeSet | None:
+        """读取首次隐藏导入的 ChangeSet，支持物化任务幂等重试。"""
+
+        if changeset_id:
+            changeset = self.db.get(ChangeSet, changeset_id)
+            if changeset is not None:
+                return changeset
+        return (
+            self.db.query(ChangeSet)
+            .join(ChangeItem, ChangeItem.changeset_id == ChangeSet.id)
+            .filter(
+                ChangeItem.target_type == "working_copy",
+                ChangeItem.target_id == working_copy_id,
+                ChangeItem.change_type == "WORKING_COPY_ORGANIZING",
+            )
+            .order_by(ChangeSet.created_at.desc())
+            .first()
+        )
 
     def _analyze_document_version(self, job: FilesystemJob) -> None:
         """在 ANALYSIS 队列补齐正文解析、摘要、分类和检索索引。"""
@@ -1772,7 +2022,10 @@ class FileLifecycleJobProcessor:
             return None
 
         categories = organization_decision.categories if organization_decision is not None else []
-        risk_status = self._initial_organization_risk_status(managed_file)
+        risk_status = self._initial_organization_risk_status(
+            managed_file,
+            version=version,
+        )
         policy_result = AutoPlacementPolicy(self.settings).evaluate(
             categories=categories,
             extraction_status=extraction_status,
@@ -1833,10 +2086,10 @@ class FileLifecycleJobProcessor:
             final_relative_path = target_relative_path
             operation_type = "INITIAL_AUTO_PLACEMENT"
         else:
-            neutral = self._working_path_resolution(
+            neutral = self._neutral_initial_path_resolution(
                 working_root=working_root,
                 managed_file=managed_file,
-                preferred_relative_path=managed_file.relative_path,
+                version=version,
             )
             final_relative_path = neutral.relative_path
             operation_type = "INITIAL_NEUTRAL_PLACEMENT"
@@ -1956,10 +2209,27 @@ class FileLifecycleJobProcessor:
         DocumentSearchProfileService(db=self.db).upsert_current_profile(working_copy.id)
         return decision_row
 
-    def _initial_organization_risk_status(self, managed_file: ManagedFile) -> str:
-        """读取上传归档时的基础风险结论；非上传来源按未知风险拒绝自动落位。"""
+    def _initial_organization_risk_status(
+        self,
+        managed_file: ManagedFile,
+        *,
+        version: DocumentVersion | None = None,
+    ) -> str:
+        """读取上传风险结论，或验证外部源修订已完成受控只读分析。"""
 
         if not managed_file.source_upload_version_id:
+            revision_id = str(
+                version.source_managed_file_revision_id if version is not None else ""
+            )
+            revision = self.db.get(ManagedFileRevision, revision_id) if revision_id else None
+            if (
+                revision is not None
+                and revision.is_current
+                and revision.status == "READY"
+                and revision.analysis_status == "READY"
+                and revision.content_sha256 == managed_file.content_sha256
+            ):
+                return "PASS"
             return "UNKNOWN"
         archive = self.repository.get_archive_by_version(managed_file.source_upload_version_id)
         if archive is None:
@@ -2367,21 +2637,54 @@ class FileLifecycleJobProcessor:
             storage_collision=True,
         )
 
+    def _neutral_initial_path_resolution(
+        self,
+        *,
+        working_root: WorkingCopyRoot,
+        managed_file: ManagedFile,
+        version: DocumentVersion,
+    ) -> InitialWorkingPathResolution:
+        """生成不泄露源分类目录的中性首次路径。
+
+        上传归档继续沿用自身中性上传相对路径；外部受管文件则进入内部中性命名空间，
+        并仅通过逻辑 ``NEEDS_REVIEW`` 虚拟节点呈现，不创建用户可见“待确认”目录。
+        """
+
+        if version.source_managed_file_revision_id and not managed_file.source_upload_version_id:
+            safe_filename = self.storage.sanitize_filename(managed_file.filename)
+            return self._working_path_resolution(
+                working_root=working_root,
+                managed_file=managed_file,
+                preferred_relative_path=(
+                    f".internal/neutral/{managed_file.id}/{safe_filename}"
+                ),
+            )
+        return self._working_path_resolution(
+            working_root=working_root,
+            managed_file=managed_file,
+            preferred_relative_path=managed_file.relative_path,
+        )
+
     def _gated_initial_placement_enabled(
         self,
         *,
         payload: dict[str, Any],
         managed_file: ManagedFile,
     ) -> bool:
-        """判断本次上传归档是否进入隐藏的首次落位链路。
+        """判断新上传或已完成源侧分析的外部物化是否进入首次落位链路。"""
 
-        受管目录的全量物化已有独立来源目录语义，本阶段不后台重排；复用源侧分析且
-        跳过分析的任务也不能进入 ``ORGANIZING`` 后失去终结节点。
-        """
-
+        source_materialization = bool(
+            payload.get("skip_document_analysis")
+            and payload.get("source_managed_file_revision_id")
+        )
         return bool(
-            managed_file.source_type == "UPLOAD_ARCHIVE"
-            and not payload.get("skip_document_analysis")
+            (
+                (
+                    managed_file.source_type == "UPLOAD_ARCHIVE"
+                    and not payload.get("skip_document_analysis")
+                )
+                or source_materialization
+            )
             and self.settings.auto_primary_classification_enabled
             and self.settings.auto_initial_placement_enabled
             and not self.settings.auto_classification_shadow_mode

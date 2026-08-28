@@ -33,7 +33,7 @@ class AutoPlacementPolicyResult:
 
 
 class AutoPlacementPolicy:
-    """应用全分类统一硬门槛并在证据不足时主动拒识。"""
+    """选择最高置信候选，并保留必要的安全与证据硬门槛。"""
 
     def __init__(self, settings: Settings) -> None:
         """保存版本化策略配置；当前冷启动阶段使用保守全局回退阈值。"""
@@ -47,11 +47,10 @@ class AutoPlacementPolicy:
         extraction_status: str,
         risk_passed: bool = True,
     ) -> AutoPlacementPolicyResult:
-        """从有序多标签候选中选择唯一主分类，任一硬门槛失败即拒识。
+        """从按置信度排序的多标签候选中选择唯一主分类，硬门槛失败时拒识。
 
-        当前分类器的 ``confidence`` 尚不是已发布校准概率，因此在校准版本为
-        ``unpublished`` 时把它作为冷启动保守分数保存，并依旧要求多正文信号、
-        可定位证据、明显 Top1/Top2 间隔和摘要/全文一致。
+        当前测试阶段暂不使用分数、候选间隔、正文信号数量、负向信号和摘要/全文
+        一致性作为拒绝条件。相关计算和原条件保留，便于后续恢复校准门控。
         """
 
         ordered = [item for item in categories if isinstance(item, dict)]
@@ -89,16 +88,18 @@ class AutoPlacementPolicy:
                 reasons.append("POLICY_VERSION_UNAVAILABLE")
             if not evidence_items:
                 reasons.append("EVIDENCE_MISSING")
-            if len(content_signals) < 2:
-                reasons.append("FILENAME_ONLY_SIGNAL")
-            if negative_signals:
-                reasons.append("NEGATIVE_SIGNAL_CONFLICT")
-            if top_score < self.settings.auto_classification_fallback_threshold:
-                reasons.append("TOP_SCORE_BELOW_THRESHOLD")
-            if margin is None or margin < self.settings.auto_classification_fallback_margin:
-                reasons.append("TOP_MARGIN_TOO_SMALL")
-            if primary.get("summary_fulltext_agreement") is False:
-                reasons.append("SUMMARY_FULLTEXT_CONFLICT")
+            # Top-1 直接落位测试期间暂时停用以下软拒绝条件。保留原判断，后续完成
+            # 人工标注评估和阈值校准后可按版本化策略恢复。
+            # if len(content_signals) < 2:
+            #     reasons.append("FILENAME_ONLY_SIGNAL")
+            # if negative_signals:
+            #     reasons.append("NEGATIVE_SIGNAL_CONFLICT")
+            # if top_score < self.settings.auto_classification_fallback_threshold:
+            #     reasons.append("TOP_SCORE_BELOW_THRESHOLD")
+            # if margin is None or margin < self.settings.auto_classification_fallback_margin:
+            #     reasons.append("TOP_MARGIN_TOO_SMALL")
+            # if primary.get("summary_fulltext_agreement") is False:
+            #     reasons.append("SUMMARY_FULLTEXT_CONFLICT")
 
         # 原因码是稳定审计接口，必须顺序去重，不能把相同失败重复展示给用户。
         reason_codes = tuple(dict.fromkeys(reasons))
@@ -124,6 +125,7 @@ class AutoPlacementPolicy:
                 "summary_fulltext_agreement": (
                     primary.get("summary_fulltext_agreement") if primary is not None else None
                 ),
+                "soft_gate_mode": "top1_test_disabled",
                 "calibration_mode": (
                     "global_conservative_fallback"
                     if self.settings.auto_classification_calibration_version == "unpublished"

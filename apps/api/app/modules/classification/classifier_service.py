@@ -121,6 +121,8 @@ class DocumentClassificationService:
                         "document_id": document_id,
                         "document_version_id": resolved_version_id,
                         "extraction_run_id": extraction_run_id,
+                        "taxonomy_key": taxonomy_key,
+                        "taxonomy_version": taxonomy_version,
                         "categories": cached_categories,
                         "text_source": "classification_cache",
                         "classification_summary_id": (
@@ -236,6 +238,8 @@ class DocumentClassificationService:
             "document_id": document_id,
             "document_version_id": resolved_version_id,
             "extraction_run_id": extraction_run_id,
+            "taxonomy_key": taxonomy_key,
+            "taxonomy_version": taxonomy_version,
             "categories": categories,
             "text_source": "classification_topic_summary" if (
                 summaries is not None and get_settings().llm_classification_summary_enabled

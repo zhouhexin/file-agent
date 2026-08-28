@@ -42,6 +42,11 @@ from app.db.models import (
 from app.modules.chunks.service import DocumentIndexService, INDEX_VERSION
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
 from app.modules.classification.runtime_factory import ClassificationRuntimeFactory
+from app.modules.classification.freshness import (
+    ClassificationFreshness,
+    current_classification_identity,
+    inspect_managed_source_classification,
+)
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.extractors import extract_document_text
 from app.modules.files.readable_source import (
@@ -155,12 +160,31 @@ class ManagedSourceAnalysisService:
             self.db.flush()
             return {"status": "STALE", "revision_id": revision.id}
 
-        if revision.status == "READY" and revision.analysis_document_version_id:
-            return {"status": "READY", "idempotent": True, "revision_id": revision.id}
-
         owner_id = user_id or root.created_by or self._fallback_user_id()
         if not owner_id:
             raise RuntimeError("原始文件分析缺少可审计用户")
+        if revision.status == "READY" and revision.analysis_document_version_id:
+            identity = current_classification_identity(
+                db=self.db,
+                settings=self.settings,
+                user_id=str(owner_id),
+            )
+            freshness = inspect_managed_source_classification(
+                db=self.db,
+                revision=revision,
+                identity=identity,
+            )
+            if freshness is ClassificationFreshness.CURRENT:
+                return {
+                    "status": "READY",
+                    "idempotent": True,
+                    "revision_id": revision.id,
+                }
+            return self.refresh_classification(
+                revision_id=revision.id,
+                user_id=str(owner_id),
+            )
+
         revision.status = "ANALYZING"
         revision.analysis_status = "RUNNING"
         analysis = ManagedFileAnalysisRun(
@@ -231,10 +255,19 @@ class ManagedSourceAnalysisService:
             )
             metadata_only = bool(extraction.get("metadata_only"))
             if metadata_only:
+                identity = current_classification_identity(
+                    db=self.db,
+                    settings=self.settings,
+                    user_id=str(owner_id),
+                )
                 classification = {
                     "status": "SKIPPED_METADATA_ONLY",
                     "categories": [],
                     "warnings": list(extraction.get("warnings") or []),
+                    "taxonomy_key": identity.taxonomy_key,
+                    "taxonomy_version": identity.taxonomy_version,
+                    "classifier_version": identity.classifier_version,
+                    "source": "managed_source_metadata_only",
                 }
                 index_result = {
                     "ok": True,
@@ -277,6 +310,14 @@ class ManagedSourceAnalysisService:
                 filename=managed_file.filename,
                 relative_path=managed_file.relative_path,
                 metadata_notice=str(extraction.get("metadata_notice") or ""),
+            )
+            self._persist_source_classification(
+                owner_id=str(owner_id),
+                revision=revision,
+                managed_file=managed_file,
+                document=document,
+                version=version,
+                classification=classification,
             )
             # 逻辑源侧版本也必须指向本次分析运行，方便后续物化副本、审计和
             # 索引重建都精确追溯到同一份原始文件修订，不能只靠最新记录猜测。
@@ -334,6 +375,180 @@ class ManagedSourceAnalysisService:
                 message="原始文件只读分析失败",
             )
             raise
+
+    def refresh_classification(
+        self,
+        *,
+        revision_id: str,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """复用持久化页面按当前运行时身份刷新分类，不重新解析原文件。"""
+
+        revision = self.db.get(ManagedFileRevision, revision_id)
+        if revision is None or not revision.is_current:
+            return {"status": "STALE", "idempotent": True, "revision_id": revision_id}
+        managed_file = self.db.get(ManagedFile, revision.managed_file_id)
+        root = self.db.get(ManagedRoot, managed_file.root_id) if managed_file else None
+        if managed_file is None or root is None or managed_file.status != "ACTIVE":
+            raise RuntimeError("源分类刷新缺少有效受管文件或目录")
+        if not revision.analysis_document_id or not revision.analysis_document_version_id:
+            raise RuntimeError("源分类刷新缺少已持久化分析文档")
+        path = resolve_managed_relative_path(
+            root_path=Path(root.container_path),
+            relative_path=managed_file.relative_path,
+        )
+        if not self._matches_revision(revision=revision, stat=path.stat()):
+            revision.status = "STALE"
+            revision.analysis_status = "STALE"
+            self.db.flush()
+            return {"status": "STALE", "revision_id": revision.id}
+        owner_id = user_id or root.created_by or self._fallback_user_id()
+        if not owner_id:
+            raise RuntimeError("源分类刷新缺少可审计用户")
+        identity = current_classification_identity(
+            db=self.db,
+            settings=self.settings,
+            user_id=str(owner_id),
+        )
+        freshness = inspect_managed_source_classification(
+            db=self.db,
+            revision=revision,
+            identity=identity,
+        )
+        if freshness is ClassificationFreshness.CURRENT:
+            return {
+                "status": "READY",
+                "revision_id": revision.id,
+                "document_id": revision.analysis_document_id,
+                "document_version_id": revision.analysis_document_version_id,
+                "classification_refreshed": False,
+                "reused_extraction": True,
+                "idempotent": True,
+            }
+        extraction_run = (
+            self.db.query(DocumentExtractionRun)
+            .filter(
+                DocumentExtractionRun.document_id == revision.analysis_document_id,
+                DocumentExtractionRun.document_version_id
+                == revision.analysis_document_version_id,
+                DocumentExtractionRun.status == "COMPLETED",
+            )
+            .order_by(DocumentExtractionRun.updated_at.desc())
+            .first()
+        )
+        if extraction_run is None:
+            raise RuntimeError("源分类刷新缺少已完成的正文解析运行")
+        document = self.db.get(Document, revision.analysis_document_id)
+        version = self.db.get(DocumentVersion, revision.analysis_document_version_id)
+        if document is None or version is None:
+            raise RuntimeError("源分类刷新缺少分析 Document 或 DocumentVersion")
+        classification = ClassificationRuntimeFactory(self.settings).create(
+            db=self.db,
+            user_id=str(owner_id),
+        ).classify(
+            document_id=document.id,
+            document_version_id=version.id,
+            extraction_run_id=extraction_run.id,
+            filename=managed_file.filename,
+            force_reprocess=True,
+        )
+        self._persist_source_classification(
+            owner_id=str(owner_id),
+            revision=revision,
+            managed_file=managed_file,
+            document=document,
+            version=version,
+            classification=classification,
+        )
+        self.db.flush()
+        log_event(
+            "managed_source.classification.refreshed",
+            status="COMPLETED",
+            document_id=document.id,
+            document_version_id=version.id,
+            managed_file_id=managed_file.id,
+            managed_file_revision_id=revision.id,
+            taxonomy_key=classification.get("taxonomy_key"),
+            taxonomy_version=classification.get("taxonomy_version"),
+            classifier_version=classification.get("classifier_version"),
+            message="受管源文件已复用持久化正文刷新分类",
+        )
+        return {
+            "status": "READY",
+            "revision_id": revision.id,
+            "document_id": document.id,
+            "document_version_id": version.id,
+            "classification_refreshed": True,
+            "reused_extraction": True,
+            "classification": classification,
+        }
+
+    def _persist_source_classification(
+        self,
+        *,
+        owner_id: str,
+        revision: ManagedFileRevision,
+        managed_file: ManagedFile,
+        document: Document,
+        version: DocumentVersion,
+        classification: dict[str, Any],
+    ) -> None:
+        """把外部自动导入产生的分类建议写入正式审计与建议表。
+
+        SOURCE_ANALYSIS 过去只把 ``classification`` 放进异步任务回执，导致算法虽然
+        执行成功，分类树、文件详情和后续反馈链路却无法读取结果。这里复用生命周期
+        审计边界创建内部 AgentRun/ChangeSet，再持久化 SUGGESTED 建议；外部原始文件
+        仍保持只读，不产生移动、改名或覆盖动作。
+        """
+
+        categories = [
+            item
+            for item in classification.get("categories", [])
+            if isinstance(item, dict)
+        ]
+        # 延迟导入避免 managed-files worker 与 file-lifecycle service 的模块初始化环。
+        from app.modules.classification.service import (
+            persist_document_results_classifications,
+        )
+        from app.modules.file_lifecycle.service import create_lifecycle_audit
+        from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
+
+        document_result = {
+            **classification,
+            "document_id": document.id,
+            "document_version_id": version.id,
+            "extraction_status": "COMPLETED",
+        }
+        changeset, _ = create_lifecycle_audit(
+            db=self.db,
+            user_id=owner_id,
+            workspace_id=get_shared_workspace_id(self.db),
+            conversation_id=None,
+            tool_name="managed-source-auto-classification",
+            message_content=(
+                f"外部自动导入文件“{managed_file.filename}”的只读分析和分类已完成。"
+            ),
+            change_type="CATEGORY_SUGGESTED",
+            target_type="managed_file_revision",
+            target_id=revision.id,
+            target_document_id=document.id,
+            after_value={
+                "managed_file_revision_id": revision.id,
+                "document_version_id": version.id,
+                "category_count": len(categories),
+                "external_source_unchanged": True,
+            },
+            graph_document_results=[document_result],
+            visible_in_conversation=False,
+        )
+        persist_document_results_classifications(
+            db=self.db,
+            agent_run_id=changeset.agent_run_id,
+            document_results=[document_result],
+            persist_empty_runs=True,
+        )
+        classification["agent_run_id"] = changeset.agent_run_id
+        classification["changeset_id"] = changeset.id
 
     def _ensure_analysis_document(
         self, *, revision: ManagedFileRevision, managed_file: ManagedFile, owner_id: str, sha256: str

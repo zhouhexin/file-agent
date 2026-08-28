@@ -60,8 +60,8 @@ def test_policy_accepts_only_unique_high_confidence_content_candidate() -> None:
     assert result.top_margin == 0.35
 
 
-def test_policy_rejects_filename_only_candidate_even_with_high_score() -> None:
-    """文件名命中不能冒充正文证据，高分也必须主动拒识。"""
+def test_policy_allows_filename_only_soft_signal_during_top1_test() -> None:
+    """Top-1 测试阶段文件名信号不足只保留审计特征，不再阻止落位。"""
 
     result = AutoPlacementPolicy(_settings()).evaluate(
         categories=[_category(matched_content_signals=[])],
@@ -69,12 +69,14 @@ def test_policy_rejects_filename_only_candidate_even_with_high_score() -> None:
         risk_passed=True,
     )
 
-    assert result.accepted is False
-    assert "FILENAME_ONLY_SIGNAL" in result.reason_codes
+    assert result.accepted is True
+    assert "FILENAME_ONLY_SIGNAL" not in result.reason_codes
+    assert result.feature_snapshot["content_signal_count"] == 0
+    assert result.feature_snapshot["soft_gate_mode"] == "top1_test_disabled"
 
 
-def test_policy_rejects_negative_signal_and_small_margin() -> None:
-    """负向冲突或 Top1/Top2 过近均不能选择最接近的目录。"""
+def test_policy_allows_negative_signal_and_small_margin_during_top1_test() -> None:
+    """Top-1 测试阶段负向信号和候选间隔只记录，不再作为软拒绝条件。"""
 
     result = AutoPlacementPolicy(_settings()).evaluate(
         categories=[
@@ -85,9 +87,30 @@ def test_policy_rejects_negative_signal_and_small_margin() -> None:
         risk_passed=True,
     )
 
-    assert result.accepted is False
-    assert "NEGATIVE_SIGNAL_CONFLICT" in result.reason_codes
-    assert "TOP_MARGIN_TOO_SMALL" in result.reason_codes
+    assert result.accepted is True
+    assert "NEGATIVE_SIGNAL_CONFLICT" not in result.reason_codes
+    assert "TOP_MARGIN_TOO_SMALL" not in result.reason_codes
+    assert result.feature_snapshot["negative_signal_count"] == 1
+    assert round(result.top_margin or 0, 2) == 0.07
+
+
+def test_policy_allows_low_score_and_summary_conflict_during_top1_test() -> None:
+    """低于旧阈值且摘要/全文冲突时仍选择当前最高置信有效候选。"""
+
+    result = AutoPlacementPolicy(_settings()).evaluate(
+        categories=[
+            _category(confidence=0.62, summary_fulltext_agreement=False),
+            _category(category_id="school.admin.rules", confidence=0.55),
+        ],
+        extraction_status="COMPLETED",
+        risk_passed=True,
+    )
+
+    assert result.accepted is True
+    assert "TOP_SCORE_BELOW_THRESHOLD" not in result.reason_codes
+    assert "TOP_MARGIN_TOO_SMALL" not in result.reason_codes
+    assert "SUMMARY_FULLTEXT_CONFLICT" not in result.reason_codes
+    assert result.calibrated_confidence == 0.62
 
 
 def test_policy_rejects_unlocated_evidence_and_parse_failure() -> None:

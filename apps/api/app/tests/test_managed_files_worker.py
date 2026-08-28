@@ -10,8 +10,12 @@ from app.db.models import (
     AgentRun,
     ChangeSet,
     Conversation,
+    DocumentCategory,
     DocumentCategorySuggestion,
+    DocumentClassificationRun,
+    DocumentExtractionRun,
     DocumentIndexRun,
+    DocumentOrganizationDecision,
     DocumentPage,
     DocumentSearchProfile,
     FilesystemJob,
@@ -29,6 +33,7 @@ from app.db.models import (
     utcnow,
 )
 from app.modules.agent.state import ToolInvocationRecord
+from app.modules.classification.freshness import ClassificationFreshness
 from app.modules.managed_files.worker import (
     _advance_waiting_search_runs,
     _enqueue_background_materialization_jobs_for_revisions,
@@ -559,21 +564,43 @@ def test_scan_publishes_source_analysis_jobs_by_batch_before_full_root_completio
         clear_overrides()
 
 
+@pytest.mark.parametrize(
+    ("filename", "content", "expected_decision"),
+    [
+        (
+            "学校会议纪要研究决定议题.txt",
+            "学校会议纪要。会议围绕议题进行研究，研究决定通过有关事项。",
+            "AUTO_ORGANIZED",
+        ),
+        (
+            "普通材料.txt",
+            "这是一份没有明确业务主题的普通材料。",
+            "NEEDS_REVIEW",
+        ),
+    ],
+)
 def test_scan_waits_for_source_analysis_before_materializing_working_copy(
     monkeypatch,
     tmp_path: Path,
+    filename: str,
+    content: str,
+    expected_decision: str,
 ):
-    """源目录初始化先提交分析任务，同一文件不得在 READY 前并发复制。"""
+    """源侧正文分类完成后才物化，并按统一门槛落入主分类或中性路径。"""
 
     managed_dir = tmp_path / "managed"
     managed_dir.mkdir()
-    source = managed_dir / "科研通知.txt"
-    source.write_text("科研项目材料提交要求", encoding="utf-8")
+    source = managed_dir / filename
+    source.write_text(content, encoding="utf-8")
     working_dir = tmp_path / "working"
     monkeypatch.setenv("WORKING_COPY_STORAGE_ROOT", str(working_dir))
     monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "uploads"))
     monkeypatch.setenv("EMBEDDING_ENABLED", "false")
     monkeypatch.setenv("GRAPH_CLASSIFICATION_ENABLED", "false")
+    monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_INITIAL_PLACEMENT_ENABLED", "true")
+    monkeypatch.setenv("AUTO_CLASSIFICATION_SHADOW_MODE", "false")
+    monkeypatch.setenv("AUTO_CLASSIFICATION_FALLBACK_MARGIN", "0.01")
     get_settings.cache_clear()
     client, session_factory = client_with_database()
     try:
@@ -642,6 +669,10 @@ def test_scan_waits_for_source_analysis_before_materializing_working_copy(
             assert completed_source_job.result_json.get("status") == "READY", (
                 completed_source_job.result_json
             )
+            classification_result = completed_source_job.result_json.get("classification") or {}
+            assert classification_result.get("agent_run_id")
+            assert classification_result.get("changeset_id")
+            assert db.query(DocumentCategorySuggestion).count() >= 1
             materialization = (
                 db.query(FilesystemJob)
                 .filter(FilesystemJob.job_type == "MATERIALIZE_WORKING_COPY")
@@ -683,17 +714,39 @@ def test_scan_waits_for_source_analysis_before_materializing_working_copy(
             physical_copy = (
                 working_dir / working_root.relative_storage_path / working_copy.relative_path
             )
-            assert physical_copy.read_text(encoding="utf-8") == "科研项目材料提交要求"
-            assert source.read_text(encoding="utf-8") == "科研项目材料提交要求"
+            decision = db.query(DocumentOrganizationDecision).filter_by(
+                working_copy_id=working_copy.id
+            ).one()
+            target_suggestions = db.query(DocumentCategorySuggestion).filter_by(
+                document_id=working_copy.document_id
+            ).all()
+            assert working_copy.status == "ACTIVE"
+            assert decision.decision == expected_decision
+            if expected_decision == "AUTO_ORGANIZED":
+                relation = db.query(DocumentCategory).filter_by(
+                    working_copy_id=working_copy.id
+                ).one()
+                assert working_copy.relative_path == f"学校/行政综合管理类/会议纪要/{filename}"
+                assert relation.status == "AUTO_APPLIED"
+                assert relation.relation_role == "PRIMARY"
+            else:
+                assert working_copy.relative_path.startswith(".internal/neutral/")
+                assert working_copy.relative_path.endswith(f"/{filename}")
+                assert db.query(DocumentCategory).filter_by(
+                    working_copy_id=working_copy.id
+                ).count() == 0
+            assert target_suggestions
+            assert physical_copy.read_text(encoding="utf-8") == content
+            assert source.read_text(encoding="utf-8") == content
     finally:
         get_settings.cache_clear()
         clear_overrides()
 
 
-def test_ready_source_revision_queues_background_materialization_and_reuses_one_job(
+def test_ready_revision_without_current_classification_queues_one_refresh_job(
     monkeypatch,
 ):
-    """READY 修订必须进入全量同步，重复触发仍只能保留一个幂等物化任务。"""
+    """READY 修订缺少当前分类时应先刷新，并按运行时身份保持幂等。"""
 
     monkeypatch.setenv("MATERIALIZE_ALL_MANAGED_FILES", "true")
     monkeypatch.setenv("MATERIALIZE_WORKING_COPY_BACKGROUND_PRIORITY", "100")
@@ -755,19 +808,161 @@ def test_ready_source_revision_queues_background_materialization_and_reuses_one_
                 created_by=registered.json()["id"],
             )
 
-            jobs = (
+            materialization_jobs = (
                 db.query(FilesystemJob)
                 .filter(FilesystemJob.job_type == "MATERIALIZE_WORKING_COPY")
                 .all()
             )
-            assert first_ids == second_ids
-            assert len(jobs) == 1
-            assert jobs[0].queue_name == "MATERIALIZE"
-            assert jobs[0].priority == 100
-            assert jobs[0].payload_json["materialization_reason"] == "startup-full-sync"
+            refresh_jobs = (
+                db.query(FilesystemJob)
+                .filter(
+                    FilesystemJob.job_type
+                    == "REFRESH_MANAGED_SOURCE_CLASSIFICATION"
+                )
+                .all()
+            )
+            assert first_ids == second_ids == []
+            assert materialization_jobs == []
+            assert len(refresh_jobs) == 1
+            assert refresh_jobs[0].queue_name == "SOURCE_ANALYSIS"
+            assert refresh_jobs[0].payload_json["managed_file_revision_id"] == revision.id
+            assert refresh_jobs[0].payload_json["taxonomy_version"]
+            assert refresh_jobs[0].payload_json["classifier_version"]
     finally:
         get_settings.cache_clear()
     clear_overrides()
+
+
+def test_stale_source_classification_refresh_reuses_extraction_before_materialization(
+    monkeypatch,
+    tmp_path: Path,
+):
+    """任意旧分类身份必须先复用正文刷新，再允许工作副本发布。"""
+
+    managed_dir = tmp_path / "managed"
+    managed_dir.mkdir()
+    filename = "学校会议纪要研究决定议题.txt"
+    source = managed_dir / filename
+    source.write_text(
+        "学校会议纪要。会议围绕议题进行研究，研究决定通过有关事项。",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WORKING_COPY_STORAGE_ROOT", str(tmp_path / "working"))
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "uploads"))
+    monkeypatch.setenv("EMBEDDING_ENABLED", "false")
+    monkeypatch.setenv("GRAPH_CLASSIFICATION_ENABLED", "false")
+    monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_INITIAL_PLACEMENT_ENABLED", "true")
+    monkeypatch.setenv("AUTO_CLASSIFICATION_SHADOW_MODE", "false")
+    monkeypatch.setenv("AUTO_CLASSIFICATION_FALLBACK_MARGIN", "0.01")
+    get_settings.cache_clear()
+    client, session_factory = client_with_database()
+    try:
+        registered = client.post(
+            "/api/auth/register",
+            json={
+                "username": "stale-classification-user",
+                "password": "password123",
+                "display_name": "stale-classification-user",
+            },
+        )
+        user_id = registered.json()["id"]
+        with session_factory() as db:
+            root = ManagedRoot(
+                root_key="stale_classification_root",
+                display_name="stale_classification_root",
+                container_path=str(managed_dir),
+                created_by=user_id,
+            )
+            db.add(root)
+            db.flush()
+            db.add(
+                FilesystemJob(
+                    job_type="SCAN_MANAGED_ROOT",
+                    queue_name="SCAN",
+                    root_id=root.id,
+                    status="PENDING",
+                    payload_json={"root_key": root.root_key},
+                    result_json={},
+                )
+            )
+            db.commit()
+
+        assert process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="stale-scan-worker",
+            queue_names={"SCAN"},
+        )
+        assert process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="stale-source-worker",
+            queue_names={"SOURCE_ANALYSIS"},
+        )
+        with session_factory() as db:
+            extraction_count = db.query(DocumentExtractionRun).count()
+            run = db.query(DocumentClassificationRun).one()
+            run.taxonomy_version = "arbitrary-old-version"
+            db.commit()
+
+        # 物化入口再次检查身份；过期时不得先复制到 neutral。
+        assert process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="stale-materialize-guard",
+            queue_names={"MATERIALIZE"},
+        )
+        with session_factory() as db:
+            assert db.query(WorkingCopy).count() == 0
+            materialization = db.query(FilesystemJob).filter_by(
+                job_type="MATERIALIZE_WORKING_COPY"
+            ).one()
+            assert materialization.result_json["status"] == (
+                "DEFERRED_CLASSIFICATION_REFRESH"
+            )
+            assert db.query(FilesystemJob).filter_by(
+                job_type="REFRESH_MANAGED_SOURCE_CLASSIFICATION",
+                status="PENDING",
+            ).count() == 1
+
+        def fail_if_source_is_reparsed(**_kwargs):
+            """分类版本刷新不得重新进入源文件解析器。"""
+
+            raise AssertionError("classification refresh unexpectedly reparsed source")
+
+        monkeypatch.setattr(
+            "app.modules.managed_files.source_analysis._extract_managed_source_document",
+            fail_if_source_is_reparsed,
+        )
+        assert process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="stale-refresh-worker",
+            queue_names={"SOURCE_ANALYSIS"},
+        )
+        with session_factory() as db:
+            assert db.query(DocumentExtractionRun).count() == extraction_count
+            assert db.query(DocumentClassificationRun).count() == 2
+            refresh_job = db.query(FilesystemJob).filter_by(
+                job_type="REFRESH_MANAGED_SOURCE_CLASSIFICATION"
+            ).one()
+            assert refresh_job.result_json["reused_extraction"] is True
+            materialization = db.query(FilesystemJob).filter_by(
+                job_type="MATERIALIZE_WORKING_COPY"
+            ).one()
+            assert materialization.status == "PENDING"
+
+        assert process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="stale-materialize-worker",
+            queue_names={"MATERIALIZE"},
+        )
+        with session_factory() as db:
+            working_copy = db.query(WorkingCopy).one()
+            assert working_copy.relative_path == (
+                f"学校/行政综合管理类/会议纪要/{filename}"
+            )
+            assert not working_copy.relative_path.startswith(".internal/neutral/")
+    finally:
+        get_settings.cache_clear()
+        clear_overrides()
 
 
 def test_metadata_only_image_analysis_materializes_searchable_working_copy(
@@ -951,6 +1146,10 @@ def test_source_analysis_completion_automatically_queues_background_materializat
         monkeypatch.setattr(
             "app.modules.managed_files.worker.ManagedSourceAnalysisService.analyze",
             fake_analyze,
+        )
+        monkeypatch.setattr(
+            "app.modules.managed_files.worker.inspect_managed_source_classification",
+            lambda **_kwargs: ClassificationFreshness.CURRENT,
         )
         processed = process_next_filesystem_job(
             session_factory=session_factory,

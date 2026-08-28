@@ -81,9 +81,9 @@ Neo4j 图谱和图向量默认以 Shadow 模式开启。API 启动只创建 GRAP
 
 Windows CMD 可直接执行 `scripts\start-file-agent-workers.cmd`。脚本会先读取项目根 `.env`，把当前
 Windows 机器的 `MANAGED_ROOT_*` 路径同步到数据库并真实验证目录可读；预检失败时不会启动任何
-worker。预检通过后分别启动 scheduler、扫描 worker、生命周期 worker、一个 `SOURCE_ANALYSIS` worker、
-两个 `MATERIALIZE,IMPORT` worker、一个 `ANALYSIS` worker、一个 `STRUCTURED_EXTRACTION` worker 和一个
-`GRAPH` worker；增加
+worker。预检通过后分别启动 scheduler 和五个合并后的 worker：扫描 worker，负责上传生命周期、
+文件操作与工作副本物化的 I/O worker，负责 `SOURCE_ANALYSIS,ANALYSIS` 的文档分析 worker，
+`STRUCTURED_EXTRACTION` worker 和 `GRAPH` worker；增加
 `--with-watcher` 才会额外启动 watcher。若 Python 不在 PATH，先设置 `FILE_AGENT_PYTHON` 为解释器
 绝对路径。脚本无论从哪个当前目录调用都会先切换到仓库根，因此相对
 `WORKING_COPY_STORAGE_ROOT=./storage/working-copies` 始终指向仓库内目录。共享开发数据库已有
@@ -93,19 +93,13 @@ WorkingCopy 记录但当前机器物理文件缺失时，下一次扫描会重�
 ```bash
 # 可在不同进程中分别设置 FILESYSTEM_WORKER_QUEUES。SCAN 每完成一批只提交
 # SOURCE_ANALYSIS；源侧索引完成即可检索和回答，随后由 MATERIALIZE 后台完成全量工作副本同步。
-PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE \
+PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION,MATERIALIZE,IMPORT \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
-PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=SOURCE_ANALYSIS \
-  /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
-PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=MATERIALIZE,IMPORT \
-  /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
-PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=ANALYSIS \
+PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=SOURCE_ANALYSIS,ANALYSIS \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=STRUCTURED_EXTRACTION \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=GRAPH \
-  /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
-PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=FILE_OPERATION \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=RECONCILE,SCAN \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker

@@ -14,8 +14,30 @@ def test_default_taxonomy_loads_unified_school_file_classification():
     taxonomy = load_default_taxonomy()
 
     assert taxonomy.key == "unified_school_file_classification"
-    assert taxonomy.version == "2026-07-v2"
+    assert taxonomy.version == "2026-08-v3"
     assert taxonomy.categories[0].name == "学校"
+
+
+def test_default_taxonomy_all_58_candidates_have_physical_paths():
+    """全部候选分类都必须可解析物理目录，避免正确分类后退回中性路径。"""
+
+    taxonomy = load_default_taxonomy()
+    candidates = []
+
+    def walk(nodes, *, depth: int) -> None:
+        """分类 matcher 跳过根节点，因此只统计根节点以下的候选。"""
+
+        for node in nodes:
+            if depth > 0:
+                candidates.append(node)
+            walk(node.children, depth=depth + 1)
+
+    walk(taxonomy.categories, depth=0)
+
+    assert len(candidates) == 58
+    assert all(node.organization_path for node in candidates)
+    union = next(node for node in candidates if node.id == "school.party.union")
+    assert union.organization_path == ["学校", "党委相关", "工会"]
 
 
 def test_flatten_category_paths_preserves_parent_path():

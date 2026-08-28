@@ -577,7 +577,7 @@ def test_document_classification_service_uses_unified_taxonomy_when_managed_cata
         )
 
         assert result["categories"][0]["taxonomy_key"] == "unified_school_file_classification"
-        assert result["categories"][0]["taxonomy_version"] == "2026-07-v2"
+        assert result["categories"][0]["taxonomy_version"] == "2026-08-v3"
         assert result["categories"][0]["source"] == "rule"
         assert "managed_global_catalog" not in {
             item["source"] for item in result["categories"]
@@ -1795,6 +1795,74 @@ def test_classification_persistence_replaces_existing_suggestions_for_same_agent
 
         assert db.query(DocumentClassificationRun).count() == 1
         assert db.query(DocumentCategorySuggestion).count() == 2
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_classification_persistence_can_record_current_empty_source_run():
+    """无候选分类也应能留下当前版本完成标记，避免每次扫描重复刷新。"""
+
+    client = _client_with_database()
+    _auth_header(client, username="classification-empty-source-user")
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.query(User).filter(
+            User.username == "classification-empty-source-user"
+        ).one()
+        agent_run = AgentRun(
+            conversation_id="conv-empty-source",
+            message_id="msg-empty-source",
+            user_id=user.id,
+        )
+        db.add(agent_run)
+        db.flush()
+
+        persist_document_results_classifications(
+            db=db,
+            agent_run_id=agent_run.id,
+            persist_empty_runs=True,
+            document_results=[
+                {
+                    "document_id": "source-document-id",
+                    "categories": [],
+                    "taxonomy_key": "school-taxonomy",
+                    "taxonomy_version": "future-release",
+                    "classifier_version": "future-classifier",
+                    "source": "managed_source_full_text",
+                }
+            ],
+        )
+
+        run = db.query(DocumentClassificationRun).one()
+        assert run.status == "COMPLETED"
+        assert run.taxonomy_key == "school-taxonomy"
+        assert run.taxonomy_version == "future-release"
+        assert run.classifier_version == "future-classifier"
+        assert db.query(DocumentCategorySuggestion).count() == 0
+
+        ordinary_run = AgentRun(
+            conversation_id="conv-empty-ordinary",
+            message_id="msg-empty-ordinary",
+            user_id=user.id,
+        )
+        db.add(ordinary_run)
+        db.flush()
+        persist_document_results_classifications(
+            db=db,
+            agent_run_id=ordinary_run.id,
+            document_results=[
+                {
+                    "document_id": "ordinary-document-id",
+                    "categories": [],
+                    "taxonomy_key": "school-taxonomy",
+                    "taxonomy_version": "future-release",
+                    "classifier_version": "future-classifier",
+                }
+            ],
+        )
+        assert db.query(DocumentClassificationRun).count() == 1
     finally:
         db.close()
         app.dependency_overrides.clear()

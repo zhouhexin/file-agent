@@ -26,6 +26,7 @@
 | 阶段四 CPU 两阶段检索 | 已完成 | 详见 `docs/stage-4-low-resource-two-stage-retrieval-plan.md` |
 | 阶段五 Evidence Answer | 代码和本地自动化验证已完成，部署烟测待验收 | 628 个后端测试通过、前端 build 通过；详见 `docs/stage-5-llm-efficient-evidence-answer-plan.md` |
 | 阶段六自然语言纠正与共享文件整理 | 已完成方案，待阶段五验收后开发 | 详见 `docs/stage-6-natural-language-correction-shared-file-organization-plan.md` |
+| 外部目录自动导入按正文主分类首次落位 | 已完成 | 复用源侧分类结果；通过门槛进入 taxonomy 主分类，拒识进入中性路径与逻辑复核队列 |
 
 ## 1. 用户要求
 
@@ -47,8 +48,9 @@
 
 ### 2.1 首次上传整理可以自动执行
 
-允许归档的上传文件完成查重和安全检查后，系统先按原始相对路径快速提交活动工作副本，再由独立
-ANALYSIS worker 执行：
+允许归档的上传文件，以及已完成只读源侧分析的外部受管文件，必须在工作副本首次成为 `ACTIVE`
+前完成正文分类门槛判断。上传由 ANALYSIS worker 完成分析；外部自动导入直接复用 SOURCE_ANALYSIS
+已经持久化的正文、摘要、索引和分类建议，不得为了物化工作副本再次解析原件。处理内容包括：
 
 ```text
 解析/OCR
@@ -133,8 +135,11 @@ admin/ops 的审计接口继续保留内部运行信息，不能为了简化普�
 → ConversationAttachmentContextService 确定附件范围
 → 异步查重和基础格式/MIME/宏/加密风险检查（当前阶段不实现病毒扫描引擎）
 → 不可变受管原始文件归档
-→ shared/<root_key>/<源相对路径> 活动工作副本
-→ ANALYSIS worker执行DocumentVersion解析/OCR和双摘要
+→ 上传：隐藏工作副本中执行 DocumentVersion 解析/OCR和双摘要
+→ 外部导入：复用已完成的源侧正文、摘要、索引和分类建议
+→ 统一置信度、证据和 Top1/Top2 间隔门槛
+→ 通过：首次发布到 shared/<root_key>/<taxonomy organization_path>/<原文件名>
+→ 未通过：首次发布到内部中性路径，并进入逻辑 NEEDS_REVIEW 队列
 → 分类建议和首次命名
 → Chunk/Evidence CPU词法索引（Embedding为默认关闭的扩展槽）
 → UserTaskReceipt
@@ -172,8 +177,8 @@ admin/ops 的审计接口继续保留内部运行信息，不能为了简化普�
 任务：
 
 1. 固化查重、基础文件风险检查、原件归档和隐藏工作副本导入的幂等键；当前阶段只保留病毒扫描适配器边界，不实现病毒扫描引擎。
-2. IMPORT worker 以一次源文件读取完成暂存复制和 SHA-256，按 `shared/<root_key>/<源相对路径>` 原子提交 `ACTIVE` 工作副本。
-3. ANALYSIS worker 异步完成解析、双摘要、分类、首次命名建议和索引；失败不得撤销已经安全提交的工作副本。
+2. IMPORT worker 以一次源文件读取完成暂存复制和 SHA-256；启用首次主分类落位时，工作副本先保持隐藏的 `ORGANIZING`。
+3. 上传由 ANALYSIS worker 完成解析和分类；外部物化复用 SOURCE_ANALYSIS 已持久化结果。门槛通过后原子发布到 taxonomy 主分类目录，未通过则发布到内部中性路径并写 `NEEDS_REVIEW`；两者最终均为可用的 `ACTIVE` 文件。
 4. 同名文件在同步阶段全部正常导入，不自动加后缀、不覆盖，也不创建“待确认”物理目录。
 5. 同名上传、查询或实际使用相关文件时，后端返回候选选择卡；用户选择后再继续原任务。
 6. 生成面向用户的逐文件整理回执。

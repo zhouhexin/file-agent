@@ -40,8 +40,6 @@ def test_compose_starts_unique_migration_and_all_required_workers() -> None:
         "reconcile-scan-worker",
         "lifecycle-worker",
         "source-analysis-worker",
-        "materialize-worker",
-        "analysis-worker",
         "structured-extraction-worker",
         "graph-worker",
         "gateway",
@@ -49,7 +47,11 @@ def test_compose_starts_unique_migration_and_all_required_workers() -> None:
         assert f"  {service}:" in compose
     assert compose.count("APP_RUNTIME: migrate") == 1
     assert "condition: service_completed_successfully" in compose
-    assert compose.count("FILESYSTEM_WORKER_ID: materialize-worker") == 1
+    assert (
+        "FILESYSTEM_WORKER_QUEUES: "
+        "DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION,MATERIALIZE,IMPORT"
+    ) in compose
+    assert "FILESYSTEM_WORKER_QUEUES: SOURCE_ANALYSIS,ANALYSIS" in compose
     assert "FILESYSTEM_WORKER_QUEUES: STRUCTURED_EXTRACTION" in compose
     assert 'STRUCTURED_EXTRACTION_WORKER_CONCURRENCY: "1"' in compose
     assert "FILESYSTEM_WORKER_QUEUES: GRAPH" in compose

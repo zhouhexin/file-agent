@@ -36,8 +36,6 @@ scheduler + watcher
 reconcile-scan-worker
 lifecycle-worker
 source-analysis-worker
-materialize-worker
-analysis-worker
 structured-extraction-worker
 graph-worker
 ```

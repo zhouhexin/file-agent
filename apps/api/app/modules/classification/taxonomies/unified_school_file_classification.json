@@ -1,8 +1,8 @@
 {
   "key": "unified_school_file_classification",
   "name": "学校文件统一分类体系",
-  "version": "2026-07-v2",
-  "source": "文件归类(1).xlsx + managed-directory-inventory@managed-downloads-2026-07-15-v1 + managed-directory-inventory@managed-downloads-2026-07-18-v2",
+  "version": "2026-08-v3",
+  "source": "文件归类(1).xlsx + managed-directory-inventory@managed-downloads-2026-07-15-v1 + managed-directory-inventory@managed-downloads-2026-07-18-v2 + physical-path-completion@2026-08-27-v3",
   "categories": [
     {
       "id": "school",
@@ -11,6 +11,7 @@
         {
           "id": "school.admin",
           "name": "行政综合管理类",
+          "organization_path": ["学校", "行政综合管理类"],
           "children": [
             {
               "id": "school.admin.development-planning",
@@ -152,6 +153,7 @@
         {
           "id": "school.hr",
           "name": "人事师资",
+          "organization_path": ["学校", "人事师资"],
           "description": "与学校人事、师资管理及人事部门发文相关的文件。",
           "aliases": [
             "人事",
@@ -444,6 +446,7 @@
         {
           "id": "school.logistics-assets",
           "name": "后勤资产",
+          "organization_path": ["学校", "后勤资产"],
           "aliases": [
             "后勤处",
             "后勤",
@@ -457,6 +460,7 @@
         {
           "id": "school.undergraduate-teaching",
           "name": "本科教学",
+          "organization_path": ["学校", "本科教学"],
           "aliases": [
             "教务处",
             "教务",
@@ -477,6 +481,7 @@
         {
           "id": "school.postgraduate",
           "name": "研究生",
+          "organization_path": ["学校", "研究生"],
           "description": "与研究生培养、招生、学位、导师、奖助和研究生教育管理相关的学校文件。",
           "aliases": [
             "研究生培养",
@@ -509,7 +514,8 @@
         },
         {
           "id": "school.discipline",
-          "name": "学科"
+          "name": "学科",
+          "organization_path": ["学校", "学科"]
         },
         {
           "id": "school.research",
@@ -548,6 +554,7 @@
         {
           "id": "school.party",
           "name": "党委相关",
+          "organization_path": ["学校", "党委相关"],
           "children": [
             {
               "id": "school.party.cadre-work",
@@ -615,15 +622,18 @@
             },
             {
               "id": "school.party.publicity",
-              "name": "宣传"
+              "name": "宣传",
+              "organization_path": ["学校", "党委相关", "宣传"]
             },
             {
               "id": "school.party.united-front",
-              "name": "统战"
+              "name": "统战",
+              "organization_path": ["学校", "党委相关", "统战"]
             },
             {
               "id": "school.party.discipline-inspection",
               "name": "纪委",
+              "organization_path": ["学校", "党委相关", "纪委"],
               "description": "与纪检监察、廉政教育、监督检查、违纪处理和纪委工作相关的文件。",
               "aliases": [
                 "纪检",
@@ -655,7 +665,8 @@
             },
             {
               "id": "school.party.union",
-              "name": "工会"
+              "name": "工会",
+              "organization_path": ["学校", "党委相关", "工会"]
             }
           ],
           "aliases": [
@@ -669,6 +680,7 @@
         {
           "id": "school.international-cooperation",
           "name": "国际合作交流",
+          "organization_path": ["学校", "国际合作交流"],
           "aliases": [
             "国际交流处",
             "国际交流",
@@ -681,23 +693,28 @@
         },
         {
           "id": "school.domestic-cooperation-alumni",
-          "name": "国内合作、校友"
+          "name": "国内合作、校友",
+          "organization_path": ["学校", "国内合作、校友"]
         },
         {
           "id": "school.audit",
-          "name": "审计"
+          "name": "审计",
+          "organization_path": ["学校", "审计"]
         },
         {
           "id": "school.student-affairs",
-          "name": "学生工作"
+          "name": "学生工作",
+          "organization_path": ["学校", "学生工作"]
         },
         {
           "id": "school.safety-stability",
-          "name": "安全稳定"
+          "name": "安全稳定",
+          "organization_path": ["学校", "安全稳定"]
         },
         {
           "id": "school.laboratory-management",
           "name": "实验室管理",
+          "organization_path": ["学校", "实验室管理"],
           "aliases": [
             "实验室工作"
           ],
@@ -711,6 +728,7 @@
         {
           "id": "school.other",
           "name": "其他",
+          "organization_path": ["学校", "其他"],
           "description": "无法明确归入学校既有高频分类，或证据不足需要人工复核的学校层面文件。",
           "aliases": [
             "其他",
@@ -742,11 +760,13 @@
       "children": [
         {
           "id": "college.party-building",
-          "name": "党建"
+          "name": "党建",
+          "organization_path": ["学院", "党建"]
         },
         {
           "id": "college.admin",
           "name": "行政管理",
+          "organization_path": ["学院", "行政综合管理"],
           "children": [
             {
               "id": "college.admin.development-planning",
@@ -869,6 +889,7 @@
         {
           "id": "college.hr",
           "name": "人事师资",
+          "organization_path": ["学院", "人事师资"],
           "children": [
             {
               "id": "college.hr.title-review",
@@ -933,11 +954,13 @@
             },
             {
               "id": "college.hr.talent-work",
-              "name": "人才工作"
+              "name": "人才工作",
+              "organization_path": ["学院", "人事师资", "人才工作"]
             },
             {
               "id": "college.hr.faculty-recruitment",
-              "name": "师资招聘"
+              "name": "师资招聘",
+              "organization_path": ["学院", "人事师资", "师资招聘"]
             }
           ],
           "aliases": [],
@@ -950,15 +973,18 @@
         },
         {
           "id": "college.request-report",
-          "name": "请示报告"
+          "name": "请示报告",
+          "organization_path": ["学院", "请示报告"]
         },
         {
           "id": "college.finance",
-          "name": "财务管理"
+          "name": "财务管理",
+          "organization_path": ["学院", "财务管理"]
         },
         {
           "id": "college.teaching",
           "name": "教学",
+          "organization_path": ["学院", "教学"],
           "description": "与学院课程建设、教学安排、教学改革、质量评价、教材和实践教学相关的文件。",
           "aliases": [
             "课程",
@@ -1019,6 +1045,7 @@
         {
           "id": "college.postgraduate",
           "name": "研究生",
+          "organization_path": ["学院", "研究生"],
           "description": "与学院研究生培养、导师管理、学位论文、研究生奖助和研究生教育日常管理相关的文件。",
           "aliases": [
             "研究生培养",
@@ -1047,11 +1074,13 @@
         },
         {
           "id": "college.discipline",
-          "name": "学科"
+          "name": "学科",
+          "organization_path": ["学院", "学科"]
         },
         {
           "id": "college.student-affairs",
           "name": "学生工作",
+          "organization_path": ["学院", "学生工作"],
           "description": "与学院学生管理、评奖评优、资助、就业、心理健康、志愿服务和日常学生事务相关的文件。",
           "aliases": [
             "学生管理",
@@ -1082,10 +1111,12 @@
         {
           "id": "college.profile",
           "name": "学院情况",
+          "organization_path": ["学院", "学院情况"],
           "children": [
             {
               "id": "college.profile.introduction",
               "name": "学院介绍",
+              "organization_path": ["学院", "学院情况", "学院介绍"],
               "description": "与学院概况、历史沿革、办学特色、师资队伍和宣传介绍相关的材料。",
               "aliases": [
                 "学院概况",
@@ -1114,25 +1145,30 @@
             },
             {
               "id": "college.profile.organization-structure",
-              "name": "机构设置"
+              "name": "机构设置",
+              "organization_path": ["学院", "学院情况", "机构设置"]
             },
             {
               "id": "college.profile.faculty-info",
-              "name": "教工信息"
+              "name": "教工信息",
+              "organization_path": ["学院", "学院情况", "教工信息"]
             }
           ]
         },
         {
           "id": "college.cadre-appointment",
-          "name": "干部任命"
+          "name": "干部任命",
+          "organization_path": ["学院", "干部任命"]
         },
         {
           "id": "college.news",
-          "name": "学院新闻"
+          "name": "学院新闻",
+          "organization_path": ["学院", "学院新闻"]
         },
         {
           "id": "college.safety-stability",
-          "name": "安全稳定"
+          "name": "安全稳定",
+          "organization_path": ["学院", "安全稳定"]
         }
       ]
     }

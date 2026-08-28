@@ -64,6 +64,11 @@ def _configure(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("GRAPH_CLASSIFICATION_ENABLED", "false")
     monkeypatch.setenv("GRAPH_EMBEDDING_ENABLED", "false")
     monkeypatch.setenv("NEO4J_SYNC_ENABLED", "false")
+    # 普通生命周期用例必须隔离开发机 .env 中可能启用的首次自动落位；
+    # 专项用例会在调用本辅助函数后显式开启并重新加载配置。
+    monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "false")
+    monkeypatch.setenv("AUTO_INITIAL_PLACEMENT_ENABLED", "false")
+    monkeypatch.setenv("AUTO_CLASSIFICATION_SHADOW_MODE", "true")
     config.get_settings.cache_clear()
 
 

@@ -20,6 +20,7 @@ from app.db.models import (
     DocumentCategorySuggestion,
     DocumentSearchProfile,
     DocumentSummary,
+    ManagedFile,
     WorkingCopy,
 )
 
@@ -76,6 +77,9 @@ class DocumentSearchProfileService:
         doc = self.db.query(Document).filter(
             Document.id == wc.document_id
         ).first()
+        managed_file = self.db.query(ManagedFile).filter(
+            ManagedFile.id == wc.managed_file_id
+        ).first()
 
         # 构建投影字段
         normalized_filename = _normalize_text(wc.filename or "")
@@ -109,13 +113,14 @@ class DocumentSearchProfileService:
                 )
         category_terms = self._tokenize(" ".join(category_terms_list))
 
-        # 工作副本来自受管目录时，相对目录是“全部材料”集合关系和弱检索信号。
-        # 它只能参与候选召回，不能替代正文证据或直接生成正式分类。
+        # 工作副本物理落位与来源元数据必须分离。低置信度外部文件会进入内部
+        # 中性路径，但原受管目录仍是“全部材料”集合关系和弱检索信号；它只能
+        # 参与候选召回，不能替代正文证据或直接生成正式分类。
         metadata_terms = self._tokenize(
             " ".join(
                 value
                 for value in [
-                    wc.relative_path or "",
+                    managed_file.relative_path if managed_file is not None else wc.relative_path or "",
                     wc.extension or "",
                     self._build_metadata_text(summary, suggestions),
                 ]
@@ -133,6 +138,7 @@ class DocumentSearchProfileService:
             normalized_filename,
             summary.id if summary else "",
             ",".join(str(item.id) for item in suggestions),
+            managed_file.relative_path if managed_file is not None else "",
             "jieba-v1",
         ]
         source_fingerprint = hashlib.sha256(

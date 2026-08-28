@@ -4,7 +4,7 @@
 > 最近更新：2026-08-27  
 > 状态：核心后端链路已实施，默认 Shadow，分类树与异常复核 UI 待实施
 > 当前授权边界：已按用户 2026-08-27 指令开始开发；生产真实落位仍须完成校准与灰度验收
-> 适用范围：新上传文件首次整理、主分类选择、工作副本首次发布和异常复核  
+> 适用范围：新上传文件及外部目录自动导入文件的首次整理、主分类选择、工作副本首次发布和异常复核
 > 核心目标：大多数文件无需用户确认即可准确存入主分类目录，仅让极少数真正不确定的文件进入复核
 
 ## 1. 结论
@@ -885,7 +885,7 @@ page / page_size 或 cursor
 AUTO_PRIMARY_CLASSIFICATION_ENABLED=false
 AUTO_INITIAL_PLACEMENT_ENABLED=false
 AUTO_CLASSIFICATION_SHADOW_MODE=true
-AUTO_CLASSIFICATION_POLICY_VERSION=auto-placement-v1
+AUTO_CLASSIFICATION_POLICY_VERSION=auto-placement-top1-test-v1
 AUTO_CLASSIFICATION_CALIBRATION_VERSION=unpublished
 AUTO_CLASSIFICATION_TARGET_PRECISION=0.99
 AUTO_CLASSIFICATION_FULL_TAXONOMY_ENABLED=true
@@ -1125,3 +1125,66 @@ time_to_active_p50/p95
 
 因此部署默认值仍为“自动主分类关闭、首次落位关闭、Shadow 开启”。在校准版本仍为
 `unpublished` 时，不建议生产环境退出 Shadow。
+
+## 22. 2026-08-27 外部自动导入首次落位补充实施
+
+外部受管目录自动导入现在严格复用本方案的首次落位边界，具体规则如下：
+
+1. `SOURCE_ANALYSIS` 先在只读边界完成正文解析、摘要、索引和 taxonomy 全分类建议，并持久化
+   `document_classification_runs` 与 `document_category_suggestions`；外部原件不移动、不改名、不覆盖。
+2. `MATERIALIZE_WORKING_COPY` 只处理状态为 `READY` 的当前源修订。它先创建隐藏的
+   `ORGANIZING` 工作副本，再复用已经完成的页面、摘要、索引和分类建议，不重新解析原件。
+3. 源侧建议会投影到工作副本 `DocumentVersion`，然后执行与上传一致的 `AutoPlacementPolicy`：
+   正文独立信号、可定位 quote、Top1 分数、Top1/Top2 间隔、负向信号、摘要/全文一致性、taxonomy
+   版本和安全路径缺一不可。
+4. 门槛通过时，以原文件名首次发布到 taxonomy `organization_path`，写入
+   `AUTO_APPLIED + PRIMARY`、`AUTO_ORGANIZED`、路径审计、ChangeItem 和图谱 Outbox。
+5. 门槛未通过时，不保留可能暴露分类答案的外部源目录结构，而是首次发布到内部中性路径
+   `.internal/neutral/<managed_file_id>/<原文件名>`，并写入 `ACTIVE + NEEDS_REVIEW`。普通用户只通过
+   “待确认主分类”虚拟节点查看，不显示该内部路径，也不会产生用户可见的“待确认”物理目录。
+6. `ACTIVE + NEEDS_REVIEW` 仍进入默认文件检索和正文检索，可以读取、预览、下载、总结、比较、
+   引用和选择；复核状态只影响主分类可信度，不能变成访问隔离条件。外部源相对目录仍作为弱检索
+   元数据保留，但不得反向决定物理主分类落位，也不得在普通用户界面显示内部中性路径。
+7. 本规则只适用于尚未成为 `ACTIVE` 的新物化工作副本。已经按旧逻辑落位的 `ACTIVE` 文件不得后台
+   静默移动；如需改到主分类目录，必须生成并确认 `MOVE_WORKING_COPIES` OperationPlan。
+
+自动化回归必须同时覆盖：高可靠外部文件进入主分类并创建正式主分类关系；低可靠外部文件进入中性
+路径和逻辑复核队列但仍保持可用；两种情况都验证源文件字节和路径不变，且工作副本存在可读取的复用
+分类建议。
+
+## 23. 2026-08-27 Top-1 直接落位测试调整
+
+为验证“现有分类候选直接决定首次物理落位”的完整链路，测试策略临时改为：从分类服务返回的有序候选中
+选择置信度最高的有效候选作为 `PRIMARY + AUTO_APPLIED`，不再因为下列软条件进入中性目录：
+
+```text
+TOP_SCORE_BELOW_THRESHOLD
+TOP_MARGIN_TOO_SMALL
+FILENAME_ONLY_SIGNAL
+NEGATIVE_SIGNAL_CONFLICT
+SUMMARY_FULLTEXT_CONFLICT
+```
+
+上述判断代码只注释停用，不删除；候选分数、Top-1/Top-2 间隔、正文信号数、负向信号数和摘要/全文
+一致性仍写入组织决策特征快照，后续完成人工标注评估后可以通过新策略版本恢复。
+
+以下硬保护继续生效：解析失败、风险检查失败、没有有效 taxonomy 候选、`其他` 分类、未经允许的
+LLM 自由路径、taxonomy 版本缺失、可定位证据缺失、分类目录无法解析以及目标文件名冲突。硬保护失败
+时仍发布到中性路径并进入 `NEEDS_REVIEW`，不得为了提高自动落位数量绕过原件保护和路径安全校验。
+
+该测试策略版本为 `auto-placement-top1-test-v1`。它只用于验证当前候选结果到首次落位的行为，不能把
+启发式 confidence 解释为真实概率，也不能据此宣称分类准确率已经提升。
+
+## 24. 2026-08-27 全量候选物理路径补齐
+
+180 文件首次落位测试发现，统一 taxonomy 虽然包含 58 个可参与候选召回的非根分类节点，但历史阶段
+只为其中 22 个节点配置了 `organization_path`。其余分类即使正确成为 Top1，也会因为
+`TARGET_PATH_UNAVAILABLE` 降级到中性路径。
+
+本次将 taxonomy 升级为 `2026-08-v3`，在不改变既有 22 个物理路径的前提下，为缺失的 36 个节点补齐
+确定性物理路径。统一 taxonomy 加载时必须校验根节点以下全部候选均具有安全 `organization_path`；任何
+新增候选漏配路径都应关闭式失败，并由自动化测试直接报告，不能继续生成可分类但无法落位的节点。
+
+历史 `2026-07-v2` 分类运行和已经成为 `ACTIVE` 的工作副本不原地改写、不静默移动。需要重新验证首次
+落位时，应按测试数据重置方案删除本轮工作副本派生数据并重新分类，由新运行生成 `2026-08-v3` 建议和
+组织决策。

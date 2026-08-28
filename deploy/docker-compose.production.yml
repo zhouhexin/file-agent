@@ -165,7 +165,7 @@ services:
       <<: *common-environment
       APP_RUNTIME: filesystem-worker
       FILESYSTEM_WORKER_ID: lifecycle-worker
-      FILESYSTEM_WORKER_QUEUES: DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION
+      FILESYSTEM_WORKER_QUEUES: DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION,MATERIALIZE,IMPORT
     depends_on: *worker-depends
     mem_limit: 2g
 
@@ -175,30 +175,10 @@ services:
       <<: *common-environment
       APP_RUNTIME: filesystem-worker
       FILESYSTEM_WORKER_ID: source-analysis-worker
-      FILESYSTEM_WORKER_QUEUES: SOURCE_ANALYSIS
+      FILESYSTEM_WORKER_QUEUES: SOURCE_ANALYSIS,ANALYSIS
       MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY: "1"
     depends_on: *worker-depends
     mem_limit: 5g
-
-  materialize-worker:
-    <<: *python-service
-    environment:
-      <<: *common-environment
-      APP_RUNTIME: filesystem-worker
-      FILESYSTEM_WORKER_ID: materialize-worker
-      FILESYSTEM_WORKER_QUEUES: MATERIALIZE,IMPORT
-    depends_on: *worker-depends
-    mem_limit: 2g
-
-  analysis-worker:
-    <<: *python-service
-    environment:
-      <<: *common-environment
-      APP_RUNTIME: filesystem-worker
-      FILESYSTEM_WORKER_ID: analysis-worker
-      FILESYSTEM_WORKER_QUEUES: ANALYSIS
-    depends_on: *worker-depends
-    mem_limit: 4g
 
   structured-extraction-worker:
     <<: *python-service

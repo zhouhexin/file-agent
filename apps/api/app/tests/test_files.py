@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.core import config
 from app.db.models import (
+    Conversation,
     Document,
     DocumentArtifact,
     DocumentVersion,
@@ -91,6 +92,66 @@ def test_upload_creates_version_review_and_persistent_job(monkeypatch, tmp_path)
     finally:
         db.close()
         clear_overrides()
+
+
+def test_upload_creates_owned_conversation_before_binding_duplicate_review(
+    monkeypatch,
+    tmp_path,
+):
+    """聊天页先选附件时，上传事务必须先创建会话再写重复检查外键。"""
+
+    _configure_storage(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth_header(client, "upload-conversation-owner")
+    conversation_id = "chat-upload-conversation-owner"
+
+    response = client.post(
+        "/api/files/upload",
+        headers=headers,
+        data={"conversation_id": conversation_id},
+        files={"file": ("attachment.txt", b"attachment", "text/plain")},
+    )
+
+    assert response.status_code == 202
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        review = db.get(
+            UploadDuplicateReview,
+            response.json()["duplicate_review_id"],
+        )
+        assert conversation is not None
+        assert review.conversation_id == conversation.id
+        assert conversation.user_id == review.user_id
+    clear_overrides()
+
+
+def test_upload_rejects_conversation_owned_by_another_user(monkeypatch, tmp_path):
+    """上传不得把附件绑定到其他用户会话，也不能把权限冲突暴露为数据库 500。"""
+
+    _configure_storage(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    owner_headers = _auth_header(client, "conversation-owner")
+    other_headers = _auth_header(client, "conversation-other")
+    conversation_id = "conversation-owned-by-first-user"
+    first = client.post(
+        "/api/files/upload",
+        headers=owner_headers,
+        data={"conversation_id": conversation_id},
+        files={"file": ("first.txt", b"first", "text/plain")},
+    )
+    assert first.status_code == 202
+
+    rejected = client.post(
+        "/api/files/upload",
+        headers=other_headers,
+        data={"conversation_id": conversation_id},
+        files={"file": ("other.txt", b"other", "text/plain")},
+    )
+
+    assert rejected.status_code == 403
+    with SessionLocal() as db:
+        assert db.query(Document).count() == 1
+    clear_overrides()
 
 
 def test_same_content_uploads_remain_distinct_until_dialog_decision(monkeypatch, tmp_path):

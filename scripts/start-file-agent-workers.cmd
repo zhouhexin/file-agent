@@ -1,6 +1,6 @@
 @echo off
-rem File Agent Windows CMD worker å¯åŠ¨å™¨ã€‚
-rem ä½¿ç”¨ç‹¬ç«‹çª—å£å¹¶è¡Œæ‰§è¡Œæ‰«æã€æºä¾§åˆ†æå’ŒæŒ‰éœ€ç‰©åŒ–ï¼Œå¯åŠ¨å‰å¿…é¡»å®Œæˆå½“å‰æœºå™¨ç›®å½•é…ç½®é¢„æ£€ã€‚
+rem File Agent Windows CMD worker Æô¶¯Æ÷¡£
+rem Ê¹ÓÃ¶ÀÁ¢´°¿Ú²¢ĞĞÖ´ĞĞÉ¨Ãè¡¢Ô´²à·ÖÎöºÍ°´ĞèÎï»¯£¬Æô¶¯Ç°±ØĞëÍê³Éµ±Ç°»úÆ÷Ä¿Â¼ÅäÖÃÔ¤¼ì¡£
 
 setlocal EnableExtensions
 set "PROJECT_ROOT=%~dp0.."
@@ -11,7 +11,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem å¯ä»¥åœ¨æ‰§è¡Œè„šæœ¬å‰æŠŠ FILE_AGENT_PYTHON è®¾ç½®ä¸ºå½“å‰ç¯å¢ƒè§£é‡Šå™¨çš„ç»å¯¹è·¯å¾„ã€‚
+rem ¿ÉÒÔÔÚÖ´ĞĞ½Å±¾Ç°°Ñ FILE_AGENT_PYTHON ÉèÖÃÎªµ±Ç°»·¾³½âÊÍÆ÷µÄ¾ø¶ÔÂ·¾¶¡£
 if not defined FILE_AGENT_PYTHON set "FILE_AGENT_PYTHON=python"
 "%FILE_AGENT_PYTHON%" --version >nul 2>&1
 if errorlevel 1 (
@@ -20,7 +20,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem åç«¯åŒ…ä½äº apps/apiï¼Œä¸å¼ºåˆ¶ç”¨æˆ·åˆ‡æ¢æˆ–æ–°å»º Python ç¯å¢ƒã€‚
+rem ºó¶Ë°üÎ»ÓÚ apps/api£¬²»Ç¿ÖÆÓÃ»§ÇĞ»»»òĞÂ½¨ Python »·¾³¡£
 set "PYTHONPATH=%PROJECT_ROOT%\apps\api"
 
 echo [File Agent] Synchronizing and validating managed roots before workers start...
@@ -31,54 +31,31 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [File Agent] Starting scheduler, scan worker, source analysis worker, materialize workers, analysis worker, structured extraction worker, and graph worker...
+echo [File Agent] Starting scheduler and five consolidated workers...
 
-rem é¢„æ£€æŠŠæœ¬æœºè·¯å¾„æäº¤åˆ°æ•°æ®åº“åæ‰èƒ½å¯åŠ¨ schedulerï¼Œé¿å…æ‰«æè¯»å–å…¶ä»–æœºå™¨çš„æ—§è·¯å¾„ã€‚
+rem Ô¤¼ì°Ñ±¾»úÂ·¾¶Ìá½»µ½Êı¾İ¿âºó²ÅÄÜÆô¶¯ scheduler£¬±ÜÃâÉ¨Ãè¶ÁÈ¡ÆäËû»úÆ÷µÄ¾ÉÂ·¾¶¡£
 set "FILESYSTEM_WORKER_ID="
 set "FILESYSTEM_WORKER_QUEUES="
 start "File Agent - Lifecycle Scheduler" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.file_lifecycle.scheduler"
 
-rem å¯¹è´¦å’Œæ‰«æåªå‘ç°åŸå§‹æ–‡ä»¶ï¼›åˆå§‹åŒ–åªæäº¤ SOURCE_ANALYSISï¼Œä¸å¤åˆ¶å…¨éƒ¨å·¥ä½œå‰¯æœ¬ã€‚
-set "FILESYSTEM_WORKER_ID=reconcile-scan-worker"
-set "FILESYSTEM_WORKER_QUEUES=RECONCILE,SCAN"
-start "File Agent - Scan Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
+rem Ã¿¸ö worker Í¨¹ı×Ó½Å±¾ÔÚ×Ô¼ºµÄ CMD ÄÚÉèÖÃÉí·İºÍ¶ÓÁĞ£¬²»ÄÜÒÀÀµ¸¸ CMD µÄ¿É±ä»·¾³¡£
+rem ¶ÔÕËºÍÉ¨ÃèÖ»·¢ÏÖÔ­Ê¼ÎÄ¼ş£»³õÊ¼»¯Ö»Ìá½» SOURCE_ANALYSIS£¬²»¸´ÖÆÈ«²¿¹¤×÷¸±±¾¡£
+start "File Agent - Scan Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%PROJECT_ROOT%\scripts\run-file-agent-worker.cmd" "reconcile-scan-worker" "RECONCILE,SCAN" "%FILE_AGENT_PYTHON%""
 
-rem ä¸Šä¼ æŸ¥é‡ã€å½’æ¡£å†™å…¥å’Œå·²ç¡®è®¤æ–‡ä»¶æ“ä½œç”±ç”Ÿå‘½å‘¨æœŸ worker æ¶ˆè´¹ã€‚
-set "FILESYSTEM_WORKER_ID=lifecycle-worker"
-set "FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION"
-start "File Agent - Lifecycle Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
+rem ÎÄ¼ş¸´ÖÆºÍÎÄ¼şÉúÃüÖÜÆÚÈÎÎñ¹²ÓÃÒ»¸ö I/O worker£¬±ÜÃâÎª MATERIALIZE/IMPORT ¶îÍâ³£×¤½ø³Ì¡£
+start "File Agent - Lifecycle and Materialize Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%PROJECT_ROOT%\scripts\run-file-agent-worker.cmd" "lifecycle-worker" "DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION,MATERIALIZE,IMPORT" "%FILE_AGENT_PYTHON%""
 
-rem æºä¾§åˆ†æåŒ…æ‹¬æ—§ Office çš„ LibreOffice è½¬æ¢ï¼›é»˜è®¤ä¸€ä¸ª workerï¼Œé¿å…å¤šä¸ª soffice æŠ¢å èµ„æºã€‚
-set "FILESYSTEM_WORKER_ID=source-analysis-worker"
-set "FILESYSTEM_WORKER_QUEUES=SOURCE_ANALYSIS"
-start "File Agent - Source Analysis Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
+rem Ô´²àÓë¹¤×÷¸±±¾·ÖÎö¹²ÓÃ½âÎö worker£»´®ĞĞÊ¹ÓÃ LibreOffice£¬±ÜÃâ¶à¸ö soffice ÇÀÕ¼×ÊÔ´¡£
+start "File Agent - Document Analysis Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%PROJECT_ROOT%\scripts\run-file-agent-worker.cmd" "source-analysis-worker" "SOURCE_ANALYSIS,ANALYSIS" "%FILE_AGENT_PYTHON%""
 
-rem åªæœ‰ç”¨æˆ·æŸ¥è¯¢ã€é˜…è¯»æˆ–é€‰æ‹©çš„ç›¸å…³æ–‡ä»¶æ‰ç”± MATERIALIZE å¤åˆ¶ä¸ºå·¥ä½œå‰¯æœ¬ï¼Œå¯ç‹¬ç«‹æ‰©å®¹ã€‚
-set "FILESYSTEM_WORKER_ID=materialize-worker-1"
-set "FILESYSTEM_WORKER_QUEUES=MATERIALIZE,IMPORT"
-start "File Agent - Materialize Worker 1" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
+rem PP-StructureV3 ºÍ×Ö¶ÎÄ£ĞÍÊ¹ÓÃ¶ÀÁ¢Âı¶ÓÁĞ£»Î´ÆôÓÃ¹¦ÄÜÊ±¸Ã worker ±£³Ö¿ÕÏĞ¡£
+start "File Agent - Structured Extraction Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%PROJECT_ROOT%\scripts\run-file-agent-worker.cmd" "structured-extraction-worker" "STRUCTURED_EXTRACTION" "%FILE_AGENT_PYTHON%""
 
-set "FILESYSTEM_WORKER_ID=materialize-worker-2"
-set "FILESYSTEM_WORKER_QUEUES=MATERIALIZE,IMPORT"
-start "File Agent - Materialize Worker 2" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
-
-rem å·¥ä½œå‰¯æœ¬å†…å®¹å‘ç”Ÿå˜åŒ–åæ‰åœ¨ ANALYSIS é˜Ÿåˆ—é‡æ–°è§£æã€æ‘˜è¦ã€åˆ†ç±»å’Œå»ºç´¢å¼•ã€‚
-set "FILESYSTEM_WORKER_ID=analysis-worker"
-set "FILESYSTEM_WORKER_QUEUES=ANALYSIS"
-start "File Agent - Analysis Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
-
-rem PP-StructureV3 å’Œå­—æ®µæ¨¡å‹ä½¿ç”¨ç‹¬ç«‹æ…¢é˜Ÿåˆ—ï¼›æœªå¯ç”¨åŠŸèƒ½æ—¶è¯¥ worker ä¿æŒç©ºé—²ã€‚
-set "FILESYSTEM_WORKER_ID=structured-extraction-worker"
-set "FILESYSTEM_WORKER_QUEUES=STRUCTURED_EXTRACTION"
-start "File Agent - Structured Extraction Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
-
-rem Neo4j bootstrap å’Œæ­£å¼åˆ†ç±» outbox ç”±ç‹¬ç«‹ GRAPH worker æ¶ˆè´¹ï¼Œä¸é˜»å¡ API å¯åŠ¨æˆ–æ–‡ä»¶å¤åˆ¶ã€‚
-set "FILESYSTEM_WORKER_ID=graph-worker"
-set "FILESYSTEM_WORKER_QUEUES=GRAPH"
-start "File Agent - Graph Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.managed_files.worker"
+rem Neo4j bootstrap ºÍÕıÊ½·ÖÀà outbox ÓÉ¶ÀÁ¢ GRAPH worker Ïû·Ñ£¬²»×èÈû API Æô¶¯»òÎÄ¼ş¸´ÖÆ¡£
+start "File Agent - Graph Worker" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%PROJECT_ROOT%\scripts\run-file-agent-worker.cmd" "graph-worker" "GRAPH" "%FILE_AGENT_PYTHON%""
 
 if /I "%~1"=="--with-watcher" (
-    rem watcher æ˜¯å¯é€‰è¿›ç¨‹ï¼›scheduler è½®è¯¢å·²ç»æä¾›æœ€ç»ˆä¸€è‡´çš„ç›®å½•åŒæ­¥ã€‚
+    rem watcher ÊÇ¿ÉÑ¡½ø³Ì£»scheduler ÂÖÑ¯ÒÑ¾­Ìá¹©×îÖÕÒ»ÖÂµÄÄ¿Â¼Í¬²½¡£
     set "FILESYSTEM_WORKER_ID="
     set "FILESYSTEM_WORKER_QUEUES="
     start "File Agent - Managed Root Watcher" /D "%PROJECT_ROOT%" "%ComSpec%" /D /K ""%FILE_AGENT_PYTHON%" -m app.modules.file_lifecycle.watcher"

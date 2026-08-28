@@ -58,6 +58,20 @@ class ClassificationRuntimeFactory:
         bucket = int(hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:8], 16) % 100
         return "enabled" if bucket < rollout else "shadow"
 
+    def classifier_version_for_user(self, *, user_id: str) -> str:
+        """不构造外部依赖即可计算指定用户当前分类器版本。"""
+
+        graph_mode = self.graph_mode_for_user(user_id=user_id)
+        summary_mode = (
+            "summary"
+            if self.settings.llm_classification_summary_enabled
+            else "fulltext"
+        )
+        return (
+            f"taxonomy-{summary_mode}-first-"
+            f"{self.settings.llm_classification_mode}-graph-{graph_mode}-v4"
+        )
+
     def _build_llm_judge(self) -> LLMClassificationJudge | None:
         """仅在显式启用 LLM 判定模式时构造外部模型客户端。"""
 
