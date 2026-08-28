@@ -26,7 +26,7 @@ const REASON_LABELS: Record<string, string> = {
   OTHER_CATEGORY: '仅匹配到“其他”分类',
   NO_TAXONOMY_CANDIDATE: '未找到可用分类',
   EVIDENCE_MISSING: '缺少可定位证据',
-  LOW_CONFIDENCE: '置信度不足',
+  LOW_CONFIDENCE: '分类依据不足',
   LOW_MARGIN: '候选分类接近',
   EVIDENCE_NOT_LOCATED: '缺少可定位证据',
   INSUFFICIENT_CONTENT_SIGNALS: '正文信号不足',

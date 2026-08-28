@@ -3,7 +3,6 @@ import { useEffect, useState } from 'react';
 
 import { getClassificationTaxonomyOptions, submitClassificationFeedback } from '../../api/client';
 import type { ClassificationTaxonomyOption, DocumentCategory } from '../../types';
-import { formatConfidence } from './presentation';
 
 type CategoryChipProps = {
   category: DocumentCategory;
@@ -89,7 +88,6 @@ export function CategoryChip({
       >
         <Tag size={14} />
         <span>{category.name}</span>
-        {!compact ? <em className="category-chip__confidence">{formatConfidence(category.confidence)}</em> : null}
       </button>
       {expanded ? (
         <div className="result-evidence">

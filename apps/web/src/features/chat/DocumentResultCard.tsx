@@ -13,6 +13,8 @@ type DocumentResultCardProps = {
   attachment?: ChatAttachment;
   onOpenFile?: (file: ChatAttachment) => void;
   onOpenDocument?: (documentId: string, filename: string) => void;
+  showIndex?: boolean;
+  showPrimaryCategory?: boolean;
 };
 
 /** 展示一个文件的安全处理回执，并把文件打开动作交给受控上层回调。 */
@@ -24,6 +26,8 @@ export function DocumentResultCard({
   onOpenDocument,
   token,
   agentRunId,
+  showIndex = true,
+  showPrimaryCategory = true,
 }: DocumentResultCardProps) {
   // 每个文件单独成卡，避免把批量结果挤成一整段文本。
   const failed = result.extraction_status === 'FAILED';
@@ -57,7 +61,7 @@ export function DocumentResultCard({
                 onClick={openFile}
                 title={canOpen ? '预览文件' : undefined}
               >
-                {index}. {filename}
+                {showIndex ? `${index}. ` : ''}{filename}
               </button>
               <span className="document-result-size">
                 {attachment ? formatFileSize(attachment.size_bytes) : '文件不可用'}
@@ -82,7 +86,7 @@ export function DocumentResultCard({
                 onClick={openFile}
                 title={canOpen ? '预览文件' : undefined}
               >
-                {index}. {filename}
+                {showIndex ? `${index}. ` : ''}{filename}
               </button>
               <span className="document-result-size">
                 {attachment
@@ -92,7 +96,7 @@ export function DocumentResultCard({
                     : '字符数未统计'}
               </span>
             </div>
-            {primaryCategory ? (
+            {showPrimaryCategory && primaryCategory ? (
               <div className="document-result-inline-category">
                 <CategoryChip
                   category={primaryCategory}
@@ -103,9 +107,9 @@ export function DocumentResultCard({
                 />
               </div>
             ) : null}
-            <span className="document-result-confidence">
-              {primaryCategory ? `置信度 ${primaryCategory.confidence.toFixed(2)}` : '暂无可靠分类'}
-            </span>
+            {showPrimaryCategory && !primaryCategory ? (
+              <span className="document-result-confidence">暂无可靠分类</span>
+            ) : null}
             {result.search_status ? (
               <span
                 className="document-result-confidence"
@@ -122,7 +126,7 @@ export function DocumentResultCard({
                 {categories.slice(1).map((category) => (
                   <CategoryChip
                     category={category}
-                    key={`${category.name}-${category.confidence}`}
+                    key={category.suggestion_id || category.category_id || category.name}
                     compact
                     token={token}
                     agentRunId={agentRunId}
