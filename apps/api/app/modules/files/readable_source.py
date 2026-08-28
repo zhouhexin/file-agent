@@ -312,5 +312,11 @@ def _parser_config_hash(*, filename: str, purpose: str) -> str | None:
     if settings.file_rename_parse_mode != "native":
         return extraction_config_hash(filename=filename)
     suffix = Path(filename).suffix.lower().lstrip(".")
-    identity = f"rename-native-v1|format={suffix}"
+    if suffix in {"txt", "md", "csv"}:
+        identity = (
+            "rename-native-v2|"
+            f"format={suffix}|parser={extraction_config_hash(filename=filename)}"
+        )
+    else:
+        identity = f"rename-native-v1|format={suffix}"
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
