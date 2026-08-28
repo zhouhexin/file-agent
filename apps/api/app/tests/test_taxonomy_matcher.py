@@ -14,7 +14,7 @@ def test_matcher_returns_specific_school_category_path():
     assert matches[0]["name"] == "学校/人事师资/职称"
     assert matches[0]["category_path"] == ["学校", "人事师资", "职称"]
     assert matches[0]["taxonomy_key"] == "unified_school_file_classification"
-    assert matches[0]["taxonomy_version"] == "2026-08-v3"
+    assert matches[0]["taxonomy_version"] == "2026-08-v4"
     assert "职称" in matches[0]["evidence"]
 
 
@@ -61,7 +61,7 @@ def test_matcher_returns_other_when_no_taxonomy_keywords_match():
             "status": "SUGGESTED",
             "evidence": [],
             "taxonomy_key": "unified_school_file_classification",
-            "taxonomy_version": "2026-08-v3",
+            "taxonomy_version": "2026-08-v4",
         }
     ]
 
@@ -150,6 +150,94 @@ def test_recall_candidates_respects_limit_and_stable_sorting():
         [item.rule_score for item in candidates],
         reverse=True,
     )
+
+
+def test_recall_candidates_prefers_college_talent_work_for_college_plan():
+    """学院人才引育计划应优先召回学院级人才工作，而不是学校级同名分类。"""
+
+    taxonomy = load_default_taxonomy()
+    features = DocumentFeatures(
+        filename="计算机学院2024年高层次人才引育计划.docx",
+        title="计算机科学与工程学院2024年高层次人才引育计划",
+        full_text=(
+            "学院始终将人才引育工作作为学院重要工作，学院计划柔性引进国家级人才，"
+            "并建立人才队伍台账。"
+        ),
+    )
+
+    candidates = recall_category_candidates(features, taxonomy, limit=8)
+    college = next(item for item in candidates if item.category_id == "college.hr.talent-work")
+    school = next(item for item in candidates if item.category_id == "school.hr.talent-work")
+
+    assert candidates[0].category_id == "college.hr.talent-work"
+    assert college.rule_score > school.rule_score
+    assert {"高层次人才引育计划", "人才引育工作", "人才队伍台账"} & set(
+        college.matched_signals
+    )
+
+
+def test_recall_candidates_prefers_college_talent_work_for_necessity_report():
+    """学院提出人才引进需求的必要性报告应归入学院级人才工作。"""
+
+    taxonomy = load_default_taxonomy()
+    features = DocumentFeatures(
+        filename="计算机学院2023年高层次人才引进必要性分析报告.docx",
+        title="计算机科学与工程学院高层次人才引进必要性分析报告",
+        full_text="根据学院发展需要，学院拟引进领军人才，以支持学院学科建设。",
+    )
+
+    candidates = recall_category_candidates(features, taxonomy, limit=8)
+    college = next(item for item in candidates if item.category_id == "college.hr.talent-work")
+    school = next(item for item in candidates if item.category_id == "school.hr.talent-work")
+
+    assert candidates[0].category_id == "college.hr.talent-work"
+    assert college.rule_score > school.rule_score
+    assert "人才引进必要性" in college.matched_signals
+    assert "学院拟引进" in college.matched_signals
+
+
+def test_recall_candidates_keeps_school_talent_notice_at_school_level():
+    """面向全校发布的人才工作通知不应因学院级规则扩展而改判为学院文件。"""
+
+    taxonomy = load_default_taxonomy()
+    features = DocumentFeatures(
+        filename="关于做好学校高层次人才引进工作的通知.docx",
+        title="关于做好学校高层次人才引进工作的通知",
+        full_text="人事处面向全校各单位发布高层次人才引进工作通知。",
+    )
+
+    candidates = recall_category_candidates(features, taxonomy, limit=8)
+    school = next(item for item in candidates if item.category_id == "school.hr.talent-work")
+    college = next(
+        (item for item in candidates if item.category_id == "college.hr.talent-work"),
+        None,
+    )
+
+    assert candidates[0].category_id == "school.hr.talent-work"
+    assert college is None or school.rule_score > college.rule_score
+
+
+def test_recall_candidates_recognizes_workdata_college_talent_filenames():
+    """来自 workdata 的稳定学院人才文种在仅有文件名时也应优先召回学院级分类。"""
+
+    taxonomy = load_default_taxonomy()
+    filenames = [
+        "计算机学院2024年高层次人才引育计划.docx",
+        "计算机学院2023年高层次人才引进必要性报告.docx",
+        "计算机科学与工程学院关于柔性引进高层次人才的报告.docx",
+        "计算机学院人才工作自评表.docx",
+        "西安理工大学海外人才需求名单-计算机学院.xlsx",
+        "西安理工大学2024年拟引进高层次人才候选人统计表-计算机学院.xls",
+    ]
+
+    for filename in filenames:
+        candidates = recall_category_candidates(
+            DocumentFeatures(filename=filename, title=filename),
+            taxonomy,
+            limit=8,
+        )
+
+        assert candidates[0].category_id == "college.hr.talent-work", filename
 
 
 def test_match_document_text_uses_recall_candidates_for_rule_only_output():

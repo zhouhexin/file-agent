@@ -28,7 +28,9 @@ export function DocumentResultCard({
   // 每个文件单独成卡，避免把批量结果挤成一整段文本。
   const failed = result.extraction_status === 'FAILED';
   const filename = result.filename || attachment?.filename || result.document_id;
-  const primaryCategory = result.categories[0];
+  // 历史生命周期回执可能只记录处理状态和命名建议，没有分类数组。
+  const categories = result.categories ?? [];
+  const primaryCategory = categories[0];
   const canOpen = Boolean((attachment && onOpenFile) || onOpenDocument);
   const openFile = () => {
     // 当前轮优先复用完整附件信息；历史回执则只用稳定 document_id 重新鉴权预览。
@@ -83,7 +85,11 @@ export function DocumentResultCard({
                 {index}. {filename}
               </button>
               <span className="document-result-size">
-                {attachment ? formatFileSize(attachment.size_bytes) : `${result.char_count.toLocaleString()} 字符`}
+                {attachment
+                  ? formatFileSize(attachment.size_bytes)
+                  : typeof result.char_count === 'number'
+                    ? `${result.char_count.toLocaleString()} 字符`
+                    : '字符数未统计'}
               </span>
             </div>
             {primaryCategory ? (
@@ -110,10 +116,10 @@ export function DocumentResultCard({
               </span>
             ) : null}
           </header>
-          {result.categories.length > 1 ? (
+          {categories.length > 1 ? (
             <div className="document-result-categories">
               <div className="category-chip-list">
-                {result.categories.slice(1).map((category) => (
+                {categories.slice(1).map((category) => (
                   <CategoryChip
                     category={category}
                     key={`${category.name}-${category.confidence}`}

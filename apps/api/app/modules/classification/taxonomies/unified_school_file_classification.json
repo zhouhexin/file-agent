@@ -1,8 +1,8 @@
 {
   "key": "unified_school_file_classification",
   "name": "学校文件统一分类体系",
-  "version": "2026-08-v3",
-  "source": "文件归类(1).xlsx + managed-directory-inventory@managed-downloads-2026-07-15-v1 + managed-directory-inventory@managed-downloads-2026-07-18-v2 + physical-path-completion@2026-08-27-v3",
+  "version": "2026-08-v4",
+  "source": "文件归类(1).xlsx + managed-directory-inventory@managed-downloads-2026-07-15-v1 + managed-directory-inventory@managed-downloads-2026-07-18-v2 + physical-path-completion@2026-08-27-v3 + college-talent-work-samples@workdata-2026-08-28-v4",
   "categories": [
     {
       "id": "school",
@@ -955,7 +955,60 @@
             {
               "id": "college.hr.talent-work",
               "name": "人才工作",
-              "organization_path": ["学院", "人事师资", "人才工作"]
+              "organization_path": ["学院", "人事师资", "人才工作"],
+              "description": "与学院制定和落实人才引育计划、提出高层次人才引进需求、推荐或考察候选人、提交柔性引进与必要性报告、开展人才工作自评及院内人才管理相关的文件。",
+              "aliases": [
+                "学院人才工作",
+                "学院人才引进",
+                "学院人才引育",
+                "人才工作自评",
+                "人才引进必要性报告",
+                "人才引进必要性分析报告",
+                "高层次人才引育计划",
+                "人才引育计划",
+                "柔性引进报告",
+                "人才引进管理办法",
+                "人才需求名单",
+                "高层次人才候选人统计表"
+              ],
+              "positive_signals": [
+                "学院人才工作",
+                "人才工作自评表",
+                "人才工作会议",
+                "人才引育工作",
+                "高层次人才引育计划",
+                "人才引育计划",
+                "人才引育",
+                "人才引进必要性",
+                "高层次人才引进必要性分析报告",
+                "高层次人才引进必要性报告",
+                "学院拟柔性引进",
+                "学院计划柔性引进",
+                "学院关于柔性引进",
+                "柔性引进",
+                "学院拟引进",
+                "拟引进高层次人才候选人",
+                "高层次人才候选人统计表",
+                "人才候选人统计表",
+                "海外人才需求名单",
+                "海外人才需求",
+                "人才需求名单",
+                "学院引进人才计划",
+                "人才队伍台账"
+              ],
+              "negative_signals": [
+                "财务报销",
+                "经费延期",
+                "学生就业",
+                "课程安排"
+              ],
+              "examples": [
+                "计算机学院2024年高层次人才引育计划",
+                "计算机学院高层次人才引进必要性分析报告",
+                "计算机科学与工程学院关于柔性引进高层次人才的报告",
+                "计算机学院人才工作自评表",
+                "学院拟引进高层次人才候选人统计表"
+              ]
             },
             {
               "id": "college.hr.faculty-recruitment",

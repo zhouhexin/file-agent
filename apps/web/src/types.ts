@@ -752,7 +752,8 @@ export type DocumentResult = {
   extraction_status: 'COMPLETED' | 'FAILED' | string;
   extractor?: string;
   page_count: number;
-  char_count: number;
+  /** 历史或非解析类任务回执可能不包含字符数。 */
+  char_count?: number;
   text_reused: boolean;
   classification_reused: boolean;
   year?: string | null;
@@ -764,7 +765,8 @@ export type DocumentResult = {
   managed_original_unchanged?: boolean;
   risk_warnings?: Array<{ code?: string; message?: string }>;
   pending_decision?: Record<string, unknown> | null;
-  categories: DocumentCategory[];
+  /** 历史或非分类类生命周期回执可能不包含分类数组。 */
+  categories?: DocumentCategory[];
   warnings: Array<Record<string, unknown> | string>;
   errors: Array<{
     code?: string;

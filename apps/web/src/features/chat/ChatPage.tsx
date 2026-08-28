@@ -783,7 +783,7 @@ export function ChatPage({
             onClick={onOpenFiles}
           >
             <FolderTree size={16} />
-            <span>文件分类</span>
+            <span>文件列表</span>
           </button>
           <button
             className="sidebar-menu-item"

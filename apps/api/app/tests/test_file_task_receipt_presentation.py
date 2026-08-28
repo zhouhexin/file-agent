@@ -73,6 +73,117 @@ def test_later_phase_classification_keeps_existing_receipt_during_stage_two() ->
     assert receipt.presentation is None
 
 
+def test_document_results_without_read_intent_do_not_infer_read_presentation() -> None:
+    """逐文件结果是结果容器，不得被回执层单独解释成用户要求读取文件。"""
+
+    receipt = build_user_task_receipt(
+        _make_result(
+            intent="BACKGROUND_TASK",
+            document_results=[
+                {
+                    "document_id": "document-1",
+                    "filename": "制度.docx",
+                    "extraction_status": "COMPLETED",
+                }
+            ],
+        )
+    )
+
+    assert receipt.response_type == "file_results"
+    assert receipt.presentation is None
+
+
+def test_historical_lifecycle_rename_result_is_not_presented_as_file_read() -> None:
+    """历史生命周期消息应按结构化命名建议映射，不能显示为文件读取结果。"""
+
+    receipt = build_user_task_receipt(
+        _make_result(
+            intent="SYSTEM_FILE_LIFECYCLE",
+            tool_invocations=[
+                ToolInvocationRecord(
+                    tool_name="document-background-analysis",
+                    input_json={"target_type": "document_version"},
+                    output_json={"status": "COMPLETED"},
+                    status="COMPLETED",
+                )
+            ],
+            document_results=[
+                {
+                    "document_id": "document-1",
+                    "working_copy_id": "copy-1",
+                    "filename": "审计报告.pdf",
+                    "extraction_status": "COMPLETED",
+                    "rename_suggestion": {
+                        "proposed_filename": "2025_审计报告.pdf",
+                    },
+                    "pending_decision": {
+                        "type": "rename_suggestion",
+                        "message": "是否生成改名计划？",
+                    },
+                }
+            ],
+            final_response="系统已生成命名建议，当前尚未改名。",
+        )
+    )
+
+    assert receipt.presentation is not None
+    assert receipt.presentation.task_kind == "RENAME_SUGGESTION"
+    assert receipt.presentation.title == "文件命名建议"
+    assert "读取" not in str(receipt.presentation.model_dump())
+    assert receipt.presentation.change_impact.operation_executed is False
+    assert receipt.presentation.change_impact.working_copies_changed is False
+    assert receipt.task_status == "needs_attention"
+
+
+def test_lifecycle_classification_and_archive_have_explicit_business_titles() -> None:
+    """后台分类和上传归档必须展示各自业务类型，不得共用读取标题。"""
+
+    classification_receipt = build_user_task_receipt(
+        _make_result(
+            intent="SYSTEM_FILE_LIFECYCLE",
+            tool_invocations=[
+                ToolInvocationRecord(
+                    tool_name="managed-source-auto-classification",
+                    input_json={"target_type": "managed_file_revision"},
+                    output_json={"status": "COMPLETED"},
+                    status="COMPLETED",
+                )
+            ],
+            document_results=[
+                {
+                    "document_id": "document-1",
+                    "filename": "工会材料.doc",
+                    "extraction_status": "COMPLETED",
+                    "categories": [{"name": "工会"}],
+                }
+            ],
+        )
+    )
+    archive_receipt = build_user_task_receipt(
+        _make_result(
+            intent="SYSTEM_FILE_LIFECYCLE",
+            tool_invocations=[
+                ToolInvocationRecord(
+                    tool_name="upload-archive",
+                    input_json={"target_type": "managed_file"},
+                    output_json={"status": "COMPLETED"},
+                    status="COMPLETED",
+                )
+            ],
+            final_response="文件原件已归档。",
+        )
+    )
+
+    assert classification_receipt.presentation is not None
+    assert classification_receipt.presentation.task_kind == "CLASSIFY"
+    assert classification_receipt.presentation.title == "文件分类结果"
+    assert archive_receipt.presentation is not None
+    assert archive_receipt.presentation.task_kind == "INGEST"
+    assert archive_receipt.presentation.title == "文件归档结果"
+    assert "读取结果" not in str(classification_receipt.presentation.model_dump())
+    assert "读取结果" not in str(archive_receipt.presentation.model_dump())
+
+
 def test_search_receipt_has_scope_counts_change_impact_and_safe_actions() -> None:
     """文件搜索必须展示业务范围、结果完整性和只读状态。"""
 

@@ -14,7 +14,7 @@ def test_default_taxonomy_loads_unified_school_file_classification():
     taxonomy = load_default_taxonomy()
 
     assert taxonomy.key == "unified_school_file_classification"
-    assert taxonomy.version == "2026-08-v3"
+    assert taxonomy.version == "2026-08-v4"
     assert taxonomy.categories[0].name == "学校"
 
 
@@ -88,6 +88,7 @@ def test_default_taxonomy_contains_v2_metadata_for_high_frequency_categories():
         if item.category_id and item.description and item.positive_signals and item.examples
     ]
     appointment = next(item for item in flattened if item.category_id == "school.hr.appointment-assessment")
+    college_talent_work = next(item for item in flattened if item.category_id == "college.hr.talent-work")
 
     assert len(enriched_leaves) >= 20
     assert appointment.path == ["学校", "人事师资", "考核聘任"]
@@ -95,6 +96,11 @@ def test_default_taxonomy_contains_v2_metadata_for_high_frequency_categories():
     assert "教师" in appointment.positive_signals
     assert "奖学金" in appointment.negative_signals
     assert appointment.examples
+    assert college_talent_work.path == ["学院", "人事师资", "人才工作"]
+    assert "学院人才引育" in college_talent_work.aliases
+    assert "人才引进必要性" in college_talent_work.positive_signals
+    assert "经费延期" in college_talent_work.negative_signals
+    assert college_talent_work.examples
 
 
 def test_default_taxonomy_contains_live_managed_volume_signals():

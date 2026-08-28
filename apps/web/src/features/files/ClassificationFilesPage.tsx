@@ -23,6 +23,9 @@ type ClassificationFilesPageProps = {
 const PAGE_SIZE = 20;
 
 const REASON_LABELS: Record<string, string> = {
+  OTHER_CATEGORY: '仅匹配到“其他”分类',
+  NO_TAXONOMY_CANDIDATE: '未找到可用分类',
+  EVIDENCE_MISSING: '缺少可定位证据',
   LOW_CONFIDENCE: '置信度不足',
   LOW_MARGIN: '候选分类接近',
   EVIDENCE_NOT_LOCATED: '缺少可定位证据',
@@ -30,6 +33,7 @@ const REASON_LABELS: Record<string, string> = {
   NEGATIVE_SIGNAL_MATCHED: '存在冲突信号',
   SUMMARY_FULLTEXT_CONFLICT: '摘要与全文结论冲突',
   TARGET_PATH_CONFLICT: '目标路径冲突',
+  TARGET_NAME_CONFLICT: '目标文件名冲突',
   PARSE_NOT_READY: '文件解析未完成',
 };
 

@@ -124,6 +124,8 @@ def compose_file_task_presentation(result: AgentRunResult) -> FileTaskPresentati
 职责边界：
 
 - 只读取 `intent`、`status`、`search_context`、`document_results`、OperationPlan ID 和已投影的安全业务结果。
+- `document_results` 只是逐文件结果容器，不能单独作为 `READ` 的判定依据；读取回执必须来自明确的读取意图。
+- `SYSTEM_FILE_LIFECYCLE` 必须由后端根据已审计的生命周期 Tool 类型和结构化结果映射为归档、分类、命名建议、文件操作或待确认事项；未声明映射的事件保持原有文本/专用回执，不得回退成“文件读取结果”。
 - 不读取文件正文，不重新计算分类或搜索相关性。
 - 不允许 LLM 填写数量、路径、页码、before/after 或文件变化状态。
 - 无文件对象、文件范围或文件结果的普通聊天返回 `None`，继续使用文本回执。
@@ -284,6 +286,7 @@ npm run build
 ### 阶段三：覆盖分析与建议任务
 
 - [ ] 接入解析、OCR、分类、洞察和重命名建议。
+- [x] 先行完成系统生命周期中的归档、后台分类、命名建议和待确认事项类型映射，并兼容既有历史 AgentRun。
 - [ ] 统一派生件、建议、低置信度、失败和待复核表达。
 
 ### 阶段四：覆盖文件变更任务
