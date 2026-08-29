@@ -4,7 +4,9 @@ from pathlib import Path
 import sys
 from types import ModuleType
 
-from app.modules.ocr.service import OcrService, PaddleOcrProvider
+from app.core import config
+from app.modules.ocr.service import OcrService, PaddleOcrProvider, build_default_ocr_service
+from app.modules.ocr.tencent_cloud_provider import TencentCloudOcrProvider
 
 
 class FakeProvider:
@@ -73,6 +75,80 @@ def test_ocr_service_keeps_paddle_result_when_quality_is_enough(tmp_path):
     assert result["text"] == "Paddle OCR 文本"
     assert result["source"] == "paddleocr_cpu"
     assert llm.calls == []
+
+
+def test_default_ocr_service_uses_tencent_cloud_provider(monkeypatch):
+    """默认基础 OCR 必须构造腾讯云 Provider，且未显式配置时不启用本地回退。"""
+
+    monkeypatch.setenv("OCR_PROVIDER", "tencent_cloud")
+    monkeypatch.setenv("OCR_EXTERNAL_CONTENT_AUTHORIZED", "true")
+    monkeypatch.setenv("TENCENT_CLOUD_OCR_SECRET_ID", "secret-id")
+    monkeypatch.setenv("TENCENT_CLOUD_OCR_SECRET_KEY", "secret-key")
+    monkeypatch.setenv("OCR_LOCAL_FALLBACK_ENABLED", "false")
+    config.get_settings.cache_clear()
+
+    service = build_default_ocr_service()
+
+    assert isinstance(service.primary_provider, TencentCloudOcrProvider)
+    assert service.fallback_provider is None
+
+
+def test_tencent_failure_can_use_explicit_local_fallback(tmp_path):
+    """只有显式注入本地回退时，腾讯云技术失败才允许继续本地识别。"""
+
+    image_path = tmp_path / "page.png"
+    image_path.write_bytes(b"fake")
+    tencent = FakeProvider(name="tencent_cloud_general_accurate", text="", quality_score=0)
+    local = FakeProvider(name="paddleocr_cpu", text="本地回退正文", quality_score=0.9)
+    # 模拟 Provider 结构化失败，而不是用低质量成功结果触发回退。
+    tencent.extract_image = lambda **_: {
+        "ok": False,
+        "source": "tencent_cloud_general_accurate",
+        "error": {
+            "code": "OCR_PROVIDER_TEMPORARY_FAILURE",
+            "message": "暂时不可用",
+            "retryable": True,
+        },
+    }
+
+    result = OcrService(
+        primary_provider=tencent,
+        fallback_provider=local,
+        fallback_on_low_quality=False,
+    ).extract_image(image_path=image_path)
+
+    assert result["ok"] is True
+    assert result["text"] == "本地回退正文"
+    assert result["fallback_from"] == "tencent_cloud_general_accurate"
+
+
+def test_tencent_non_retryable_failure_does_not_use_local_fallback(tmp_path):
+    """未授权、鉴权和输入错误不得被本地回退掩盖。"""
+
+    image_path = tmp_path / "page.png"
+    image_path.write_bytes(b"fake")
+    tencent = FakeProvider(name="tencent_cloud_general_accurate", text="", quality_score=0)
+    local = FakeProvider(name="paddleocr_cpu", text="不应使用的本地正文", quality_score=0.9)
+    tencent.extract_image = lambda **_: {
+        "ok": False,
+        "source": "tencent_cloud_general_accurate",
+        "error": {
+            "code": "OCR_EXTERNAL_CONTENT_NOT_AUTHORIZED",
+            "message": "未授权外发",
+            "retryable": False,
+        },
+    }
+
+    result = OcrService(
+        primary_provider=tencent,
+        fallback_provider=local,
+        fallback_on_low_quality=False,
+        fallback_on_non_retryable_failure=False,
+    ).extract_image(image_path=image_path)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "OCR_EXTERNAL_CONTENT_NOT_AUTHORIZED"
+    assert local.calls == []
 
 
 def test_paddle_provider_sets_baidu_bos_model_source_before_loading(monkeypatch):

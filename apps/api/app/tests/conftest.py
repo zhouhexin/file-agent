@@ -48,12 +48,16 @@ def disable_real_integrations_by_default(monkeypatch, request):
         "MCP_FILESYSTEM_ENABLED",
         "OCR_ENABLED",
         "OCR_LLM_ENABLED",
+        "OCR_EXTERNAL_CONTENT_AUTHORIZED",
         "PP_STRUCTURE_ENABLED",
         "STRUCTURED_EXTRACTION_ENABLED",
         "DOCLING_ENABLED",
         "MANAGED_ROOT_RECONCILE_ON_STARTUP",
     ):
         monkeypatch.setenv(env_name, "false")
+    # 即使开发者 Shell 中存在真实腾讯云凭证，测试也不能读取或使用它们。
+    monkeypatch.delenv("TENCENT_CLOUD_OCR_SECRET_ID", raising=False)
+    monkeypatch.delenv("TENCENT_CLOUD_OCR_SECRET_KEY", raising=False)
     config.get_settings.cache_clear()
     yield
     config.get_settings.cache_clear()

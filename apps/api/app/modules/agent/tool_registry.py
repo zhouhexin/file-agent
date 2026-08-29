@@ -3366,7 +3366,7 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
             extractor=extraction["extractor"],
             page_count=len(extraction["pages"]),
         )
-        if extraction["extractor"] == "ocr":
+        if "ocr" in str(extraction["extractor"]).lower() or "tencent_cloud_general_accurate" in str(extraction["extractor"]):
             log_event(
                 "file.ocr.completed" if extraction["ok"] else "file.ocr.failed",
                 level="ERROR" if not extraction["ok"] else "INFO",
@@ -3508,7 +3508,9 @@ def _read_profile_from_persisted_pages(*, extractor: str, pages: list[Any]) -> D
         "char_count": char_count,
         "has_text": char_count > 0,
         "requires_ocr": quality == "OCR_NEEDED",
-        "ocr_used": any(bool((page.metadata_json or {}).get("ocr_fallback")) for page in pages) or "ocr" in extractor,
+        "ocr_used": any(bool((page.metadata_json or {}).get("ocr_fallback")) for page in pages)
+        or "ocr" in extractor
+        or extractor == "tencent_cloud_general_accurate",
     }
 
 
@@ -3523,7 +3525,7 @@ def _file_type_from_extractor_name(extractor: str) -> str:
         return "document"
     if extractor.startswith("pdf"):
         return "pdf"
-    if extractor in {"ocr", "paddleocr_cpu", "llm_ocr_remote"}:
+    if extractor in {"ocr", "paddleocr_cpu", "llm_ocr_remote", "tencent_cloud_general_accurate"}:
         return "image"
     return "unknown"
 

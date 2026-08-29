@@ -264,6 +264,18 @@ ADAPTIVE_PLANNER_ROLLOUT_PERCENT=0
 ADAPTIVE_PLANNER_SHADOW_SAMPLE_PERCENT=100
 ADAPTIVE_PLANNER_SCHEMA_VERSION=planner-decision-v1
 OCR_ENABLED=true
+OCR_PROVIDER=tencent_cloud
+OCR_EXTERNAL_CONTENT_AUTHORIZED=true
+TENCENT_CLOUD_OCR_SECRET_ID=<your-secret-id>
+TENCENT_CLOUD_OCR_SECRET_KEY=<your-secret-key>
+TENCENT_CLOUD_OCR_REGION=ap-guangzhou
+TENCENT_CLOUD_OCR_ENDPOINT=ocr.tencentcloudapi.com
+TENCENT_CLOUD_OCR_ACTION=GeneralAccurateOCR
+TENCENT_CLOUD_OCR_TIMEOUT_SECONDS=30
+TENCENT_CLOUD_OCR_MAX_RETRIES=2
+TENCENT_CLOUD_OCR_MAX_QPS=2
+TENCENT_CLOUD_OCR_MAX_IMAGE_BYTES=10485760
+OCR_LOCAL_FALLBACK_ENABLED=false
 OCR_PADDLE_MODEL_SOURCE=BOS
 OCR_LLM_ENABLED=false
 OCR_LLM_FALLBACK_QUALITY_THRESHOLD=0.68
@@ -349,9 +361,11 @@ LexRank 选择可定位原文句子，不下载模型、不要求 GPU，也不�
 识别为待修复并重建。重建完成前全文总结明确返回 `INDEX_PENDING`，不会把旧 500 字符证据冒充完整
 总结。
 
-OCR 第一阶段使用本地 PaddleOCR 作为默认 Provider。图片文件会直接进入 OCR；PDF 原生文本为空时会先渲染页面，再进入 OCR，并把识别文本写入 `document_pages.text_content`。`OCR_PADDLE_MODEL_SOURCE` 默认是 `BOS`，服务会在加载 PaddleOCR 前设置 `PADDLE_PDX_MODEL_SOURCE=BOS`，让 PaddleOCR 使用百度 BOS 模型下载源。如需启用 LLM OCR 兜底，必须显式设置 `OCR_LLM_ENABLED=true` 且 `LLM_ENABLED=true`；系统会在本地 OCR 质量低于 `OCR_LLM_FALLBACK_QUALITY_THRESHOLD` 时按页调用多模态模型，不默认外发整份文件。
+基础 OCR 默认使用腾讯云 `GeneralAccurateOCR`。图片文件会直接进入 OCR；PDF 原生文本为空时先由 PyMuPDF 按页渲染，再逐页调用腾讯云，并把识别文本写入 `document_pages.text_content`。腾讯云 Provider 只有在 `OCR_EXTERNAL_CONTENT_AUTHORIZED=true` 且 SecretId/SecretKey 完整时才允许外发；密钥只能放在真实 `.env` 或服务器密钥管理系统，不得提交到 Git。`OCR_LOCAL_FALLBACK_ENABLED=false` 时腾讯云失败不会静默切换到 PaddleOCR。历史解析运行继续保留，但 Provider、Docling OCR 和本地 fallback 配置已进入解析指纹，下一次读取或管理员重处理不会复用不兼容的旧 OCR 页面。
 
-PDF、DOCX 默认使用 Docling 进行本地结构化解析，并将标题、章节、正文、页眉页脚和位置元素写入 `document_elements`。`DOCLING_OCR_ENABLED=false` 时，扫描件继续使用上述 PaddleOCR/LLM OCR 链路；Docling 缺失、转换失败或正文为空时自动回退现有 PyMuPDF/python-docx 解析器。首次启用或升级 Docling 后，解析器配置指纹会变化，相关文件下一次读取时会生成新的解析运行，旧解析结果继续保留用于历史审计。
+本次基础 OCR Provider 切换不新增数据库表或字段，不需要单独执行数据库迁移；部署时需要先安装更新后的 `requirements.txt`，再修改真实 `.env` 并重启 API、SOURCE_ANALYSIS/ANALYSIS worker。受管源文件若已有旧 OCR 解析结果，会按新解析指纹异步重建，不需要删除历史页面或解析运行。
+
+PDF、DOCX 默认使用 Docling 进行本地结构化解析，并将标题、章节、正文、页眉页脚和位置元素写入 `document_elements`。腾讯云基础 OCR 上线时必须保持 `DOCLING_OCR_ENABLED=false`，否则扫描 PDF 可能先由 Docling 本地 OCR 处理而不会进入腾讯云；Docling 缺失、转换失败或正文为空时自动回退现有 PyMuPDF/python-docx 解析器。PP-StructureV3 和 PaddleOCR-VL 属于独立的表格/结构化抽取能力，不受 `OCR_PROVIDER` 替换影响。
 
 升级到结构化解析版本后，在仓库根目录执行：
 
@@ -649,7 +663,7 @@ textutil 或 LibreOffice
 LibreOffice（旧版 .doc 和 .xls 转换所需；.xls 不再使用 xlrd）
 ```
 
-图片 OCR 和扫描 PDF OCR 默认使用 PaddleOCR CPU Provider；旧版 `.doc` 优先使用 LibreOffice 生成持久化 `.docx` 派生件，失败后再使用现有纯文本回退；旧版 `.xls` 由 LibreOffice 生成持久化 `.xlsx` 派生件后交给 openpyxl，并由各表格 Tool 复用。如果缺少依赖、没有可复用派生件或转换失败，Tool 会返回结构化错误，不会读取任意路径。
+图片 OCR 和扫描 PDF OCR 默认使用腾讯云通用文字识别 Provider；未授权、密钥不完整或腾讯云不可用时返回结构化错误，不会绕过配置外发。旧版 `.doc` 优先使用 LibreOffice 生成持久化 `.docx` 派生件，失败后再使用现有纯文本回退；旧版 `.xls` 由 LibreOffice 生成持久化 `.xlsx` 派生件后交给 openpyxl，并由各表格 Tool 复用。如果缺少依赖、没有可复用派生件或转换失败，Tool 会返回结构化错误，不会读取任意路径。
 
 当前对话触发解析已支持多个附件顺序执行。单个文件 Tool 异常会记录为该文件的失败 `document_results.errors`，后续文件继续处理；并发执行、LangGraph map/reduce、步骤级重试和恢复后续单独实现。
 

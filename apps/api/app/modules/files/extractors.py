@@ -37,6 +37,7 @@ class TextDecodingError(ValueError):
 
 _PLAIN_TEXT_DECODER_VERSION = "plain-text-decoder-v2"
 _PLAIN_TEXT_SUFFIXES = {"txt", "md", "csv"}
+_OCR_IMAGE_SUFFIXES = {"png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"}
 
 
 def extract_document_text(*, file_path: Path, filename: str, content_type: str, ocr_service: Any = None) -> Dict[str, Any]:
@@ -210,6 +211,25 @@ def extraction_config_hash(*, filename: str) -> str | None:
                 _PLAIN_TEXT_DECODER_VERSION,
                 "order=utf-8-bom>utf-16-bom>utf-8>gb18030",
                 f"format={suffix}",
+            ]
+        )
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    # 图片和扫描 PDF 的 OCR Provider 必须进入复用指纹；否则切换 PaddleOCR/Tencent
+    # 后会继续复用旧页面，导致部署者误以为腾讯云 Provider 没有生效。
+    if suffix in _OCR_IMAGE_SUFFIXES or suffix == "pdf":
+        identity = "|".join(
+            [
+                "ocr-extraction-v2",
+                f"format={suffix}",
+                f"provider={settings.ocr_provider}",
+                f"external_authorized={int(settings.ocr_external_content_authorized)}",
+                f"provider_action={settings.tencent_cloud_ocr_action if settings.ocr_provider == 'tencent_cloud' else 'local'}",
+                f"provider_endpoint={settings.tencent_cloud_ocr_endpoint if settings.ocr_provider == 'tencent_cloud' else 'local'}",
+                "image_preprocess=tencent-ocr-image-v1",
+                f"docling={int(settings.docling_enabled and suffix in set(settings.docling_formats))}",
+                f"docling_version={docling_runtime_version() if settings.docling_enabled and suffix in set(settings.docling_formats) else 'native'}",
+                f"docling_ocr={int(settings.docling_ocr_enabled)}",
+                f"local_fallback={int(settings.ocr_local_fallback_enabled)}",
             ]
         )
         return hashlib.sha256(identity.encode("utf-8")).hexdigest()
@@ -696,6 +716,7 @@ def _extract_pdf_text(file_path: Path, ocr_service: Any = None) -> Dict[str, Any
     except RuntimeError as exc:
         return _failed("pdf-ocr", "PDF_RENDER_FOR_OCR_FAILED", str(exc))
     ocr_pages: List[Dict[str, Any]] = []
+    ocr_failures: List[Dict[str, Any]] = []
     extractor_name = "pdf+ocr"
     for page in native_pages:
         page_number = int(page["page_number"])
@@ -705,20 +726,37 @@ def _extract_pdf_text(file_path: Path, ocr_service: Any = None) -> Dict[str, Any
             continue
         ocr_result = service.extract_image(image_path=rendered_path, page_number=page_number)
         if not ocr_result.get("ok"):
+            ocr_error = dict(ocr_result.get("error") or {})
+            ocr_failures.append(ocr_error)
             ocr_pages.append(
                 {
                     **page,
                     "metadata": {
                         **page.get("metadata", {}),
                         "ocr_fallback": True,
-                        "ocr_error": ocr_result.get("error"),
+                        "ocr_error": ocr_error,
                     },
                 }
             )
             continue
         extractor_name = f"pdf+{ocr_result.get('source') or 'ocr'}"
         ocr_pages.append(_page_from_ocr_result(page_number=page_number, ocr_result=ocr_result, base_metadata=page.get("metadata", {})))
-    return _completed(extractor_name, ocr_pages)
+    if ocr_failures and not any(str(page.get("text") or "").strip() for page in ocr_pages):
+        first_error = ocr_failures[0]
+        return _failed(
+            "pdf-ocr",
+            str(first_error.get("code") or "PDF_OCR_FAILED"),
+            str(first_error.get("message") or "扫描 PDF 的 OCR 识别失败。"),
+            retryable=bool(first_error.get("retryable")),
+        )
+    warnings = [
+        {
+            "code": str(error.get("code") or "PDF_OCR_PAGE_FAILED"),
+            "message": "部分 PDF 页面 OCR 识别失败，已保留成功页面结果。",
+        }
+        for error in ocr_failures[:1]
+    ]
+    return _completed(extractor_name, ocr_pages, warnings=warnings)
 
 
 def _extract_pdf_native_pages(file_path: Path) -> List[Dict[str, Any]]:
@@ -786,7 +824,12 @@ def _extract_image_text(file_path: Path, ocr_service: Any = None) -> Dict[str, A
         return _failed("ocr", "OCR_ENGINE_NOT_AVAILABLE", f"OCR 引擎不可用：{exc}")
     if not ocr_result.get("ok"):
         error = ocr_result.get("error") or {}
-        return _failed("ocr", str(error.get("code") or "OCR_FAILED"), str(error.get("message") or "OCR 识别失败。"))
+        return _failed(
+            "ocr",
+            str(error.get("code") or "OCR_FAILED"),
+            str(error.get("message") or "OCR 识别失败。"),
+            retryable=bool(error.get("retryable")),
+        )
     return _completed(
         str(ocr_result.get("source") or "ocr"),
         [_page_from_ocr_result(page_number=1, ocr_result=ocr_result, base_metadata={})],
@@ -805,6 +848,8 @@ def _page_from_ocr_result(*, page_number: int, ocr_result: Dict[str, Any], base_
             "ocr_fallback": True,
             "ocr_source": ocr_result.get("source"),
             "ocr_provider": ocr_result.get("provider_name"),
+            "ocr_provider_version": ocr_result.get("provider_version"),
+            "ocr_provider_request_id": ocr_result.get("provider_request_id"),
             "ocr_quality_score": ocr_result.get("quality_score"),
             "ocr_confidence": ocr_result.get("confidence"),
             "ocr_is_llm_fallback": bool(ocr_result.get("is_fallback")),
@@ -859,7 +904,13 @@ def _completed(
     }
 
 
-def _failed(extractor: str, code: str, message: str) -> Dict[str, Any]:
+def _failed(
+    extractor: str,
+    code: str,
+    message: str,
+    *,
+    retryable: bool = False,
+) -> Dict[str, Any]:
     """构造结构化解析失败结果。"""
 
     return {
@@ -879,7 +930,7 @@ def _failed(extractor: str, code: str, message: str) -> Dict[str, Any]:
         "error": {
             "code": code,
             "message": message,
-            "retryable": False,
+            "retryable": retryable,
             "user_action_required": False,
         },
         "pages": [],
@@ -925,7 +976,7 @@ def _file_type_from_extractor(extractor: str) -> str:
         return "document"
     if extractor.startswith("pdf"):
         return "pdf"
-    if extractor in {"ocr", "paddleocr_cpu", "llm_ocr_remote"}:
+    if extractor in {"ocr", "paddleocr_cpu", "llm_ocr_remote", "tencent_cloud_general_accurate"}:
         return "image"
     return "unknown"
 
@@ -933,4 +984,7 @@ def _file_type_from_extractor(extractor: str) -> str:
 def _extractor_uses_ocr(extractor: str) -> bool:
     """判断解析器是否已经使用 OCR。"""
 
-    return "ocr" in extractor or extractor in {"paddleocr_cpu", "llm_ocr_remote"}
+    return "ocr" in extractor or "tencent_cloud_general_accurate" in extractor or extractor in {
+        "paddleocr_cpu",
+        "llm_ocr_remote",
+    }

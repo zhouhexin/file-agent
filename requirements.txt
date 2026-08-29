@@ -19,3 +19,5 @@ paddleocr>=3.7,<4.0
 python-docx>=1.1.0
 docling>=2.50,<3.0
 jieba>=0.42.1,<0.43
+tencentcloud-sdk-python-common>=3.1,<4.0
+tencentcloud-sdk-python-ocr>=3.1,<4.0

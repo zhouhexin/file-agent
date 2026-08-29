@@ -182,6 +182,8 @@ def format_exception_traceback(error: BaseException, *, settings: Settings | Non
         resolved_settings.jwt_secret_key,
         resolved_settings.llm_api_key,
         resolved_settings.neo4j_password,
+        resolved_settings.tencent_cloud_ocr_secret_id,
+        resolved_settings.tencent_cloud_ocr_secret_key,
     ):
         if sensitive_value and len(sensitive_value) >= 4:
             formatted = formatted.replace(sensitive_value, "<redacted>")

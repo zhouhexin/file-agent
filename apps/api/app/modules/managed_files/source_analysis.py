@@ -57,6 +57,50 @@ from app.modules.managed_files.path_policy import resolve_managed_relative_path
 from app.modules.retrieval.search_profile import _normalize_text
 
 
+def managed_source_extraction_is_current(
+    *,
+    db: Session,
+    revision: ManagedFileRevision,
+    owner_id: str,
+) -> bool:
+    """判断当前源修订是否已有与现行 OCR/解析配置完全兼容的成功运行。"""
+
+    document = db.get(Document, revision.analysis_document_id)
+    version = db.get(DocumentVersion, revision.analysis_document_version_id)
+    if document is None or version is None:
+        return False
+    expected_parser_hash = ReadableDocumentSourceResolver(db=db).expected_parser_config_hash(
+        document=document,
+        document_version=version,
+    )
+    if expected_parser_hash is None:
+        return True
+    reusable = FileExtractionRepository(db, str(owner_id)).get_latest_successful_extraction(
+        document_id=document.id,
+        document_version_id=version.id,
+        parser_config_hash=expected_parser_hash,
+    )
+    return reusable is not None
+
+
+def managed_source_extraction_fingerprint(
+    *,
+    db: Session,
+    revision: ManagedFileRevision,
+) -> str:
+    """返回源侧分析任务去重使用的完整解析指纹。"""
+
+    document = db.get(Document, revision.analysis_document_id)
+    version = db.get(DocumentVersion, revision.analysis_document_version_id)
+    if document is None or version is None:
+        return "missing-analysis-record"
+    expected_parser_hash = ReadableDocumentSourceResolver(db=db).expected_parser_config_hash(
+        document=document,
+        document_version=version,
+    )
+    return expected_parser_hash or "parser-config-not-applicable"
+
+
 class ManagedFileRevisionService:
     """维护原始文件修订，不在扫描阶段读取正文或计算完整哈希。"""
 
@@ -164,26 +208,44 @@ class ManagedSourceAnalysisService:
         if not owner_id:
             raise RuntimeError("原始文件分析缺少可审计用户")
         if revision.status == "READY" and revision.analysis_document_version_id:
-            identity = current_classification_identity(
-                db=self.db,
-                settings=self.settings,
-                user_id=str(owner_id),
-            )
-            freshness = inspect_managed_source_classification(
+            extraction_current = managed_source_extraction_is_current(
                 db=self.db,
                 revision=revision,
-                identity=identity,
+                owner_id=str(owner_id),
             )
-            if freshness is ClassificationFreshness.CURRENT:
-                return {
-                    "status": "READY",
-                    "idempotent": True,
-                    "revision_id": revision.id,
-                }
-            return self.refresh_classification(
-                revision_id=revision.id,
-                user_id=str(owner_id),
-            )
+            if not extraction_current:
+                # OCR Provider、外发授权或解析器配置改变后，同一原始修订也必须重建
+                # 正文与索引；不能只刷新分类后继续复用旧 Paddle/空白页面。
+                log_event(
+                    "managed_source.analysis.parser_stale",
+                    status="STALE",
+                    document_id=revision.analysis_document_id,
+                    document_version_id=revision.analysis_document_version_id,
+                    managed_file_id=managed_file.id,
+                    managed_file_revision_id=revision.id,
+                    message="原始文件解析配置已变化，将重新生成正文和检索资料",
+                )
+            else:
+                identity = current_classification_identity(
+                    db=self.db,
+                    settings=self.settings,
+                    user_id=str(owner_id),
+                )
+                freshness = inspect_managed_source_classification(
+                    db=self.db,
+                    revision=revision,
+                    identity=identity,
+                )
+                if freshness is ClassificationFreshness.CURRENT:
+                    return {
+                        "status": "READY",
+                        "idempotent": True,
+                        "revision_id": revision.id,
+                    }
+                return self.refresh_classification(
+                    revision_id=revision.id,
+                    user_id=str(owner_id),
+                )
 
         revision.status = "ANALYZING"
         revision.analysis_status = "RUNNING"

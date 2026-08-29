@@ -253,6 +253,26 @@ def test_settings_defaults_paddleocr_model_source_to_baidu_bos(monkeypatch, tmp_
     assert settings.ocr_paddle_model_source == "BOS"
 
 
+def test_settings_loads_tencent_cloud_ocr_provider_options(monkeypatch, tmp_path):
+    """基础 OCR 默认切到腾讯云，但文件外发必须由部署方独立显式授权。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.delenv("OCR_PROVIDER", raising=False)
+    monkeypatch.setenv("OCR_EXTERNAL_CONTENT_AUTHORIZED", "true")
+    monkeypatch.setenv("TENCENT_CLOUD_OCR_SECRET_ID", "secret-id")
+    monkeypatch.setenv("TENCENT_CLOUD_OCR_SECRET_KEY", "secret-key")
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.ocr_provider == "tencent_cloud"
+    assert settings.ocr_external_content_authorized is True
+    assert settings.tencent_cloud_ocr_secret_id == "secret-id"
+    assert settings.tencent_cloud_ocr_secret_key == "secret-key"
+    assert settings.tencent_cloud_ocr_action == "GeneralAccurateOCR"
+
+
 def test_settings_loads_legacy_office_conversion_options(monkeypatch, tmp_path):
     """旧版 Office 转换配置必须由统一 Settings 读取。"""
 

@@ -32,6 +32,14 @@ DEFAULT_STRUCTURED_EXTRACTION_MAX_FIELDS = 40
 DEFAULT_STRUCTURED_EXTRACTION_MAX_RETRY_FIELDS = 20
 DEFAULT_STRUCTURED_EXTRACTION_MAX_RECORDS = 1000
 DEFAULT_OCR_PADDLE_MODEL_SOURCE = "BOS"
+DEFAULT_OCR_PROVIDER = "tencent_cloud"
+DEFAULT_TENCENT_CLOUD_OCR_REGION = "ap-guangzhou"
+DEFAULT_TENCENT_CLOUD_OCR_ENDPOINT = "ocr.tencentcloudapi.com"
+DEFAULT_TENCENT_CLOUD_OCR_ACTION = "GeneralAccurateOCR"
+DEFAULT_TENCENT_CLOUD_OCR_TIMEOUT_SECONDS = 30
+DEFAULT_TENCENT_CLOUD_OCR_MAX_RETRIES = 2
+DEFAULT_TENCENT_CLOUD_OCR_MAX_QPS = 2
+DEFAULT_TENCENT_CLOUD_OCR_MAX_IMAGE_BYTES = 10 * 1024 * 1024
 DEFAULT_DOCLING_FORMATS = ("pdf", "docx")
 DEFAULT_FILE_RENAME_EXECUTOR = "native"
 DEFAULT_FILE_RENAME_PARSE_MODE = "hybrid"
@@ -221,6 +229,18 @@ class Settings(BaseModel):
     log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
     log_level: str = "INFO"
     ocr_enabled: bool = True
+    ocr_provider: str = DEFAULT_OCR_PROVIDER
+    ocr_external_content_authorized: bool = False
+    tencent_cloud_ocr_secret_id: str = ""
+    tencent_cloud_ocr_secret_key: str = ""
+    tencent_cloud_ocr_region: str = DEFAULT_TENCENT_CLOUD_OCR_REGION
+    tencent_cloud_ocr_endpoint: str = DEFAULT_TENCENT_CLOUD_OCR_ENDPOINT
+    tencent_cloud_ocr_action: str = DEFAULT_TENCENT_CLOUD_OCR_ACTION
+    tencent_cloud_ocr_timeout_seconds: int = DEFAULT_TENCENT_CLOUD_OCR_TIMEOUT_SECONDS
+    tencent_cloud_ocr_max_retries: int = DEFAULT_TENCENT_CLOUD_OCR_MAX_RETRIES
+    tencent_cloud_ocr_max_qps: int = DEFAULT_TENCENT_CLOUD_OCR_MAX_QPS
+    tencent_cloud_ocr_max_image_bytes: int = DEFAULT_TENCENT_CLOUD_OCR_MAX_IMAGE_BYTES
+    ocr_local_fallback_enabled: bool = False
     ocr_paddle_model_source: str = DEFAULT_OCR_PADDLE_MODEL_SOURCE
     ocr_llm_enabled: bool = False
     ocr_llm_fallback_quality_threshold: float = DEFAULT_OCR_LLM_FALLBACK_QUALITY_THRESHOLD
@@ -785,6 +805,55 @@ def get_settings() -> Settings:
         log_retention_days=int(os.getenv("LOG_RETENTION_DAYS", str(DEFAULT_LOG_RETENTION_DAYS))),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         ocr_enabled=os.getenv("OCR_ENABLED", "true").lower() == "true",
+        ocr_provider=_choice(
+            os.getenv("OCR_PROVIDER", DEFAULT_OCR_PROVIDER),
+            allowed={"paddleocr_cpu", "tencent_cloud"},
+            default=DEFAULT_OCR_PROVIDER,
+        ),
+        ocr_external_content_authorized=os.getenv(
+            "OCR_EXTERNAL_CONTENT_AUTHORIZED", "false"
+        ).lower() == "true",
+        tencent_cloud_ocr_secret_id=os.getenv("TENCENT_CLOUD_OCR_SECRET_ID", "").strip(),
+        tencent_cloud_ocr_secret_key=os.getenv("TENCENT_CLOUD_OCR_SECRET_KEY", ""),
+        tencent_cloud_ocr_region=os.getenv(
+            "TENCENT_CLOUD_OCR_REGION", DEFAULT_TENCENT_CLOUD_OCR_REGION
+        ).strip() or DEFAULT_TENCENT_CLOUD_OCR_REGION,
+        tencent_cloud_ocr_endpoint=os.getenv(
+            "TENCENT_CLOUD_OCR_ENDPOINT", DEFAULT_TENCENT_CLOUD_OCR_ENDPOINT
+        ).strip() or DEFAULT_TENCENT_CLOUD_OCR_ENDPOINT,
+        tencent_cloud_ocr_action=_choice(
+            os.getenv("TENCENT_CLOUD_OCR_ACTION", DEFAULT_TENCENT_CLOUD_OCR_ACTION),
+            allowed={"GeneralAccurateOCR"},
+            default=DEFAULT_TENCENT_CLOUD_OCR_ACTION,
+            normalize=lambda item: str(item).strip(),
+        ),
+        tencent_cloud_ocr_timeout_seconds=_bounded_int_env(
+            "TENCENT_CLOUD_OCR_TIMEOUT_SECONDS",
+            DEFAULT_TENCENT_CLOUD_OCR_TIMEOUT_SECONDS,
+            minimum=1,
+            maximum=300,
+        ),
+        tencent_cloud_ocr_max_retries=_bounded_int_env(
+            "TENCENT_CLOUD_OCR_MAX_RETRIES",
+            DEFAULT_TENCENT_CLOUD_OCR_MAX_RETRIES,
+            minimum=0,
+            maximum=5,
+        ),
+        tencent_cloud_ocr_max_qps=_bounded_int_env(
+            "TENCENT_CLOUD_OCR_MAX_QPS",
+            DEFAULT_TENCENT_CLOUD_OCR_MAX_QPS,
+            minimum=1,
+            maximum=20,
+        ),
+        tencent_cloud_ocr_max_image_bytes=_bounded_int_env(
+            "TENCENT_CLOUD_OCR_MAX_IMAGE_BYTES",
+            DEFAULT_TENCENT_CLOUD_OCR_MAX_IMAGE_BYTES,
+            minimum=1_024,
+            maximum=10 * 1024 * 1024,
+        ),
+        ocr_local_fallback_enabled=os.getenv(
+            "OCR_LOCAL_FALLBACK_ENABLED", "false"
+        ).lower() == "true",
         ocr_paddle_model_source=os.getenv("OCR_PADDLE_MODEL_SOURCE", DEFAULT_OCR_PADDLE_MODEL_SOURCE),
         ocr_llm_enabled=os.getenv("OCR_LLM_ENABLED", "false").lower() == "true",
         ocr_llm_fallback_quality_threshold=float(

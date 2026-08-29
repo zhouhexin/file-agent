@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from app.core import config
-from app.core.logging import cleanup_old_logs
+from app.core.logging import cleanup_old_logs, format_exception_traceback
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -53,6 +53,22 @@ def test_cleanup_old_logs_removes_files_older_than_retention(monkeypatch, tmp_pa
     assert not old_log.exists()
     assert fresh_log.exists()
     config.get_settings.cache_clear()
+
+
+def test_exception_traceback_redacts_tencent_cloud_ocr_credentials(monkeypatch):
+    """运维异常堆栈不得泄漏腾讯云 OCR 的 SecretId 或 SecretKey。"""
+
+    monkeypatch.setenv("TENCENT_CLOUD_OCR_SECRET_ID", "AKID-ocr-secret-id")
+    monkeypatch.setenv("TENCENT_CLOUD_OCR_SECRET_KEY", "ocr-secret-key-value")
+    config.get_settings.cache_clear()
+    try:
+        raise RuntimeError("AKID-ocr-secret-id ocr-secret-key-value")
+    except RuntimeError as exc:
+        traceback_text = format_exception_traceback(exc)
+
+    assert "AKID-ocr-secret-id" not in traceback_text
+    assert "ocr-secret-key-value" not in traceback_text
+    assert traceback_text.count("<redacted>") >= 2
 
 
 def test_message_processing_writes_agent_tool_file_classification_and_changeset_logs(monkeypatch, tmp_path):

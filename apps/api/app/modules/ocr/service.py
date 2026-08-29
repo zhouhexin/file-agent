@@ -15,6 +15,7 @@ from typing import Any, Protocol
 from app.core.config import get_settings
 from app.modules.files.content_types import detect_image_content_type
 from app.modules.llm.client import OpenAICompatibleLLMClient
+from app.modules.ocr.tencent_cloud_provider import TencentCloudOcrProvider
 
 
 class OcrProviderProtocol(Protocol):
@@ -129,23 +130,37 @@ class OcrService:
         primary_provider: OcrProviderProtocol | None = None,
         fallback_provider: OcrProviderProtocol | None = None,
         fallback_quality_threshold: float = 0.68,
+        fallback_on_low_quality: bool = True,
+        fallback_on_non_retryable_failure: bool = True,
     ) -> None:
         """保存 Provider 与 LLM 兜底阈值。"""
 
         self.primary_provider = primary_provider or PaddleOcrProvider()
         self.fallback_provider = fallback_provider
         self.fallback_quality_threshold = fallback_quality_threshold
+        self.fallback_on_low_quality = fallback_on_low_quality
+        self.fallback_on_non_retryable_failure = fallback_on_non_retryable_failure
 
     def extract_image(self, *, image_path: Path, page_number: int = 1) -> dict[str, Any]:
         """执行单页 OCR，必要时按质量阈值调用 LLM 兜底。"""
 
         primary_result = self.primary_provider.extract_image(image_path=image_path, page_number=page_number)
+        if self.fallback_provider is None:
+            return primary_result
         if (
-            self.fallback_provider is None
+            not primary_result.get("ok")
+            and not self.fallback_on_non_retryable_failure
+            and not bool((primary_result.get("error") or {}).get("retryable"))
+        ):
+            return primary_result
+        if primary_result.get("ok") and (
+            not self.fallback_on_low_quality
             or float(primary_result.get("quality_score") or 0) >= self.fallback_quality_threshold
         ):
             return primary_result
         fallback_result = self.fallback_provider.extract_image(image_path=image_path, page_number=page_number)
+        if not fallback_result.get("ok"):
+            return primary_result
         return {**fallback_result, "is_fallback": True, "fallback_from": primary_result.get("source")}
 
 
@@ -163,10 +178,32 @@ def build_default_ocr_service() -> OcrService:
                 timeout_seconds=settings.llm_timeout_seconds,
             )
         )
+    if settings.ocr_provider == "tencent_cloud":
+        # 腾讯云基础 OCR 的回退只允许显式开启本地 Provider，不能因 OCR_LLM_ENABLED
+        # 的历史配置而把页面再次外发给另一套模型服务。
+        fallback_provider = None
+        primary_provider: OcrProviderProtocol = TencentCloudOcrProvider(
+            secret_id=settings.tencent_cloud_ocr_secret_id,
+            secret_key=settings.tencent_cloud_ocr_secret_key,
+            region=settings.tencent_cloud_ocr_region,
+            endpoint=settings.tencent_cloud_ocr_endpoint,
+            action=settings.tencent_cloud_ocr_action,
+            timeout_seconds=settings.tencent_cloud_ocr_timeout_seconds,
+            max_retries=settings.tencent_cloud_ocr_max_retries,
+            max_qps=settings.tencent_cloud_ocr_max_qps,
+            max_image_bytes=settings.tencent_cloud_ocr_max_image_bytes,
+            external_content_authorized=settings.ocr_external_content_authorized,
+        )
+        if settings.ocr_local_fallback_enabled:
+            fallback_provider = PaddleOcrProvider(model_source=settings.ocr_paddle_model_source)
+    else:
+        primary_provider = PaddleOcrProvider(model_source=settings.ocr_paddle_model_source)
     return OcrService(
-        primary_provider=PaddleOcrProvider(model_source=settings.ocr_paddle_model_source),
+        primary_provider=primary_provider,
         fallback_provider=fallback_provider,
         fallback_quality_threshold=settings.ocr_llm_fallback_quality_threshold,
+        fallback_on_low_quality=settings.ocr_provider != "tencent_cloud",
+        fallback_on_non_retryable_failure=settings.ocr_provider != "tencent_cloud",
     )
 
 

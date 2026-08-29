@@ -73,6 +73,8 @@ from app.modules.managed_files.source_analysis import (
     ManagedFileRevisionService,
     ManagedSourceAnalysisService,
     SourceAnalysisBusinessError,
+    managed_source_extraction_fingerprint,
+    managed_source_extraction_is_current,
 )
 
 
@@ -1071,6 +1073,37 @@ def _enqueue_source_analysis_jobs_for_revisions(
         if not revision.is_current:
             continue
         if revision.status == "READY":
+            extraction_current = managed_source_extraction_is_current(
+                db=db,
+                revision=revision,
+                owner_id=fallback_user,
+            )
+            if not extraction_current:
+                parser_fingerprint = managed_source_extraction_fingerprint(
+                    db=db,
+                    revision=revision,
+                )
+                job = queue.create_job(
+                    job_type="ANALYZE_MANAGED_FILE_REVISION",
+                    queue_name="SOURCE_ANALYSIS",
+                    root_id=root_id,
+                    created_by=fallback_user,
+                    priority=settings.managed_source_analysis_background_priority,
+                    # 把当前解析指纹写入去重键，配置变化后才能重置已完成旧任务。
+                    deduplication_key=f"managed-source-analysis:{revision.id}:{parser_fingerprint}",
+                    reuse_completed=True,
+                    payload={"managed_file_revision_id": revision.id, "user_id": fallback_user},
+                )
+                job_ids.append(job.id)
+                log_event(
+                    "managed_source.analysis.requeued",
+                    status=job.status,
+                    managed_file_revision_id=revision.id,
+                    root_id=root_id,
+                    filesystem_job_id=job.id,
+                    message="OCR 或解析配置已变化，已重新提交原始文件只读分析任务",
+                )
+                continue
             freshness = inspect_managed_source_classification(
                 db=db,
                 revision=revision,

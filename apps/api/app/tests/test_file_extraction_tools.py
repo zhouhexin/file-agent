@@ -21,12 +21,21 @@ from app.tests.helpers import clear_overrides, client_with_database
 class FakeOcrService:
     """测试用 OCR 服务，避免依赖真实 PaddleOCR 或外部 LLM。"""
 
-    def __init__(self, text: str = "OCR 识别文本", source: str = "paddleocr_cpu", quality_score: float = 0.9):
+    def __init__(
+        self,
+        text: str = "OCR 识别文本",
+        source: str = "paddleocr_cpu",
+        quality_score: float = 0.9,
+        provider_version: str | None = None,
+        provider_request_id: str | None = None,
+    ):
         """保存固定 OCR 返回值。"""
 
         self.text = text
         self.source = source
         self.quality_score = quality_score
+        self.provider_version = provider_version
+        self.provider_request_id = provider_request_id
         self.calls: list[dict] = []
 
     def extract_image(self, *, image_path, page_number: int = 1):
@@ -38,6 +47,8 @@ class FakeOcrService:
             "text": self.text,
             "source": self.source,
             "provider_name": self.source,
+            "provider_version": self.provider_version,
+            "provider_request_id": self.provider_request_id,
             "quality_score": self.quality_score,
             "confidence": 0.88,
             "blocks": [],
@@ -907,6 +918,79 @@ def test_extract_image_uses_injected_ocr_service(monkeypatch, tmp_path):
     assert ocr_service.calls[0]["page_number"] == 1
 
 
+def test_ocr_provider_change_invalidates_image_extraction_config_hash(monkeypatch):
+    """切换基础 OCR Provider 必须改变解析指纹，禁止复用旧 PaddleOCR 页面。"""
+
+    monkeypatch.setenv("DOCLING_ENABLED", "false")
+    monkeypatch.setenv("OCR_PROVIDER", "paddleocr_cpu")
+    config.get_settings.cache_clear()
+    paddle_hash = extraction_config_hash(filename="scan.png")
+
+    monkeypatch.setenv("OCR_PROVIDER", "tencent_cloud")
+    config.get_settings.cache_clear()
+    tencent_hash = extraction_config_hash(filename="scan.png")
+
+    assert paddle_hash
+    assert tencent_hash
+    assert paddle_hash != tencent_hash
+
+
+def test_tencent_image_extraction_keeps_ocr_profile_and_audit_metadata(monkeypatch, tmp_path):
+    """腾讯云结果必须仍标记为图片 OCR，并持久化 Provider 版本和 RequestId。"""
+
+    monkeypatch.setenv("OCR_ENABLED", "true")
+    config.get_settings.cache_clear()
+    image_path = tmp_path / "scan.png"
+    image_path.write_bytes(b"fake-image")
+    ocr_service = FakeOcrService(
+        text="腾讯云 OCR 正文",
+        source="tencent_cloud_general_accurate",
+        provider_version="GeneralAccurateOCR@2018-11-19",
+        provider_request_id="request-123",
+    )
+
+    result = extract_document_text(
+        file_path=image_path,
+        filename="scan.png",
+        content_type="image/png",
+        ocr_service=ocr_service,
+    )
+
+    assert result["ok"] is True
+    assert result["read_profile"]["file_type"] == "image"
+    assert result["read_profile"]["ocr_used"] is True
+    assert result["pages"][0]["metadata"]["ocr_provider_version"] == "GeneralAccurateOCR@2018-11-19"
+    assert result["pages"][0]["metadata"]["ocr_provider_request_id"] == "request-123"
+
+
+def test_tencent_ocr_audit_fields_are_persisted_in_page_metadata(monkeypatch, tmp_path):
+    """腾讯云接口版本和 RequestId 应进入页面审计元数据，但不包含密钥或 Base64。"""
+
+    monkeypatch.setenv("OCR_ENABLED", "true")
+    config.get_settings.cache_clear()
+    image_path = tmp_path / "scan.png"
+    image_path.write_bytes(b"fake-image")
+    ocr_service = FakeOcrService(
+        text="腾讯云 OCR 文本",
+        source="tencent_cloud_general_accurate",
+        provider_version="GeneralAccurateOCR@2018-11-19",
+        provider_request_id="request-123",
+    )
+
+    result = extract_document_text(
+        file_path=image_path,
+        filename="scan.png",
+        content_type="image/png",
+        ocr_service=ocr_service,
+    )
+
+    metadata = result["pages"][0]["metadata"]
+    assert metadata["ocr_provider_version"] == "GeneralAccurateOCR@2018-11-19"
+    assert metadata["ocr_provider_request_id"] == "request-123"
+    assert "secret" not in str(metadata).lower()
+    assert "base64" not in str(metadata).lower()
+
+
 def test_empty_pdf_triggers_ocr_fallback(monkeypatch, tmp_path):
     """PDF 原生文本为空时应渲染页面并触发 OCR 兜底。"""
 
@@ -944,6 +1028,52 @@ def test_empty_pdf_triggers_ocr_fallback(monkeypatch, tmp_path):
     assert result["pages"][0]["text"] == "扫描 PDF OCR 文本"
     assert result["pages"][0]["metadata"]["ocr_fallback"] is True
     assert ocr_service.calls[0]["image_path"] == rendered_page
+
+
+def test_empty_pdf_fails_when_online_ocr_provider_is_unavailable(monkeypatch, tmp_path):
+    """扫描 PDF 全部页面在线 OCR 失败时必须明确失败，不能发布空白成功解析。"""
+
+    monkeypatch.setenv("OCR_ENABLED", "true")
+    config.get_settings.cache_clear()
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"fake-pdf")
+    rendered_page = tmp_path / "page-1.png"
+    rendered_page.write_bytes(b"fake-render")
+    monkeypatch.setattr(
+        "app.modules.files.extractors._inspect_pdf_before_docling",
+        lambda file_path: {"ok": True, "inspectable": True, "repaired": False},
+    )
+    monkeypatch.setattr(
+        "app.modules.files.extractors._extract_pdf_native_pages",
+        lambda file_path: [{"page_number": 1, "sheet_name": None, "text": "", "metadata": {}}],
+    )
+    monkeypatch.setattr(
+        "app.modules.files.extractors._render_pdf_pages_for_ocr",
+        lambda file_path, page_numbers: {1: rendered_page},
+    )
+
+    class FailedOcrService:
+        """模拟未获得腾讯云外发授权。"""
+
+        def extract_image(self, **_: object) -> dict:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "OCR_EXTERNAL_CONTENT_NOT_AUTHORIZED",
+                    "message": "未授权将文件图片发送到腾讯云 OCR。",
+                },
+            }
+
+    result = extract_document_text(
+        file_path=pdf_path,
+        filename="scan.pdf",
+        content_type="application/pdf",
+        ocr_service=FailedOcrService(),
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "OCR_EXTERNAL_CONTENT_NOT_AUTHORIZED"
+    assert result["pages"] == []
 
 
 def test_empty_pdf_marks_ocr_needed_when_ocr_disabled(monkeypatch, tmp_path):
