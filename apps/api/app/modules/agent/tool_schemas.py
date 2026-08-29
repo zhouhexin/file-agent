@@ -535,6 +535,7 @@ class WorkingCopyActionPlanInput(StrictToolInput):
         "CONFLICT_DELETE_EXISTING",
         "CONFLICT_CANCEL",
         "MOVE_BY_CONFIRMED_CATEGORY",
+        "MOVE_AFTER_AUTO_RECLASSIFICATION",
     ]
     message: str = Field(min_length=1, max_length=4000)
     document_ids: List[str] = Field(default_factory=list, max_length=50)

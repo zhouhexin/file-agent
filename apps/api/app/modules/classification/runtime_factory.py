@@ -69,7 +69,7 @@ class ClassificationRuntimeFactory:
         )
         return (
             f"taxonomy-{summary_mode}-first-"
-            f"{self.settings.llm_classification_mode}-graph-{graph_mode}-v4"
+            f"{self.settings.llm_classification_mode}-graph-{graph_mode}-v5"
         )
 
     def _build_llm_judge(self) -> LLMClassificationJudge | None:

@@ -12,7 +12,16 @@ from fastapi.testclient import TestClient
 import openpyxl
 
 from app.core import config
-from app.db.models import AgentRun, Conversation, Message, ToolInvocation
+from app.db.models import (
+    AgentRun,
+    Conversation,
+    DocumentClassificationRun,
+    DocumentVersion,
+    Message,
+    ToolInvocation,
+    UploadArchiveRecord,
+    WorkingCopy,
+)
 from app.modules.managed_files.scanner import ManagedFileScanner
 from app.modules.managed_files.service import sync_configured_managed_roots
 from app.modules.managed_files.worker import process_next_filesystem_job
@@ -47,6 +56,16 @@ def _upload_document(
         files={"file": (filename, content, "text/plain")},
     )
     return response.json()["document_id"]
+
+
+def _configure_upload_lifecycle_storage(monkeypatch, tmp_path) -> None:
+    """把上传、不可变原件、工作副本和回收站隔离到测试目录。"""
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "uploads"))
+    monkeypatch.setenv("MANAGED_ROOT_ARCHIVE_WRITE_PATH", str(tmp_path / "originals"))
+    monkeypatch.setenv("WORKING_COPY_STORAGE_ROOT", str(tmp_path / "working"))
+    monkeypatch.setenv("TRASH_STORAGE_ROOT", str(tmp_path / "trash"))
+    config.get_settings.cache_clear()
 
 
 def _xlsx_with_formula_error() -> bytes:
@@ -869,6 +888,161 @@ def test_uploaded_message_attachments_share_batch_id():
     assert sources == {"uploaded"}
     assert len(batch_ids) == 1
     assert None not in batch_ids
+    clear_overrides()
+
+
+def test_archived_upload_is_canonicalized_to_working_copy_before_agent_run(
+    monkeypatch,
+    tmp_path,
+):
+    """消息审计保留上传 ID，但 Agent Tool 只能消费活动工作副本 ID。"""
+
+    _configure_upload_lifecycle_storage(monkeypatch, tmp_path)
+    client, session_factory = client_with_database()
+    headers = _auth_header(client, "canonical-agent-attachment-user")
+    upload_document_id = _upload_document(
+        client,
+        headers,
+        filename="salary-audit-notice.txt",
+        content="工资津贴补贴发放情况专项监督检查和自查工作。".encode("utf-8"),
+    )
+
+    for _ in range(30):
+        if process_next_filesystem_job(
+            session_factory=session_factory,
+            worker_id="canonical-agent-attachment-worker",
+        ) is None:
+            break
+
+    with session_factory() as db:
+        upload_version = (
+            db.query(DocumentVersion)
+            .filter(
+                DocumentVersion.document_id == upload_document_id,
+                DocumentVersion.storage_tier == "UPLOAD",
+            )
+            .one()
+        )
+        archive = (
+            db.query(UploadArchiveRecord)
+            .filter(
+                UploadArchiveRecord.upload_document_version_id
+                == upload_version.id
+            )
+            .one()
+        )
+        working_copy = (
+            db.query(WorkingCopy)
+            .filter(
+                WorkingCopy.managed_file_id == archive.managed_file_id,
+                WorkingCopy.status == "ACTIVE",
+            )
+            .one()
+        )
+        working_document_id = working_copy.document_id
+        upload_classification_count_before = (
+            db.query(DocumentClassificationRun)
+            .filter(DocumentClassificationRun.document_id == upload_document_id)
+            .count()
+        )
+        assert upload_classification_count_before == 0
+
+    response = client.post(
+        "/api/conversations/canonical-agent-attachment-chat/messages",
+        headers=headers,
+        json={
+            "content": "对上传文件进行分类归档",
+            "attachments": [{"document_id": upload_document_id}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["message"]["attachments"] == [
+        {"document_id": upload_document_id}
+    ]
+    with session_factory() as db:
+        message = (
+            db.query(Message)
+            .filter(
+                Message.conversation_id == "canonical-agent-attachment-chat",
+                Message.role == "user",
+            )
+            .one()
+        )
+        run = db.query(AgentRun).filter(AgentRun.message_id == message.id).one()
+        invocations = (
+            db.query(ToolInvocation)
+            .filter(ToolInvocation.agent_run_id == run.id)
+            .order_by(ToolInvocation.created_at)
+            .all()
+        )
+        invoked_document_ids = {
+            str(item.input_json.get("document_id"))
+            for item in invocations
+            if item.input_json.get("document_id")
+        }
+        assert message.attachments_json[0]["document_id"] == upload_document_id
+        assert invoked_document_ids == {working_document_id}
+        assert upload_document_id not in invoked_document_ids
+        assert (
+            db.query(DocumentClassificationRun)
+            .filter(DocumentClassificationRun.document_id == upload_document_id)
+            .count()
+            == 0
+        )
+
+    # 文件已归档且不属于新会话附件时，完整文件名仍必须先解析到同一个活动工作副本，
+    # 不能把内部 upload_archive 错当作普通受管源目录查询。
+    filename_response = client.post(
+        "/api/conversations/working-copy-filename-classification-chat/messages",
+        headers=headers,
+        json={
+            "content": "重新分类“salary-audit-notice.txt”",
+            "attachments": [],
+        },
+    )
+
+    assert filename_response.status_code == 200
+    assert filename_response.json()["task_result"]["task_status"] == "completed"
+    assert filename_response.json()["task_result"]["document_results"][0][
+        "document_id"
+    ] == working_document_id
+    with session_factory() as db:
+        filename_message = (
+            db.query(Message)
+            .filter(
+                Message.conversation_id
+                == "working-copy-filename-classification-chat",
+                Message.role == "user",
+            )
+            .one()
+        )
+        assert filename_message.attachments_json[0]["document_id"] == working_document_id
+        filename_run = (
+            db.query(AgentRun)
+            .filter(AgentRun.message_id == filename_message.id)
+            .one()
+        )
+        filename_invocations = (
+            db.query(ToolInvocation)
+            .filter(ToolInvocation.agent_run_id == filename_run.id)
+            .order_by(ToolInvocation.created_at)
+            .all()
+        )
+        # 重新分类会在新分类达到自动标准时直接归位，因此除了正文解析还会
+        # 调用受控工作副本动作；两步都只能使用规范工作副本身份。
+        assert [item.tool_name for item in filename_invocations] == [
+            "extract-document-text",
+            "working-copy-action-plan-create",
+        ]
+        assert filename_invocations[0].input_json["document_id"] == working_document_id
+        assert filename_invocations[1].input_json["document_ids"] == [
+            working_document_id
+        ]
+        assert (
+            filename_invocations[1].input_json["action"]
+            == "MOVE_AFTER_AUTO_RECLASSIFICATION"
+        )
     clear_overrides()
 
 

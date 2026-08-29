@@ -353,8 +353,8 @@ class ClassificationDecisionService:
                     detail="该文件已有其他人工确认的主分类，请先选择要作为整理目录的分类。",
                 )
             if conflicting is not None:
-                # 用户明确更正可以结束系统自动主分类事实，但物理路径是否随之变化仍
-                # 必须由后续 MOVE OperationPlan 决定，分类确认不能直接移动文件。
+                # 用户明确更正可以结束系统自动主分类事实；本事务只写分类事实，
+                # 对话应用服务随后根据同一条显式指令创建并直接执行受控 MOVE 计划。
                 conflicting.status = "REJECTED"
                 conflicting.ended_at = utcnow()
         relation = (

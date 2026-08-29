@@ -1,4 +1,4 @@
-"""把自然语言文件动作收敛为真实、待确认的工作副本 OperationPlan。
+"""把自然语言文件动作收敛为真实、可审计的工作副本 OperationPlan。
 
 本模块只接受后端已解析的附件 ID 或持久化同名冲突记录。Planner 不能提交物理路径、
 工作副本 ID 或回收站 ID，从而避免自然语言猜测越过用户、会话和工作区边界。
@@ -12,16 +12,25 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.models import (
     AgentRun,
+    ChangeItem,
+    ChangeSet,
     Document,
     DocumentCategory,
+    DocumentCategorySuggestion,
+    DocumentClassificationRun,
     FileRenameReviewItem,
     TrashEntry,
     User,
     WorkingCopy,
     WorkingCopyRoot,
     utcnow,
+)
+from app.modules.classification.auto_placement_policy import AutoPlacementPolicy
+from app.modules.classification.organization_repository import (
+    OrganizationDecisionRepository,
 )
 from app.modules.classification.organization_path import (
     CategoryOrganizationPathError,
@@ -46,7 +55,7 @@ class WorkingCopyConflictPending(ValueError):
 
 
 class ConversationalWorkingCopyPlanService:
-    """按当前用户和会话解析删除、恢复及同名冲突计划。"""
+    """按当前用户和会话解析删除、恢复、分类归位及同名冲突计划。"""
 
     def __init__(self, db: Session, user_id: str) -> None:
         """保存请求级数据库会话，禁止跨请求复用带用户状态的服务。"""
@@ -65,7 +74,7 @@ class ConversationalWorkingCopyPlanService:
         conversation_id: str,
         agent_run_id: str,
     ) -> dict[str, Any]:
-        """创建待确认计划而不执行文件动作，并返回普通用户可理解的摘要。"""
+        """创建受控计划；显式分类归位直接执行，其他高风险动作等待确认。"""
 
         user = self.db.get(User, self.user_id)
         run = self.db.get(AgentRun, agent_run_id)
@@ -89,12 +98,27 @@ class ConversationalWorkingCopyPlanService:
                     agent_run_id=agent_run_id,
                 )
             elif action == "MOVE_BY_CONFIRMED_CATEGORY":
-                plan = self._create_category_move_plan(
+                outcome = self._create_category_move_plan(
                     user=user,
                     document_ids=document_ids,
                     conversation_id=conversation_id,
                     agent_run_id=agent_run_id,
                 )
+                if isinstance(outcome, dict):
+                    self.db.commit()
+                    return outcome
+                plan = outcome
+            elif action == "MOVE_AFTER_AUTO_RECLASSIFICATION":
+                outcome = self._create_auto_reclassification_move_plan(
+                    user=user,
+                    document_ids=document_ids,
+                    conversation_id=conversation_id,
+                    agent_run_id=agent_run_id,
+                )
+                if isinstance(outcome, dict):
+                    self.db.commit()
+                    return outcome
+                plan = outcome
             elif action == "CONFLICT_CANCEL":
                 message_text = self._cancel_conflict(
                     user=user,
@@ -137,6 +161,41 @@ class ConversationalWorkingCopyPlanService:
             return _error(f"WORKING_COPY_PLAN_{exc.status_code}", str(exc.detail))
         except ValueError as exc:
             return _error("WORKING_COPY_SCOPE_INVALID", str(exc))
+        if action in {
+            "MOVE_BY_CONFIRMED_CATEGORY",
+            "MOVE_AFTER_AUTO_RECLASSIFICATION",
+        }:
+            # 用户在当前消息中已经明确要求分类、重新分类或按分类整理，
+            # 该指令本身就是本次归位授权；仍保留 OperationPlan、确认记录、
+            # 路径快照和 ChangeSet，但不再要求用户发送第二条确认消息。
+            self.operations.plan_repository.confirm_plan(
+                plan=plan,
+                user_id=user.id,
+                confirmation_text=message,
+            )
+            result, changeset_id = self.operations.execute(
+                plan=plan,
+                current_user=user,
+            )
+            self.db.commit()
+            self.db.refresh(plan)
+            completed_count = int(result.get("completed_count") or 0)
+            return {
+                "ok": plan.status in {"EXECUTED", "PARTIAL"},
+                "kind": "working_copy_operation_result",
+                "status": plan.status,
+                "operation_plan_id": plan.id,
+                "operation_type": plan.operation_type,
+                "changeset_id": changeset_id,
+                "item_count": len(result.get("items") or []),
+                "items": list(result.get("items") or []),
+                "file_position_changed": completed_count > 0,
+                "message": (
+                    "已按分类直接移动工作副本。"
+                    if completed_count > 0
+                    else "分类已保存，但文件移动未完成，请查看失败原因。"
+                ),
+            }
         if action == "CONFLICT_REPLACE_EXISTING":
             # 用户当前回复已经构成唯一冲突的明确覆盖确认；仍然创建、确认并执行
             # OperationPlan，只是不再插入第二次重复确认。
@@ -172,6 +231,336 @@ class ConversationalWorkingCopyPlanService:
             "item_count": len([item for item in plan.plan_json.get("items", []) if isinstance(item, dict)]),
             "message": plan.reason,
         }
+
+    def _create_auto_reclassification_move_plan(
+        self,
+        *,
+        user: User,
+        document_ids: list[str],
+        conversation_id: str,
+        agent_run_id: str,
+    ):
+        """比较本次重新分类与正式主分类，达标时生成并直接执行移动计划。"""
+
+        settings = get_settings()
+        copies = self._resolve_working_copies(
+            document_ids=document_ids,
+            workspace_id=get_shared_workspace_id(self.db),
+        )
+        if not copies:
+            raise ValueError("请明确选择要重新分类并整理的共享文件。")
+
+        policy = AutoPlacementPolicy(settings)
+        repository = OrganizationDecisionRepository(self.db)
+        changed_document_ids: list[str] = []
+        details: list[dict[str, Any]] = []
+        for working_copy in copies:
+            classification_run = (
+                self.db.query(DocumentClassificationRun)
+                .filter(
+                    DocumentClassificationRun.agent_run_id == agent_run_id,
+                    DocumentClassificationRun.document_id == working_copy.document_id,
+                    DocumentClassificationRun.status == "COMPLETED",
+                )
+                .order_by(DocumentClassificationRun.created_at.desc())
+                .first()
+            )
+            suggestions = (
+                self.db.query(DocumentCategorySuggestion)
+                .filter(
+                    DocumentCategorySuggestion.classification_run_id
+                    == classification_run.id
+                )
+                .order_by(
+                    DocumentCategorySuggestion.rank.asc(),
+                    DocumentCategorySuggestion.confidence.desc(),
+                )
+                .all()
+                if classification_run is not None
+                else []
+            )
+            primary_suggestion = suggestions[0] if suggestions else None
+            if (
+                classification_run is None
+                or primary_suggestion is None
+                or primary_suggestion.document_version_id
+                != working_copy.current_version_id
+            ):
+                details.append(
+                    {
+                        "document_id": working_copy.document_id,
+                        "filename": working_copy.filename,
+                        "status": "SKIPPED",
+                        "reason_codes": ["CURRENT_RECLASSIFICATION_NOT_FOUND"],
+                    }
+                )
+                continue
+
+            categories = [self._policy_category(item) for item in suggestions]
+            policy_result = policy.evaluate(
+                categories=categories,
+                extraction_status=classification_run.status,
+                risk_passed=True,
+            )
+            reason_codes = list(policy_result.reason_codes)
+            if (
+                not settings.auto_primary_classification_enabled
+                or settings.auto_classification_shadow_mode
+            ):
+                reason_codes.append("AUTO_RECLASSIFICATION_DISABLED")
+
+            active_primary = (
+                self.db.query(DocumentCategory)
+                .filter(
+                    DocumentCategory.working_copy_id == working_copy.id,
+                    DocumentCategory.document_version_id
+                    == working_copy.current_version_id,
+                    DocumentCategory.relation_role == "PRIMARY",
+                    DocumentCategory.status.in_(["AUTO_APPLIED", "CONFIRMED"]),
+                )
+                .order_by(DocumentCategory.created_at.asc())
+                .all()
+            )
+            previous = active_primary[0] if len(active_primary) == 1 else None
+            if len(active_primary) > 1:
+                reason_codes.append("MULTIPLE_ACTIVE_PRIMARY_CATEGORIES")
+            if (
+                previous is not None
+                and previous.status == "CONFIRMED"
+                and previous.category_id != primary_suggestion.category_id
+            ):
+                reason_codes.append("CONFIRMED_CATEGORY_PROTECTED")
+
+            target_relative_path: str | None = None
+            working_root = self.db.get(
+                WorkingCopyRoot, working_copy.working_copy_root_id
+            )
+            if working_root is None:
+                reason_codes.append("WORKING_COPY_ROOT_MISSING")
+            elif not reason_codes:
+                try:
+                    target = CategoryOrganizationPathResolver(
+                        self.storage
+                    ).resolve_category(
+                        category_id=primary_suggestion.category_id,
+                        taxonomy_key=classification_run.taxonomy_key,
+                        taxonomy_version=classification_run.taxonomy_version,
+                        working_copy=working_copy,
+                        working_root=working_root,
+                    )
+                    target_relative_path = target.target_relative_path
+                except CategoryOrganizationPathError:
+                    reason_codes.append("TARGET_PATH_UNAVAILABLE")
+
+            if reason_codes:
+                repository.create_or_update_decision(
+                    working_copy=working_copy,
+                    classification_run=classification_run,
+                    primary_suggestion=primary_suggestion,
+                    policy_result=policy_result,
+                    policy_version=settings.auto_classification_policy_version,
+                    calibration_version=(
+                        settings.auto_classification_calibration_version
+                    ),
+                    decision="NEEDS_REVIEW",
+                    reason_codes=reason_codes,
+                    shadow_only=True,
+                    decision_scope=f"reclassification:{agent_run_id}",
+                )
+                details.append(
+                    {
+                        "document_id": working_copy.document_id,
+                        "filename": working_copy.filename,
+                        "status": "NEEDS_REVIEW",
+                        "reason_codes": reason_codes,
+                    }
+                )
+                continue
+
+            if (
+                previous is not None
+                and previous.category_id == primary_suggestion.category_id
+            ):
+                repository.create_or_update_decision(
+                    working_copy=working_copy,
+                    classification_run=classification_run,
+                    primary_suggestion=primary_suggestion,
+                    policy_result=policy_result,
+                    policy_version=settings.auto_classification_policy_version,
+                    calibration_version=(
+                        settings.auto_classification_calibration_version
+                    ),
+                    decision="UNCHANGED",
+                    reason_codes=[],
+                    target_relative_path=target_relative_path,
+                    decision_scope=f"reclassification:{agent_run_id}",
+                )
+                details.append(
+                    {
+                        "document_id": working_copy.document_id,
+                        "filename": working_copy.filename,
+                        "status": "UNCHANGED",
+                        "category_id": primary_suggestion.category_id,
+                    }
+                )
+                continue
+
+            new_relation, ended_relations = repository.replace_auto_applied_primary(
+                working_copy=working_copy,
+                classification_run=classification_run,
+                suggestion=primary_suggestion,
+            )
+            self._audit_auto_reclassification(
+                user=user,
+                agent_run_id=agent_run_id,
+                new_relation=new_relation,
+                ended_relations=ended_relations,
+                confidence=policy_result.calibrated_confidence,
+            )
+            repository.create_or_update_decision(
+                working_copy=working_copy,
+                classification_run=classification_run,
+                primary_suggestion=primary_suggestion,
+                policy_result=policy_result,
+                policy_version=settings.auto_classification_policy_version,
+                calibration_version=settings.auto_classification_calibration_version,
+                decision=(
+                    "DIRECT_MOVE_AUTHORIZED"
+                    if target_relative_path != working_copy.relative_path
+                    else "AUTO_RECLASSIFIED"
+                ),
+                reason_codes=[],
+                target_relative_path=target_relative_path,
+                decision_scope=f"reclassification:{agent_run_id}",
+            )
+            if target_relative_path != working_copy.relative_path:
+                changed_document_ids.append(working_copy.document_id)
+                item_status = "MOVE_REQUIRED"
+            else:
+                item_status = "AUTO_RECLASSIFIED"
+            details.append(
+                {
+                    "document_id": working_copy.document_id,
+                    "filename": working_copy.filename,
+                    "status": item_status,
+                    "previous_category_id": (
+                        previous.category_id if previous is not None else None
+                    ),
+                    "category_id": primary_suggestion.category_id,
+                    "target_relative_path": target_relative_path,
+                }
+            )
+
+        if not changed_document_ids:
+            return {
+                "ok": True,
+                "kind": "auto_reclassification_no_move",
+                "status": "COMPLETED",
+                "item_count": 0,
+                "suggestions": details,
+                "message": "重新分类已完成，没有需要移动的文件。",
+            }
+        return self._create_category_move_plan(
+            user=user,
+            document_ids=changed_document_ids,
+            conversation_id=conversation_id,
+            agent_run_id=agent_run_id,
+            reason=(
+                "重新分类结果达到自动分类标准且与原分类不同；"
+                "已按本次重新分类指令直接移动共享工作副本"
+            ),
+        )
+
+    @staticmethod
+    def _policy_category(suggestion: DocumentCategorySuggestion) -> dict[str, Any]:
+        """把持久化建议还原为自动分类门槛需要的有限字段。"""
+
+        candidate_scores = dict(suggestion.candidate_scores_json or {})
+        return {
+            "name": suggestion.category_name,
+            "category_id": suggestion.category_id,
+            "category_path": list(suggestion.category_path_json or []),
+            "confidence": suggestion.confidence,
+            "status": suggestion.status,
+            "source": suggestion.source,
+            "taxonomy_key": suggestion.taxonomy_key,
+            "taxonomy_version": suggestion.taxonomy_version,
+            "evidence_items": list(suggestion.evidence_json or []),
+            "candidate_scores": candidate_scores,
+            "matched_content_signals": list(
+                candidate_scores.get("matched_content_signals") or []
+            ),
+            "negative_signals": list(
+                candidate_scores.get("negative_signals") or []
+            ),
+        }
+
+    def _audit_auto_reclassification(
+        self,
+        *,
+        user: User,
+        agent_run_id: str,
+        new_relation: DocumentCategory,
+        ended_relations: list[DocumentCategory],
+        confidence: float | None,
+    ) -> None:
+        """把自动正式分类替换追加到本次 AgentRun 的 ChangeSet。"""
+
+        run = self.db.get(AgentRun, agent_run_id)
+        if run is None:
+            raise ValueError("重新分类运行不存在。")
+        changeset = self.db.get(ChangeSet, run.changeset_id) if run.changeset_id else None
+        if changeset is None:
+            changeset = ChangeSet(
+                workspace_id=get_shared_workspace_id(self.db),
+                conversation_id=run.conversation_id,
+                agent_run_id=run.id,
+                user_id=user.id,
+                status="COMPLETED",
+                summary="重新分类达到自动标准，已更新正式分类并按当前指令直接归位。",
+            )
+            self.db.add(changeset)
+            self.db.flush()
+            run.changeset_id = changeset.id
+        for relation in ended_relations:
+            self.db.add(
+                ChangeItem(
+                    changeset_id=changeset.id,
+                    target_type="DOCUMENT_CATEGORY",
+                    target_id=relation.id,
+                    target_document_id=relation.document_id,
+                    change_type="CATEGORY_REMOVED",
+                    before_value_json={
+                        "category_id": relation.category_id,
+                        "status": "AUTO_APPLIED",
+                    },
+                    after_value_json={"status": "ENDED"},
+                    source="auto-reclassification-policy",
+                    confidence=float(confidence or 0.0),
+                    evidence_json={},
+                    execution_status="COMPLETED",
+                )
+            )
+        self.db.add(
+            ChangeItem(
+                changeset_id=changeset.id,
+                target_type="DOCUMENT_CATEGORY",
+                target_id=new_relation.id,
+                target_document_id=new_relation.document_id,
+                change_type="CATEGORY_ADDED",
+                before_value_json={},
+                after_value_json={
+                    "category_id": new_relation.category_id,
+                    "status": new_relation.status,
+                },
+                source="auto-reclassification-policy",
+                confidence=float(confidence or 0.0),
+                evidence_json={
+                    "source_suggestion_id": new_relation.source_suggestion_id
+                },
+                execution_status="COMPLETED",
+            )
+        )
 
     def _cancel_conflict(
         self,
@@ -267,6 +656,7 @@ class ConversationalWorkingCopyPlanService:
         document_ids: list[str],
         conversation_id: str,
         agent_run_id: str,
+        reason: str = "按当前明确分类指令直接整理共享工作副本位置",
     ):
         """按正式分类的受控 organization_path 创建共享移动计划。"""
 
@@ -345,9 +735,7 @@ class ConversationalWorkingCopyPlanService:
                 )
             relation, target = candidates[0]
             if target.target_relative_path == working_copy.relative_path:
-                raise ValueError(
-                    f"文件“{working_copy.filename}”已经位于确认分类对应目录。"
-                )
+                continue
             occupied = (
                 self.db.query(WorkingCopy)
                 .filter(
@@ -410,13 +798,22 @@ class ConversationalWorkingCopyPlanService:
                     },
                 )
             )
+        if not items:
+            return {
+                "ok": True,
+                "kind": "classification_move_not_required",
+                "status": "COMPLETED",
+                "item_count": 0,
+                "file_position_changed": False,
+                "message": "分类已保存，文件已经位于对应分类目录。",
+            }
         plan = self.operations.create_plan(
             current_user=user,
             request=OperationPlanCreateRequest(
                 conversation_id=conversation_id,
                 operation_type="MOVE_WORKING_COPIES",
                 risk_level="high",
-                reason="按已确认分类整理共享工作副本；确认后将影响所有用户看到的文件位置",
+                reason=reason,
                 items=items,
             ),
         )

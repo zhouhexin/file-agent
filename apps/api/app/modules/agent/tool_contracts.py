@@ -192,7 +192,7 @@ class ManagedFileReadToolOutput(GenericToolOutput):
 
 
 class OperationPlanToolOutput(GenericToolOutput):
-    """重命名与工作副本操作计划的输出契约，仅代表待确认计划。"""
+    """工作副本计划或显式分类指令直接执行结果的兼容输出契约。"""
 
     kind: str | None = None
     message: str | None = None

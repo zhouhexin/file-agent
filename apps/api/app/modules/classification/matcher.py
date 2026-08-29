@@ -46,6 +46,8 @@ class CategoryCandidate:
     matched_title_signals: list[str]
     matched_content_signals: list[str]
     negative_signals: list[str]
+    organization_scope: str | None
+    organization_score: float
     candidate_reason: str
     taxonomy_key: str
     taxonomy_version: str
@@ -99,9 +101,21 @@ def recall_category_candidates(
         ]
     )
     body_text = document_features.full_text or ""
+    organization_scope = _detect_organization_scope(
+        taxonomy=taxonomy,
+        title_text=title_text,
+        body_text=body_text,
+    )
     candidates: list[CategoryCandidate] = []
     for category in flatten_category_paths(taxonomy):
         if len(category.path) == 1:
+            continue
+        root_name = category.path[0] if category.path else ""
+        if (
+            organization_scope.dominant_root
+            and root_name in organization_scope.scores
+            and root_name != organization_scope.dominant_root
+        ):
             continue
         (
             score,
@@ -117,6 +131,42 @@ def recall_category_candidates(
         )
         if score <= 0:
             continue
+        scope_score = 0.0
+        if root_name == organization_scope.dominant_root:
+            scope_score = min(
+                0.45,
+                0.25 + organization_scope.scores.get(root_name, 0.0) * 0.35,
+            )
+            score += scope_score
+            matched_title_signals = _unique_signals(
+                [
+                    *matched_title_signals,
+                    *organization_scope.matched_title_signals.get(root_name, []),
+                ]
+            )
+            matched_content_signals = _unique_signals(
+                [
+                    *matched_content_signals,
+                    *organization_scope.matched_content_signals.get(root_name, []),
+                ]
+            )
+            matched_signals = _unique_signals(
+                [
+                    *matched_signals,
+                    *matched_title_signals,
+                    *matched_content_signals,
+                ]
+            )
+            scope_signals = _unique_signals(
+                [
+                    *organization_scope.matched_title_signals.get(root_name, []),
+                    *organization_scope.matched_content_signals.get(root_name, []),
+                ]
+            )
+            reasons.insert(
+                0,
+                f"组织层级判定为{root_name}：{'、'.join(scope_signals[:5])}",
+            )
         candidates.append(
             CategoryCandidate(
                 category_id=category.category_id,
@@ -127,6 +177,8 @@ def recall_category_candidates(
                 matched_title_signals=matched_title_signals,
                 matched_content_signals=matched_content_signals,
                 negative_signals=negative_signals,
+                organization_scope=organization_scope.dominant_root,
+                organization_score=round(scope_score, 4),
                 candidate_reason="；".join(reasons),
                 taxonomy_key=taxonomy.key,
                 taxonomy_version=taxonomy.version,
@@ -272,6 +324,103 @@ def _score_category_candidate(
     )
 
 
+@dataclass(frozen=True)
+class _OrganizationScopeDecision:
+    """学校/学院一级组织范围判定，只约束候选分支，不直接生成分类。"""
+
+    dominant_root: str | None
+    scores: dict[str, float]
+    matched_title_signals: dict[str, list[str]]
+    matched_content_signals: dict[str, list[str]]
+
+
+def _detect_organization_scope(
+    *,
+    taxonomy: Taxonomy,
+    title_text: str,
+    body_text: str,
+) -> _OrganizationScopeDecision:
+    """先根据 taxonomy 根节点信号判断学校或学院，再进入业务分类。"""
+
+    scores: dict[str, float] = {}
+    matched_title_by_root: dict[str, list[str]] = {}
+    matched_content_by_root: dict[str, list[str]] = {}
+    for root in taxonomy.categories:
+        if root.name not in {"学校", "学院"}:
+            continue
+        positive_signals = _unique_signals([*root.aliases, *root.positive_signals])
+        negative_signals = _unique_signals(root.negative_signals)
+        matched_title = _prefer_specific_signals(
+            [signal for signal in positive_signals if signal in title_text]
+        )
+        matched_content = _prefer_specific_signals(
+            [signal for signal in positive_signals if signal in body_text]
+        )
+        negative_title = _prefer_specific_signals(
+            [signal for signal in negative_signals if signal in title_text]
+        )
+        negative_content = _prefer_specific_signals(
+            [signal for signal in negative_signals if signal in body_text]
+        )
+        score = min(
+            0.65,
+            sum(_scope_signal_weight(signal, title=True) for signal in matched_title),
+        )
+        score += min(
+            0.3,
+            sum(
+                _scope_signal_weight(signal, title=False)
+                for signal in matched_content
+            ),
+        )
+        score -= min(
+            0.65,
+            sum(_scope_signal_weight(signal, title=True) for signal in negative_title),
+        )
+        score -= min(
+            0.3,
+            sum(
+                _scope_signal_weight(signal, title=False)
+                for signal in negative_content
+            ),
+        )
+        scores[root.name] = round(max(0.0, score), 4)
+        matched_title_by_root[root.name] = matched_title
+        matched_content_by_root[root.name] = matched_content
+
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    dominant_root: str | None = None
+    if ranked:
+        best_root, best_score = ranked[0]
+        second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+        if best_score >= 0.18 and best_score - second_score >= 0.1:
+            dominant_root = best_root
+    return _OrganizationScopeDecision(
+        dominant_root=dominant_root,
+        scores=scores,
+        matched_title_signals=matched_title_by_root,
+        matched_content_signals=matched_content_by_root,
+    )
+
+
+def _scope_signal_weight(signal: str, *, title: bool) -> float:
+    """长组织短语比“学校/学院”等泛词更可靠，标题信号高于正文信号。"""
+
+    base = 0.18 if title else 0.08
+    return base + min(0.08, len(signal) * 0.01)
+
+
+def _prefer_specific_signals(signals: list[str]) -> list[str]:
+    """同一短语命中时只保留最长表达，避免“全校/面向全校”重复放大。"""
+
+    unique = _unique_signals(signals)
+    return [
+        signal
+        for signal in unique
+        if not any(signal != other and signal in other for other in unique)
+    ]
+
+
 def _candidate_to_category(candidate: CategoryCandidate) -> dict[str, Any]:
     """把候选召回结果转换为现有 rule-only 分类建议结构。"""
 
@@ -288,8 +437,10 @@ def _candidate_to_category(candidate: CategoryCandidate) -> dict[str, Any]:
         "matched_title_signals": candidate.matched_title_signals,
         "matched_content_signals": candidate.matched_content_signals,
         "negative_signals": candidate.negative_signals,
+        "organization_scope": candidate.organization_scope,
         "candidate_scores": {
             "rule": candidate.rule_score,
+            "organization": candidate.organization_score,
             "matched_title_signals": candidate.matched_title_signals,
             "matched_content_signals": candidate.matched_content_signals,
             "negative_signals": candidate.negative_signals,

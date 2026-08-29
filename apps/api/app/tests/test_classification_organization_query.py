@@ -131,7 +131,7 @@ def _add_primary(
             relation_role="PRIMARY",
             status=status,
             taxonomy_key="unified_school_file_classification",
-            taxonomy_version="2026-08-v4",
+            taxonomy_version="2026-08-v6",
             classifier_version="test",
         )
     )

@@ -22,7 +22,11 @@ from app.modules.agent.graph import (
     response,
 )
 from app.modules.agent.repository import _safe_graph_state_snapshot
-from app.modules.agent.planner import DeterministicPlanner, build_plan_from_user_intent
+from app.modules.agent.planner import (
+    DeterministicPlanner,
+    FileScopeClarificationPlanner,
+    build_plan_from_user_intent,
+)
 from app.modules.agent.service import (
     AgentRuntimeService,
     _build_document_summary_service,
@@ -80,6 +84,29 @@ def test_bare_confirmation_is_not_globally_interpreted_as_filename_overwrite():
         step.tool_name != "working-copy-action-plan-create"
         for step in plan.steps
     )
+
+
+def test_file_scope_clarification_planner_preserves_backend_question():
+    """文件名未找到或同名歧义时必须直接澄清，不能再调用受管文件 Tool。"""
+
+    question = "找到多份同名活动文件，请重新附加需要分类的具体文件。"
+    planner = FileScopeClarificationPlanner(question=question)
+    plan = planner.plan(message="重新分类“同名通知.docx”")
+    result = AgentRuntimeService().run_message(
+        conversation_id="filename-clarification-conversation",
+        user_id="filename-clarification-user",
+        message_id="filename-clarification-message",
+        message="重新分类“同名通知.docx”",
+        attachments=[],
+        planner=planner,
+    )
+
+    assert plan.intent == "MISSING_FILE_SCOPE"
+    assert plan.slots["document_ids"] == []
+    assert plan.slots["clarification_question"] == question
+    assert result.status == "NEEDS_REVIEW"
+    assert result.final_response == question
+    assert result.tool_invocations == []
 
 
 def test_tool_registry_contains_mvp_catalog_and_endpoint_requires_authentication():
@@ -1107,6 +1134,7 @@ def test_planner_routes_natural_language_classification_decisions():
         ("这个分类是对的", "ACCEPT"),
         ("这个不是科研材料", "REJECT"),
         ("这个不是科研材料，是干部考察材料", "CORRECT"),
+        ("将这个文件分类为学校/人事师资/考核聘任", "CORRECT"),
     ]
     for message, action in cases:
         plan = DeterministicPlanner().plan(
@@ -1121,8 +1149,8 @@ def test_planner_routes_natural_language_classification_decisions():
         assert plan.steps[0].input["document_ids"] == ["document-stage6"]
 
 
-def test_planner_only_moves_after_explicit_organization_request():
-    """确认分类本身不能移动，只有明确整理请求才创建移动计划。"""
+def test_planner_treats_explicit_classification_as_direct_move_authorization():
+    """确认分类或按分类整理都是本次直接归位授权，不得再要求二次确认。"""
 
     accepted = DeterministicPlanner().plan(
         conversation_id="conv-stage6-move",
@@ -1140,8 +1168,16 @@ def test_planner_only_moves_after_explicit_organization_request():
     )
 
     assert accepted.steps[0].tool_name == "classification-decision"
+    assert accepted.confirmation_policy["operation_plan_required"] is False
+    assert (
+        accepted.confirmation_policy[
+            "explicit_classification_instruction_authorizes_move"
+        ]
+        is True
+    )
     assert organized.steps[0].tool_name == "working-copy-action-plan-create"
     assert organized.steps[0].input["action"] == "MOVE_BY_CONFIRMED_CATEGORY"
+    assert organized.confirmation_policy["operation_plan_required"] is False
 
 
 @pytest.mark.parametrize(
@@ -1323,6 +1359,46 @@ def test_llm_classification_hint_is_overridden_for_explicit_file_classification(
         "change-report",
     ]
     assert [step.tool_name for step in plan.steps] == ["extract-document-text"]
+    assert plan.steps[0].input["force_reprocess"] is False
+
+
+def test_llm_managed_classification_intent_cannot_override_resolved_filename_working_copy():
+    """文件名已由后端唯一解析为工作副本后，LLM 不得再改走受管源目录分类。"""
+
+    intent_plan = UserIntentPlan(
+        intent="CLASSIFY_MANAGED_FILES",
+        # 即使 LLM 把目标改写为普通“分类”，后端仍应以原始消息中的“重新分类”为准。
+        user_goal="分类指定文件",
+        needs_file_context=True,
+        target_scope="filename_reference",
+        required_capabilities=["managed_file_classification"],
+        tool_plan_hint=["classify-managed-files"],
+        response_style="concise",
+    )
+
+    plan = build_plan_from_user_intent(
+        intent_plan=intent_plan,
+        message="重新分类“工资津贴发放情况自查表.doc”",
+        attachments=[
+            {
+                "document_id": "working-document",
+                "context_scope": "working_copy_filename_reference",
+            }
+        ],
+    )
+
+    assert plan.intent == "CLASSIFY_FILES"
+    assert plan.slots["document_ids"] == ["working-document"]
+    assert plan.slots["resolved_scope"] == "working_copy_filename_reference"
+    assert [step.tool_name for step in plan.steps] == [
+        "extract-document-text",
+        "working-copy-action-plan-create",
+    ]
+    assert plan.steps[0].input["force_reprocess"] is True
+    assert (
+        plan.steps[1].input["action"]
+        == "MOVE_AFTER_AUTO_RECLASSIFICATION"
+    )
 
 
 def test_llm_taxonomy_hint_is_overridden_for_explicit_attachment_classification():

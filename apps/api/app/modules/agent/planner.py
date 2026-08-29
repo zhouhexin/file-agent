@@ -518,19 +518,19 @@ class DeterministicPlanner:
                 action=conflict_action,
                 document_ids=[],
             )
-        # 识别“按已确认分类整理/移动文件”，命中后生成按正式分类移动工作副本的计划。
-        if has_organize_by_classification_intent(message):
-            return _working_copy_action_plan(
-                user_goal=message,
-                action="MOVE_BY_CONFIRMED_CATEGORY",
-                document_ids=_document_ids(attachments),
-            )
         classification_action = classification_decision_action(message)
         # 识别接受、拒绝或更正分类的回复，命中后生成分类决策计划。
         if classification_action:
             return _classification_decision_plan(
                 user_goal=message,
                 action=classification_action,
+                document_ids=_document_ids(attachments),
+            )
+        # 识别“按已确认分类整理/移动文件”，命中后按当前正式分类直接归位。
+        if has_organize_by_classification_intent(message):
+            return _working_copy_action_plan(
+                user_goal=message,
+                action="MOVE_BY_CONFIRMED_CATEGORY",
                 document_ids=_document_ids(attachments),
             )
         # 识别只给出目标名称、但没有源文件或附件的改名请求，命中后要求补充文件范围。
@@ -950,6 +950,14 @@ class DeterministicPlanner:
             return _classify_files_plan(
                 user_goal=message,
                 document_ids=document_ids,
+                force_reprocess=_should_force_reprocess(
+                    message=message,
+                    lowered=lowered,
+                ),
+                move_after_reclassification=_should_plan_reclassification_move(
+                    message=message,
+                    lowered=lowered,
+                ),
                 selected_skills=[
                     "chat-intake",
                     "document-text-extract",
@@ -961,12 +969,37 @@ class DeterministicPlanner:
         return _classify_files_plan(
             user_goal=message,
             document_ids=document_ids,
+            force_reprocess=_should_force_reprocess(
+                message=message,
+                lowered=lowered,
+            ),
+            move_after_reclassification=_should_plan_reclassification_move(
+                message=message,
+                lowered=lowered,
+            ),
             selected_skills=[
                 "chat-intake",
                 "document-text-extract",
                 "document-classification",
                 "change-report",
             ],
+        )
+
+
+class FileScopeClarificationPlanner(DeterministicPlanner):
+    """返回后端已确定的文件范围澄清，不允许 LLM 改写为其他文件 Tool。"""
+
+    def __init__(self, *, question: str) -> None:
+        """保存不含内部路径或数据库 ID 的用户可见澄清问题。"""
+
+        self.question = question
+
+    def plan(self, **kwargs: Any) -> PlannerOutput:
+        """生成无文件副作用的澄清计划，阻止未找到或同名歧义继续执行。"""
+
+        return _missing_file_scope_plan(
+            user_goal=str(kwargs.get("message") or "确认文件范围"),
+            clarification_question=self.question,
         )
 
 
@@ -1001,19 +1034,19 @@ def build_plan_from_user_intent(
             response_style=intent_plan.response_style,
             llm_intent_plan=intent_plan.model_dump(),
         )
-    if has_organize_by_classification_intent(message):
-        return _working_copy_action_plan(
-            user_goal=intent_plan.user_goal or message,
-            action="MOVE_BY_CONFIRMED_CATEGORY",
-            document_ids=attachment_document_ids,
-            response_style=intent_plan.response_style,
-            llm_intent_plan=intent_plan.model_dump(),
-        )
     classification_action = classification_decision_action(message)
     if classification_action:
         return _classification_decision_plan(
             user_goal=intent_plan.user_goal or message,
             action=classification_action,
+            document_ids=attachment_document_ids,
+            response_style=intent_plan.response_style,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
+    if has_organize_by_classification_intent(message):
+        return _working_copy_action_plan(
+            user_goal=intent_plan.user_goal or message,
+            action="MOVE_BY_CONFIRMED_CATEGORY",
             document_ids=attachment_document_ids,
             response_style=intent_plan.response_style,
             llm_intent_plan=intent_plan.model_dump(),
@@ -1128,6 +1161,14 @@ def build_plan_from_user_intent(
         return _classify_files_plan(
             user_goal=intent_plan.user_goal or message,
             document_ids=attachment_document_ids,
+            force_reprocess=_should_force_reprocess(
+                message=message,
+                lowered=lowered,
+            ),
+            move_after_reclassification=_should_plan_reclassification_move(
+                message=message,
+                lowered=lowered,
+            ),
             selected_skills=[
                 "llm-understanding",
                 "document-text-extract",
@@ -1486,6 +1527,14 @@ def build_plan_from_user_intent(
         return _classify_files_plan(
             user_goal=intent_plan.user_goal or message,
             document_ids=document_ids,
+            force_reprocess=_should_force_reprocess(
+                message=message,
+                lowered=lowered,
+            ),
+            move_after_reclassification=_should_plan_reclassification_move(
+                message=message,
+                lowered=lowered,
+            ),
             selected_skills=[
                 "llm-understanding",
                 "document-text-extract",
@@ -1578,6 +1627,14 @@ def build_plan_from_user_intent(
         return _classify_files_plan(
             user_goal=intent_plan.user_goal or message,
             document_ids=document_ids,
+            force_reprocess=_should_force_reprocess(
+                message=message,
+                lowered=lowered,
+            ),
+            move_after_reclassification=_should_plan_reclassification_move(
+                message=message,
+                lowered=lowered,
+            ),
             selected_skills=[
                 "llm-understanding",
                 "document-text-extract",
@@ -1897,7 +1954,11 @@ def _evidence_answer_plan(
     )
 
 
-def _missing_file_scope_plan(*, user_goal: str) -> PlannerOutput:
+def _missing_file_scope_plan(
+    *,
+    user_goal: str,
+    clarification_question: str | None = None,
+) -> PlannerOutput:
     """用户请求文件任务但未解析到真实 document_id 时，返回明确提示。"""
     return PlannerOutput(
         intent="MISSING_FILE_SCOPE",
@@ -1906,6 +1967,7 @@ def _missing_file_scope_plan(*, user_goal: str) -> PlannerOutput:
             "document_ids": [],
             "requested_outputs": ["missing_file_scope"],
             "response_style": "concise",
+            "clarification_question": clarification_question,
         },
         selected_skills=["file-context"],
         steps=[
@@ -2251,14 +2313,20 @@ def _working_copy_action_plan(
     response_style: str = "concise",
     llm_intent_plan: Dict[str, Any] | None = None,
 ) -> PlannerOutput:
-    """生成删除、恢复或同名冲突的声明式计划，真实对象由后端服务解析。"""
+    """生成工作副本动作；显式按分类整理直接执行，其余动作保留确认边界。"""
+
+    direct_classification_move = action == "MOVE_BY_CONFIRMED_CATEGORY"
 
     return PlannerOutput(
         intent="PREPARE_WORKING_COPY_ACTION",
         user_goal=user_goal,
         slots={
             "document_ids": document_ids,
-            "requested_outputs": ["operation_plan"],
+            "requested_outputs": [
+                "working_copy_operation_result"
+                if direct_classification_move
+                else "operation_plan"
+            ],
             "response_style": response_style,
             "llm_intent_plan": llm_intent_plan or {},
             "route_source": "controlled_working_copy_action",
@@ -2276,12 +2344,29 @@ def _working_copy_action_plan(
                 },
                 "requires_confirmation": False,
                 "risk_level": "high" if action in {"TRASH", "CONFLICT_REPLACE_EXISTING", "CONFLICT_DELETE_EXISTING"} else "medium",
-                "expected_outputs": ["operation_plan"],
-                "writes": ["operation_plans", "working_copy_path_records"],
+                "expected_outputs": [
+                    "working_copy_operation_result"
+                    if direct_classification_move
+                    else "operation_plan"
+                ],
+                "writes": [
+                    "operation_plans",
+                    "operation_confirmations",
+                    "working_copy_path_records",
+                    "working_copies",
+                    "document_versions",
+                    "change_sets",
+                    "change_items",
+                ],
             }
         ],
         evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
-        confirmation_policy={"operation_plan_required": True},
+        confirmation_policy={
+            "operation_plan_required": not direct_classification_move,
+            "explicit_classification_instruction_authorizes_move": (
+                direct_classification_move
+            ),
+        },
     )
 
 
@@ -2298,6 +2383,7 @@ def _classification_decision_plan(
     Planner 不解析 suggestion/category ID，真实对象和 taxonomy 节点由 Tool 后端校验。
     """
 
+    direct_classification_move = action in {"ACCEPT", "CORRECT"}
     return PlannerOutput(
         intent=f"{action}_CLASSIFICATION",
         user_goal=user_goal,
@@ -2313,6 +2399,11 @@ def _classification_decision_plan(
             "document-classification",
             "feedback-and-memory",
             "change-report",
+            *(
+                ["operation-plan", "confirmed-file-action"]
+                if direct_classification_move
+                else []
+            ),
         ],
         steps=[
             {
@@ -2325,10 +2416,11 @@ def _classification_decision_plan(
                     "document_ids": document_ids,
                 },
                 "requires_confirmation": False,
-                "risk_level": "low",
+                "risk_level": "medium" if direct_classification_move else "low",
                 "expected_outputs": [
                     "classification_decision",
                     "classification_clarification",
+                    "working_copy_operation_result",
                 ],
                 "writes": [
                     "document_category_feedback",
@@ -2337,6 +2429,11 @@ def _classification_decision_plan(
                     "change_sets",
                     "change_items",
                     "classification_graph_outbox",
+                    "operation_plans",
+                    "operation_confirmations",
+                    "working_copy_path_records",
+                    "working_copies",
+                    "document_versions",
                 ],
             }
         ],
@@ -2344,7 +2441,12 @@ def _classification_decision_plan(
             "require_page_or_cell": True,
             "allow_no_evidence_answer": False,
         },
-        confirmation_policy={"operation_plan_required": False},
+        confirmation_policy={
+            "operation_plan_required": False,
+            "explicit_classification_instruction_authorizes_move": (
+                direct_classification_move
+            ),
+        },
     )
 
 
@@ -2611,6 +2713,8 @@ def _classify_files_plan(
     user_goal: str,
     document_ids: List[str],
     selected_skills: List[str],
+    force_reprocess: bool = False,
+    move_after_reclassification: bool = False,
     response_style: str = "concise",
     clarification_question: str | None = None,
     llm_intent_plan: Dict[str, Any] | None = None,
@@ -2632,17 +2736,60 @@ def _classify_files_plan(
             "target_scope": target_scope,
             "resolved_scope": resolved_scope,
         },
-        selected_skills=selected_skills,
+        selected_skills=[
+            *selected_skills,
+            *(
+                ["operation-plan", "confirmed-file-action"]
+                if move_after_reclassification
+                else []
+            ),
+        ],
         steps=[
-            _extract_document_text_step(
-                document_id=document_id,
-                index=index,
-                force_reprocess=False,
-            )
-            for index, document_id in enumerate(document_ids, start=1)
+            *[
+                _extract_document_text_step(
+                    document_id=document_id,
+                    index=index,
+                    force_reprocess=force_reprocess,
+                )
+                for index, document_id in enumerate(document_ids, start=1)
+            ],
+            *(
+                [
+                    {
+                        "step_id": "step-plan-auto-reclassification-move",
+                        "skill": "operation-plan",
+                        "tool_name": "working-copy-action-plan-create",
+                        "input": {
+                            "action": "MOVE_AFTER_AUTO_RECLASSIFICATION",
+                            "message": user_goal,
+                            "document_ids": document_ids,
+                        },
+                        "requires_confirmation": False,
+                        "risk_level": "high",
+                        "expected_outputs": [
+                            "working_copy_operation_result",
+                            "classification_decision",
+                        ],
+                        "writes": [
+                            "document_categories",
+                            "document_organization_decisions",
+                            "operation_plans",
+                            "working_copy_path_records",
+                            "working_copies",
+                            "document_versions",
+                            "change_items",
+                        ],
+                    }
+                ]
+                if move_after_reclassification
+                else []
+            ),
         ],
         evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
-        confirmation_policy={"operation_plan_required": False},
+        confirmation_policy={
+            "operation_plan_required": False,
+            "direct_move_when_classification_changes": move_after_reclassification,
+        },
     )
 
 
@@ -2791,11 +2938,20 @@ def _should_force_reprocess(*, message: str, lowered: str) -> bool:
         "强制重新",
     ]
     english_keywords = ["reprocess", "rerun", "force reprocess", "parse again"]
-    explicit_reclassification = "重新" in message and any(
-        keyword in message for keyword in ["分类", "归类"]
-    )
-    return explicit_reclassification or any(keyword in message for keyword in chinese_keywords) or any(
+    return _should_plan_reclassification_move(
+        message=message,
+        lowered=lowered,
+    ) or any(keyword in message for keyword in chinese_keywords) or any(
         keyword in lowered for keyword in english_keywords
+    )
+
+
+def _should_plan_reclassification_move(*, message: str, lowered: str) -> bool:
+    """只有明确重新分类/归类才在结果变化后准备移动，重新读取不触发归位。"""
+
+    return ("重新" in message and any(keyword in message for keyword in ["分类", "归类"])) or any(
+        keyword in lowered
+        for keyword in ["reclassify", "re-classify", "classify again"]
     )
 
 

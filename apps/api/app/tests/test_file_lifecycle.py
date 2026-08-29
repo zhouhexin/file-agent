@@ -14,7 +14,9 @@ from app.db.models import (
     Document,
     DocumentClassificationSummary,
     DocumentCategory,
+    DocumentCategorySuggestion,
     DocumentChunk,
+    DocumentClassificationRun,
     DocumentExtractionRun,
     DocumentIndexRun,
     DocumentOrganizationDecision,
@@ -354,10 +356,6 @@ def test_rename_and_classify_only_returns_uploaded_file_cards(monkeypatch, tmp_p
     task_result = response.json()["task_result"]
     document_results = task_result["document_results"]
     assert len(document_results) == 2
-    assert {item["document_id"] for item in document_results} == {
-        first["document_id"],
-        second["document_id"],
-    }
     assert all(item["filename"] not in {item["document_id"], ""} for item in document_results)
 
     with SessionLocal() as db:
@@ -365,9 +363,9 @@ def test_rename_and_classify_only_returns_uploaded_file_cards(monkeypatch, tmp_p
             item.document_id
             for item in db.query(WorkingCopy).filter(WorkingCopy.status == "ACTIVE").all()
         }
-    assert working_document_ids.isdisjoint(
-        {item["document_id"] for item in document_results}
-    )
+    # Agent 执行前已把上传 Document 统一映射到活动工作副本；逐文件
+    # 回执因此必须使用工作副本 Document ID，不再使用上传暂存 ID。
+    assert {item["document_id"] for item in document_results} == working_document_ids
     clear_overrides()
 
 
@@ -1581,8 +1579,8 @@ def test_duplicate_upload_decision_is_audited_but_hidden_from_chat(monkeypatch, 
     clear_overrides()
 
 
-def test_low_confidence_initial_name_keeps_upload_name_and_returns_pending_receipt(monkeypatch, tmp_path):
-    """低置信度首次命名必须保留上传名，并在普通回执中请求自然语言确认。"""
+def test_low_confidence_initial_name_keeps_upload_name_and_audit_without_chat_notice(monkeypatch, tmp_path):
+    """低置信度命名保留原名和复核审计，但未请求改名时不进入聊天。"""
 
     _configure(monkeypatch, tmp_path)
     original_suggest = UploadedRenameSuggestionService.suggest_for_initial_import
@@ -1615,20 +1613,27 @@ def test_low_confidence_initial_name_keeps_upload_name_and_returns_pending_recei
     _drain(SessionLocal)
     working_copy = client.get("/api/working-copies", headers=headers).json()[0]
     history = client.get("/api/conversations/low-confidence-conv", headers=headers).json()
-    task_result = history["messages"][-1]["task_result"]
 
     assert working_copy["filename"] == "原上传名称.txt"
-    assert task_result["task_status"] == "needs_attention"
-    assert task_result["processed_count"] == 1
-    assert task_result["document_results"][0]["working_copy_id"] == working_copy["id"]
-    assert task_result["document_results"][0]["filename"] == "原上传名称.txt"
-    assert task_result["pending_decisions"][0]["reason"] == "LOW_CONFIDENCE_RENAME"
+    assert history["messages"] == []
     db = SessionLocal()
     try:
         review = db.query(FileRenameReviewItem).filter_by(document_id=working_copy["document_id"]).one()
         assert review.status == "NEEDS_REVIEW"
         assert review.review_context_json["reason"] == "LOW_CONFIDENCE_RENAME"
         assert db.get(Document, upload["document_id"]).original_filename == "原上传名称.txt"
+        background_run = (
+            db.query(AgentRun)
+            .filter(AgentRun.conversation_id == "low-confidence-conv")
+            .order_by(AgentRun.created_at.desc())
+            .first()
+        )
+        assert background_run is not None
+        pending_decision = background_run.graph_state_json["document_results"][0][
+            "pending_decision"
+        ]
+        assert pending_decision["reason"] == "LOW_CONFIDENCE_RENAME"
+        assert db.get(Message, background_run.message_id).role == "SYSTEM_AUDIT"
     finally:
         db.close()
         clear_overrides()
@@ -1676,16 +1681,38 @@ def test_initial_ready_rename_is_only_suggestion_until_user_requests_rename(monk
     _drain(SessionLocal)
     working_copy = client.get("/api/working-copies", headers=headers).json()[0]
     history = client.get("/api/conversations/rename-suggestion-conv", headers=headers).json()
-    task_result = history["messages"][-1]["task_result"]
 
     assert working_copy["filename"] == "2024科研成果资助汇总表.txt"
-    assert task_result["document_results"][0]["filename"] == "2024科研成果资助汇总表.txt"
-    assert task_result["document_results"][0]["rename_suggestion"] == {
-        "proposed_filename": "2026_研究成果资助汇总表.txt"
-    }
-    pending = task_result["pending_decisions"][0]
-    assert pending["reason"] == "RENAME_SUGGESTION_AVAILABLE"
-    assert pending["proposed_filename"] == "2026_研究成果资助汇总表.txt"
+    assert history["messages"] == []
+    db = SessionLocal()
+    try:
+        background_run = (
+            db.query(AgentRun)
+            .filter(AgentRun.conversation_id == "rename-suggestion-conv")
+            .order_by(AgentRun.created_at.desc())
+            .first()
+        )
+        assert background_run is not None
+        audit_result = background_run.graph_state_json["document_results"][0]
+        assert audit_result["rename_suggestion"] == {
+            "proposed_filename": "2026_研究成果资助汇总表.txt"
+        }
+        assert audit_result["pending_decision"]["reason"] == "RENAME_SUGGESTION_AVAILABLE"
+        audit_message = db.get(Message, background_run.message_id)
+        assert audit_message.role == "SYSTEM_AUDIT"
+
+        # 兼容修复前已写成 assistant 的历史数据：即使旧角色仍在，
+        # 会话读取投影也不得再展示这张命名建议卡。
+        audit_message.role = "assistant"
+        db.commit()
+    finally:
+        db.close()
+    legacy_history = client.get(
+        "/api/conversations/rename-suggestion-conv",
+        headers=headers,
+    ).json()
+    assert legacy_history["messages"] == []
+
     # 用户仅在后续明确提出改名时，才允许创建待确认计划；此刻仍不得改动工作副本。
     rename_request = client.post(
         "/api/conversations/rename-suggestion-conv/messages",
@@ -2279,11 +2306,11 @@ def test_confirmed_file_action_tool_executes_persisted_working_copy_plan(monkeyp
     clear_overrides()
 
 
-def test_confirmed_primary_category_creates_plan_before_shared_file_move(
+def test_explicit_category_organization_moves_shared_file_without_second_confirmation(
     monkeypatch,
     tmp_path,
 ):
-    """按分类整理必须先建计划，确认后才移动共享工作副本且版本不变。"""
+    """按分类整理指令直接授权受控移动，同时保留计划、确认和版本审计。"""
 
     _configure(monkeypatch, tmp_path)
     client, SessionLocal = client_with_database()
@@ -2326,7 +2353,7 @@ def test_confirmed_primary_category_creates_plan_before_shared_file_move(
             .filter(DocumentVersion.document_id == working_copy["document_id"])
             .count()
         )
-        planned = ToolRegistry(db=db, user_id=user.id).invoke(
+        executed = ToolRegistry(db=db, user_id=user.id).invoke(
             "working-copy-action-plan-create",
             {
                 "action": "MOVE_BY_CONFIRMED_CATEGORY",
@@ -2336,19 +2363,11 @@ def test_confirmed_primary_category_creates_plan_before_shared_file_move(
                 "agent_run_id": run.id,
             },
         )
-        assert planned.output_json["status"] == "WAITING_CONFIRMATION"
-        db.refresh(db.get(WorkingCopy, working_copy["id"]))
-        assert db.get(WorkingCopy, working_copy["id"]).relative_path == original_path
-
-        executed = ToolRegistry(db=db, user_id=user.id).invoke(
-            "confirmed-file-action",
-            {
-                "operation_plan_id": planned.output_json["operation_plan_id"],
-                "confirmation_text": "确认按分类整理共享文件",
-            },
-        )
         moved = db.get(WorkingCopy, working_copy["id"])
         assert executed.output_json["status"] == "EXECUTED"
+        assert executed.output_json["file_position_changed"] is True
+        assert executed.output_json["operation_plan_id"]
+        assert moved.relative_path != original_path
         assert moved.relative_path == "学校/人事师资/考核聘任/教师考核材料.txt"
         assert (
             db.query(DocumentVersion)
@@ -2366,6 +2385,310 @@ def test_confirmed_primary_category_creates_plan_before_shared_file_move(
             .count()
             == 1
         )
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_auto_reclassification_change_moves_without_second_confirmation(
+    monkeypatch,
+    tmp_path,
+):
+    """重新分类达标且主分类变化时，当前指令直接授权关系更新和受控移动。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "auto-reclassification-move-owner")
+    _upload(
+        client,
+        headers,
+        "工资津贴发放情况自查通知.txt",
+        b"salary allowance audit notice",
+    )
+    _drain(SessionLocal)
+    working_copy = client.get("/api/working-copies", headers=headers).json()[0]
+    original_path = working_copy["relative_path"]
+
+    monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_CLASSIFICATION_SHADOW_MODE", "false")
+    config.get_settings.cache_clear()
+
+    db = SessionLocal()
+    try:
+        user = (
+            db.query(User)
+            .filter(User.username == "auto-reclassification-move-owner")
+            .one()
+        )
+        taxonomy = load_default_taxonomy()
+        run = AgentRun(
+            id="44444444-4444-4444-8444-444444444444",
+            conversation_id="auto-reclassification-conversation",
+            message_id="auto-reclassification-message",
+            user_id=user.id,
+        )
+        classification_run = DocumentClassificationRun(
+            id="55555555-5555-4555-8555-555555555555",
+            document_id=working_copy["document_id"],
+            agent_run_id=run.id,
+            taxonomy_key=taxonomy.key,
+            taxonomy_version=taxonomy.version,
+            classifier_version="test-auto-reclassification",
+            source="rule",
+            status="COMPLETED",
+        )
+        suggestion = DocumentCategorySuggestion(
+            id="66666666-6666-4666-8666-666666666666",
+            classification_run_id=classification_run.id,
+            document_id=working_copy["document_id"],
+            document_version_id=working_copy["current_version_id"],
+            category_id="school.hr.salary-social-security",
+            category_name="学校/人事师资/劳资社保",
+            category_path_json=["学校", "人事师资", "劳资社保"],
+            taxonomy_key=taxonomy.key,
+            taxonomy_version=taxonomy.version,
+            confidence=0.9,
+            status="SUGGESTED",
+            evidence_json=[
+                {
+                    "type": "text_quote",
+                    "page_number": 1,
+                    "sheet_name": None,
+                    "quote": "开展工资津贴补贴发放情况自查",
+                    "signals": ["工资", "津贴", "补贴"],
+                    "source": "document_pages",
+                }
+            ],
+            candidate_scores_json={
+                "rule": 0.9,
+                "matched_content_signals": ["工资", "津贴", "补贴"],
+                "negative_signals": [],
+            },
+            source="rule",
+            rank=1,
+        )
+        old_relation = DocumentCategory(
+            working_copy_id=working_copy["id"],
+            document_id=working_copy["document_id"],
+            document_version_id=working_copy["current_version_id"],
+            category_id="school.audit",
+            category_path_json=["学校", "审计"],
+            relation_role="PRIMARY",
+            status="AUTO_APPLIED",
+            taxonomy_key=taxonomy.key,
+            taxonomy_version=taxonomy.version,
+            classifier_version="previous-classifier",
+            source="auto_placement_policy",
+        )
+        db.add_all([run, classification_run, suggestion, old_relation])
+        db.commit()
+
+        executed = ToolRegistry(db=db, user_id=user.id).invoke(
+            "working-copy-action-plan-create",
+            {
+                "action": "MOVE_AFTER_AUTO_RECLASSIFICATION",
+                "message": "重新分类这个文件，并在分类变化时整理位置",
+                "document_ids": [working_copy["document_id"]],
+                "conversation_id": run.conversation_id,
+                "agent_run_id": run.id,
+            },
+        )
+
+        assert executed.output_json["status"] == "EXECUTED"
+        assert executed.output_json["file_position_changed"] is True
+        current_copy = db.get(WorkingCopy, working_copy["id"])
+        assert current_copy.relative_path != original_path
+        db.refresh(old_relation)
+        assert old_relation.status == "ENDED"
+        new_relation = (
+            db.query(DocumentCategory)
+            .filter(
+                DocumentCategory.working_copy_id == working_copy["id"],
+                DocumentCategory.status == "AUTO_APPLIED",
+            )
+            .one()
+        )
+        assert new_relation.category_id == "school.hr.salary-social-security"
+
+        db.refresh(current_copy)
+        assert current_copy.relative_path == (
+            "学校/人事师资/劳资社保/工资津贴发放情况自查通知.txt"
+        )
+
+        # 人工确认属于更高优先级事实。后续自动重新分类即使证据充分，
+        # 也只能进入复核，不能覆盖关系或再次创建移动计划。
+        new_relation.status = "CONFIRMED"
+        protected_run = AgentRun(
+            id="77777777-7777-4777-8777-777777777777",
+            conversation_id="protected-reclassification-conversation",
+            message_id="protected-reclassification-message",
+            user_id=user.id,
+        )
+        protected_classification_run = DocumentClassificationRun(
+            id="88888888-8888-4888-8888-888888888888",
+            document_id=working_copy["document_id"],
+            agent_run_id=protected_run.id,
+            taxonomy_key=taxonomy.key,
+            taxonomy_version=taxonomy.version,
+            classifier_version="test-confirmed-category-protection",
+            source="rule",
+            status="COMPLETED",
+        )
+        protected_suggestion = DocumentCategorySuggestion(
+            id="99999999-9999-4999-8999-999999999999",
+            classification_run_id=protected_classification_run.id,
+            document_id=working_copy["document_id"],
+            document_version_id=working_copy["current_version_id"],
+            category_id="school.audit",
+            category_name="学校/审计",
+            category_path_json=["学校", "审计"],
+            taxonomy_key=taxonomy.key,
+            taxonomy_version=taxonomy.version,
+            confidence=0.9,
+            status="SUGGESTED",
+            evidence_json=[
+                {
+                    "type": "text_quote",
+                    "page_number": 1,
+                    "sheet_name": None,
+                    "quote": "开展专项审计检查",
+                    "signals": ["审计", "检查"],
+                    "source": "document_pages",
+                }
+            ],
+            candidate_scores_json={
+                "rule": 0.9,
+                "matched_content_signals": ["审计", "检查"],
+                "negative_signals": [],
+            },
+            source="rule",
+            rank=1,
+        )
+        db.add_all(
+            [protected_run, protected_classification_run, protected_suggestion]
+        )
+        db.commit()
+
+        protected = ToolRegistry(db=db, user_id=user.id).invoke(
+            "working-copy-action-plan-create",
+            {
+                "action": "MOVE_AFTER_AUTO_RECLASSIFICATION",
+                "message": "重新分类这个文件",
+                "document_ids": [working_copy["document_id"]],
+                "conversation_id": protected_run.conversation_id,
+                "agent_run_id": protected_run.id,
+            },
+        )
+
+        assert protected.output_json["status"] == "COMPLETED"
+        assert "operation_plan_id" not in protected.output_json
+        assert protected.output_json["suggestions"][0]["status"] == "NEEDS_REVIEW"
+        assert (
+            "CONFIRMED_CATEGORY_PROTECTED"
+            in protected.output_json["suggestions"][0]["reason_codes"]
+        )
+        db.refresh(new_relation)
+        db.refresh(current_copy)
+        assert new_relation.status == "CONFIRMED"
+        assert new_relation.category_id == "school.hr.salary-social-security"
+        assert current_copy.relative_path == (
+            "学校/人事师资/劳资社保/工资津贴发放情况自查通知.txt"
+        )
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_explicit_target_classification_persists_relation_and_moves_immediately(
+    monkeypatch,
+    tmp_path,
+):
+    """“将文件分类为 X”必须一次完成正式分类和归位，不再返回确认卡。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "direct-target-classification-owner")
+    _upload(client, headers, "待指定分类材料.txt", b"manual classification target")
+    _drain(SessionLocal)
+    working_copy = client.get("/api/working-copies", headers=headers).json()[0]
+
+    db = SessionLocal()
+    try:
+        user = (
+            db.query(User)
+            .filter(User.username == "direct-target-classification-owner")
+            .one()
+        )
+        taxonomy = load_default_taxonomy()
+        run = AgentRun(
+            id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            conversation_id="direct-target-classify-conv",
+            message_id="direct-target-classify-msg",
+            user_id=user.id,
+        )
+        classification_run = DocumentClassificationRun(
+            id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            document_id=working_copy["document_id"],
+            agent_run_id=run.id,
+            taxonomy_key=taxonomy.key,
+            taxonomy_version=taxonomy.version,
+            classifier_version="test-direct-target-classification",
+            source="rule",
+            status="COMPLETED",
+        )
+        suggestion = DocumentCategorySuggestion(
+            id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            classification_run_id=classification_run.id,
+            document_id=working_copy["document_id"],
+            document_version_id=working_copy["current_version_id"],
+            category_id="school.audit",
+            category_name="学校/审计",
+            category_path_json=["学校", "审计"],
+            taxonomy_key=taxonomy.key,
+            taxonomy_version=taxonomy.version,
+            confidence=0.7,
+            status="SUGGESTED",
+            evidence_json=[
+                {
+                    "type": "text_quote",
+                    "page_number": 1,
+                    "sheet_name": None,
+                    "quote": "manual classification target",
+                    "signals": ["classification"],
+                    "source": "document_pages",
+                }
+            ],
+            source="rule",
+            rank=1,
+        )
+        db.add_all([run, classification_run, suggestion])
+        db.commit()
+
+        result = ToolRegistry(db=db, user_id=user.id).invoke(
+            "classification-decision",
+            {
+                "action": "CORRECT",
+                "message": "将这个文件分类为学校/人事师资/考核聘任",
+                "document_ids": [working_copy["document_id"]],
+                "conversation_id": run.conversation_id,
+                "agent_run_id": run.id,
+            },
+        )
+
+        assert result.output_json["status"] == "COMPLETED"
+        assert result.output_json["file_position_changed"] is True
+        moved = db.get(WorkingCopy, working_copy["id"])
+        assert moved.relative_path == "学校/人事师资/考核聘任/待指定分类材料.txt"
+        relation = (
+            db.query(DocumentCategory)
+            .filter(
+                DocumentCategory.working_copy_id == working_copy["id"],
+                DocumentCategory.status == "CONFIRMED",
+                DocumentCategory.relation_role == "PRIMARY",
+            )
+            .one()
+        )
+        assert relation.category_id == "school.hr.appointment-assessment"
     finally:
         db.close()
         clear_overrides()

@@ -370,7 +370,7 @@ class DocumentClassificationService:
         """返回会影响分类结果的受控实现版本。"""
 
         summary_mode = "summary" if get_settings().llm_classification_summary_enabled else "fulltext"
-        return f"taxonomy-{summary_mode}-first-{self.mode}-graph-{self.graph_mode}-v4"
+        return f"taxonomy-{summary_mode}-first-{self.mode}-graph-{self.graph_mode}-v5"
 
     def _taxonomy_identity(self) -> tuple[str, str]:
         """返回当前统一 taxonomy 身份，用于分类结果缓存隔离。"""

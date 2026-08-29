@@ -1740,10 +1740,10 @@ class WorkingCopyPathRecord(Base):
 
 
 class DocumentOrganizationDecision(Base):
-    """新文件首次主分类和物理落位的版本化审计事实。
+    """首次分类或重新分类后的主分类与物理归位决策审计事实。
 
-    该表不保存正文、绝对路径或用户权限信息；Shadow 运行同样写入决策快照，
-    但不会创建 ``AUTO_APPLIED`` 关系或路径审计记录。
+    该表不保存正文、绝对路径或用户权限信息；Shadow 运行同样写入决策快照。
+    首次发布可以直接落位，活动工作副本的后续移动必须通过待确认 OperationPlan。
     """
 
     __tablename__ = "document_organization_decisions"

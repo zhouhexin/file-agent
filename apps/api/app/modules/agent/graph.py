@@ -1260,8 +1260,8 @@ def tool_dispatch(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext])
                 failed_step_ids.append(step_id)
             current_step_index += 1
             changeset_id = invocation.changeset_id or changeset_id
-            # 同名冲突卡中的明确“覆盖”回复本身就是用户确认。该链路仍会创建并执行
-            # OperationPlan 供审计，但已执行计划不能再投影成第二张待确认卡。
+            # 同名冲突处理或显式分类归位指令本身就是本次执行授权。链路仍会创建并
+            # 执行 OperationPlan 供审计，但已执行计划不能再投影成第二张待确认卡。
             if not (
                 invocation.output_json.get("kind") == "working_copy_operation_result"
                 and invocation.output_json.get("status") == "EXECUTED"

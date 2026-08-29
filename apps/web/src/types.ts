@@ -369,7 +369,7 @@ export type ClassificationClarificationResult = {
 export type ClassificationDecisionResult = {
   action: string;
   message: string;
-  file_position_changed: false;
+  file_position_changed: boolean;
 };
 
 export type FilenameConflictResult = {

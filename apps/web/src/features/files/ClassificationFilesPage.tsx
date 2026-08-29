@@ -34,7 +34,12 @@ const REASON_LABELS: Record<string, string> = {
   SUMMARY_FULLTEXT_CONFLICT: '摘要与全文结论冲突',
   TARGET_PATH_CONFLICT: '目标路径冲突',
   TARGET_NAME_CONFLICT: '目标文件名冲突',
+  TARGET_PATH_UNAVAILABLE: '分类目录不可用',
   PARSE_NOT_READY: '文件解析未完成',
+  AUTO_RECLASSIFICATION_DISABLED: '自动重新归位当前处于关闭或影子模式',
+  MULTIPLE_ACTIVE_PRIMARY_CATEGORIES: '存在多个有效主分类',
+  CONFIRMED_CATEGORY_PROTECTED: '人工确认的主分类未被自动结果覆盖',
+  WORKING_COPY_ROOT_MISSING: '工作副本目录配置缺失',
 };
 
 function formatSize(size: number): string {

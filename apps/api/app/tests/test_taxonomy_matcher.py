@@ -14,7 +14,7 @@ def test_matcher_returns_specific_school_category_path():
     assert matches[0]["name"] == "学校/人事师资/职称"
     assert matches[0]["category_path"] == ["学校", "人事师资", "职称"]
     assert matches[0]["taxonomy_key"] == "unified_school_file_classification"
-    assert matches[0]["taxonomy_version"] == "2026-08-v4"
+    assert matches[0]["taxonomy_version"] == "2026-08-v6"
     assert "职称" in matches[0]["evidence"]
 
 
@@ -26,7 +26,7 @@ def test_matcher_prefers_longer_category_name():
     matches = match_document_text("请归档学院财务管理相关制度。", taxonomy)
 
     assert matches[0]["category_path"] == ["学院", "财务管理"]
-    assert matches[0]["evidence"] == ["财务管理"]
+    assert "财务管理" in matches[0]["evidence"]
     assert ["学校", "财务"] not in [item["category_path"] for item in matches]
 
 
@@ -61,7 +61,7 @@ def test_matcher_returns_other_when_no_taxonomy_keywords_match():
             "status": "SUGGESTED",
             "evidence": [],
             "taxonomy_key": "unified_school_file_classification",
-            "taxonomy_version": "2026-08-v4",
+            "taxonomy_version": "2026-08-v6",
         }
     ]
 
@@ -167,10 +167,13 @@ def test_recall_candidates_prefers_college_talent_work_for_college_plan():
 
     candidates = recall_category_candidates(features, taxonomy, limit=8)
     college = next(item for item in candidates if item.category_id == "college.hr.talent-work")
-    school = next(item for item in candidates if item.category_id == "school.hr.talent-work")
+    school = next(
+        (item for item in candidates if item.category_id == "school.hr.talent-work"),
+        None,
+    )
 
     assert candidates[0].category_id == "college.hr.talent-work"
-    assert college.rule_score > school.rule_score
+    assert school is None
     assert {"高层次人才引育计划", "人才引育工作", "人才队伍台账"} & set(
         college.matched_signals
     )
@@ -188,10 +191,13 @@ def test_recall_candidates_prefers_college_talent_work_for_necessity_report():
 
     candidates = recall_category_candidates(features, taxonomy, limit=8)
     college = next(item for item in candidates if item.category_id == "college.hr.talent-work")
-    school = next(item for item in candidates if item.category_id == "school.hr.talent-work")
+    school = next(
+        (item for item in candidates if item.category_id == "school.hr.talent-work"),
+        None,
+    )
 
     assert candidates[0].category_id == "college.hr.talent-work"
-    assert college.rule_score > school.rule_score
+    assert school is None
     assert "人才引进必要性" in college.matched_signals
     assert "学院拟引进" in college.matched_signals
 
@@ -238,6 +244,86 @@ def test_recall_candidates_recognizes_workdata_college_talent_filenames():
         )
 
         assert candidates[0].category_id == "college.hr.talent-work", filename
+
+
+def test_recall_candidates_prefers_college_salary_for_workdata_self_check_form():
+    """学院工资津贴奖金补助自查表必须召回学院劳资，不得再由“学院”泛词落到发展规划。"""
+
+    taxonomy = load_default_taxonomy()
+    filename = "计算机学院规范工资津贴补贴外各项奖金津贴补助发放情况自查表20180622.doc"
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename=filename,
+            title=filename,
+            full_text=(
+                "填报单位：计算机科学与工程学院。表中包括奖金项目、发放对象、"
+                "发放标准、经费来源和发放情况。"
+            ),
+        ),
+        taxonomy,
+        limit=8,
+    )
+
+    assert candidates[0].category_id == "college.hr.salary-social-security"
+    assert {
+        "工资津贴补贴",
+        "奖金津贴补助",
+        "发放情况自查",
+    } & set(candidates[0].matched_signals)
+    assert all(
+        item.category_id != "college.admin.development-planning"
+        for item in candidates
+    )
+
+
+def test_recall_candidates_resolves_school_scope_before_salary_business_topic():
+    """面向全校的工资自查通知必须先进入学校分支，不得被学院长短语截走。"""
+
+    taxonomy = load_default_taxonomy()
+    filename = "关于开展全校工资津贴补贴发放情况自查的通知20180628.pdf"
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename=filename,
+            title="关于开展全校工资津贴补贴发放情况自查的通知",
+            full_text=(
+                "通知 校属各单位：根据陕西省教育厅办公室转发省审计厅、省财政厅、"
+                "省人社厅关于全省行政事业单位工资津贴补贴发放情况自查工作的通知，"
+                "请在全校开展监督检查。"
+            ),
+        ),
+        taxonomy,
+        limit=8,
+    )
+
+    assert candidates[0].category_id == "school.audit"
+    assert candidates[0].organization_scope == "学校"
+    assert candidates[0].organization_score > 0
+    assert {"全校", "校属各单位"} & set(candidates[0].matched_signals)
+    assert any(
+        item.category_id == "school.hr.salary-social-security"
+        for item in candidates
+    )
+    assert all(not str(item.category_id).startswith("college.") for item in candidates)
+
+
+def test_recall_candidates_recognizes_added_college_hr_categories():
+    """workdata 中教师发展、师资招聘和博士后文种应进入新增或补全的学院人事分类。"""
+
+    taxonomy = load_default_taxonomy()
+    cases = {
+        "计算机学院近三年教师进修情况统计表.xlsx": "college.hr.faculty-development",
+        "计算机学院师资招聘面试试讲安排.docx": "college.hr.faculty-recruitment",
+        "计算机学院博士后流动站年度工作报告.docx": "college.hr.postdoc",
+    }
+
+    for filename, expected_category_id in cases.items():
+        candidates = recall_category_candidates(
+            DocumentFeatures(filename=filename, title=filename),
+            taxonomy,
+            limit=8,
+        )
+
+        assert candidates[0].category_id == expected_category_id, filename
 
 
 def test_match_document_text_uses_recall_candidates_for_rule_only_output():

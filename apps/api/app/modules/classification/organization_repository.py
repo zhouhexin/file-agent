@@ -1,7 +1,10 @@
-"""首次分类组织决策、自动主分类关系和幂等查询仓库。"""
+"""首次分类与重新分类的组织决策、自动主分类关系和幂等查询仓库。"""
 
 from __future__ import annotations
 
+import hashlib
+
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -67,12 +70,21 @@ class OrganizationDecisionRepository:
         reason_codes: list[str],
         target_relative_path: str | None = None,
         shadow_only: bool = False,
+        decision_scope: str = "initial-organization",
     ) -> DocumentOrganizationDecision:
         """按文件版本和策略版本幂等写入组织决策快照。"""
 
-        idempotency_key = (
-            f"initial-organization:{working_copy.id}:{working_copy.current_version_id}:"
+        raw_idempotency_key = (
+            f"{decision_scope}:{working_copy.id}:{working_copy.current_version_id}:"
             f"{policy_version}:{calibration_version}"
+        )
+        idempotency_key = (
+            raw_idempotency_key
+            if len(raw_idempotency_key) <= 160
+            else (
+                f"{decision_scope[:40]}:"
+                f"{hashlib.sha256(raw_idempotency_key.encode('utf-8')).hexdigest()}"
+            )
         )
         row = (
             self.db.query(DocumentOrganizationDecision)
@@ -163,3 +175,108 @@ class OrganizationDecisionRepository:
             )
         )
         return relation
+
+    def replace_auto_applied_primary(
+        self,
+        *,
+        working_copy: WorkingCopy,
+        classification_run: DocumentClassificationRun,
+        suggestion: DocumentCategorySuggestion,
+    ) -> tuple[DocumentCategory, list[DocumentCategory]]:
+        """以新自动结果替换旧自动主分类，人工确认关系绝不自动覆盖。"""
+
+        active = (
+            self.db.query(DocumentCategory)
+            .filter(
+                DocumentCategory.working_copy_id == working_copy.id,
+                DocumentCategory.document_version_id == working_copy.current_version_id,
+                DocumentCategory.relation_role == "PRIMARY",
+                DocumentCategory.status.in_(["AUTO_APPLIED", "CONFIRMED"]),
+            )
+            .with_for_update()
+            .all()
+        )
+        same = next(
+            (item for item in active if item.category_id == suggestion.category_id),
+            None,
+        )
+        if same is not None:
+            return same, []
+        if any(item.status == "CONFIRMED" for item in active):
+            raise ValueError("人工确认的主分类不能被自动重新分类覆盖。")
+
+        ended: list[DocumentCategory] = []
+        now = utcnow()
+        for relation in active:
+            relation.status = "ENDED"
+            relation.ended_at = now
+            relation.updated_at = now
+            ended.append(relation)
+            self._enqueue_graph_projection(
+                relation=relation,
+                source_key=f"auto-reclassification-ended:{suggestion.id}",
+            )
+
+        relation = DocumentCategory(
+            working_copy_id=working_copy.id,
+            document_id=working_copy.document_id,
+            document_version_id=str(working_copy.current_version_id or ""),
+            category_id=suggestion.category_id,
+            category_path_json=list(suggestion.category_path_json or []),
+            relation_role="PRIMARY",
+            status="AUTO_APPLIED",
+            taxonomy_key=classification_run.taxonomy_key,
+            taxonomy_version=classification_run.taxonomy_version,
+            classifier_version=classification_run.classifier_version,
+            source="auto_reclassification_policy",
+            source_suggestion_id=suggestion.id,
+            evidence_json=list(suggestion.evidence_json or []),
+        )
+        self.db.add(relation)
+        self.db.flush()
+        self._enqueue_graph_projection(
+            relation=relation,
+            source_key=f"auto-reclassification-applied:{suggestion.id}",
+        )
+        return relation, ended
+
+    def _enqueue_graph_projection(
+        self,
+        *,
+        relation: DocumentCategory,
+        source_key: str,
+    ) -> None:
+        """为自动关系状态变化写入幂等图谱投影待办。"""
+
+        latest_version = (
+            self.db.query(func.max(ClassificationGraphOutbox.state_version))
+            .filter(
+                ClassificationGraphOutbox.document_category_id == relation.id
+            )
+            .scalar()
+            or 0
+        )
+        state_version = int(latest_version) + 1
+        deduplication_key = (
+            f"{relation.id}:{state_version}:{relation.status}:{source_key}"
+        )
+        if (
+            self.db.query(ClassificationGraphOutbox)
+            .filter(
+                ClassificationGraphOutbox.deduplication_key == deduplication_key
+            )
+            .first()
+            is not None
+        ):
+            return
+        self.db.add(
+            ClassificationGraphOutbox(
+                document_category_id=relation.id,
+                working_copy_id=relation.working_copy_id,
+                document_version_id=relation.document_version_id,
+                expected_status=relation.status,
+                state_version=state_version,
+                deduplication_key=deduplication_key,
+                status="PENDING",
+            )
+        )

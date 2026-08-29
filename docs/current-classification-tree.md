@@ -1,13 +1,13 @@
 # 当前文件分类目录树
 
 - Taxonomy：`unified_school_file_classification`
-- 版本：`2026-08-v3`
-- 分类节点：60 个
+- 版本：`2026-08-v6`
+- 分类节点：63 个
 - 根节点：2 个
-- 实际候选分类节点：58 个
-- 已配置物理路径：58 个
+- 实际候选分类节点：61 个
+- 已配置物理路径：61 个
 
-> 方括号内为稳定分类 ID。核对分类结果或数据库记录时，应优先使用分类 ID；`学校`和`学院`是根节点，不直接作为文件分类。全部 58 个候选分类均已配置安全 `organization_path`。
+> 方括号内为稳定分类 ID。核对分类结果或数据库记录时，应优先使用分类 ID；`学校`和`学院`是根节点，不直接作为文件分类。全部 61 个候选分类均已配置安全 `organization_path`。
 
 ```text
 分类目录
@@ -56,7 +56,10 @@
    │  ├─ 职称 [college.hr.title-review]
    │  ├─ 考核聘任 [college.hr.appointment-assessment]
    │  ├─ 人才工作 [college.hr.talent-work]
-   │  └─ 师资招聘 [college.hr.faculty-recruitment]
+   │  ├─ 师资招聘 [college.hr.faculty-recruitment]
+   │  ├─ 教师发展 [college.hr.faculty-development]
+   │  ├─ 劳资社保 [college.hr.salary-social-security]
+   │  └─ 博士后 [college.hr.postdoc]
    ├─ 请示报告 [college.request-report]
    ├─ 财务管理 [college.finance]
    ├─ 教学 [college.teaching]

@@ -73,6 +73,34 @@ def test_later_phase_classification_keeps_existing_receipt_during_stage_two() ->
     assert receipt.presentation is None
 
 
+def test_classification_only_receipt_hides_background_rename_fields() -> None:
+    """单纯分类归档只展示分类结果，不夹带命名建议或改名确认。"""
+
+    receipt = build_user_task_receipt(
+        _make_result(
+            intent="CLASSIFY_FILES",
+            document_results=[
+                {
+                    "document_id": "document-1",
+                    "filename": "制度.docx",
+                    "extraction_status": "COMPLETED",
+                    "categories": [{"name": "学校/审计", "confidence": 0.9}],
+                    "rename_suggestion": {"proposed_filename": "2026_制度.docx"},
+                    "pending_decision": {
+                        "type": "rename_suggestion",
+                        "reason": "RENAME_SUGGESTION_AVAILABLE",
+                    },
+                }
+            ],
+        )
+    )
+
+    assert "rename_suggestion" not in receipt.document_results[0]
+    assert "pending_decision" not in receipt.document_results[0]
+    assert receipt.pending_decisions == []
+    assert receipt.task_status == "completed"
+
+
 def test_document_results_without_read_intent_do_not_infer_read_presentation() -> None:
     """逐文件结果是结果容器，不得被回执层单独解释成用户要求读取文件。"""
 

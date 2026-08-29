@@ -1922,8 +1922,11 @@ class FileLifecycleJobProcessor:
                 "pending_decision": pending_decision,
             },
             graph_document_results=graph_document_results,
-            # 只有确实需要用户决定命名时进入普通对话；后台成功状态保持为审计消息。
-            visible_in_conversation=bool(pending_decision),
+            # 初次后台整理会保存命名候选和待复核事实，但用户没有明确要求
+            # 改名时不应进入普通对话。真正阻断归档的文件名冲突仍可单独展示。
+            visible_in_conversation=self._initial_organization_decision_is_user_visible(
+                pending_decision
+            ),
         )
         if graph_document_results:
             persist_document_results_classifications(
@@ -2728,6 +2731,17 @@ class FileLifecycleJobProcessor:
                 "allowed_decisions": ["CONFIRM_CURRENT_NAME", "PROVIDE_NEW_NAME"],
             }
         return None
+
+    @staticmethod
+    def _initial_organization_decision_is_user_visible(
+        pending_decision: dict[str, Any] | None,
+    ) -> bool:
+        """只展示会阻断当前归档的决策，隐藏未请求的命名分析。"""
+
+        return bool(
+            pending_decision
+            and pending_decision.get("type") == "filename_conflict"
+        )
 
     @staticmethod
     def _initial_organization_message(

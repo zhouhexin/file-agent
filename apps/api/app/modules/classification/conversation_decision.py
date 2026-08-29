@@ -29,6 +29,9 @@ from app.modules.file_lifecycle.shared_access import (
     CanonicalWorkingFileError,
     CanonicalWorkingFileResolver,
 )
+from app.modules.file_lifecycle.conversation_operations import (
+    ConversationalWorkingCopyPlanService,
+)
 
 
 class ConversationalClassificationDecisionService:
@@ -93,6 +96,11 @@ class ConversationalClassificationDecisionService:
             if len(target_category_ids) == 1:
                 target_category_id = target_category_ids[0]
 
+        if action == "CORRECT" and target_category_id and len(suggestions) > 1:
+            # “将文件分类为 X”已经明确给出最终分类；同一工作副本的多个候选
+            # 只用于提供证据锚点，不应再次要求用户选择一个旧候选。
+            suggestions = self._collapse_explicit_correction_source(suggestions)
+
         if len(suggestions) != 1 or len(target_category_ids) > 1:
             try:
                 clarification = ClassificationClarificationService(self.db).create(
@@ -134,6 +142,26 @@ class ConversationalClassificationDecisionService:
             request=request,
             current_user=user,
         )
+        move_result: dict[str, Any] | None = None
+        if action in {"ACCEPT", "CORRECT"}:
+            move_result = ConversationalWorkingCopyPlanService(
+                self.db,
+                user.id,
+            ).prepare(
+                action="MOVE_BY_CONFIRMED_CATEGORY",
+                message=message,
+                document_ids=[response.document_id],
+                conversation_id=conversation_id,
+                agent_run_id=agent_run_id,
+            )
+        file_position_changed = bool(
+            move_result and move_result.get("file_position_changed")
+        )
+        user_message = (
+            str(move_result.get("message") or "")
+            if move_result is not None
+            else response.user_message
+        )
         return {
             "ok": True,
             "kind": "classification_decision",
@@ -144,9 +172,38 @@ class ConversationalClassificationDecisionService:
             "document_version_id": response.document_version_id,
             "action": response.action,
             "changeset_id": response.changeset_id,
-            "file_position_changed": False,
-            "message": response.user_message,
+            "file_position_changed": file_position_changed,
+            "move_status": (
+                str(move_result.get("status") or "") if move_result else None
+            ),
+            "move_operation_plan_id": (
+                move_result.get("operation_plan_id") if move_result else None
+            ),
+            "move_changeset_id": (
+                move_result.get("changeset_id") if move_result else None
+            ),
+            "move_result": move_result,
+            "message": user_message or response.user_message,
         }
+
+    def _collapse_explicit_correction_source(
+        self,
+        suggestions: list[DocumentCategorySuggestion],
+    ) -> list[DocumentCategorySuggestion]:
+        """目标分类已明确时，同一文件只保留最新候选作为审计证据锚点。"""
+
+        working_copy_ids: set[str] = set()
+        valid: list[DocumentCategorySuggestion] = []
+        for suggestion in suggestions:
+            try:
+                canonical = self.resolver.resolve_suggestion(suggestion)
+            except CanonicalWorkingFileError:
+                continue
+            working_copy_ids.add(canonical.working_copy.id)
+            valid.append(suggestion)
+        if len(working_copy_ids) == 1 and valid:
+            return [valid[0]]
+        return suggestions
 
     def _candidate_suggestions(
         self,
@@ -243,11 +300,17 @@ def classification_decision_action(message: str) -> str | None:
     """确定性识别用户是否在接受、拒绝或纠正分类。"""
 
     compact = re.sub(r"\s+", "", str(message or ""))
-    if not compact or "分类" not in compact and not any(
-        value in compact for value in ("这个是对的", "这个不是", "不是")
+    if not compact or (
+        not any(value in compact for value in ("分类", "归类"))
+        and not any(
+            value in compact for value in ("这个是对的", "这个不是", "不是")
+        )
     ):
         return None
-    if re.search(r"(?:分类)?(?:改成|改为|更正为)", compact) or (
+    if re.search(
+        r"(?:(?:将|把).+?)?(?:分类|归类)(?:改成|改为|更正为|为|到)",
+        compact,
+    ) or (
         "不是" in compact
         and (
             "而是" in compact
