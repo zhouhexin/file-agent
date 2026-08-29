@@ -933,6 +933,92 @@
   width: min(760px, 100%);
 }
 
+.classification-tree-receipt {
+  width: min(760px, 100%);
+  overflow: hidden;
+  border: 1px solid #dbe4ef;
+  border-radius: 9px;
+  background: #ffffff;
+}
+
+.classification-tree-header {
+  padding: 14px 18px;
+  border-bottom: 1px solid #e3eaf3;
+  color: #1f2933;
+  font-size: 14px;
+}
+
+.classification-tree-body {
+  display: grid;
+  gap: 8px;
+  padding: 12px 16px 16px;
+}
+
+.classification-tree-branch {
+  min-width: 0;
+}
+
+.classification-tree-node {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 7px;
+  color: #1f2933;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 800;
+  list-style: none;
+}
+
+.classification-tree-node::-webkit-details-marker {
+  display: none;
+}
+
+.classification-tree-chevron {
+  flex: 0 0 auto;
+  color: #52677d;
+  transition: transform 120ms ease;
+}
+
+.classification-tree-branch[open] > .classification-tree-node > .classification-tree-chevron {
+  transform: rotate(90deg);
+}
+
+.classification-tree-folder {
+  flex: 0 0 auto;
+  color: #2f75e8;
+}
+
+.classification-tree-node small {
+  min-width: 24px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #667789;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  text-align: center;
+}
+
+.classification-tree-children {
+  display: grid;
+  gap: 7px;
+  margin-left: 8px;
+  padding-left: 24px;
+  border-left: 1px solid #d8e3f0;
+}
+
+.classification-tree-files {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 0 5px;
+}
+
+.classification-tree-files .document-result-card {
+  max-width: 560px;
+}
+
 .document-result-card {
   display: block;
   border: 1px solid #e1e8f2;
@@ -1066,11 +1152,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.category-chip__confidence {
-  color: #0f172a;
-  font-style: normal;
 }
 
 .result-evidence {

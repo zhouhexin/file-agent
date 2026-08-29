@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -25,9 +25,51 @@ from app.modules.classification.feedback_service import ClassificationFeedbackSe
 from app.modules.classification.taxonomy_service import read_default_taxonomy_catalog
 from app.modules.classification.loader import load_default_taxonomy
 from app.modules.classification.schemas import CategoryNode
+from app.modules.classification.organization_query_service import (
+    ClassificationOrganizationQueryService,
+    OrganizationQueryError,
+)
+from app.modules.classification.organization_schemas import (
+    OrganizationFilePageResponse,
+    OrganizationTreeResponse,
+)
 
 
 router = APIRouter(prefix="/api/classification", tags=["classification"])
+
+
+@router.get("/organization/tree", response_model=OrganizationTreeResponse)
+def get_classification_organization_tree(
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> OrganizationTreeResponse:
+    """返回共享活动文件的主分类树和待复核虚拟节点。"""
+
+    return ClassificationOrganizationQueryService(db).tree()
+
+
+@router.get("/organization/files", response_model=OrganizationFilePageResponse)
+def list_classification_organization_files(
+    category_id: str | None = None,
+    scope: str = Query(default="descendants", pattern="^(direct|descendants)$"),
+    review_only: bool = False,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> OrganizationFilePageResponse:
+    """按分类范围或待复核状态分页读取已发布工作副本。"""
+
+    try:
+        return ClassificationOrganizationQueryService(db).files(
+            category_id=category_id,
+            scope=scope,
+            review_only=review_only,
+            page=page,
+            page_size=page_size,
+        )
+    except OrganizationQueryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/taxonomy/options", response_model=ClassificationTaxonomyOptionsResponse)

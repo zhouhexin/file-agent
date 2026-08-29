@@ -1,6 +1,6 @@
 // 聊天工作台是文件智能体主入口，文件打开动作必须经过后端受控接口。
 import { ChangeEvent, FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, AlertTriangle, BookOpen, Lightbulb, LogOut, MessageSquare, Paperclip, Send, Trash2, User as UserIcon } from 'lucide-react';
+import { Activity, AlertTriangle, BookOpen, FolderTree, Lightbulb, LogOut, MessageSquare, Paperclip, Send, Trash2, User as UserIcon } from 'lucide-react';
 
 import {
   ApiError,
@@ -69,6 +69,7 @@ type ChatPageProps = {
   user: User;
   onLogout: () => void;
   onOpenOnboarding: () => void;
+  onOpenFiles: () => void;
   onOpenFailedFiles: () => void;
   onOpenAgentRuns: () => void;
   onOpenCapabilitySuggestions: () => void;
@@ -111,6 +112,7 @@ export function ChatPage({
   user,
   onLogout,
   onOpenOnboarding,
+  onOpenFiles,
   onOpenFailedFiles,
   onOpenAgentRuns,
   onOpenCapabilitySuggestions,
@@ -775,6 +777,14 @@ export function ChatPage({
 
       <section className={hasTurns ? 'workspace conversation-mode' : 'workspace empty-mode'}>
         <aside className="chat-sidebar" aria-label="聊天功能菜单">
+          <button
+            className="sidebar-menu-item"
+            type="button"
+            onClick={onOpenFiles}
+          >
+            <FolderTree size={16} />
+            <span>文件列表</span>
+          </button>
           <button
             className="sidebar-menu-item"
             type="button"

@@ -341,17 +341,22 @@ class ClassificationDecisionService:
                     DocumentCategory.working_copy_id == canonical.working_copy.id,
                     DocumentCategory.document_version_id == canonical.document_version.id,
                     DocumentCategory.relation_role == "PRIMARY",
-                    DocumentCategory.status == "CONFIRMED",
+                    DocumentCategory.status.in_(["AUTO_APPLIED", "CONFIRMED"]),
                     DocumentCategory.category_id != target.category_id,
                 )
                 .with_for_update()
                 .first()
             )
-            if conflicting is not None:
+            if conflicting is not None and conflicting.status == "CONFIRMED":
                 raise HTTPException(
                     status_code=409,
-                    detail="该文件已有其他主分类，请先选择要作为整理目录的分类。",
+                    detail="该文件已有其他人工确认的主分类，请先选择要作为整理目录的分类。",
                 )
+            if conflicting is not None:
+                # 用户明确更正可以结束系统自动主分类事实；本事务只写分类事实，
+                # 对话应用服务随后根据同一条显式指令创建并直接执行受控 MOVE 计划。
+                conflicting.status = "REJECTED"
+                conflicting.ended_at = utcnow()
         relation = (
             self.db.query(DocumentCategory)
             .filter(
@@ -359,7 +364,7 @@ class ClassificationDecisionService:
                 DocumentCategory.document_version_id == canonical.document_version.id,
                 DocumentCategory.category_id == target.category_id,
                 DocumentCategory.relation_role == relation_role,
-                DocumentCategory.status == "CONFIRMED",
+                DocumentCategory.status.in_(["AUTO_APPLIED", "CONFIRMED"]),
             )
             .with_for_update()
             .one_or_none()
@@ -391,6 +396,10 @@ class ClassificationDecisionService:
             )
             self.db.add(relation)
             self.db.flush()
+        elif relation.status == "AUTO_APPLIED":
+            relation.status = "CONFIRMED"
+            relation.source = "user_confirmed"
+            relation.updated_at = utcnow()
         existing_source = (
             self.db.query(DocumentCategoryConfirmationSource)
             .filter(
@@ -434,7 +443,7 @@ class ClassificationDecisionService:
                 DocumentCategory.working_copy_id == working_copy_id,
                 DocumentCategory.document_version_id == document_version_id,
                 DocumentCategory.category_id == category_id,
-                DocumentCategory.status == "CONFIRMED",
+                DocumentCategory.status.in_(["AUTO_APPLIED", "CONFIRMED"]),
             )
             .with_for_update()
             .all()
@@ -442,6 +451,12 @@ class ClassificationDecisionService:
         changed: list[DocumentCategory] = []
         now = utcnow()
         for relation in relations:
+            if relation.status == "AUTO_APPLIED":
+                relation.status = "REJECTED"
+                relation.ended_at = now
+                relation.updated_at = now
+                changed.append(relation)
+                continue
             sources = (
                 self.db.query(DocumentCategoryConfirmationSource)
                 .filter(

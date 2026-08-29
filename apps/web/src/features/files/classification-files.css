@@ -1,0 +1,83 @@
+.classification-files-page {
+  min-height: 100vh;
+  padding: 28px;
+  color: #172033;
+  background: #f5f7fb;
+}
+
+.classification-files-header,
+.classification-file-list-heading,
+.classification-files-actions,
+.classification-pagination,
+.classification-files-header h1 {
+  display: flex;
+  align-items: center;
+}
+
+.classification-files-header {
+  max-width: 1440px;
+  margin: 0 auto 20px;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.classification-files-header h1 { gap: 10px; margin: 0; font-size: 24px; }
+.classification-files-header p { margin: 7px 0 0; color: #667085; }
+.classification-files-actions { gap: 10px; }
+.classification-files-actions button,
+.classification-pagination button,
+.classification-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  color: #344054;
+  background: #fff;
+  cursor: pointer;
+}
+
+.classification-files-actions button:disabled,
+.classification-pagination button:disabled { opacity: .45; cursor: default; }
+.classification-files-error { max-width: 1440px; margin: 0 auto 14px; padding: 10px 14px; border-radius: 8px; color: #b42318; background: #fef3f2; }
+.classification-files-workspace { display: grid; grid-template-columns: minmax(240px, 320px) 1fr; min-height: 660px; max-width: 1440px; margin: 0 auto; overflow: hidden; border: 1px solid #e4e7ec; border-radius: 14px; background: #fff; }
+.classification-tree { padding: 18px 12px; overflow: auto; border-right: 1px solid #e4e7ec; background: #fbfcfe; }
+.classification-tree-summary { display: flex; justify-content: space-between; padding: 0 8px 14px; }
+.classification-tree-summary span { color: #98a2b3; font-size: 12px; }
+.classification-tree-list,
+.classification-tree-list ul { margin: 0; padding: 0; list-style: none; }
+.classification-tree-list ul { padding-left: 14px; }
+.classification-tree-list summary { list-style: none; }
+.classification-tree-list summary::-webkit-details-marker { display: none; }
+.file-tree-node { width: 100%; display: flex; justify-content: space-between; gap: 8px; padding: 8px 10px; border: 0; border-radius: 7px; color: #475467; background: transparent; text-align: left; cursor: pointer; }
+.file-tree-node:hover { background: #f0f4ff; }
+.file-tree-node.selected { color: #175cd3; background: #eaf1ff; }
+.file-tree-node span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-tree-node strong { min-width: 24px; color: #667085; text-align: right; }
+.classification-file-list { min-width: 0; padding: 22px; }
+.classification-file-list-heading { justify-content: space-between; }
+.classification-file-list-heading h2 { margin: 0; font-size: 20px; }
+.classification-file-list-heading p { margin: 6px 0 18px; color: #667085; }
+.classification-table-wrap { overflow-x: auto; border: 1px solid #e4e7ec; border-radius: 10px; }
+.classification-table { width: 100%; border-collapse: collapse; }
+.classification-table th,
+.classification-table td { padding: 13px 14px; border-bottom: 1px solid #eaecf0; text-align: left; vertical-align: top; }
+.classification-table th { color: #475467; background: #f9fafb; font-size: 13px; }
+.classification-table td:first-child strong,
+.classification-table td:first-child span { display: block; }
+.classification-table td:first-child span { max-width: 420px; margin-top: 4px; overflow: hidden; color: #667085; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.classification-status { display: inline-block; padding: 4px 8px; border-radius: 999px; font-size: 12px; }
+.classification-status.review { color: #b54708; background: #fffaeb; }
+.classification-status.confirmed { color: #027a48; background: #ecfdf3; }
+.classification-status.automatic { color: #175cd3; background: #eff4ff; }
+.classification-status.neutral { color: #475467; background: #f2f4f7; }
+.classification-download { padding: 6px 9px; color: #175cd3; }
+.classification-pagination { justify-content: flex-end; gap: 14px; padding-top: 18px; color: #667085; }
+
+@media (max-width: 860px) {
+  .classification-files-page { padding: 16px; }
+  .classification-files-header { align-items: flex-start; flex-direction: column; }
+  .classification-files-workspace { grid-template-columns: 1fr; }
+  .classification-tree { max-height: 300px; border-right: 0; border-bottom: 1px solid #e4e7ec; }
+}

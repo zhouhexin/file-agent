@@ -451,7 +451,10 @@ class FileLifecycleRepository:
         return (
             self.db.query(WorkingCopy, WorkingCopyRoot)
             .join(WorkingCopyRoot, WorkingCopy.working_copy_root_id == WorkingCopyRoot.id)
-            .filter(WorkingCopy.workspace_id == workspace_id)
+            .filter(
+                WorkingCopy.workspace_id == workspace_id,
+                WorkingCopy.status.in_(["ACTIVE", "TRASHED"]),
+            )
             .order_by(WorkingCopy.relative_path.asc())
             .all()
         )
@@ -467,7 +470,10 @@ class FileLifecycleRepository:
         return (
             self.db.query(WorkingCopy, WorkingCopyRoot)
             .join(WorkingCopyRoot, WorkingCopy.working_copy_root_id == WorkingCopyRoot.id)
-            .filter(WorkingCopy.workspace_id == workspace_id)
+            .filter(
+                WorkingCopy.workspace_id == workspace_id,
+                WorkingCopy.status.in_(["ACTIVE", "TRASHED"]),
+            )
             .order_by(WorkingCopy.relative_path.asc())
             .all()
         )
@@ -477,7 +483,11 @@ class FileLifecycleRepository:
 
         return (
             self.db.query(WorkingCopy)
-            .filter(WorkingCopy.id == working_copy_id, WorkingCopy.workspace_id == workspace_id)
+            .filter(
+                WorkingCopy.id == working_copy_id,
+                WorkingCopy.workspace_id == workspace_id,
+                WorkingCopy.status.in_(["ACTIVE", "TRASHED"]),
+            )
             .one_or_none()
         )
 
@@ -493,6 +503,7 @@ class FileLifecycleRepository:
             .filter(
                 WorkingCopy.id == working_copy_id,
                 WorkingCopy.workspace_id == workspace_id,
+                WorkingCopy.status.in_(["ACTIVE", "TRASHED"]),
             )
             .one_or_none()
         )

@@ -2,9 +2,9 @@
 
 > 日期：2026-08-26  
 > 最近更新：2026-08-27  
-> 状态：方案设计，尚未实施  
-> 当前授权边界：仅讨论并固化方案；未授权修改代码、数据库迁移、配置或运行数据  
-> 适用范围：新上传文件首次整理、主分类选择、工作副本首次发布和异常复核  
+> 状态：核心后端链路已实施，默认 Shadow，分类树与异常复核 UI 待实施
+> 当前授权边界：已按用户 2026-08-27 指令开始开发；生产真实落位仍须完成校准与灰度验收
+> 适用范围：新上传文件及外部目录自动导入文件的首次整理、主分类选择、工作副本首次发布和异常复核
 > 核心目标：大多数文件无需用户确认即可准确存入主分类目录，仅让极少数真正不确定的文件进入复核
 
 ## 1. 结论
@@ -885,7 +885,7 @@ page / page_size 或 cursor
 AUTO_PRIMARY_CLASSIFICATION_ENABLED=false
 AUTO_INITIAL_PLACEMENT_ENABLED=false
 AUTO_CLASSIFICATION_SHADOW_MODE=true
-AUTO_CLASSIFICATION_POLICY_VERSION=auto-placement-v1
+AUTO_CLASSIFICATION_POLICY_VERSION=auto-placement-top1-test-v1
 AUTO_CLASSIFICATION_CALIBRATION_VERSION=unpublished
 AUTO_CLASSIFICATION_TARGET_PRECISION=0.99
 AUTO_CLASSIFICATION_FULL_TAXONOMY_ENABLED=true
@@ -1094,3 +1094,172 @@ time_to_active_p50/p95
 - 原始文件内容、名称和归档位置均未改变。
 - 已成为 `ACTIVE` 的工作副本后续移动仍强制 OperationPlan。
 - 关闭功能开关后可以立即停止新的自动落位，且不会破坏既有文件。
+
+## 21. 2026-08-27 实施记录
+
+本次已完成核心后端闭环：
+
+- 新增统一 `ClassificationRuntimeFactory`，上传 Worker、受管源侧分析、批量分类和 Agent 使用同一组 LLM、图谱、语义与灰度配置。
+- 分类候选现在显式区分文件名/标题信号与正文信号，并保存摘要/全文 Top1 一致性特征。
+- 新增确定性 `AutoPlacementPolicy`、稳定原因码、冷启动保守阈值和 Shadow 决策快照。
+- 新增 `document_organization_decisions` ORM、Alembic 迁移和幂等仓储；`document_categories` 的活动唯一约束扩展到 `AUTO_APPLIED` 与 `CONFIRMED`。
+- 只有 `AUTO_PRIMARY_CLASSIFICATION_ENABLED=true`、`AUTO_INITIAL_PLACEMENT_ENABLED=true` 且 `AUTO_CLASSIFICATION_SHADOW_MODE=false` 时，新上传归档副本才进入 `ORGANIZING`。
+- `ORGANIZING` 副本不进入普通列表、详情、下载、检索或附件范围；分类完成后一次原子发布。
+- 门槛通过时发布到 taxonomy `organization_path`，创建 `AUTO_APPLIED + PRIMARY` 关系、路径记录、ChangeItem 和图谱 Outbox。
+- 门槛未通过或解析失败时发布到中性路径，工作副本保持 `ACTIVE`，组织决策为 `NEEDS_REVIEW`，不创建正式主分类关系。
+- 已经 `ACTIVE` 的历史文件只执行 Shadow 回放，不允许通过该链路静默移动；后续移动仍走 OperationPlan。
+- StorageService 支持“文件系统已发布、数据库待收敛”场景的同哈希幂等重试，不覆盖不同内容。
+- 新增主分类树和文件清单只读接口，只聚合共享工作区中的 `ACTIVE` 文件；分类计数只认
+  `AUTO_APPLIED` / `CONFIRMED + PRIMARY` 当前版本关系，并提供服务端分页和父节点后代范围查询。
+- 新增“待复核”虚拟节点：只读取当前版本最新的非 Shadow `NEEDS_REVIEW` 决策，既不创建物理目录，
+  也不让 `ORGANIZING` 文件提前出现在页面。
+- 前端新增 `/files` 文件分类页，提供 taxonomy 树、分类状态、待复核原因、分页和受控下载入口；
+  页面不提供直接拖动、移动或改名能力，后续路径变更仍必须回到聊天生成 OperationPlan。
+
+当前仍未完成、不能据此宣称全方案交付的内容：
+
+- 冻结人工标注集、校准器训练、逐分类阈值和 99% 精度统计。
+- admin/ops Shadow 抽检报表、线上指标和按流量灰度控制台。
+- 分类证据/摘要行展开、父节点“仅本级”切换、批量复核和基于 OperationPlan 的拖拽预览。
+- 用户明确“只保存不整理”到 `SKIPPED` 的消息级参数贯通。
+
+因此部署默认值仍为“自动主分类关闭、首次落位关闭、Shadow 开启”。在校准版本仍为
+`unpublished` 时，不建议生产环境退出 Shadow。
+
+## 22. 2026-08-27 外部自动导入首次落位补充实施
+
+外部受管目录自动导入现在严格复用本方案的首次落位边界，具体规则如下：
+
+1. `SOURCE_ANALYSIS` 先在只读边界完成正文解析、摘要、索引和 taxonomy 全分类建议，并持久化
+   `document_classification_runs` 与 `document_category_suggestions`；外部原件不移动、不改名、不覆盖。
+2. `MATERIALIZE_WORKING_COPY` 只处理状态为 `READY` 的当前源修订。它先创建隐藏的
+   `ORGANIZING` 工作副本，再复用已经完成的页面、摘要、索引和分类建议，不重新解析原件。
+3. 源侧建议会投影到工作副本 `DocumentVersion`，然后执行与上传一致的 `AutoPlacementPolicy`：
+   正文独立信号、可定位 quote、Top1 分数、Top1/Top2 间隔、负向信号、摘要/全文一致性、taxonomy
+   版本和安全路径缺一不可。
+4. 门槛通过时，以原文件名首次发布到 taxonomy `organization_path`，写入
+   `AUTO_APPLIED + PRIMARY`、`AUTO_ORGANIZED`、路径审计、ChangeItem 和图谱 Outbox。
+5. 门槛未通过时，不保留可能暴露分类答案的外部源目录结构，而是首次发布到内部中性路径
+   `.internal/neutral/<managed_file_id>/<原文件名>`，并写入 `ACTIVE + NEEDS_REVIEW`。普通用户只通过
+   “待确认主分类”虚拟节点查看，不显示该内部路径，也不会产生用户可见的“待确认”物理目录。
+6. `ACTIVE + NEEDS_REVIEW` 仍进入默认文件检索和正文检索，可以读取、预览、下载、总结、比较、
+   引用和选择；复核状态只影响主分类可信度，不能变成访问隔离条件。外部源相对目录仍作为弱检索
+   元数据保留，但不得反向决定物理主分类落位，也不得在普通用户界面显示内部中性路径。
+7. 本规则只适用于尚未成为 `ACTIVE` 的新物化工作副本。已经按旧逻辑落位的 `ACTIVE` 文件不得后台
+   静默移动；如需改到主分类目录，必须生成并确认 `MOVE_WORKING_COPIES` OperationPlan。
+
+自动化回归必须同时覆盖：高可靠外部文件进入主分类并创建正式主分类关系；低可靠外部文件进入中性
+路径和逻辑复核队列但仍保持可用；两种情况都验证源文件字节和路径不变，且工作副本存在可读取的复用
+分类建议。
+
+## 23. 2026-08-27 Top-1 直接落位测试调整
+
+为验证“现有分类候选直接决定首次物理落位”的完整链路，测试策略临时改为：从分类服务返回的有序候选中
+选择置信度最高的有效候选作为 `PRIMARY + AUTO_APPLIED`，不再因为下列软条件进入中性目录：
+
+```text
+TOP_SCORE_BELOW_THRESHOLD
+TOP_MARGIN_TOO_SMALL
+FILENAME_ONLY_SIGNAL
+NEGATIVE_SIGNAL_CONFLICT
+SUMMARY_FULLTEXT_CONFLICT
+```
+
+上述判断代码只注释停用，不删除；候选分数、Top-1/Top-2 间隔、正文信号数、负向信号数和摘要/全文
+一致性仍写入组织决策特征快照，后续完成人工标注评估后可以通过新策略版本恢复。
+
+以下硬保护继续生效：解析失败、风险检查失败、没有有效 taxonomy 候选、`其他` 分类、未经允许的
+LLM 自由路径、taxonomy 版本缺失、可定位证据缺失、分类目录无法解析以及目标文件名冲突。硬保护失败
+时仍发布到中性路径并进入 `NEEDS_REVIEW`，不得为了提高自动落位数量绕过原件保护和路径安全校验。
+
+该测试策略版本为 `auto-placement-top1-test-v1`。它只用于验证当前候选结果到首次落位的行为，不能把
+启发式 confidence 解释为真实概率，也不能据此宣称分类准确率已经提升。
+
+## 24. 2026-08-27 全量候选物理路径补齐
+
+180 文件首次落位测试发现，统一 taxonomy 虽然包含 58 个可参与候选召回的非根分类节点，但历史阶段
+只为其中 22 个节点配置了 `organization_path`。其余分类即使正确成为 Top1，也会因为
+`TARGET_PATH_UNAVAILABLE` 降级到中性路径。
+
+本次将 taxonomy 升级为 `2026-08-v3`，在不改变既有 22 个物理路径的前提下，为缺失的 36 个节点补齐
+确定性物理路径。统一 taxonomy 加载时必须校验根节点以下全部候选均具有安全 `organization_path`；任何
+新增候选漏配路径都应关闭式失败，并由自动化测试直接报告，不能继续生成可分类但无法落位的节点。
+
+历史 `2026-07-v2` 分类运行和已经成为 `ACTIVE` 的工作副本不原地改写、不静默移动。需要重新验证首次
+落位时，应按测试数据重置方案删除本轮工作副本派生数据并重新分类，由新运行生成 `2026-08-v3` 建议和
+组织决策。
+
+## 25. 2026-08-28 学院分类与真实样本信号补齐
+
+基于 `E:/workdata` 中约 4.6 万个历史文件路径和文件名样本，taxonomy 升级为 `2026-08-v5`。学院
+人事师资分支新增 `教师发展`、`劳资社保` 和 `博士后`，并补齐既有 `师资招聘` 定义；学院其他既有
+分类同步补充描述、别名、正向信号、负向信号和示例。单独出现的“学院”只表示组织层级，不再作为
+发展规划、年度计划总结、规章制度、会议纪要、职称、考核聘任或科研等叶子分类的强业务信号。
+
+本次不修改 `auto-placement-top1-test-v1`，也不恢复完全同分、低于阈值或摘要全文不一致时的软拒绝
+条件。taxonomy 版本升级只使后续分类运行使用新候选定义；既有工作副本不原地重排或静默移动。
+
+## 26. 2026-08-29 按完整文件名重新分类活动工作副本
+
+文件分类的对象范围除当前消息附件、会话历史附件外，也允许来自用户明确写出的完整文件名。后端必须
+先按 Unicode 规范化后的完整名称在共享 `ACTIVE` 工作副本中解析唯一对象，再把该工作副本的
+`document_id` 交给既有 `extract-document-text -> DocumentClassificationService -> ChangeSet`
+链路。LLM 只能理解“重新分类”动作，不能把完整文件名自行改写成受管目录过滤条件。
+
+`upload_archive` 是内部上传归档根，不属于普通受管源目录查询范围。按文件名命中的上传归档文件不得
+通过扩大 `classify-managed-files` 权限解决，而应统一映射为活动工作副本。未找到活动文件时停止执行并
+要求核对文件名或重新附加文件；存在多份同名活动文件时不得批量分类或自动选择最新项，必须要求用户
+重新附加具体文件。该链路只生成新的分类建议和审计记录，不会静默移动已经 `ACTIVE` 的工作副本；
+后续归位仍须生成并确认 `MOVE_WORKING_COPIES` OperationPlan。
+
+## 27. 2026-08-29 学校/学院组织层级优先判定
+
+基于 `E:/workdata` 的真实文件名和目录样本，taxonomy 升级为 `2026-08-v6`。分类候选召回改为两阶段：
+先使用 taxonomy 根节点中版本化的组织信号判断文件属于学校级还是学院级，再只在明确命中的组织分支内
+执行原有业务分类。学校级强信号包括“全校”“校属各单位”“中共西安理工大学委员会”“校长办公会”
+等；学院级强信号包括具体学院名称、“学院党委”“党政联席会”“院内”“各系室”和明确填报单位等。
+
+“学校统一格式”“校级成果”等表达会出现在学院向学校报送的材料中，不能单独决定组织层级；普通的
+“学校”和“学院”也不作为强判定词。只有最高组织分数达到最低证据要求且与另一分支拉开安全间隔时，
+才约束候选分支；组织证据不足或相互冲突时继续保留两边候选，避免以目录或单个泛词强行分类。
+
+组织层级分数高于叶子业务词分数，并记录在候选的 `organization_scope`、
+`candidate_scores.organization` 和 `candidate_reason` 中。分类匹配实现版本同步升级为 `v5`，确保旧缓存
+不会遮蔽新的组织优先结果。该变化只影响新分类建议，不会移动既有工作副本或覆盖正式分类关系。
+
+## 28. 2026-08-29 重新分类后的受控归位
+
+用户明确要求“重新分类/重新归类”时，Planner 必须设置 `force_reprocess=true`，在正文解析和分类运行完成
+后追加 `working-copy-action-plan-create`。后端只读取本次 AgentRun、当前工作副本内容版本对应的最新分类
+建议，使用与首次落位相同的 `AutoPlacementPolicy` 硬门槛重新评估；旧缓存、其他运行和旧文件版本不能
+作为移动依据。
+
+新主分类与当前正式主分类不一致且通过自动标准时，系统结束旧 `AUTO_APPLIED` 主分类、写入新的
+`AUTO_APPLIED` 主分类和 ChangeItem，并基于版本化 `organization_path` 生成
+`MOVE_WORKING_COPIES` OperationPlan。此时只更新分类事实和待确认计划，不执行物理移动；前端必须展示
+当前位置、新分类目标位置和共享影响，用户确认后才由 `confirmed-file-action` 执行移动。
+
+人工 `CONFIRMED` 主分类不得被自动重新分类覆盖；候选缺少可定位证据、解析失败、taxonomy 路径不可用、
+自动分类开关处于 Shadow/关闭状态或存在多个活动主分类时，只记录 `NEEDS_REVIEW`，不生成移动计划。
+重新分类结果与原主分类一致时不移动；目标同名冲突继续进入既有冲突处理流程。取消或不确认计划时，
+工作副本物理位置保持不变，受管原件始终不变。
+
+## 29. 2026-08-29 显式分类指令直接归位
+
+本节按用户最新要求覆盖第 28 节中的二次确认约束。用户在当前消息中明确发出“重新分类/重新归类”、
+“将文件分类为某分类”或“按已确认分类整理”指令时，该消息同时构成正式分类和对应目录归位的执行授权；
+分类关系写入成功且目标目录可唯一解析后，系统不再展示第二张移动确认卡，直接移动共享工作副本。
+
+实现仍须在内部创建 `MOVE_WORKING_COPIES` OperationPlan、OperationConfirmation、路径快照和 ChangeSet，
+并在移动前重新校验工作副本版本、内容哈希、正式主分类、taxonomy 版本和目标路径。这里的
+OperationConfirmation 记录当前显式分类指令本身，不代表要求用户再发送一条确认消息。受管原件不移动，
+工作副本内容和 DocumentVersion 身份不变化。
+
+“将文件分类为 X”由后端在当前 ACTIVE taxonomy 中唯一解析 X，写入 `CONFIRMED PRIMARY` 关系后立即
+归位；同一文件有多个机器候选时，明确目标已经消除分类歧义，可选择该文件最新有效建议作为证据锚点，
+不得再次要求用户选择旧候选。目标分类不存在或对应多个 taxonomy 节点、文件范围不唯一、目标同名冲突、
+正文证据/当前版本失效时仍停止移动并返回复核信息，不能覆盖其他文件。
+
+重新分类仍必须通过本次 AgentRun 和当前 DocumentVersion 的新建议，并继续遵守自动分类硬门槛及人工
+`CONFIRMED` 分类保护；只有分类变化且达标时直接归位。普通后台分类、首次分类 Shadow 回放、只读查询、
+分类建议展示以及用户明确说“不要移动/位置不变/只修改分类”时，不得借此规则移动文件。

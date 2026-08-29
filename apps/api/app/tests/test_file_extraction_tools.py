@@ -11,7 +11,7 @@ import pytest
 
 from app.core import config
 from app.db.models import Document, DocumentArtifact, DocumentElement, DocumentExtractionRun, DocumentPage
-from app.modules.files.extractors import extract_document_text
+from app.modules.files.extractors import extract_document_text, extraction_config_hash
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.docling_parser import _build_converter, try_parse_with_docling
 from app.modules.agent.tool_registry import ToolRegistry
@@ -440,6 +440,83 @@ def test_extract_document_text_supports_doc_with_textutil(monkeypatch, tmp_path)
     assert result["status"] == "COMPLETED"
     assert result["extractor"] == "doc-textutil"
     assert "电子发票承诺书" in result["pages"][0]["text"]
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_encoding"),
+    [
+        (b"\xef\xbb\xbf" + "学校科研先进名单".encode("utf-8"), "utf-8-sig"),
+        (b"\xff\xfe" + "学校科研先进名单".encode("utf-16-le"), "utf-16-le"),
+        (b"\xfe\xff" + "学校科研先进名单".encode("utf-16-be"), "utf-16-be"),
+        ("学校科研先进名单".encode("utf-8"), "utf-8"),
+        ("学校科研先进名单".encode("gb18030"), "gb18030"),
+    ],
+)
+def test_extract_document_text_uses_deterministic_text_encoding_order(
+    tmp_path,
+    payload: bytes,
+    expected_encoding: str,
+):
+    """纯文本必须按固定编码顺序严格解码，并记录最终采用的编码。"""
+
+    text_path = tmp_path / "科研先进名单.txt"
+    text_path.write_bytes(payload)
+
+    result = extract_document_text(
+        file_path=text_path,
+        filename=text_path.name,
+        content_type="text/plain",
+    )
+
+    assert result["ok"] is True
+    assert result["pages"][0]["text"] == "学校科研先进名单"
+    assert result["pages"][0]["metadata"]["text_encoding"] == expected_encoding
+    assert result["parser_config_hash"] == extraction_config_hash(filename=text_path.name)
+
+
+def test_extract_document_text_reads_realistic_gb18030_name_list_without_garbled_text(
+    tmp_path,
+):
+    """GBK/GB18030 中文名单不得因 UTF-8 静默忽略而变成乱码。"""
+
+    expected = (
+        "费蓉、郝雯、黑新宏、金海燕、李薇、鲁晓锋、孟海宁、\r\n"
+        "宁小娟、随连升、孙钦东、王磊、王伟、\r\n"
+        "王晓帆、王映辉、王志晓、赵金伟、朱磊\r\n"
+    )
+    text_path = tmp_path / "2016年度校级科研先进名单-人事处返.txt"
+    text_path.write_bytes(expected.encode("gb18030"))
+
+    result = extract_document_text(
+        file_path=text_path,
+        filename=text_path.name,
+        content_type="text/plain",
+    )
+
+    assert result["ok"] is True
+    assert result["pages"][0]["text"] == expected
+    assert result["pages"][0]["metadata"]["text_encoding"] == "gb18030"
+    assert "费蓉" in result["pages"][0]["text"]
+    assert "�" not in result["pages"][0]["text"]
+
+
+def test_extract_document_text_rejects_unsupported_text_encoding_without_dropping_bytes(
+    tmp_path,
+):
+    """所有受支持编码均严格失败时，应返回结构化错误而不是忽略无效字节。"""
+
+    text_path = tmp_path / "invalid.txt"
+    text_path.write_bytes(b"\xff")
+
+    result = extract_document_text(
+        file_path=text_path,
+        filename=text_path.name,
+        content_type="text/plain",
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "FAILED"
+    assert result["error"]["code"] == "TEXT_DECODING_FAILED"
 
 
 def test_extract_document_text_prefers_docling_for_pdf(monkeypatch, tmp_path):

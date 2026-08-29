@@ -37,7 +37,15 @@ from app.modules.file_lifecycle.repository import FileLifecycleRepository
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.changesets.service import persist_changeset_from_document_results
-from app.modules.classification.classifier_service import DocumentClassificationService
+from app.modules.classification.runtime_factory import ClassificationRuntimeFactory
+from app.modules.classification.freshness import (
+    ClassificationFreshness,
+    ClassificationRuntimeIdentity,
+    classification_refresh_deduplication_key,
+    classification_refresh_priority,
+    current_classification_identity,
+    inspect_managed_source_classification,
+)
 from app.modules.classification.graph_outbox import (
     ClassificationGraphOutboxService,
 )
@@ -124,6 +132,8 @@ def _job_completion_summary(job: FilesystemJob) -> str | None:
         )
     if job.job_type == "ANALYZE_MANAGED_FILE_REVISION":
         return f"source_revision_ready={result.get('status') == 'READY'}"
+    if job.job_type == "REFRESH_MANAGED_SOURCE_CLASSIFICATION":
+        return f"classification_refreshed={bool(result.get('classification_refreshed'))}"
     if job.job_type == "MATERIALIZE_WORKING_COPY":
         return f"working_copy_created={not bool(result.get('idempotent'))}"
     return None
@@ -554,6 +564,39 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
     if job.job_type == "STRUCTURED_IMAGE_EXTRACTION":
         process_structured_extraction_job(db=db, job=job)
         return
+    if job.job_type == "REFRESH_MANAGED_SOURCE_CLASSIFICATION":
+        revision_id = str(
+            (job.payload_json or {}).get("managed_file_revision_id") or ""
+        )
+        if not revision_id:
+            raise ValueError(
+                "REFRESH_MANAGED_SOURCE_CLASSIFICATION 缺少 managed_file_revision_id"
+            )
+        result = ManagedSourceAnalysisService(db=db).refresh_classification(
+            revision_id=revision_id,
+            user_id=(
+                str((job.payload_json or {}).get("user_id") or job.created_by or "")
+                or None
+            ),
+        )
+        if result.get("status") == "READY":
+            revision = db.get(ManagedFileRevision, revision_id)
+            result["materialization_job_ids"] = (
+                _enqueue_background_materialization_jobs_for_revisions(
+                    db=db,
+                    revisions=[revision] if revision is not None else [],
+                    created_by=(
+                        str(
+                            (job.payload_json or {}).get("user_id")
+                            or job.created_by
+                            or ""
+                        )
+                        or None
+                    ),
+                )
+            )
+        FilesystemJobQueue(db).mark_completed(job=job, result=result)
+        return
     if job.job_type == "ANALYZE_MANAGED_FILE_REVISION":
         revision_id = str((job.payload_json or {}).get("managed_file_revision_id") or "")
         if not revision_id:
@@ -645,12 +688,20 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
                 for revision in revisions
                 if str(revision.managed_file_id) not in active_copy_file_ids
             ]
+            active_ready_revisions = [
+                revision
+                for revision in revisions
+                if str(revision.managed_file_id) in active_copy_file_ids
+                and revision.status == "READY"
+            ]
             source_job_ids = _enqueue_source_analysis_jobs_for_revisions(
                 db=db,
                 root_id=root.id,
                 # 已有活动副本继续沿用工作副本分析/显式重处理边界；这里只分析
                 # 尚无副本的源文件，避免确定性失败后被扫描隐式重新处理。
-                revisions=source_only_revisions,
+                # 已有工作副本不重新解析源文件，但 taxonomy 或分类器升级后仍需
+                # 复用既有页面刷新源分类事实；刷新不会静默移动活动工作副本。
+                revisions=[*source_only_revisions, *active_ready_revisions],
             )
             materialization_job_ids = _enqueue_background_materialization_jobs_for_revisions(
                 db=db,
@@ -949,6 +1000,43 @@ def _enqueue_import_jobs_for_files(*, db: Session, root_id: str, files: list[Man
     return job_ids
 
 
+def _enqueue_classification_refresh_job(
+    *,
+    db: Session,
+    revision: ManagedFileRevision,
+    root_id: str,
+    user_id: str,
+    identity: ClassificationRuntimeIdentity,
+) -> FilesystemJob:
+    """按动态分类身份幂等提交源分类刷新任务。"""
+
+    settings = get_settings()
+    queue = FilesystemJobQueue(db)
+    job = queue.create_job(
+        job_type="REFRESH_MANAGED_SOURCE_CLASSIFICATION",
+        queue_name="SOURCE_ANALYSIS",
+        root_id=root_id,
+        created_by=user_id,
+        priority=classification_refresh_priority(settings),
+        deduplication_key=classification_refresh_deduplication_key(
+            revision_id=revision.id,
+            identity=identity,
+        ),
+        reuse_completed=True,
+        payload={
+            "managed_file_revision_id": revision.id,
+            "user_id": user_id,
+            "taxonomy_key": identity.taxonomy_key,
+            "taxonomy_version": identity.taxonomy_version,
+            "classifier_version": identity.classifier_version,
+        },
+    )
+    return queue.promote_pending_job(
+        job=job,
+        priority=classification_refresh_priority(settings),
+    )
+
+
 def _enqueue_source_analysis_jobs_for_revisions(
     *,
     db: Session,
@@ -974,8 +1062,42 @@ def _enqueue_source_analysis_jobs_for_revisions(
         return []
     queue = FilesystemJobQueue(db)
     job_ids: list[str] = []
+    identity = current_classification_identity(
+        db=db,
+        settings=settings,
+        user_id=fallback_user,
+    )
     for revision in revisions:
-        if not revision.is_current or revision.status == "READY":
+        if not revision.is_current:
+            continue
+        if revision.status == "READY":
+            freshness = inspect_managed_source_classification(
+                db=db,
+                revision=revision,
+                identity=identity,
+            )
+            if freshness is ClassificationFreshness.CURRENT:
+                continue
+            job = _enqueue_classification_refresh_job(
+                db=db,
+                revision=revision,
+                root_id=root_id,
+                user_id=fallback_user,
+                identity=identity,
+            )
+            job_ids.append(str(job.id))
+            log_event(
+                "managed_source.classification_refresh.queued",
+                status=job.status,
+                managed_file_revision_id=revision.id,
+                root_id=root_id,
+                filesystem_job_id=job.id,
+                taxonomy_key=identity.taxonomy_key,
+                taxonomy_version=identity.taxonomy_version,
+                classifier_version=identity.classifier_version,
+                previous_freshness=freshness.value,
+                message="受管源分类身份已过期，已提交正文复用刷新任务",
+            )
             continue
         job = queue.create_job(
             job_type="ANALYZE_MANAGED_FILE_REVISION",
@@ -1018,6 +1140,35 @@ def _enqueue_background_materialization_jobs_for_revisions(
     job_ids: list[str] = []
     for revision in revisions:
         if not revision.is_current or revision.status != "READY":
+            continue
+        managed_file = db.get(ManagedFile, revision.managed_file_id)
+        root = db.get(ManagedRoot, managed_file.root_id) if managed_file else None
+        classification_user_id = str(
+            (root.created_by if root is not None else "")
+            or created_by
+            or db.query(User.id).order_by(User.created_at.asc()).scalar()
+            or ""
+        )
+        if not classification_user_id or root is None:
+            continue
+        identity = current_classification_identity(
+            db=db,
+            settings=settings,
+            user_id=classification_user_id,
+        )
+        freshness = inspect_managed_source_classification(
+            db=db,
+            revision=revision,
+            identity=identity,
+        )
+        if freshness is not ClassificationFreshness.CURRENT:
+            _enqueue_classification_refresh_job(
+                db=db,
+                revision=revision,
+                root_id=root.id,
+                user_id=classification_user_id,
+                identity=identity,
+            )
             continue
         existing_copy = (
             db.query(WorkingCopy.id)
@@ -1540,7 +1691,10 @@ def _process_managed_file_classification_job(*, db: Session, job: FilesystemJob)
     job.progress_current = 0
     db.flush()
     registry = ToolRegistry(db=db, user_id=user_id)
-    classification_service = DocumentClassificationService(db=db)
+    classification_service = ClassificationRuntimeFactory().create(
+        db=db,
+        user_id=user_id,
+    )
     document_results: list[dict] = []
     for managed_file, root in rows:
         try:

@@ -168,6 +168,10 @@ class FileLifecycleStorageService:
 
         staged = self.working_copy_path(staged_relative_path)
         target = self.working_copy_path(target_relative_path)
+        if not staged.exists() and target.is_file() and self.sha256_file(target) == expected_sha256:
+            # 文件系统提交成功而数据库事务尚未提交时，Worker 重试必须收敛到同一目标，
+            # 不能因为隐藏暂存文件已被 os.replace 移走而永久失败。
+            return target, False
         if not staged.is_file() or (
             not staged_hash_verified and self.sha256_file(staged) != expected_sha256
         ):

@@ -154,17 +154,22 @@ _TITLES: dict[FileTaskKind, str] = {
     "RENAME_SUGGESTION": "文件命名建议",
     "OPERATION_PLAN": "文件操作计划",
     "FILE_OPERATION": "文件操作结果",
-    "CLARIFICATION": "需要确认文件范围",
+    "CLARIFICATION": "文件处理需要确认",
     "FAILURE": "文件任务未完成",
 }
 
 _ACTION_LABELS: dict[FileTaskKind, str] = {
+    "INGEST": "归档或接收文件",
     "READ": "读取文件",
     "SUMMARIZE": "总结文件内容",
     "ANSWER": "根据文件原文回答",
+    "CLASSIFY": "分类文件",
     "SEARCH": "查找相关文件",
     "LIST": "列出目录文件",
     "SPREADSHEET": "分析表格",
+    "RENAME_SUGGESTION": "生成文件命名建议",
+    "FILE_OPERATION": "执行已确认的文件操作",
+    "CLARIFICATION": "确认文件处理方式",
 }
 
 
@@ -216,17 +221,11 @@ def compose_file_task_presentation(
     )
     return FileTaskPresentation(
         task_kind=task_kind,
-        title=_TITLES[task_kind],
+        title=_presentation_title(result=result, task_kind=task_kind),
         phase=phase,
         request=request,
         outcome=outcome,
-        change_impact=FileChangeImpactPresentation(
-            originals_changed=False,
-            working_copies_changed=False,
-            derivatives_created=0,
-            operation_executed=False,
-            message=_read_only_change_message(task_kind),
-        ),
+        change_impact=_build_change_impact(result=result, task_kind=task_kind),
         notices=_build_notices(
             file_search_result=file_search_result,
             outcome=outcome,
@@ -249,9 +248,16 @@ def _resolve_stage_two_task_kind(
     file_search_result: dict[str, Any] | None,
     evidence_answer_result: dict[str, Any] | None,
 ) -> FileTaskKind | None:
-    """只识别阶段二已经承诺统一展示的只读文件任务。"""
+    """识别明确任务类型；逐文件结果本身不能被解释成“读取”意图。"""
 
     intent = str(result.intent or "").upper()
+    if intent == "SYSTEM_FILE_LIFECYCLE":
+        # 生命周期消息由后端审计事件和结构化结果确定类型。这里兼容既有历史记录，
+        # 不读取消息文案，也不让前端从 Tool 名称猜测业务含义。
+        return _system_lifecycle_task_kind(
+            result=result,
+            document_results=document_results,
+        )
     # 分类、命名和文件变更将在阶段三、四接入；即使这些任务也产生 document_results，
     # 当前也必须保持旧回执，避免被误标为只读文件读取。
     if any(
@@ -273,12 +279,88 @@ def _resolve_stage_two_task_kind(
         return "ANSWER"
     if "SUMMAR" in intent:
         return "SUMMARIZE"
-    if document_results or any(
+    if any(
         marker in intent
         for marker in ("READ_", "READ_DOCUMENT", "EXTRACT_DOCUMENT")
     ):
         return "READ"
     return None
+
+
+def _system_lifecycle_task_kind(
+    *,
+    result: AgentRunResult,
+    document_results: list[dict[str, Any]],
+) -> FileTaskKind | None:
+    """把系统生命周期审计事件映射为用户业务类型，并兼容历史 AgentRun。"""
+
+    tool_names = _result_tool_names(result)
+
+    if "document-background-analysis" in tool_names:
+        # 后台分析可能同时给出分类和命名建议；存在明确命名建议时，用户当前需要
+        # 处理的是命名选择，因此优先展示为命名建议，而不是泛化的分类结果。
+        if any(_has_rename_suggestion(item) for item in document_results):
+            return "RENAME_SUGGESTION"
+        if not document_results and any(
+            str(invocation.output_json.get("organization_decision") or "").upper()
+            == "NEEDS_REVIEW"
+            for invocation in result.tool_invocations
+            if invocation.tool_name == "document-background-analysis"
+            and isinstance(invocation.output_json, dict)
+        ):
+            return "CLARIFICATION"
+        return "CLASSIFY"
+    if "managed-source-auto-classification" in tool_names:
+        return "CLASSIFY"
+    if tool_names.intersection(
+        {
+            "upload-archive",
+            "working-copy-fast-import",
+        }
+    ):
+        return "INGEST"
+    if "basic-file-risk-check" in tool_names:
+        return "CLARIFICATION"
+    if "confirmed-file-action" in tool_names:
+        return "FILE_OPERATION"
+    # 未声明映射的后台事件保持原有文本/专用回执，绝不能仅因携带逐文件结果
+    # 就降级成“文件读取结果”。
+    return None
+
+
+def _result_tool_names(result: AgentRunResult) -> set[str]:
+    """读取后端已经审计的生命周期工具名，不向普通用户直接暴露该字段。"""
+
+    tool_names = {
+        invocation.tool_name
+        for invocation in result.tool_invocations
+        if invocation.tool_name
+    }
+    planned_tool = (
+        str(result.tool_plan.get("tool_name") or "")
+        if isinstance(result.tool_plan, dict)
+        else ""
+    )
+    if planned_tool:
+        tool_names.add(planned_tool)
+    return tool_names
+
+
+def _has_rename_suggestion(item: dict[str, Any]) -> bool:
+    """只根据生命周期结构化结果识别命名建议，不解析自然语言消息。"""
+
+    if isinstance(item.get("rename_suggestion"), dict):
+        return True
+    pending = item.get("pending_decision")
+    return isinstance(pending, dict) and str(pending.get("type") or "") == "rename_suggestion"
+
+
+def _presentation_title(*, result: AgentRunResult, task_kind: FileTaskKind) -> str:
+    """为归档生命周期给出准确标题，其他任务沿用稳定公共标题。"""
+
+    if task_kind == "INGEST" and "upload-archive" in _result_tool_names(result):
+        return "文件归档结果"
+    return _TITLES[task_kind]
 
 
 def _build_phase(status: str, *, task_status: str) -> FileTaskPhase:
@@ -428,6 +510,19 @@ def _build_outcome(
             completeness=("PARTIAL" if failed and completed else _status_completeness(result.status)),
         )
 
+    if task_kind in {
+        "INGEST",
+        "CLASSIFY",
+        "RENAME_SUGGESTION",
+        "FILE_OPERATION",
+        "CLARIFICATION",
+    }:
+        return _build_lifecycle_outcome(
+            result=result,
+            task_kind=task_kind,
+            document_results=document_results,
+        )
+
     total = len(document_results) or _document_scope_count(result)
     failed = sum(
         1
@@ -460,6 +555,93 @@ def _build_outcome(
             + (f"，{failed} 个未完成" if failed else "")
             + (f"，{needs_review} 个需要留意" if needs_review else "")
         )
+    return FileTaskOutcomePresentation(
+        headline=headline,
+        total_count=total,
+        completed_count=completed,
+        failed_count=failed,
+        needs_review_count=needs_review,
+        completeness=(
+            "PARTIAL"
+            if failed or needs_review
+            else _status_completeness(result.status)
+        ),
+    )
+
+
+def _build_lifecycle_outcome(
+    *,
+    result: AgentRunResult,
+    task_kind: FileTaskKind,
+    document_results: list[dict[str, Any]],
+) -> FileTaskOutcomePresentation:
+    """为归档、分类、命名建议和确认事项生成确定性结果统计。"""
+
+    total = (
+        len(document_results)
+        or _document_scope_count(result)
+        # 每条系统生命周期审计只对应一个受控目标；历史记录通常没有 Planner slots，
+        # 但不能因此把已知的单文件归档或确认事项显示成 0 个文件。
+        or (1 if str(result.intent or "").upper() == "SYSTEM_FILE_LIFECYCLE" else 0)
+    )
+    failed = sum(
+        1
+        for item in document_results
+        if str(item.get("extraction_status") or "").upper() == "FAILED"
+    )
+    needs_review = sum(
+        1
+        for item in document_results
+        if (
+            str(item.get("organization_status") or "").upper() == "NEEDS_REVIEW"
+            or isinstance(item.get("pending_decision"), dict)
+        )
+        and str(item.get("extraction_status") or "").upper() != "FAILED"
+    )
+    completed = (
+        max(0, len(document_results) - failed)
+        if document_results
+        else total
+        if result.status == "COMPLETED"
+        else 0
+    )
+
+    if task_kind == "CLARIFICATION":
+        headline = "需要确认文件处理方式"
+        needs_review = max(needs_review, total or 1)
+    elif task_kind == "RENAME_SUGGESTION":
+        headline = (
+            f"已生成 {completed} 个文件的命名建议"
+            if completed
+            else "文件命名建议尚未生成"
+        )
+        if needs_review:
+            headline += f"，{needs_review} 个需要确认"
+    elif task_kind == "CLASSIFY":
+        headline = (
+            f"已生成 {completed} 个文件的分类结果"
+            if completed
+            else "文件分类尚未完成"
+        )
+        if failed:
+            headline += f"，{failed} 个未完成"
+        if needs_review:
+            headline += f"，{needs_review} 个需要确认"
+    elif task_kind == "FILE_OPERATION":
+        headline = (
+            f"已完成 {completed} 个文件操作"
+            if completed or result.status == "COMPLETED"
+            else "文件操作尚未完成"
+        )
+    else:
+        headline = (
+            f"已完成 {completed} 个文件的归档或接收"
+            if completed
+            else "文件归档或接收已完成"
+            if result.status == "COMPLETED"
+            else "文件归档或接收尚未完成"
+        )
+
     return FileTaskOutcomePresentation(
         headline=headline,
         total_count=total,
@@ -684,6 +866,62 @@ def _build_notices(
     return notices
 
 
+def _build_change_impact(
+    *,
+    result: AgentRunResult,
+    task_kind: FileTaskKind,
+) -> FileChangeImpactPresentation:
+    """按业务任务说明文件变化，不能把分析或建议伪装成已执行文件操作。"""
+
+    if task_kind == "CLASSIFY":
+        return FileChangeImpactPresentation(
+            originals_changed=False,
+            working_copies_changed=None,
+            operation_executed=False,
+            message="本次生成了分类结果；受管原件未改变，工作副本状态以逐文件结果为准。",
+        )
+    if task_kind == "RENAME_SUGGESTION":
+        return FileChangeImpactPresentation(
+            originals_changed=False,
+            working_copies_changed=False,
+            operation_executed=False,
+            message="本次只生成命名建议，当前尚未改名；原件和工作副本均未改变。",
+        )
+    if task_kind == "CLARIFICATION":
+        return FileChangeImpactPresentation(
+            originals_changed=False,
+            working_copies_changed=False,
+            operation_executed=False,
+            message="确认前不会执行文件变更；原件和工作副本均未改变。",
+        )
+    if task_kind == "INGEST":
+        return FileChangeImpactPresentation(
+            originals_changed=False,
+            working_copies_changed=None,
+            operation_executed=False,
+            message="上传原件已按文件生命周期规则受到保护，不会因归档、分类或命名被覆盖。",
+        )
+    if task_kind == "FILE_OPERATION":
+        executed = result.status == "COMPLETED"
+        return FileChangeImpactPresentation(
+            originals_changed=False,
+            working_copies_changed=executed,
+            operation_executed=executed,
+            message=(
+                "已执行确认后的工作副本操作；受管原件未改变。"
+                if executed
+                else "文件操作未完成；受管原件未改变。"
+            ),
+        )
+    return FileChangeImpactPresentation(
+        originals_changed=False,
+        working_copies_changed=False,
+        derivatives_created=0,
+        operation_executed=False,
+        message=_read_only_change_message(task_kind),
+    )
+
+
 def _read_only_change_message(task_kind: FileTaskKind) -> str:
     """为阶段二只读任务明确原件保护状态。"""
 
@@ -723,6 +961,15 @@ def _build_next_actions(task_kind: FileTaskKind) -> list[FileTaskNextAction]:
         ],
         "SPREADSHEET": [
             ("continue-spreadsheet-analysis", "继续分析表格", "请继续分析这份表格："),
+        ],
+        "CLASSIFY": [
+            ("review-classification", "核对分类", "请说明需要确认或纠正分类的文件"),
+        ],
+        "RENAME_SUGGESTION": [
+            ("request-rename-plan", "生成改名计划", "请为刚才的命名建议生成待确认的改名计划"),
+        ],
+        "CLARIFICATION": [
+            ("clarify-file-task", "补充处理方式", "我确认的处理方式是："),
         ],
     }
     return [

@@ -14,6 +14,7 @@ def persist_document_results_classifications(
     db: Session,
     agent_run_id: str,
     document_results: list[dict[str, Any]],
+    persist_empty_runs: bool = False,
 ) -> dict[tuple[str, int], str]:
     """把 AgentRun 的 document_results 分类建议落库。
 
@@ -30,14 +31,20 @@ def persist_document_results_classifications(
             continue
         categories = [item for item in result.get("categories", []) if isinstance(item, dict)]
         document_version_id = str(result.get("document_version_id") or document_id)
-        if not categories:
+        if not categories and not persist_empty_runs:
             # 纯读取/总结任务不会生成分类建议；此时不创建空分类运行，避免把读取误记为分类。
             continue
         status = "FAILED" if result.get("extraction_status") == "FAILED" else "COMPLETED"
         error_message = _first_error_message(result)
-        taxonomy_key = _first_category_value(categories, "taxonomy_key")
-        taxonomy_version = _first_category_value(categories, "taxonomy_version")
-        source = _first_category_value(categories, "source") or "rule"
+        taxonomy_key = str(result.get("taxonomy_key") or "") or _first_category_value(
+            categories, "taxonomy_key"
+        )
+        taxonomy_version = str(
+            result.get("taxonomy_version") or ""
+        ) or _first_category_value(categories, "taxonomy_version")
+        source = str(result.get("source") or "") or _first_category_value(
+            categories, "source"
+        ) or "rule"
         classification_run = repository.create_run(
             agent_run_id=agent_run_id,
             document_id=document_id,
@@ -45,7 +52,10 @@ def persist_document_results_classifications(
             taxonomy_version=taxonomy_version,
             status=status,
             source=source,
-            classifier_version=_classifier_version(categories),
+            classifier_version=(
+                str(result.get("classifier_version") or "")
+                or _classifier_version(categories)
+            ),
             classification_summary_id=(
                 str(result.get("classification_summary_id"))
                 if result.get("classification_summary_id")

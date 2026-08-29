@@ -116,11 +116,6 @@ export function canPreviewFileInfo(filenameValue: string, contentType: string): 
   return ['.txt', '.md', '.csv', '.json'].some((suffix) => filename.endsWith(suffix));
 }
 
-export function formatConfidence(confidence: number): string {
-  // 分类置信度统一转成整数百分比，避免卡片里出现过多小数。
-  return `${Math.round(confidence * 100)}%`;
-}
-
 export function findAttachmentByDocumentId(
   attachments: ChatAttachment[],
   documentId: string,

@@ -209,7 +209,8 @@ function toDisplayJson(result: StructuredExtractionResult) {
 
 
 function qualityLabel(value: string): string {
-  if (value === 'HIGH') return '高置信度';
+  // 普通用户只需要知道是否应当复核，不展示内部置信度术语或数值。
+  if (value === 'HIGH') return '已识别';
   if (value === 'MEDIUM') return '部分待复核';
   return '需要复核';
 }

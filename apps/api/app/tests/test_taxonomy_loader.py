@@ -14,8 +14,34 @@ def test_default_taxonomy_loads_unified_school_file_classification():
     taxonomy = load_default_taxonomy()
 
     assert taxonomy.key == "unified_school_file_classification"
-    assert taxonomy.version == "2026-07-v2"
+    assert taxonomy.version == "2026-08-v6"
     assert taxonomy.categories[0].name == "学校"
+    school, college = taxonomy.categories
+    assert {"全校", "校属各单位"} <= set(school.positive_signals)
+    assert {"计算机学院", "计算机科学与工程学院"} <= set(college.aliases)
+    assert "全校" in college.negative_signals
+
+
+def test_default_taxonomy_all_61_candidates_have_physical_paths():
+    """全部候选分类都必须可解析物理目录，避免正确分类后退回中性路径。"""
+
+    taxonomy = load_default_taxonomy()
+    candidates = []
+
+    def walk(nodes, *, depth: int) -> None:
+        """分类 matcher 跳过根节点，因此只统计根节点以下的候选。"""
+
+        for node in nodes:
+            if depth > 0:
+                candidates.append(node)
+            walk(node.children, depth=depth + 1)
+
+    walk(taxonomy.categories, depth=0)
+
+    assert len(candidates) == 61
+    assert all(node.organization_path for node in candidates)
+    union = next(node for node in candidates if node.id == "school.party.union")
+    assert union.organization_path == ["学校", "党委相关", "工会"]
 
 
 def test_flatten_category_paths_preserves_parent_path():
@@ -66,6 +92,7 @@ def test_default_taxonomy_contains_v2_metadata_for_high_frequency_categories():
         if item.category_id and item.description and item.positive_signals and item.examples
     ]
     appointment = next(item for item in flattened if item.category_id == "school.hr.appointment-assessment")
+    college_talent_work = next(item for item in flattened if item.category_id == "college.hr.talent-work")
 
     assert len(enriched_leaves) >= 20
     assert appointment.path == ["学校", "人事师资", "考核聘任"]
@@ -73,6 +100,40 @@ def test_default_taxonomy_contains_v2_metadata_for_high_frequency_categories():
     assert "教师" in appointment.positive_signals
     assert "奖学金" in appointment.negative_signals
     assert appointment.examples
+    assert college_talent_work.path == ["学院", "人事师资", "人才工作"]
+    assert "学院人才引育" in college_talent_work.aliases
+    assert "人才引进必要性" in college_talent_work.positive_signals
+    assert "经费延期" in college_talent_work.negative_signals
+    assert college_talent_work.examples
+
+
+def test_default_taxonomy_enriches_every_college_candidate_from_workdata_samples():
+    """学院分支全部候选都应具备可审计定义和正负信号，新增人事子类必须有稳定路径。"""
+
+    flattened = flatten_category_paths(load_default_taxonomy())
+    college_candidates = [
+        item
+        for item in flattened
+        if item.category_id and item.category_id.startswith("college.")
+    ]
+    by_id = {item.category_id: item for item in college_candidates}
+
+    assert all(item.description for item in college_candidates)
+    assert all(item.aliases for item in college_candidates)
+    assert all(item.positive_signals for item in college_candidates)
+    assert all(item.negative_signals for item in college_candidates)
+    assert all(item.examples for item in college_candidates)
+    assert by_id["college.hr.faculty-development"].path == [
+        "学院",
+        "人事师资",
+        "教师发展",
+    ]
+    assert by_id["college.hr.salary-social-security"].path == [
+        "学院",
+        "人事师资",
+        "劳资社保",
+    ]
+    assert by_id["college.hr.postdoc"].path == ["学院", "人事师资", "博士后"]
 
 
 def test_default_taxonomy_contains_live_managed_volume_signals():

@@ -69,7 +69,7 @@ class SupportingSemanticContext:
                 SemanticCategorySupport(
                     category_id="school.hr.title-review",
                     graph_key=(
-                        "unified_school_file_classification:2026-07-v2:"
+                        "unified_school_file_classification:2026-08-v6:"
                         "school.hr.title-review"
                     ),
                     category_path=["学校", "人事师资", "职称"],
@@ -94,6 +94,9 @@ def test_document_classification_service_adds_graph_scores_without_passing_full_
     assert graph_context.seeds
     assert not hasattr(graph_context.seeds[0], "full_text")
     assert result["graph_status"] == "COMPLETED"
+    assert result["taxonomy_key"] == "unified_school_file_classification"
+    assert result["taxonomy_version"]
+    assert result["classifier_version"]
     assert result["categories"][0]["candidate_scores"]["graph"] == 0.7
     assert result["categories"][0]["evidence_items"][0]["quote"]
 

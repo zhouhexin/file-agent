@@ -101,3 +101,11 @@ def test_docling_repositories_and_runtime_versions_are_commit_locked(monkeypatch
         "neo4j": "6.2.0",
         "neo4j-graphrag": "1.18.0",
     }
+
+
+def test_paddlex_chart_model_uses_actual_37_cache_directory(monkeypatch, tmp_path):
+    """生产白名单必须匹配 PaddleX 3.7 实际生成的图表模型目录。"""
+
+    module, _, _ = _load_preloader(monkeypatch, tmp_path)
+    assert "PP-Chart2Table_safetensors" in module.PADDLEX_ALLOWED_MODEL_DIRS
+    assert "PP-Chart2Table" not in module.PADDLEX_ALLOWED_MODEL_DIRS

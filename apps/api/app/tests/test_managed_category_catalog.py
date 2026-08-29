@@ -104,7 +104,7 @@ def test_global_catalog_deduplicates_same_path_across_roots(tmp_path):
         } == {"unified_school_file_classification"}
         assert {
             item["taxonomy_version"] for item in uploaded_result["categories"]
-        } == {"2026-07-v2"}
+        } == {"2026-08-v6"}
     finally:
         db.close()
 

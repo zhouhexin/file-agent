@@ -176,8 +176,9 @@ PYTHONPATH=apps/api \
 
 ### 5.1 Worker 与 scheduler 启动
 
-Windows CMD 从仓库根目录执行以下脚本即可。它会分别打开扫描 worker、导入/生命周期 worker 和
-scheduler 三个窗口；扫描每批发现文件后，导入 worker 可立即消费 IMPORT 任务，不必等待全量扫描。
+Windows CMD 从仓库根目录执行以下脚本即可。它会分别打开 scheduler 和五个 worker 窗口：扫描、
+生命周期与物化、文档分析、结构化抽取、图谱。扫描每批发现文件后，文档分析 worker 可立即消费
+`SOURCE_ANALYSIS`，分析完成后生命周期与物化 worker 继续消费 `MATERIALIZE`。
 脚本会在打开子窗口前同步并校验当前 Windows `.env` 中的受管目录，因此必须从 Windows 本机仓库
 根目录执行，不能使用文档中的 macOS `/Users/...` 路径。`.env` 必须位于 Windows 仓库根目录，
 例如 `E:\PycharmProject\file-agent\.env`；放在 Downloads 中的 `.env` 不会被自动读取。
@@ -205,7 +206,7 @@ scripts\start-file-agent-workers.cmd
 [File Agent Startup] 配置检查通过 managed_roots=1 root_keys=school_files
 ~~~
 
-然后才会打开三个子窗口。预检失败时脚本返回非零退出码且不启动 worker，并明确区分：
+然后才会打开六个子窗口。预检失败时脚本返回非零退出码且不启动 worker，并明确区分：
 
 ```text
 MANAGED_ROOT_NOT_FOUND
@@ -242,7 +243,7 @@ worker 启动时会输出“已启动，等待任务”，领取、完成或失�
 `import_jobs`。不会输出文件正文、绝对路径或密钥。空闲轮询不会刷屏，这不是卡住
 或退出。
 
-### 5.1.2 导入与上传生命周期 worker
+### 5.1.2 生命周期与物化 worker
 
 终端二：
 
@@ -251,16 +252,46 @@ cd /Users/zhouhexin/PycharmProjects/file-agent
 
 PYTHONPATH=apps/api \
 FILESYSTEM_WORKER_ID=import-lifecycle-worker \
-FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE,IMPORT,FILE_OPERATION \
+FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION,MATERIALIZE,IMPORT \
 /opt/homebrew/anaconda3/envs/py311/bin/python \
   -m app.modules.managed_files.worker
 ```
 
 API 启动时只向 `RECONCILE` 队列提交同步任务。扫描 worker 每达到文件数或时间
-预算，就提交该批 `IMPORT` 任务；导入 worker 应立刻显示 `IMPORT_WORKING_COPIES`，
-无需等待整棵目录扫描结束。
+预算，就提交该批 `SOURCE_ANALYSIS` 任务；源侧分析完成后会提交 `MATERIALIZE_WORKING_COPY`，
+由本 worker 复制工作副本。上传链路仍由本 worker 串联查重、归档和 `IMPORT`。
 
-### 5.1.3 已有受管原始目录的同步前提
+### 5.1.3 文档分析 worker
+
+终端三：
+
+```bash
+cd /Users/zhouhexin/PycharmProjects/file-agent
+
+PYTHONPATH=apps/api \
+FILESYSTEM_WORKER_ID=source-analysis-worker \
+FILESYSTEM_WORKER_QUEUES=SOURCE_ANALYSIS,ANALYSIS \
+/opt/homebrew/anaconda3/envs/py311/bin/python \
+  -m app.modules.managed_files.worker
+```
+
+源侧原件分析与工作副本变更后的重新分析共用一个串行进程，避免多个 LibreOffice 子进程争用资源。
+
+### 5.1.4 结构化抽取与图谱 worker
+
+终端四、五分别执行：
+
+```bash
+PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=structured-extraction-worker \
+FILESYSTEM_WORKER_QUEUES=STRUCTURED_EXTRACTION \
+/opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
+
+PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=graph-worker \
+FILESYSTEM_WORKER_QUEUES=GRAPH \
+/opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
+```
+
+### 5.1.5 已有受管原始目录的同步前提
 
 在启动 API 前，`.env` 必须定义一个普通受管目录，例如：
 
@@ -274,12 +305,12 @@ MANAGED_ROOT_SCAN_BATCH_MAX_SECONDS=5
 
 `MANAGED_ROOT_ARCHIVE_WRITE_PATH` 仅是上传文件的受保护归档写入位置，系统刻意
 不会把它当作可扫描的受管根；将原始文件手动放入该目录不会触发同步。普通受管根
-中的文件在 API 启动后依次进入 `RECONCILE -> SCAN -> IMPORT`，再由 worker 为已有
-用户工作区创建只可由 File Agent 操作的工作副本。
+中的文件在 API 启动后依次进入 `RECONCILE -> SCAN -> SOURCE_ANALYSIS -> MATERIALIZE`，再由 worker
+创建只可由 File Agent 操作的共享工作副本。分类发生在 `SOURCE_ANALYSIS` 阶段，物化复用其正文和证据。
 
 ### 5.2 生命周期 scheduler
 
-终端三：
+终端六：
 
 ```bash
 cd /Users/zhouhexin/PycharmProjects/file-agent

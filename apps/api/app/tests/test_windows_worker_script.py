@@ -11,23 +11,27 @@ def test_windows_worker_launcher_starts_required_isolated_processes():
         / "scripts"
         / "start-file-agent-workers.cmd"
     )
-    content = script.read_text(encoding="utf-8")
-    assert 'FILESYSTEM_WORKER_QUEUES=RECONCILE,SCAN' in content
-    assert 'FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION' in content
-    assert 'FILESYSTEM_WORKER_QUEUES=SOURCE_ANALYSIS' in content
-    assert content.count('FILESYSTEM_WORKER_QUEUES=MATERIALIZE,IMPORT') == 2
-    assert 'FILESYSTEM_WORKER_QUEUES=ANALYSIS' in content
-    assert 'FILESYSTEM_WORKER_QUEUES=STRUCTURED_EXTRACTION' in content
-    assert 'FILESYSTEM_WORKER_QUEUES=GRAPH' in content
-    assert 'app.modules.managed_files.worker' in content
+    runner = script.with_name("run-file-agent-worker.cmd")
+    # Windows CMD 在当前部署环境中按 GBK 读取中文注释，测试必须遵守生产脚本编码。
+    content = script.read_text(encoding="gbk")
+    runner_content = runner.read_text(encoding="gbk")
+    assert '"reconcile-scan-worker" "RECONCILE,SCAN"' in content
+    assert (
+        '"lifecycle-worker" '
+        '"DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION,MATERIALIZE,IMPORT"'
+    ) in content
+    assert '"source-analysis-worker" "SOURCE_ANALYSIS,ANALYSIS"' in content
+    assert '"structured-extraction-worker" "STRUCTURED_EXTRACTION"' in content
+    assert '"graph-worker" "GRAPH"' in content
+    assert content.count("run-file-agent-worker.cmd") == 5
+    assert 'set "FILESYSTEM_WORKER_ID=%~1"' in runner_content
+    assert 'set "FILESYSTEM_WORKER_QUEUES=%~2"' in runner_content
+    assert 'app.modules.managed_files.worker' in runner_content
     assert 'app.modules.file_lifecycle.scheduler' in content
     assert 'app.modules.file_lifecycle.startup_preflight' in content
     assert 'start "File Agent - Scan Worker"' in content
-    assert 'start "File Agent - Lifecycle Worker"' in content
-    assert 'start "File Agent - Source Analysis Worker"' in content
-    assert 'start "File Agent - Materialize Worker 1"' in content
-    assert 'start "File Agent - Materialize Worker 2"' in content
-    assert 'start "File Agent - Analysis Worker"' in content
+    assert 'start "File Agent - Lifecycle and Materialize Worker"' in content
+    assert 'start "File Agent - Document Analysis Worker"' in content
     assert 'start "File Agent - Structured Extraction Worker"' in content
     assert 'start "File Agent - Graph Worker"' in content
     assert "if errorlevel 1" in content

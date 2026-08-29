@@ -17,6 +17,7 @@ import { TrashRestoreSelectionCard } from './TrashRestoreSelectionCard';
 import { FileSearchClarificationCard } from './FileSearchClarificationCard';
 import { EvidenceAnswerReceipt, FileSelectionReceipt } from './EvidenceAnswerReceipt';
 import { ClassificationClarificationCard } from './ClassificationClarificationCard';
+import { ClassificationTreeReceipt } from './ClassificationTreeReceipt';
 import { FilenameConflictCard } from './FilenameConflictCard';
 import { FileTaskReceiptShell } from './FileTaskReceiptShell';
 import { StructuredExtractionReceipt } from './StructuredExtractionReceipt';
@@ -166,20 +167,14 @@ export function AgentRunReceipt({
     taskResult.display_mode === 'classification_cards'
     && visibleClassificationResults.length > 0
   ) ? (
-    <div className="document-result-list document-result-list--standalone">
-      {visibleClassificationResults.map((result, index) => (
-        <DocumentResultCard
-          attachment={findAttachmentByDocumentId(attachments, result.document_id)}
-          index={index + 1}
-          key={`${result.document_id}-${index}`}
-          result={result}
-          token={token}
-          agentRunId={taskResult.task_id}
-          onOpenDocument={onOpenDocument}
-          onOpenFile={onOpenAttachment}
-        />
-      ))}
-    </div>
+    <ClassificationTreeReceipt
+      results={visibleClassificationResults}
+      attachments={attachments}
+      token={token}
+      agentRunId={taskResult.task_id}
+      onOpenDocument={onOpenDocument}
+      onOpenAttachment={onOpenAttachment}
+    />
   ) : null;
 
   if (taskResult.response_type === 'rename_plan') {
@@ -378,7 +373,7 @@ export function AgentRunReceipt({
           <p className="agent-final-response">{taskResult.final_response}</p>
         ) : null}
 
-        {results.length > 0 ? (
+        {classificationCards ?? (results.length > 0 ? (
           <div className="document-result-list">
             {results.map((result, index) => (
               <DocumentResultCard
@@ -393,7 +388,7 @@ export function AgentRunReceipt({
               />
             ))}
           </div>
-        ) : null}
+        ) : null)}
       </>
     ) : <section className="agent-run-receipt">
       <div className="agent-run-summary">
@@ -413,7 +408,7 @@ export function AgentRunReceipt({
         <p className="agent-final-response">{taskResult.final_response}</p>
       ) : null}
 
-      {results.length > 0 ? (
+      {classificationCards ?? (results.length > 0 ? (
         <div className="document-result-list">
           {results.map((result, index) => (
             <DocumentResultCard
@@ -428,7 +423,7 @@ export function AgentRunReceipt({
             />
           ))}
         </div>
-      ) : null}
+      ) : null)}
     </section>
   );
 }

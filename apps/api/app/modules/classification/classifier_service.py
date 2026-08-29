@@ -18,7 +18,7 @@ from app.db.models import (
 )
 from app.modules.classification.loader import load_default_taxonomy
 from app.modules.classification.managed_catalog import GlobalManagedCategoryCatalogService
-from app.modules.classification.matcher import match_document_text
+from app.modules.classification.matcher import DocumentFeatures, match_document_features
 from app.modules.classification.summary_service import (
     DocumentSummaryService,
     resolve_document_version_id,
@@ -121,6 +121,8 @@ class DocumentClassificationService:
                         "document_id": document_id,
                         "document_version_id": resolved_version_id,
                         "extraction_run_id": extraction_run_id,
+                        "taxonomy_key": taxonomy_key,
+                        "taxonomy_version": taxonomy_version,
                         "categories": cached_categories,
                         "text_source": "classification_cache",
                         "classification_summary_id": (
@@ -142,6 +144,31 @@ class DocumentClassificationService:
                 filename=filename,
                 classification_text=classification_text,
             )
+            full_text_categories = self._classify_with_unified_taxonomy(
+                filename=filename,
+                classification_text=full_text or fallback_text,
+            )
+            full_text_primary_id = _primary_category_id(full_text_categories)
+            summary_primary_id = _primary_category_id(base_categories)
+            base_categories = [
+                {
+                    **category,
+                    "summary_fulltext_agreement": (
+                        summary_primary_id == full_text_primary_id
+                        if summary_primary_id and full_text_primary_id
+                        else None
+                    ),
+                    "candidate_scores": {
+                        **dict(category.get("candidate_scores") or {}),
+                        "summary_fulltext_agreement": (
+                            summary_primary_id == full_text_primary_id
+                            if summary_primary_id and full_text_primary_id
+                            else None
+                        ),
+                    },
+                }
+                for category in base_categories
+            ]
             graph_result = self._load_graph_candidates(
                 document_id=document_id,
                 categories=base_categories,
@@ -211,6 +238,8 @@ class DocumentClassificationService:
             "document_id": document_id,
             "document_version_id": resolved_version_id,
             "extraction_run_id": extraction_run_id,
+            "taxonomy_key": taxonomy_key,
+            "taxonomy_version": taxonomy_version,
             "categories": categories,
             "text_source": "classification_topic_summary" if (
                 summaries is not None and get_settings().llm_classification_summary_enabled
@@ -331,14 +360,17 @@ class DocumentClassificationService:
         """统一使用构建后的单一 taxonomy，受管目录只作为离线构建证据。"""
 
         taxonomy = load_default_taxonomy()
-        return match_document_text(text=f"{filename}\n{classification_text}", taxonomy=taxonomy)
+        return match_document_features(
+            DocumentFeatures(filename=filename, full_text=classification_text),
+            taxonomy,
+        )
 
     @property
     def classifier_version(self) -> str:
         """返回会影响分类结果的受控实现版本。"""
 
         summary_mode = "summary" if get_settings().llm_classification_summary_enabled else "fulltext"
-        return f"taxonomy-{summary_mode}-first-{self.mode}-graph-{self.graph_mode}-v4"
+        return f"taxonomy-{summary_mode}-first-{self.mode}-graph-{self.graph_mode}-v5"
 
     def _taxonomy_identity(self) -> tuple[str, str]:
         """返回当前统一 taxonomy 身份，用于分类结果缓存隔离。"""
@@ -396,6 +428,18 @@ class DocumentClassificationService:
                 "evidence_items": list(suggestion.evidence_json or []),
                 "evidence": _evidence_signals(suggestion.evidence_json),
                 "candidate_scores": dict(suggestion.candidate_scores_json or {}),
+                "matched_title_signals": list(
+                    (suggestion.candidate_scores_json or {}).get("matched_title_signals") or []
+                ),
+                "matched_content_signals": list(
+                    (suggestion.candidate_scores_json or {}).get("matched_content_signals") or []
+                ),
+                "negative_signals": list(
+                    (suggestion.candidate_scores_json or {}).get("negative_signals") or []
+                ),
+                "summary_fulltext_agreement": (
+                    (suggestion.candidate_scores_json or {}).get("summary_fulltext_agreement")
+                ),
                 "semantic_evidence": dict(suggestion.semantic_evidence_json or {}),
                 "taxonomy_key": suggestion.taxonomy_key,
                 "taxonomy_version": suggestion.taxonomy_version,
@@ -542,6 +586,16 @@ def _category_ids(categories: list[dict[str, Any]], limit: int = 5) -> list[str]
         if category_id:
             result.append(category_id)
     return result
+
+
+def _primary_category_id(categories: list[dict[str, Any]]) -> str:
+    """提取有稳定 ID 的首候选，供摘要与全文一致性门槛使用。"""
+
+    for category in categories:
+        category_id = str(category.get("category_id") or "")
+        if category_id:
+            return category_id
+    return ""
 
 
 def _quote_around_signal(*, text: str, signal: str) -> str:

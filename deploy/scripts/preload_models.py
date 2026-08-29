@@ -54,7 +54,9 @@ DOCLING_REPOSITORIES = (
 )
 
 PADDLEX_ALLOWED_MODEL_DIRS = {
-    "PP-Chart2Table",
+    # PaddleX 3.7.2 的 PP-StructureV3 实际把图表模型固化到该目录名；
+    # 使用旧名称会在模型已经下载后仍被完整性校验误判为缺失。
+    "PP-Chart2Table_safetensors",
     "PP-DocBlockLayout",
     "PP-DocLayout_plus-L",
     "PP-DocLayoutV3",

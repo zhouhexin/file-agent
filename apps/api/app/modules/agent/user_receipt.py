@@ -95,6 +95,10 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         initial_organization_results,
         [_safe_document_result(item) for item in result.document_results],
     )
+    document_results = _project_document_results_for_intent(
+        result=result,
+        document_results=document_results,
+    )
     response_type = _response_type(
         result=result,
         managed_file_result=managed_file_result,
@@ -383,6 +387,38 @@ def _merge_document_results(*groups: list[dict[str, Any]]) -> list[dict[str, Any
                 positions[key] = len(merged)
             merged.append(item)
     return merged
+
+
+def _project_document_results_for_intent(
+    *,
+    result: AgentRunResult,
+    document_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """按用户明确任务收窄逐文件展示字段，不改写持久化审计结果。
+
+    单纯分类或分类归档不包含文件命名工作。后台可以继续生成并保存命名候选，但普通
+    回执不得因此展示建议名称、命名确认提示或改名入口。复合意图
+    ``CLASSIFY_AND_SUGGEST_RENAME`` 仍保留这些字段。
+    """
+
+    if str(result.intent or "").upper() not in {
+        "CLASSIFY_FILES",
+        "CLASSIFY_MANAGED_FILES",
+    }:
+        return document_results
+
+    projected: list[dict[str, Any]] = []
+    for item in document_results:
+        safe_item = dict(item)
+        safe_item.pop("rename_suggestion", None)
+        pending = safe_item.get("pending_decision")
+        if isinstance(pending, dict) and str(pending.get("type") or "") in {
+            "rename_suggestion",
+            "rename_review",
+        }:
+            safe_item.pop("pending_decision", None)
+        projected.append(safe_item)
+    return projected
 
 
 def _managed_file_result(result: AgentRunResult) -> dict[str, Any] | None:
@@ -712,7 +748,9 @@ def _classification_decision_results(
                         output.get("message")
                         or "分类决定已保存，文件位置未改变。"
                     ),
-                    "file_position_changed": False,
+                    "file_position_changed": bool(
+                        output.get("file_position_changed")
+                    ),
                 },
             )
     return None, None
@@ -873,7 +911,7 @@ def _bounded_receipt_value(value: Any) -> Any:
 
 
 def _has_executed_working_copy_result(result: AgentRunResult) -> bool:
-    """识别已在本轮完成的冲突覆盖，避免把审计计划再次展示成待确认卡。"""
+    """识别本轮已直接完成的工作副本动作，避免再次展示确认卡。"""
 
     return any(
         isinstance(invocation.output_json, dict)

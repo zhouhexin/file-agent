@@ -52,6 +52,12 @@ class FakeConversationRepository:
             return []
         return [MessageAttachment(document_id="named-doc")]
 
+    def get_exact_active_working_copy_references(self, **_: object) -> list[MessageAttachment]:
+        """默认模拟共享工作目录没有同名活动文件。"""
+
+        self.calls.append("working-copy-filename")
+        return []
+
 
 class SingleFileConversationRepository(FakeConversationRepository):
     """模拟当前会话只有一个不同文件，允许泛指删除唯一解析。"""
@@ -264,6 +270,82 @@ def test_explicit_filename_parser_preserves_full_name_for_exact_context_scope():
     assert _explicit_filename_from_content(
         "请完整总结西安理工大学用印申请单.docx，覆盖每个章节"
     ) == "西安理工大学用印申请单.docx"
+
+
+def test_explicit_filename_parser_reads_quoted_name_after_reclassification_action():
+    """“重新分类”是动作而不是文件名的一部分，中文引号内名称必须原样保留。"""
+
+    filename = "计算机学院规范工资津贴补贴外各项奖金津贴补助发放情况自查表20180622.doc"
+
+    assert _explicit_filename_from_content(f"重新分类“{filename}”") == filename
+
+
+def test_filename_classification_resolves_unique_active_working_copy():
+    """会话历史未命中时，完整文件名分类必须继续唯一解析共享活动工作副本。"""
+
+    class WorkingCopyRepository(FakeConversationRepository):
+        """模拟文件只存在于共享工作目录而未作为当前会话历史附件出现。"""
+
+        def get_filename_matched_attachment_references(self, **_: object) -> list[MessageAttachment]:
+            """当前会话没有同名历史附件。"""
+
+            self.calls.append("filename")
+            return []
+
+        def get_exact_active_working_copy_references(self, **_: object) -> list[MessageAttachment]:
+            """共享工作目录唯一命中活动文件。"""
+
+            self.calls.append("working-copy-filename")
+            return [MessageAttachment(document_id="working-document")]
+
+    repository = WorkingCopyRepository()
+    context = ConversationAttachmentContextService(repository).resolve(
+        conversation_id="chat-working-copy-name",
+        user_id="user-1",
+        content="重新分类“工资津贴发放情况自查表.doc”",
+        explicit_attachments=[],
+    )
+
+    assert repository.calls == ["filename", "working-copy-filename"]
+    assert context.scope == "working_copy_filename_reference"
+    assert context.clarification_question is None
+    assert [item.document_id for item in context.attachments] == ["working-document"]
+
+
+def test_filename_classification_stops_when_active_working_copy_is_ambiguous():
+    """同名活动工作副本不能被合并分类，必须停止并要求用户选择具体文件。"""
+
+    class AmbiguousWorkingCopyRepository(FakeConversationRepository):
+        """模拟共享工作目录中存在两份同名活动文件。"""
+
+        def get_filename_matched_attachment_references(self, **_: object) -> list[MessageAttachment]:
+            """当前会话没有可用于消歧的历史附件。"""
+
+            self.calls.append("filename")
+            return []
+
+        def get_exact_active_working_copy_references(self, **_: object) -> list[MessageAttachment]:
+            """返回两份同名文件，调用方不得擅自选择。"""
+
+            self.calls.append("working-copy-filename")
+            return [
+                MessageAttachment(document_id="working-document-1"),
+                MessageAttachment(document_id="working-document-2"),
+            ]
+
+    context = ConversationAttachmentContextService(
+        AmbiguousWorkingCopyRepository()
+    ).resolve(
+        conversation_id="chat-working-copy-ambiguous",
+        user_id="user-1",
+        content="重新分类“同名通知.docx”",
+        explicit_attachments=[],
+    )
+
+    assert context.attachments == []
+    assert context.scope == "filename_reference_ambiguous"
+    assert "找到多份" in str(context.clarification_question)
+    assert "重新附加" in str(context.clarification_question)
 
 
 def test_target_rename_filename_is_not_used_as_historical_source_reference():

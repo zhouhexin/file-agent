@@ -720,6 +720,29 @@ create table document_categories (
 );
 ```
 
+### 4.18.1 document_organization_decisions
+
+迁移 `20260827_0001` 新增首次自动分类组织决策审计。它和工作副本生命周期是两个状态域：
+`working_copies.status` 表达 `ORGANIZING/ACTIVE` 可用性，`decision` 表达主分类是否自动生效或待复核。
+
+```text
+document_organization_decisions
+- working_copy_id / document_id / document_version_id
+- classification_run_id / primary_suggestion_id / category_id
+- taxonomy_key / taxonomy_version / classifier_version
+- calibration_version / policy_version
+- decision: AUTO_ORGANIZED | NEEDS_REVIEW | SKIPPED | FAILED
+- calibrated_confidence / required_threshold / top_margin / required_margin
+- feature_snapshot_json / reason_codes_json
+- target_relative_path_snapshot / path_record_id
+- idempotency_key unique / created_at / completed_at
+```
+
+`feature_snapshot_json` 只保存有限分数、计数、版本和 Shadow 标志，不保存正文、Prompt 或绝对路径。
+同一迁移把正式活动主分类唯一约束扩展为
+`status IN ('AUTO_APPLIED', 'CONFIRMED') AND relation_role='PRIMARY'`。自动关系不创建
+`document_category_confirmation_sources`；用户接受同一自动关系时才把它提升为 `CONFIRMED` 并追加真实确认来源。
+
 ### 4.19 qa_answers
 
 ```sql

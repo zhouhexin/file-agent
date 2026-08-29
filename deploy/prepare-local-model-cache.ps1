@@ -15,7 +15,7 @@ $OutputRoot = if ([System.IO.Path]::IsPathRooted($OutputDirectory)) {
     [System.IO.Path]::GetFullPath((Join-Path $ProjectRoot $OutputDirectory))
 }
 $AllowedPaddleModels = @(
-    "PP-Chart2Table",
+    "PP-Chart2Table_safetensors",
     "PP-DocBlockLayout",
     "PP-DocLayout_plus-L",
     "PP-DocLayoutV3",

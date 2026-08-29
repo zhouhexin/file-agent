@@ -7,11 +7,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.core.logging import log_event
 from app.db.models import AgentRun, FileRenameReviewItem, Message
 from app.modules.agent.repository import AgentRunRepository
+from app.modules.agent.planner import FileScopeClarificationPlanner
 from app.modules.agent.service import AgentRuntimeService
 from app.modules.agent.state import AgentRunResult
 from app.modules.conversations.context import ConversationAttachmentContextService
@@ -21,6 +24,10 @@ from app.modules.conversations.schemas import (
     ConversationDetailResponse,
     ConversationMessage,
     SendMessageRequest,
+)
+from app.modules.file_lifecycle.shared_access import (
+    CanonicalWorkingFileError,
+    CanonicalWorkingFileResolver,
 )
 from app.modules.files.repository import FileRepository
 from app.modules.retrieval.clarification_planner import (
@@ -146,6 +153,9 @@ class ConversationMessageService:
             conversation_id=conversation_id,
             message_id=message.id,
         )
+        runtime_attachments = self._canonicalize_agent_attachments(
+            attachments=[dict(item) for item in (message.attachments_json or [])],
+        )
         agent_message = self._normalize_unique_filename_conflict_reply(
             conversation_id=conversation_id,
             user_id=user_id,
@@ -159,15 +169,21 @@ class ConversationMessageService:
             message=agent_message,
             attachments=[
                 {
-                    **attachment.model_dump(),
+                    **attachment,
                     "context_scope": attachment_context.scope,
                 }
-                for attachment in attachments
+                for attachment in runtime_attachments
             ],
             planner=(
                 FileSearchClarificationPlanner(clarification_selection)
                 if clarification_selection is not None
-                else None
+                else (
+                    FileScopeClarificationPlanner(
+                        question=attachment_context.clarification_question
+                    )
+                    if attachment_context.clarification_question
+                    else None
+                )
             ),
             db=self.db,
         )
@@ -184,6 +200,82 @@ class ConversationMessageService:
             message=self.repository.to_schema(message),
             agent_run=agent_run,
         )
+
+    def _canonicalize_agent_attachments(
+        self,
+        *,
+        attachments: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """把持久化上传引用映射为 Agent 使用的唯一活动工作副本。
+
+        用户消息继续保存原上传 ``document_id`` 作为不可变审计引用；这里只改写运行时附件，
+        且必须沿 ``UploadArchiveRecord -> ManagedFile -> WorkingCopy`` 血缘映射，不能按文件名
+        或内容哈希猜测、合并文件。
+        """
+
+        resolver = CanonicalWorkingFileResolver(self.db)
+        canonical: list[dict[str, Any]] = []
+        index_by_document_id: dict[str, int] = {}
+        for attachment in attachments:
+            source_document_id = str(attachment.get("document_id") or "")
+            if not source_document_id:
+                continue
+            runtime_attachment = dict(attachment)
+            try:
+                resolved = resolver.resolve_document(document_id=source_document_id)
+            except CanonicalWorkingFileError as exc:
+                # 用户可能在异步归档/导入尚未生成活动工作副本前就发送任务。当前轮保持既有上传
+                # 来源读取能力；一旦血缘就绪，后续每次 AgentRun 都会确定性改用工作副本 Document。
+                log_event(
+                    "conversation.attachment.canonicalization_deferred",
+                    level="INFO",
+                    document_id=source_document_id,
+                    status="SKIPPED",
+                    error_code=exc.code,
+                    message="Agent 附件尚无可用工作副本，暂时保留上传来源引用",
+                )
+                target_document_id = source_document_id
+            else:
+                target_document_id = str(resolved.working_copy.document_id)
+                runtime_attachment.update(
+                    {
+                        "document_id": target_document_id,
+                        "document_version_id": str(resolved.document_version.id),
+                        "working_copy_id": str(resolved.working_copy.id),
+                        "mapped_from_upload": bool(resolved.mapped_from_upload),
+                    }
+                )
+                if resolved.mapped_from_upload:
+                    runtime_attachment.update(
+                        {
+                            "source_document_id": source_document_id,
+                            "source_document_version_id": str(
+                                resolved.source_document_version_id
+                            ),
+                        }
+                    )
+                log_event(
+                    "conversation.attachment.canonicalized",
+                    document_id=target_document_id,
+                    status="COMPLETED",
+                    source_document_id=source_document_id,
+                    working_copy_id=str(resolved.working_copy.id),
+                    mapped_from_upload=bool(resolved.mapped_from_upload),
+                    message="Agent 附件已映射到唯一活动工作副本",
+                )
+
+            existing_index = index_by_document_id.get(target_document_id)
+            if existing_index is not None:
+                existing = canonical[existing_index]
+                source_ids = list(existing.get("source_document_ids") or [])
+                if source_document_id not in source_ids:
+                    source_ids.append(source_document_id)
+                existing["source_document_ids"] = source_ids
+                continue
+            runtime_attachment["source_document_ids"] = [source_document_id]
+            index_by_document_id[target_document_id] = len(canonical)
+            canonical.append(runtime_attachment)
+        return canonical
 
     def _normalize_unique_filename_conflict_reply(
         self,

@@ -34,6 +34,7 @@ class ResolvedAttachmentContext:
     attachments: list[MessageAttachment]
     source: str
     scope: str
+    clarification_question: str | None = None
 
 
 class ConversationAttachmentContextService:
@@ -81,16 +82,49 @@ class ConversationAttachmentContextService:
             # 只有用户写出完整文件名时才能直接绑定历史附件。文件名片段或相似词
             # 只能作为候选召回，必须先让用户选择，不能静默变成本轮正文范围。
             # 删除请求仍可解析唯一历史对象，但后续必须展示 OperationPlan 再确认。
+            explicit_filename = _explicit_filename_from_content(content)
             named_attachments = self.repository.get_filename_matched_attachment_references(
                 conversation_id=conversation_id,
                 user_id=user_id,
                 content=content,
             )
-            if named_attachments:
+            if len(named_attachments) == 1:
                 return ResolvedAttachmentContext(
                     attachments=named_attachments,
                     source="inferred_context",
                     scope="filename_reference",
+                )
+            has_history_selector = _should_infer_recent_attachments(content)
+            if len(named_attachments) > 1 and not has_history_selector:
+                return _ambiguous_filename_context(explicit_filename)
+            if (
+                explicit_filename
+                and _has_filename_classification_task(content)
+                and not has_history_selector
+            ):
+                # 分类任务不仅支持会话附件，也支持完整文件名引用共享工作副本。
+                # upload_archive 是内部归档根，不能为了命中它而扩大受管目录 Tool 权限。
+                working_copy_references = (
+                    self.repository.get_exact_active_working_copy_references(
+                        content=content,
+                    )
+                )
+                if len(working_copy_references) == 1:
+                    return ResolvedAttachmentContext(
+                        attachments=working_copy_references,
+                        source="inferred_context",
+                        scope="working_copy_filename_reference",
+                    )
+                if len(working_copy_references) > 1:
+                    return _ambiguous_filename_context(explicit_filename)
+                return ResolvedAttachmentContext(
+                    attachments=[],
+                    source="inferred_context",
+                    scope="filename_reference_not_found",
+                    clarification_question=(
+                        f"没有找到名为“{explicit_filename}”的活动文件，请确认文件名，"
+                        "或重新附加需要分类的具体文件。"
+                    ),
                 )
         if _is_single_file_rename_confirmation(content):
             # “改名”可以确认上一轮单文件建议，但多个最近附件时绝不能猜测要改哪一份。
@@ -173,6 +207,41 @@ def _deduplicate_attachments(attachments: list[MessageAttachment]) -> list[Messa
         seen.add(attachment.document_id)
         unique.append(attachment)
     return unique
+
+
+def _ambiguous_filename_context(filename: str | None) -> ResolvedAttachmentContext:
+    """同名文件不自动合并，要求用户重新附加具体对象。"""
+
+    label = filename or "该名称"
+    return ResolvedAttachmentContext(
+        attachments=[],
+        source="inferred_context",
+        scope="filename_reference_ambiguous",
+        clarification_question=(
+            f"找到多份名为“{label}”的活动文件，不能仅凭文件名确定对象。"
+            "请重新附加需要分类的具体文件。"
+        ),
+    )
+
+
+def _has_filename_classification_task(content: str) -> bool:
+    """识别按完整文件名执行分类的任务，排除目录展示和结果查看。"""
+
+    compact = re.sub(r"\s+", "", str(content or ""))
+    if not any(keyword in compact for keyword in ("分类", "归类")):
+        return False
+    return not any(
+        keyword in compact
+        for keyword in (
+            "分类体系",
+            "分类目录",
+            "有哪些分类",
+            "支持的分类",
+            "查看分类结果",
+            "读取分类结果",
+            "汇总分类结果",
+        )
+    )
 
 
 def _should_infer_recent_attachments(content: str) -> bool:

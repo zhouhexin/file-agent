@@ -17,6 +17,7 @@ from app.db.models import Document, User, WorkingCopy
 from app.modules.file_lifecycle.service import UploadLifecycleService
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
+from app.modules.conversations.repository import ConversationRepository
 from app.modules.files.artifact_repository import DocumentArtifactRepository
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.repository import FileRepository
@@ -64,6 +65,13 @@ class FileUploadService:
         incoming_path, size_bytes, sha256 = await self._stream_upload_to_quarantine(file=file)
         relative_path: str | None = None
         try:
+            if conversation_id:
+                # 聊天页允许先选附件、后发送文字；因此上传必须在同一事务中创建
+                # 当前用户的空会话，不能把尚未创建的前端会话 ID 直接写入外键。
+                ConversationRepository(self.db).ensure_conversation(
+                    conversation_id=conversation_id,
+                    user_id=current_user.id,
+                )
             document = self.repository.create_document(
                 user_id=current_user.id,
                 workspace_id=current_user.default_workspace_id,

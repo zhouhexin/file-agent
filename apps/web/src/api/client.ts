@@ -18,6 +18,8 @@ import type {
   FilesystemJobResponse,
   OperationConfirmResponse,
   OperationPlanResponse,
+  OrganizationFilePageResponse,
+  OrganizationTreeResponse,
   RenameBatchItemsResponse,
   SendMessageResponse,
   TokenResponse,
@@ -309,6 +311,45 @@ export async function fetchManagedFileBlob(
 
   if (!response.ok) {
     throw await readApiError(response, '文件预览失败');
+  }
+  return response.blob();
+}
+
+export async function getClassificationOrganizationTree(
+  token: string,
+): Promise<OrganizationTreeResponse> {
+  // 目录计数完全由后端按活动主分类关系计算，前端不拼装本地分类树。
+  return request<OrganizationTreeResponse>('/classification/organization/tree', { token });
+}
+
+export async function getClassificationOrganizationFiles(
+  token: string,
+  options: { categoryId?: string; page?: number; pageSize?: number } = {},
+): Promise<OrganizationFilePageResponse> {
+  // 分类目录始终使用服务端分页；虚拟待复核节点也只传稳定 category_id。
+  const params = new URLSearchParams({
+    scope: 'descendants',
+    page: String(options.page ?? 1),
+    page_size: String(options.pageSize ?? 20),
+  });
+  if (options.categoryId) params.set('category_id', options.categoryId);
+  return request<OrganizationFilePageResponse>(
+    `/classification/organization/files?${params.toString()}`,
+    { token },
+  );
+}
+
+export async function fetchWorkingCopyBlob(
+  token: string,
+  workingCopyId: string,
+): Promise<Blob> {
+  // 文件目录只持有工作副本 ID；内容仍由后端活动状态与共享空间边界保护。
+  const response = await fetch(
+    `${API_BASE_URL}/working-copies/${encodeURIComponent(workingCopyId)}/download`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!response.ok) {
+    throw await readApiError(response, '文件打开失败');
   }
   return response.blob();
 }

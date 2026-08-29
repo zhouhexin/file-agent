@@ -13,6 +13,8 @@ type DocumentResultCardProps = {
   attachment?: ChatAttachment;
   onOpenFile?: (file: ChatAttachment) => void;
   onOpenDocument?: (documentId: string, filename: string) => void;
+  showIndex?: boolean;
+  showPrimaryCategory?: boolean;
 };
 
 /** 展示一个文件的安全处理回执，并把文件打开动作交给受控上层回调。 */
@@ -24,11 +26,15 @@ export function DocumentResultCard({
   onOpenDocument,
   token,
   agentRunId,
+  showIndex = true,
+  showPrimaryCategory = true,
 }: DocumentResultCardProps) {
   // 每个文件单独成卡，避免把批量结果挤成一整段文本。
   const failed = result.extraction_status === 'FAILED';
   const filename = result.filename || attachment?.filename || result.document_id;
-  const primaryCategory = result.categories[0];
+  // 历史生命周期回执可能只记录处理状态和命名建议，没有分类数组。
+  const categories = result.categories ?? [];
+  const primaryCategory = categories[0];
   const canOpen = Boolean((attachment && onOpenFile) || onOpenDocument);
   const openFile = () => {
     // 当前轮优先复用完整附件信息；历史回执则只用稳定 document_id 重新鉴权预览。
@@ -55,7 +61,7 @@ export function DocumentResultCard({
                 onClick={openFile}
                 title={canOpen ? '预览文件' : undefined}
               >
-                {index}. {filename}
+                {showIndex ? `${index}. ` : ''}{filename}
               </button>
               <span className="document-result-size">
                 {attachment ? formatFileSize(attachment.size_bytes) : '文件不可用'}
@@ -80,13 +86,17 @@ export function DocumentResultCard({
                 onClick={openFile}
                 title={canOpen ? '预览文件' : undefined}
               >
-                {index}. {filename}
+                {showIndex ? `${index}. ` : ''}{filename}
               </button>
               <span className="document-result-size">
-                {attachment ? formatFileSize(attachment.size_bytes) : `${result.char_count.toLocaleString()} 字符`}
+                {attachment
+                  ? formatFileSize(attachment.size_bytes)
+                  : typeof result.char_count === 'number'
+                    ? `${result.char_count.toLocaleString()} 字符`
+                    : '字符数未统计'}
               </span>
             </div>
-            {primaryCategory ? (
+            {showPrimaryCategory && primaryCategory ? (
               <div className="document-result-inline-category">
                 <CategoryChip
                   category={primaryCategory}
@@ -97,9 +107,9 @@ export function DocumentResultCard({
                 />
               </div>
             ) : null}
-            <span className="document-result-confidence">
-              {primaryCategory ? `置信度 ${primaryCategory.confidence.toFixed(2)}` : '暂无可靠分类'}
-            </span>
+            {showPrimaryCategory && !primaryCategory ? (
+              <span className="document-result-confidence">暂无可靠分类</span>
+            ) : null}
             {result.search_status ? (
               <span
                 className="document-result-confidence"
@@ -110,13 +120,13 @@ export function DocumentResultCard({
               </span>
             ) : null}
           </header>
-          {result.categories.length > 1 ? (
+          {categories.length > 1 ? (
             <div className="document-result-categories">
               <div className="category-chip-list">
-                {result.categories.slice(1).map((category) => (
+                {categories.slice(1).map((category) => (
                   <CategoryChip
                     category={category}
-                    key={`${category.name}-${category.confidence}`}
+                    key={category.suggestion_id || category.category_id || category.name}
                     compact
                     token={token}
                     agentRunId={agentRunId}

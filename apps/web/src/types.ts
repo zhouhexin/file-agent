@@ -9,6 +9,52 @@ export type User = {
   default_workspace_id: string | null;
 };
 
+// 主分类目录只展示已发布工作副本；虚拟“待复核”节点由后端按真实组织决策计算。
+export type OrganizationTreeNode = {
+  category_id: string;
+  name: string;
+  category_path: string[];
+  direct_file_count: number;
+  subtree_file_count: number;
+  is_virtual: boolean;
+  children: OrganizationTreeNode[];
+};
+
+export type OrganizationTreeResponse = {
+  taxonomy_key: string;
+  taxonomy_version: string;
+  total_active_files: number;
+  classified_file_count: number;
+  needs_review_file_count: number;
+  nodes: OrganizationTreeNode[];
+};
+
+export type OrganizationFileItem = {
+  working_copy_id: string;
+  document_id: string;
+  document_version_id: string;
+  filename: string;
+  relative_path: string;
+  size_bytes: number;
+  primary_category_id: string | null;
+  primary_category_path: string[];
+  primary_category_status: 'AUTO_APPLIED' | 'CONFIRMED' | string | null;
+  organization_decision: string | null;
+  organization_reason_codes: string[];
+  updated_at: string;
+};
+
+export type OrganizationFilePageResponse = {
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+  category_id: string | null;
+  scope: 'direct' | 'descendants';
+  review_only: boolean;
+  files: OrganizationFileItem[];
+};
+
 export type TokenResponse = {
   access_token: string;
   token_type: 'bearer';
@@ -323,7 +369,7 @@ export type ClassificationClarificationResult = {
 export type ClassificationDecisionResult = {
   action: string;
   message: string;
-  file_position_changed: false;
+  file_position_changed: boolean;
 };
 
 export type FilenameConflictResult = {
@@ -743,7 +789,8 @@ export type DocumentResult = {
   extraction_status: 'COMPLETED' | 'FAILED' | string;
   extractor?: string;
   page_count: number;
-  char_count: number;
+  /** 历史或非解析类任务回执可能不包含字符数。 */
+  char_count?: number;
   text_reused: boolean;
   classification_reused: boolean;
   year?: string | null;
@@ -755,7 +802,8 @@ export type DocumentResult = {
   managed_original_unchanged?: boolean;
   risk_warnings?: Array<{ code?: string; message?: string }>;
   pending_decision?: Record<string, unknown> | null;
-  categories: DocumentCategory[];
+  /** 历史或非分类类生命周期回执可能不包含分类数组。 */
+  categories?: DocumentCategory[];
   warnings: Array<Record<string, unknown> | string>;
   errors: Array<{
     code?: string;

@@ -933,7 +933,7 @@ class WorkingCopyOperationService:
         )
         if (
             relation is None
-            or relation.status != "CONFIRMED"
+            or relation.status not in {"AUTO_APPLIED", "CONFIRMED"}
             or relation.working_copy_id != working_copy.id
             or relation.document_version_id != working_copy.current_version_id
             or relation.category_id != metadata.get("category_id")

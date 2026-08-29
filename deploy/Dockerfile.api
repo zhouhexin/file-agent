@@ -86,12 +86,27 @@ RUN if [ "$MODEL_PRELOAD" = "true" ]; then \
       python /app/deploy/scripts/preload_models.py paddleocr; \
     fi
 
-RUN if [ "$MODEL_PRELOAD" = "true" ]; then \
-      python /app/deploy/scripts/preload_models.py pp-structure; \
+RUN --mount=type=cache,target=/var/cache/file-agent-paddlex-models,sharing=locked \
+    if [ "$MODEL_PRELOAD" = "true" ]; then \
+      mkdir -p /var/cache/file-agent-paddlex-models/official_models; \
+      cp -a /opt/file-agent/models/paddlex/official_models/. /var/cache/file-agent-paddlex-models/official_models/; \
+      rm -rf /opt/file-agent/models/paddlex/official_models; \
+      ln -s /var/cache/file-agent-paddlex-models/official_models /opt/file-agent/models/paddlex/official_models; \
+      PADDLE_PDX_CACHE_HOME=/var/cache/file-agent-paddlex-models python /app/deploy/scripts/preload_models.py pp-structure; \
+      rm /opt/file-agent/models/paddlex/official_models; \
+      mkdir -p /opt/file-agent/models/paddlex/official_models; \
+      cp -a /var/cache/file-agent-paddlex-models/official_models/. /opt/file-agent/models/paddlex/official_models/; \
     fi
 
-RUN if [ "$MODEL_PRELOAD" = "true" ]; then \
-      python /app/deploy/scripts/preload_models.py paddleocr-vl; \
+RUN --mount=type=cache,target=/var/cache/file-agent-paddlex-models,sharing=locked \
+    if [ "$MODEL_PRELOAD" = "true" ]; then \
+      mkdir -p /var/cache/file-agent-paddlex-models/official_models; \
+      cp -a /opt/file-agent/models/paddlex/official_models/. /var/cache/file-agent-paddlex-models/official_models/; \
+      ln -sfn /var/cache/file-agent-paddlex-models/official_models/PaddleOCR-VL-1.6 /opt/file-agent/models/paddlex/official_models/PaddleOCR-VL-1.6-0.9B; \
+      PADDLE_PDX_CACHE_HOME=/var/cache/file-agent-paddlex-models python /app/deploy/scripts/preload_models.py paddleocr-vl; \
+      rm -f /opt/file-agent/models/paddlex/official_models/PaddleOCR-VL-1.6-0.9B; \
+      cp -a /var/cache/file-agent-paddlex-models/official_models/PaddleOCR-VL-1.6 /opt/file-agent/models/paddlex/official_models/; \
+      ln -s PaddleOCR-VL-1.6 /opt/file-agent/models/paddlex/official_models/PaddleOCR-VL-1.6-0.9B; \
     fi
 
 RUN if [ "$MODEL_PRELOAD" = "true" ]; then \

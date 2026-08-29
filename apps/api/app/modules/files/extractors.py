@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import csv
 import hashlib
 import re
@@ -28,6 +29,14 @@ class PDFInvalidDocumentError(RuntimeError):
 
 
 EXCEL_MAX_STRUCTURED_CELLS = 100_000
+
+
+class TextDecodingError(ValueError):
+    """表示纯文本不符合当前允许的确定性编码集合。"""
+
+
+_PLAIN_TEXT_DECODER_VERSION = "plain-text-decoder-v2"
+_PLAIN_TEXT_SUFFIXES = {"txt", "md", "csv"}
 
 
 def extract_document_text(*, file_path: Path, filename: str, content_type: str, ocr_service: Any = None) -> Dict[str, Any]:
@@ -77,11 +86,11 @@ def extract_document_text(*, file_path: Path, filename: str, content_type: str, 
         ocr_service=ocr_service,
     )
     if suffix in {".docx", ".pdf"}:
-        return _apply_parser_metadata(
-            _append_parser_warning(native_result, docling_failure),
-            parser_config_hash=parser_config_hash,
-        )
-    return native_result
+        native_result = _append_parser_warning(native_result, docling_failure)
+    return _apply_parser_metadata(
+        native_result,
+        parser_config_hash=parser_config_hash,
+    )
 
 
 def extract_document_text_native(
@@ -95,11 +104,45 @@ def extract_document_text_native(
 
     suffix = Path(filename).suffix.lower()
     if suffix in {".txt", ".md"} or content_type.startswith("text/"):
-        text = file_path.read_text(encoding="utf-8", errors="ignore")
-        return _completed("plain-text", [{"page_number": 1, "sheet_name": None, "text": text, "metadata": {}}])
+        try:
+            text, text_encoding = _decode_plain_text(file_path)
+        except TextDecodingError:
+            return _failed(
+                "plain-text",
+                "TEXT_DECODING_FAILED",
+                "文本不是有效的 UTF-8、带 BOM 的 UTF-16 或 GB18030 编码，无法可靠读取。",
+            )
+        return _completed(
+            "plain-text",
+            [
+                {
+                    "page_number": 1,
+                    "sheet_name": None,
+                    "text": text,
+                    "metadata": {"text_encoding": text_encoding},
+                }
+            ],
+        )
     if suffix == ".csv":
-        text = _extract_csv_text(file_path)
-        return _completed("csv", [{"page_number": 1, "sheet_name": None, "text": text, "metadata": {}}])
+        try:
+            text, text_encoding = _extract_csv_text(file_path)
+        except TextDecodingError:
+            return _failed(
+                "csv",
+                "TEXT_DECODING_FAILED",
+                "文本不是有效的 UTF-8、带 BOM 的 UTF-16 或 GB18030 编码，无法可靠读取。",
+            )
+        return _completed(
+            "csv",
+            [
+                {
+                    "page_number": 1,
+                    "sheet_name": None,
+                    "text": text,
+                    "metadata": {"text_encoding": text_encoding},
+                }
+            ],
+        )
     if suffix == ".xls":
         return _extract_legacy_xls_text(file_path)
     if suffix == ".xlsx":
@@ -161,6 +204,15 @@ def extraction_config_hash(*, filename: str) -> str | None:
 
     settings = get_settings()
     suffix = Path(filename).suffix.lower().lstrip(".")
+    if suffix in _PLAIN_TEXT_SUFFIXES:
+        identity = "|".join(
+            [
+                _PLAIN_TEXT_DECODER_VERSION,
+                "order=utf-8-bom>utf-16-bom>utf-8>gb18030",
+                f"format={suffix}",
+            ]
+        )
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
     if not settings.docling_enabled or suffix not in set(settings.docling_formats):
         return None
     identity = "|".join(
@@ -201,12 +253,41 @@ def _apply_parser_metadata(result: Dict[str, Any], *, parser_config_hash: str | 
     return result
 
 
-def _extract_csv_text(file_path: Path) -> str:
+def _decode_plain_text(file_path: Path) -> tuple[str, str]:
+    """按固定顺序严格解码纯文本，不使用概率探测或静默丢字。"""
+
+    payload = file_path.read_bytes()
+    if payload.startswith(codecs.BOM_UTF8):
+        try:
+            return payload.decode("utf-8-sig"), "utf-8-sig"
+        except UnicodeDecodeError as exc:
+            raise TextDecodingError("UTF-8 BOM 文本解码失败") from exc
+    if payload.startswith(codecs.BOM_UTF16_LE):
+        try:
+            return payload.decode("utf-16"), "utf-16-le"
+        except UnicodeDecodeError as exc:
+            raise TextDecodingError("UTF-16 LE BOM 文本解码失败") from exc
+    if payload.startswith(codecs.BOM_UTF16_BE):
+        try:
+            return payload.decode("utf-16"), "utf-16-be"
+        except UnicodeDecodeError as exc:
+            raise TextDecodingError("UTF-16 BE BOM 文本解码失败") from exc
+    try:
+        return payload.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        pass
+    try:
+        return payload.decode("gb18030"), "gb18030"
+    except UnicodeDecodeError as exc:
+        raise TextDecodingError("纯文本编码不受支持") from exc
+
+
+def _extract_csv_text(file_path: Path) -> tuple[str, str]:
     """使用标准库读取 CSV 并转成行文本。"""
 
-    raw_text = file_path.read_text(encoding="utf-8", errors="ignore")
+    raw_text, text_encoding = _decode_plain_text(file_path)
     rows = csv.reader(StringIO(raw_text))
-    return "\n".join(["\t".join(row) for row in rows])
+    return "\n".join(["\t".join(row) for row in rows]), text_encoding
 
 
 def _extract_excel_text(file_path: Path) -> Dict[str, Any]:

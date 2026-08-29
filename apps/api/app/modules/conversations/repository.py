@@ -12,7 +12,7 @@ from typing import Iterable
 from uuid import uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -252,6 +252,40 @@ class ConversationRepository:
                 matched_ids.append(document_id)
         return [MessageAttachment(document_id=document_id) for document_id in matched_ids]
 
+    def get_exact_active_working_copy_references(
+        self,
+        *,
+        content: str,
+    ) -> list[MessageAttachment]:
+        """按完整文件名查询共享活动工作副本，不按相似名称或内容哈希猜测。
+
+        该入口只返回后端可验证的共享 ``ACTIVE`` 工作副本 Document。调用方必须
+        对零个、一个和多个结果分别处理；尤其不能在同名多份时自动挑选最新文件。
+        """
+
+        explicit_filename = _explicit_filename_from_content(content)
+        if explicit_filename is None:
+            return []
+        shared_workspace_id = get_shared_workspace_id(self.db)
+        normalized_filename = _normalize_filename_identity(explicit_filename)
+        candidates = (
+            self.db.query(WorkingCopy)
+            .filter(
+                WorkingCopy.workspace_id == shared_workspace_id,
+                WorkingCopy.status == "ACTIVE",
+                WorkingCopy.current_version_id.isnot(None),
+                func.lower(WorkingCopy.filename) == explicit_filename.casefold(),
+            )
+            .order_by(WorkingCopy.relative_path.asc(), WorkingCopy.id.asc())
+            .all()
+        )
+        return [
+            MessageAttachment(document_id=working_copy.document_id)
+            for working_copy in candidates
+            if _normalize_filename_identity(working_copy.filename)
+            == normalized_filename
+        ]
+
     def get_latest_attachment_batch_references(
         self,
         *,
@@ -414,6 +448,11 @@ class ConversationRepository:
         # 兼容修复前已经写入普通 assistant 消息的重复上传确认卡：
         # 决策完成后卡片本身也不再属于用户对话内容，但审计行仍保留在数据库。
         messages = self._exclude_resolved_duplicate_notifications(messages=messages)
+        # 兼容旧版后台分析把普通命名建议写成 assistant 消息的数据。
+        # 命名审计仍在 AgentRun/ToolInvocation/ChangeSet 中，只从普通聊天投影排除。
+        messages = self._exclude_unsolicited_background_rename_notifications(
+            messages=messages
+        )
         document_map = self._load_document_map(messages=messages, user_id=user_id)
         agent_run_map = self._load_agent_run_map(messages=messages)
         agent_repository = AgentRunRepository(self.db)
@@ -622,6 +661,49 @@ class ConversationRepository:
             message
             for message in messages
             if message.id not in resolved_notification_ids
+        ]
+
+    def _exclude_unsolicited_background_rename_notifications(
+        self,
+        *,
+        messages: list[Message],
+    ) -> list[Message]:
+        """隐藏修复前未经用户请求就展示的后台命名通知。
+
+        只识别 ``SYSTEM_FILE_LIFECYCLE + document-background-analysis`` 的结构化
+        AgentRun，不根据自然语言文本猜测，避免隐藏用户主动发起的改名任务。
+        """
+
+        message_ids = [message.id for message in messages]
+        if not message_ids:
+            return messages
+        runs = (
+            self.db.query(AgentRun)
+            .filter(
+                AgentRun.message_id.in_(message_ids),
+                AgentRun.intent == "SYSTEM_FILE_LIFECYCLE",
+            )
+            .all()
+        )
+        hidden_message_ids: set[str] = set()
+        for run in runs:
+            plan = dict(run.plan_json or {})
+            if plan.get("tool_name") != "document-background-analysis":
+                continue
+            graph_state = dict(run.graph_state_json or {})
+            document_results = graph_state.get("document_results") or []
+            if any(
+                isinstance(item, dict)
+                and isinstance(item.get("pending_decision"), dict)
+                and str(item["pending_decision"].get("type") or "")
+                in {"rename_suggestion", "rename_review"}
+                for item in document_results
+            ):
+                hidden_message_ids.add(run.message_id)
+        if not hidden_message_ids:
+            return messages
+        return [
+            message for message in messages if message.id not in hidden_message_ids
         ]
 
     @staticmethod
@@ -1098,17 +1180,25 @@ def _explicit_filename_from_content(content: str) -> str | None:
     """提取用户明确写出的完整文件名，阻止历史附件模糊扩张。"""
 
     normalized = unicodedata.normalize("NFKC", str(content or ""))
+    # 用户经常用中文引号标出文件名。优先读取引号内部，避免把“重新分类”等
+    # 动作词误并入文件名，进而导致后端无法匹配活动工作副本。
     match = re.search(
-        r"(?P<filename>[^/\\，。！？\r\n]+?\.(?:docx?|xlsx?|xlsm|xls|csv|tsv|pdf|txt|md))",
+        r"[“\"《【](?P<filename>[^/\\“”\"《》【】，。！？\r\n]+?\.(?:docx?|xlsx?|xlsm|xls|csv|tsv|pdf|txt|md))[”\"》】]",
         normalized,
         flags=re.IGNORECASE,
     )
+    if match is None:
+        match = re.search(
+            r"(?P<filename>[^/\\，。！？\r\n]+?\.(?:docx?|xlsx?|xlsm|xls|csv|tsv|pdf|txt|md))",
+            normalized,
+            flags=re.IGNORECASE,
+        )
     if match is None:
         return None
     candidate = match.group("filename").strip().strip("“”\"'《》【】")
     candidate = re.sub(
         r"^(?:请|麻烦)?(?:帮我)?(?:对|把|将)?\s*"
-        r"(?:(?:完整|全面|详细|全文)?(?:总结|汇总|概括|讲解|说明|读取|解析)(?:一下)?)\s*",
+        r"(?:(?:重新)?(?:分类|归类)|(?:完整|全面|详细|全文)?(?:总结|汇总|概括|讲解|说明|读取|解析)(?:一下)?)\s*",
         "",
         candidate,
     ).strip().strip("“”\"'《》【】")
