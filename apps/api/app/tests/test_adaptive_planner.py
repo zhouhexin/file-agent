@@ -411,6 +411,97 @@ def test_enabled_adaptive_planner_keeps_explicit_attachment_classification(
     assert "分类建议" in (result.final_response or "")
 
 
+def test_enabled_adaptive_planner_keeps_explicit_working_copy_re_rename(
+    monkeypatch,
+    tmp_path,
+):
+    """明确源/目标的“重新命名为”必须绕过 Adaptive 的受管原件建议查询。"""
+
+    from app.core import config
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent",
+    )
+    monkeypatch.setenv("ADAPTIVE_PLANNER_MODE", "enabled")
+    monkeypatch.setenv("ADAPTIVE_PLANNER_ROLLOUT_PERCENT", "100")
+    config.get_settings.cache_clear()
+
+    class MustNotRunAdaptive:
+        """显式文件动作已由后端收敛，不能再次交给模型改写 Tool。"""
+
+        enabled = True
+
+        def decide(self, **_kwargs):
+            """若被调用，说明生产图仍会复现受管原件空范围错误。"""
+
+            raise AssertionError("显式工作副本重命名不得交给 Adaptive Planner 改写")
+
+    class EnabledLegacyIntent:
+        """只令运行时进入 LLM 模式；硬预检命中后不应调用。"""
+
+        enabled = True
+
+        def understand_user_request(self, **_kwargs):
+            """预检失效时立即暴露错误回退。"""
+
+            raise AssertionError("显式工作副本重命名不得调用 Legacy LLM")
+
+    class RenameRegistry(ToolRegistry):
+        """记录图最终调用的受控工作副本重命名解析 Tool。"""
+
+        def __init__(self):
+            """保留生产 Catalog，同时用确定性结果替代数据库副作用。"""
+
+            super().__init__()
+            self.calls: list[tuple[str, dict]] = []
+
+        def invoke(self, name, input_json):
+            """模拟已经生成待确认的工作副本 OperationPlan。"""
+
+            self.calls.append((name, input_json))
+            return ToolInvocationRecord(
+                tool_name=name,
+                input_json=input_json,
+                output_json={
+                    "kind": "rename_review_resolution",
+                    "ok": True,
+                    "status": "WAITING_CONFIRMATION",
+                    "operation_plan_id": "plan-explicit-re-rename",
+                    "accepted_count": 1,
+                    "dismissed_count": 0,
+                    "remaining_review_count": 0,
+                    "completed_items": [],
+                    "failed_items": [],
+                    "ambiguous_items": [],
+                },
+                status="COMPLETED",
+                operation_plan_id="plan-explicit-re-rename",
+            )
+
+    message = (
+        "将 2025_计算机科学与工程学院下载监控视频申请.docx "
+        "重新命名为 2025_计算机科学与工程学院下载监控视频申请1.docx"
+    )
+    registry = RenameRegistry()
+    result = AgentRuntimeService(
+        registry_factory=lambda _db, _user_id: registry,
+        llm_intent_service=EnabledLegacyIntent(),
+        adaptive_planner_service=MustNotRunAdaptive(),
+    ).run_message(
+        conversation_id="conv-explicit-re-rename",
+        user_id="user-explicit-re-rename",
+        message_id="message-explicit-re-rename",
+        message=message,
+    )
+
+    assert result.intent == "RESOLVE_RENAME_REVIEW"
+    assert [name for name, _input in registry.calls] == ["resolve-rename-reviews"]
+    assert registry.calls[0][1]["message"] == message
+    assert result.operation_plan_id == "plan-explicit-re-rename"
+
+
 def _db_session():
     """创建包含全部 ORM 模型的隔离 SQLite 会话。"""
 

@@ -77,7 +77,11 @@ def execute_query(
 
         number = to_decimal(row.get(metric_column.column_id))
         if number is None:
-            rows_ignored += 1
+            raw_value = row.get(metric_column.column_id)
+            # 其他列包含页脚说明、签字栏时，目标数值列为空属于正常缺失，不应渲染成
+            # “非数值数据被忽略”的质量警告；只有目标单元格本身非空但不可计算才计入。
+            if raw_value is not None and str(raw_value).strip():
+                rows_ignored += 1
             continue
         values_by_group[group_key].append(number)
         rows_included += 1

@@ -35,7 +35,10 @@ from app.modules.retrieval.clarification_service import FileSearchClarificationS
 
 
 _CORRECTION_PATTERN = re.compile(
-    r"^\s*(?:把\s*)?(?:文件\s*)?(?P<source>.+?)\s*(?:更正为|改为|重命名为)\s*(?P<target>.+?)\s*[。；;]?\s*$"
+    # “把/将 A 重新命名为 B”与既有“更正为/改为/重命名为”语义一致。
+    # 这里只解析用户明确给出的源和目标；上传后台命名建议仍走独立 SuggestionService。
+    r"^\s*(?:(?:把|将)\s*)?(?:文件\s*)?(?P<source>.+?)\s*"
+    r"(?:更正为|改为|重新命名为|重命名为)\s*(?P<target>.+?)\s*[。；;]?\s*$"
 )
 _DISMISS_MESSAGES = {"不需要", "不需要改名", "无需改名", "不用改名"}
 _SOURCE_PLACEHOLDERS = {"原文件名", "文件原文件名"}

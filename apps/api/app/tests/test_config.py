@@ -114,6 +114,29 @@ def test_settings_loads_classification_llm_options(monkeypatch, tmp_path):
     assert settings.llm_classification_allow_free_paths is True
 
 
+def test_settings_default_uploads_to_classified_initial_placement(monkeypatch, tmp_path):
+    """新部署默认对上传文件分类并按分类完成首次归档。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent",
+    )
+    for name in (
+        "AUTO_PRIMARY_CLASSIFICATION_ENABLED",
+        "AUTO_INITIAL_PLACEMENT_ENABLED",
+        "AUTO_CLASSIFICATION_SHADOW_MODE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.auto_primary_classification_enabled is True
+    assert settings.auto_initial_placement_enabled is True
+    assert settings.auto_classification_shadow_mode is False
+
+
 def test_settings_defaults_background_summaries_to_local_extractive_provider(monkeypatch, tmp_path):
     """后台上传和分类摘要默认不得因全局 LLM 开启而自动发送文件正文。"""
 

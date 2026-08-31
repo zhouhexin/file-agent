@@ -103,6 +103,12 @@ Dockerfile 把 Docling、PaddleOCR、PP-StructureV3、PaddleOCR-VL、Embedding �
 组件可被 BuildKit 缓存复用。Docling 的 Git/LFS 下载目录使用 BuildKit cache mount，网络中断后保留
 已到达的 LFS 对象并有限重试。
 
+PP-StructureV3 与 PaddleOCR-VL 共用 `/var/cache/file-agent-paddlex-models` BuildKit cache mount。
+PaddleX 下载成功的模型先保留在该持久缓存中，通过完整性校验后再复制进最终镜像层；后续阶段失败时，
+重建可直接复用已下载模型。PaddleX 3.7.2 的图表模型实际目录为 `PP-Chart2Table_safetensors`，
+PaddleOCR-VL 实际目录为 `PaddleOCR-VL-1.6`；镜像同时提供兼容目录
+`PaddleOCR-VL-1.6-0.9B`，避免运行时配置名与真实缓存目录不一致。
+
 可选本地缓存只能通过命名 BuildKit context 输入。`prepare-local-model-cache.ps1` 仅复制生产模型白名单
 内的 PaddleX 目录、指定 sentence-transformers Hugging Face 缓存或显式 Document Embedding 目录；
 其他本机文件不会进入构建上下文。

@@ -146,6 +146,30 @@ def is_structured_image_extraction_request(message: str) -> bool:
     return has_image_source and has_extraction_action and has_structured_output
 
 
+def _has_image_field_value_request(message: str) -> bool:
+    """识别用户直接列出多个图片字段并要求返回字段值的自然表达。
+
+    用户不需要为了取得字段值额外说“字段”“表格”或“JSON”。显式要求结构化展示的
+    请求仍由 ``is_structured_image_extraction_request`` 和专用 Tool 处理；这里只保护
+    “识别图片中的申请人、金额和用途”这类应进入证据回答而不是普通 OCR 回执的请求。
+    """
+
+    normalized = re.sub(r"\s+", "", str(message or ""))
+    if not normalized:
+        return False
+    has_image_source = any(
+        marker in normalized
+        for marker in ("图片", "图中", "图里", "图像", "截图", "扫描件", "照片", "影像")
+    )
+    has_extraction_action = any(
+        marker in normalized for marker in ("识别", "提取", "抽取", "读取")
+    )
+    if not (has_image_source and has_extraction_action):
+        return False
+    schema_mode, fields = _structured_field_schema(normalized)
+    return schema_mode == "AUTO_DISCOVER" or len(fields) >= 2
+
+
 def has_explicit_attachment_classification_request(message: str) -> bool:
     """判断用户是否明确要求执行附件分类，而不是查看分类体系或历史结果。"""
 
@@ -706,6 +730,7 @@ class DeterministicPlanner:
 
         has_attached_content_task = bool(attachments) and any(
             [
+                _has_image_field_value_request(message),
                 _should_extract_text(message=message, lowered=lowered),
                 _has_classification_intent(message=message, lowered=lowered),
                 _has_answer_intent(message=message, lowered=lowered),
@@ -748,7 +773,8 @@ class DeterministicPlanner:
             return _general_chat_plan(intent="GENERAL_CHAT", user_goal=message)
 
         needs_file_scope = (
-            _should_extract_text(message=message, lowered=lowered)
+            _has_image_field_value_request(message)
+            or _should_extract_text(message=message, lowered=lowered)
             or _has_classification_intent(message=message, lowered=lowered)
             or _has_answer_intent(message=message, lowered=lowered)
             or _has_summary_intent(message=message, lowered=lowered)
@@ -766,6 +792,24 @@ class DeterministicPlanner:
             return _general_chat_plan(intent="GENERAL_CHAT", user_goal=message)
 
         document_ids = _document_ids(attachments)
+
+        # 无附件但用户已经用“从某某表中统计……”明确给出表格主题时，先在共享工作区
+        # 发现真实文件，再把严格命中的 document_id 交给表格分析。这里不能直接要求上传，
+        # 也不能让 analyze-spreadsheet 接收模型猜测的文件 ID。
+        if (
+            needs_file_scope
+            and not document_ids
+            and _has_spreadsheet_analysis_intent(
+                message=message,
+                lowered=lowered,
+                attachments=attachments,
+            )
+        ):
+            return _workspace_spreadsheet_discovery_plan(
+                user_goal=message,
+                question=message,
+                search_query=_spreadsheet_reference_query(message),
+            )
 
         # 没有明确附件但问题指向共享工作区文件正文时，生成工作区证据回答或完整总结计划。
         if (
@@ -864,6 +908,26 @@ class DeterministicPlanner:
                 document_ids=document_ids,
                 question=message,
                 selected_skills=["chat-intake", "spreadsheet-analysis"],
+            )
+
+        # 用户列出图片中的多个目标字段时，最终结果必须返回字段值。明确要求“重新”
+        # 识别时先跳过缓存重建 OCR 页面，再基于新页面生成带证据的回答。
+        if _has_image_field_value_request(message):
+            if _should_force_reprocess(message=message, lowered=lowered):
+                return _extract_then_evidence_answer_plan(
+                    user_goal=message,
+                    question=message,
+                    document_ids=document_ids,
+                    answer_mode="FOCUSED",
+                    force_reprocess=True,
+                    show_evidence=False,
+                )
+            return _evidence_answer_plan(
+                user_goal=message,
+                question=message,
+                document_ids=document_ids,
+                answer_mode="FOCUSED",
+                show_evidence=False,
             )
 
         # 识别对已确定附件的总结请求；实际读取摘要还是正文由证据策略按用户深度要求决定。
@@ -1516,6 +1580,32 @@ def build_plan_from_user_intent(
             llm_intent_plan=intent_plan.model_dump(),
         )
 
+    # LLM 可能同时正确要求 OCR 和 evidence-answer；后端必须保留“返回字段值”目标，
+    # 不能因为文本抽取步骤先命中而只返回页数和字符数。
+    if document_ids and _has_image_field_value_request(message):
+        if _should_force_reprocess(message=message, lowered=lowered):
+            return _extract_then_evidence_answer_plan(
+                user_goal=intent_plan.user_goal or message,
+                question=message,
+                document_ids=document_ids,
+                answer_mode="FOCUSED",
+                force_reprocess=True,
+                show_evidence=False,
+                response_style=intent_plan.response_style,
+                clarification_question=intent_plan.clarification_question,
+                llm_intent_plan=intent_plan.model_dump(),
+            )
+        return _evidence_answer_plan(
+            user_goal=intent_plan.user_goal or message,
+            question=message,
+            document_ids=document_ids,
+            answer_mode="FOCUSED",
+            show_evidence=False,
+            response_style=intent_plan.response_style,
+            clarification_question=intent_plan.clarification_question,
+            llm_intent_plan=intent_plan.model_dump(),
+        )
+
     # 关键修复：LLM Planner 中用户明确要求“分类/归类/整理”时，必须生成
     # extract-document-text 步骤，不能降级成 intent-summary。
     # “查看/列出/汇总 分类结果”仍由后面的 SUMMARIZE_CLASSIFICATIONS 分支处理。
@@ -1887,6 +1977,35 @@ def _workspace_evidence_discovery_plan(
     )
 
 
+def _workspace_spreadsheet_discovery_plan(
+    *,
+    user_goal: str,
+    question: str,
+    search_query: str,
+    response_style: str = "concise",
+) -> PlannerOutput:
+    """先检索用户点名的表格，再对后端严格命中的文件执行确定性分析。"""
+
+    search_plan = _file_search_plan(
+        user_goal=user_goal,
+        query=search_query,
+        document_ids=[],
+        response_style=response_style,
+        semantic_plan=_spreadsheet_reference_semantic_plan(search_query),
+    )
+    return search_plan.model_copy(
+        update={
+            "intent": "SPREADSHEET_DISCOVERY",
+            "slots": {
+                **search_plan.slots,
+                "question": question,
+                "requested_outputs": ["spreadsheet_analysis", "receipt"],
+                "workspace_spreadsheet_discovery": True,
+            },
+        }
+    )
+
+
 def build_workspace_evidence_followup_plan(
     *,
     user_goal: str,
@@ -1908,12 +2027,31 @@ def build_workspace_evidence_followup_plan(
     )
 
 
+def build_workspace_spreadsheet_followup_plan(
+    *,
+    user_goal: str,
+    question: str,
+    document_ids: List[str],
+) -> PlannerOutput:
+    """把工作区检索严格命中的表格交给确定性表格分析 Tool。"""
+
+    if not document_ids:
+        raise ValueError("workspace spreadsheet follow-up requires document_ids")
+    return _spreadsheet_analysis_plan(
+        user_goal=user_goal,
+        document_ids=list(dict.fromkeys(document_ids))[:50],
+        question=question,
+        selected_skills=["chat-intake", "spreadsheet-analysis"],
+    )
+
+
 def _evidence_answer_plan(
     *,
     user_goal: str,
     question: str,
     document_ids: List[str],
     answer_mode: str,
+    show_evidence: bool = True,
     response_style: str = "concise",
     clarification_question: str | None = None,
     llm_intent_plan: Dict[str, Any] | None = None,
@@ -1928,6 +2066,9 @@ def _evidence_answer_plan(
             "question": question,
             "answer_mode": answer_mode,
             "requested_outputs": ["answer", "references", "receipt"],
+            # OCR 字段识别仍在内部保存引用用于校验，只控制普通用户界面是否重复
+            # 展示原文片段；普通问答和总结继续沿用默认展示策略。
+            **({"show_evidence": False} if not show_evidence else {}),
             "response_style": response_style,
             "clarification_question": clarification_question,
             "llm_intent_plan": llm_intent_plan or {},
@@ -1948,6 +2089,67 @@ def _evidence_answer_plan(
                 "expected_outputs": ["qa_answer", "answer_references"],
                 "writes": ["qa_answers", "answer_references"],
             }
+        ],
+        evidence_policy={"require_page_or_cell": True, "allow_no_evidence_answer": False},
+        confirmation_policy={"operation_plan_required": False},
+    )
+
+
+def _extract_then_evidence_answer_plan(
+    *,
+    user_goal: str,
+    question: str,
+    document_ids: List[str],
+    answer_mode: str,
+    force_reprocess: bool,
+    show_evidence: bool = True,
+    response_style: str = "concise",
+    clarification_question: str | None = None,
+    llm_intent_plan: Dict[str, Any] | None = None,
+) -> PlannerOutput:
+    """先重建附件正文，再用同一批已持久化页面回答用户明确要求的字段。"""
+
+    extraction_steps = [
+        _extract_document_text_step(
+            document_id=document_id,
+            index=index,
+            force_reprocess=force_reprocess,
+            force_reconvert=False,
+        )
+        for index, document_id in enumerate(document_ids, start=1)
+    ]
+    return PlannerOutput(
+        intent="EVIDENCE_ANSWER",
+        user_goal=user_goal,
+        slots={
+            "document_ids": document_ids,
+            "question": question,
+            "answer_mode": answer_mode,
+            "requested_outputs": ["answer", "references", "receipt"],
+            # 重新 OCR 后的字段值依然必须由证据回答生成；这里只控制展示层，不能
+            # 删除持久化引用或放宽 EvidenceAnswerService 的证据要求。
+            **({"show_evidence": False} if not show_evidence else {}),
+            "response_style": response_style,
+            "clarification_question": clarification_question,
+            "llm_intent_plan": llm_intent_plan or {},
+        },
+        selected_skills=["document-text-extract", "evidence-answer"],
+        steps=[
+            *extraction_steps,
+            PlannerStep(
+                step_id="step-evidence-answer",
+                skill="evidence-answer",
+                tool_name="evidence-answer",
+                input={
+                    "question": question,
+                    "document_ids": document_ids,
+                    "answer_mode": answer_mode,
+                },
+                requires_confirmation=False,
+                risk_level="low",
+                expected_outputs=["qa_answer", "answer_references"],
+                writes=["qa_answers", "answer_references"],
+            ),
         ],
         evidence_policy={"require_page_or_cell": True, "allow_no_evidence_answer": False},
         confirmation_policy={"operation_plan_required": False},
@@ -2480,7 +2682,9 @@ def _has_rename_review_resolution_intent(message: str) -> bool:
         return True
     return bool(
         re.search(
-            r"(?:文件\s*)?.+?\s*(?:更正为|改为|重命名为)\s*.+",
+            # “重新命名为”不能降级为 LLM 的命名建议任务；源、目标都已明确时，
+            # 必须进入工作副本受控改名链路，避免按改名后的名称反查受管原件。
+            r"(?:文件\s*)?.+?\s*(?:更正为|改为|重新命名为|重命名为)\s*.+",
             message,
             flags=re.DOTALL,
         )
@@ -2928,6 +3132,7 @@ def _should_extract_text(*, message: str, lowered: str) -> bool:
 def _should_force_reprocess(*, message: str, lowered: str) -> bool:
     """判断用户是否明确要求跳过缓存重新处理。"""
     chinese_keywords = [
+        "重新识别",
         "重新解析",
         "重新读取",
         "重新处理",
@@ -3901,6 +4106,53 @@ def _has_spreadsheet_analysis_intent(
     ]
     return any(keyword in message for keyword in chinese_operations) or any(
         keyword in lowered for keyword in english_operations
+    )
+
+
+def _spreadsheet_reference_query(message: str) -> str:
+    """从“从某某表中统计……”中提取稳定的表格检索主题。"""
+
+    normalized = re.sub(r"\s+", "", str(message or "")).strip()
+    patterns = [
+        r"^(?:请)?从[《“\"]?(?P<name>.+?(?:表|清单|台账))[》”\"]?(?:中|里|内)(?:统计|汇总|计算|筛选|分析|查看)",
+        r"^(?:请)?(?:统计|汇总|计算|筛选|分析)[《“\"]?(?P<name>.+?(?:表|清单|台账))[》”\"]?(?:中|里|内|的)",
+    ]
+    for pattern in patterns:
+        matched = re.search(pattern, normalized)
+        if matched:
+            name = str(matched.group("name") or "").strip("《》“”\"'")
+            if len(name) >= 2:
+                return name
+    return str(message or "").strip()
+
+
+def _spreadsheet_reference_semantic_plan(
+    search_query: str,
+) -> FileSearchSemanticPlan | None:
+    """为“某领域整改自查表”保留可跨连接词匹配的全部必要主题。"""
+
+    normalized = re.sub(r"\s+", "", str(search_query or ""))
+    matched = re.fullmatch(r"(?P<domain>.+?)整改.*自查表", normalized)
+    if not matched:
+        return None
+    domain = str(matched.group("domain") or "").strip()
+    if not 2 <= len(domain) <= 12:
+        return None
+    return FileSearchSemanticPlan.model_validate(
+        {
+            "core_topics": [
+                {"phrase": domain, "required": True},
+                {"phrase": "整改", "required": True},
+                {"phrase": "自查表", "required": True},
+            ],
+            "scope": {
+                "type": "CURRENT_SCHOOL_WORKSPACE",
+                "organization_level": "ANY",
+                "organization_terms": [],
+            },
+            "group_by": ["organization_level", "year"],
+            "response_style": "FLAT_FILE_LIST",
+        }
     )
 
 

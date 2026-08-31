@@ -125,6 +125,11 @@ MATERIALIZE_WORKING_COPY_PRIORITY=20
 准备脚本只复制部署清单允许的模型目录，不会把整个用户缓存或其他本机文件送进 Docker。没有本地缓存时
 无需执行准备脚本，导出脚本使用 `deploy/empty-model-cache`。
 
+PP-StructureV3 和 PaddleOCR-VL 的下载目录使用持久 BuildKit 缓存；如果构建在后续模型或镜像导出阶段
+失败，再次执行同一导出命令会复用已经下载的 PaddleX 模型。PaddleX 3.7.2 生成的
+`PP-Chart2Table_safetensors` 与 `PaddleOCR-VL-1.6` 实际目录会在镜像内转换为运行时兼容布局，
+不需要手工改名或重复下载。
+
 脚本会构建包含全部模型的 API/worker 镜像，拉取 PostgreSQL/pgvector 和 Neo4j，生成一个 Docker
 归档、SHA-256 文件和清单。将整个输出目录复制到目标服务器，然后执行：
 

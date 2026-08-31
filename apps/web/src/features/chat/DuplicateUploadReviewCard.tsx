@@ -32,6 +32,23 @@ export function DuplicateUploadReviewCard({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [comparisonCandidate, setComparisonCandidate] = useState<DuplicateCandidate | null>(null);
+  const [latestReview, setLatestReview] = useState(review);
+
+  useEffect(() => {
+    // 卡片可能收到查重刚完成时的短暂状态；重新读取一次，避免可复用 ID 已就绪但按钮仍不可用。
+    let cancelled = false;
+    setLatestReview(review);
+    getDuplicateReview(token, review.upload_document_version_id)
+      .then((result) => {
+        if (!cancelled) setLatestReview(result);
+      })
+      .catch(() => {
+        // 刷新失败时保留已取得的确认卡，用户仍可继续上传或取消，不把只读刷新变成阻断错误。
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [review.id, review.upload_document_version_id, token]);
 
   async function decide(
     decision: 'CONTINUE_UPLOAD' | 'USE_EXISTING_FILE' | 'CANCEL_UPLOAD',
@@ -40,8 +57,8 @@ export function DuplicateUploadReviewCard({
     setSubmitting(true);
     setError('');
     try {
-      const result = await decideDuplicateReview(token, review.upload_document_version_id, {
-        duplicate_review_id: review.id,
+      const result = await decideDuplicateReview(token, latestReview.upload_document_version_id, {
+        duplicate_review_id: latestReview.id,
         decision,
         selected_existing_working_copy_id: selectedExistingWorkingCopyId ?? null,
       });
@@ -55,17 +72,17 @@ export function DuplicateUploadReviewCard({
   }
 
   return (
-    <section className="duplicate-review-card" aria-label={`${review.filename} 重复上传确认`}>
+    <section className="duplicate-review-card" aria-label={`${latestReview.filename} 重复上传确认`}>
       <header>
         <AlertTriangle size={18} />
         <div>
           <strong>检测到相同或相似文件</strong>
-          <span>{review.filename}</span>
+          <span>{latestReview.filename}</span>
         </div>
       </header>
 
       <div className="duplicate-review-candidates">
-        {review.candidates.map((candidate) => (
+        {latestReview.candidates.map((candidate) => (
           <article key={candidate.id}>
             <FileCheck2 size={16} />
             <div>
@@ -89,15 +106,29 @@ export function DuplicateUploadReviewCard({
                   <Eye size={15} />对比查看
                 </button>
               ) : null}
-              {candidate.existing_working_copy_id && review.allowed_decisions.includes('USE_EXISTING_FILE') ? (
-                <button
-                  disabled={submitting}
-                  onClick={() => void decide('USE_EXISTING_FILE', candidate.existing_working_copy_id ?? undefined)}
-                  type="button"
-                >
-                  使用现有文件
-                </button>
-              ) : null}
+              <button
+                disabled={
+                  submitting
+                  || !candidate.existing_working_copy_id
+                  || !latestReview.allowed_decisions.includes('USE_EXISTING_FILE')
+                }
+                onClick={() => void decide('USE_EXISTING_FILE', candidate.existing_working_copy_id ?? undefined)}
+                title={
+                  candidate.existing_working_copy_id
+                  && latestReview.allowed_decisions.includes('USE_EXISTING_FILE')
+                    ? '直接使用共享工作目录中的现有文件'
+                    : '现有文件尚未准备为可直接使用的工作副本'
+                }
+                type="button"
+              >
+                使用现有文件
+              </button>
+              {candidate.existing_working_copy_id
+              && latestReview.allowed_decisions.includes('USE_EXISTING_FILE') ? null : (
+                <small className="duplicate-review-action-hint">
+                  现有文件尚未准备完成，暂时不能选择
+                </small>
+              )}
             </div>
           </article>
         ))}
@@ -118,7 +149,7 @@ export function DuplicateUploadReviewCard({
           decisionError={error}
           onClose={() => setComparisonCandidate(null)}
           onDecision={(decision, workingCopyId) => void decide(decision, workingCopyId)}
-          review={review}
+          review={latestReview}
           submitting={submitting}
           token={token}
         />

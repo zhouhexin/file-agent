@@ -97,6 +97,7 @@ def test_classification_only_receipt_hides_background_rename_fields() -> None:
 
     assert "rename_suggestion" not in receipt.document_results[0]
     assert "pending_decision" not in receipt.document_results[0]
+    assert receipt.document_results[0]["categories"][0]["name"] == "学校/审计"
     assert receipt.pending_decisions == []
     assert receipt.task_status == "completed"
 
@@ -163,8 +164,8 @@ def test_historical_lifecycle_rename_result_is_not_presented_as_file_read() -> N
     assert receipt.task_status == "needs_attention"
 
 
-def test_lifecycle_classification_and_archive_have_explicit_business_titles() -> None:
-    """后台分类和上传归档必须展示各自业务类型，不得共用读取标题。"""
+def test_background_classification_is_hidden_while_archive_keeps_business_title() -> None:
+    """上传后台分类不展示，上传归档回执仍保留明确业务标题。"""
 
     classification_receipt = build_user_task_receipt(
         _make_result(
@@ -202,13 +203,12 @@ def test_lifecycle_classification_and_archive_have_explicit_business_titles() ->
         )
     )
 
-    assert classification_receipt.presentation is not None
-    assert classification_receipt.presentation.task_kind == "CLASSIFY"
-    assert classification_receipt.presentation.title == "文件分类结果"
+    assert classification_receipt.presentation is None
+    assert "categories" not in classification_receipt.document_results[0]
+    assert classification_receipt.display_mode == "default"
     assert archive_receipt.presentation is not None
     assert archive_receipt.presentation.task_kind == "INGEST"
     assert archive_receipt.presentation.title == "文件归档结果"
-    assert "读取结果" not in str(classification_receipt.presentation.model_dump())
     assert "读取结果" not in str(archive_receipt.presentation.model_dump())
 
 
@@ -457,6 +457,16 @@ def test_evidence_answer_uses_reference_count_without_copying_quotes_to_shell() 
     assert receipt.presentation is not None
     assert receipt.presentation.task_kind == "ANSWER"
     assert receipt.presentation.outcome.total_count == 1
+    # 普通文件问答仍必须展示可定位原文；只有 Planner 明确标记的 OCR 识别回执隐藏它。
+    assert receipt.evidence_answer_result is not None
+    assert receipt.evidence_answer_result["files"][0]["evidence_items"] == [
+        {
+            "quote": "本制度自发布之日起施行。",
+            "page_number": 2,
+            "sheet_name": None,
+            "cell_range": None,
+        }
+    ]
     assert "本制度自发布之日起施行" not in str(receipt.presentation.model_dump())
     assert "原文件未改变" in receipt.presentation.change_impact.message
 
@@ -527,6 +537,40 @@ def test_spreadsheet_text_result_also_gets_common_shell() -> None:
     assert receipt.presentation.task_kind == "SPREADSHEET"
     assert receipt.presentation.outcome.completed_count == 1
     assert receipt.presentation.change_impact.originals_changed is False
+
+
+def test_spreadsheet_single_metric_is_the_outcome_headline() -> None:
+    """表格单值统计必须在公共回执首屏直接回答，不能只写“分析完成”。"""
+
+    invocation = ToolInvocationRecord(
+        tool_name="analyze-spreadsheet",
+        input_json={"document_id": "document-1"},
+        output_json={
+            "kind": "spreadsheet_analysis",
+            "ok": True,
+            "status": "COMPLETED",
+            "document_id": "document-1",
+            "metric": {
+                "operation": "sum",
+                "column_name": "招聘计划",
+                "label": "岗位总数",
+            },
+            "group_by": None,
+            "results": [{"group": "全部", "value": "12"}],
+        },
+        status="COMPLETED",
+    )
+
+    receipt = build_user_task_receipt(
+        _make_result(
+            intent="ANALYZE_SPREADSHEET",
+            tool_invocations=[invocation],
+            final_response="岗位总数为 12 个。",
+        )
+    )
+
+    assert receipt.presentation is not None
+    assert receipt.presentation.outcome.headline == "岗位总数为 12 个"
 
 
 def test_processing_read_task_uses_business_phase_without_internal_tool_name() -> None:

@@ -19,6 +19,7 @@ from app.modules.llm.schemas import UserIntentPlan
 from app.modules.agent.graph import (
     _build_classification_summary_response,
     _build_document_results_response,
+    _document_results_for_response,
     response,
 )
 from app.modules.agent.repository import _safe_graph_state_snapshot
@@ -36,6 +37,7 @@ from app.modules.agent.service import (
 from app.modules.agent.state import ToolInvocationRecord
 from app.modules.agent.tool_registry import ToolRegistry, UnknownToolError
 from app.modules.agent.tool_schemas import ToolInputValidationError
+from app.modules.agent.user_receipt import build_user_task_receipt
 from app.modules.llm.client import LLMResponseError
 
 
@@ -1577,8 +1579,11 @@ def test_document_results_include_read_profile_and_quality():
     assert result.document_results[0]["read_quality"] == "GOOD"
     assert result.document_results[0]["read_profile"]["file_type"] == "text"
     assert result.document_results[0]["read_profile"]["requires_ocr"] is False
-    assert result.document_results[0]["categories"] == []
+    assert result.document_results[0]["categories"]
     assert "分类建议" not in (result.final_response or "")
+    receipt = build_user_task_receipt(result)
+    assert "categories" not in receipt.document_results[0]
+    assert "classification_reused" not in receipt.document_results[0]
 
 
 def test_document_results_preserve_docx_conversion_audit_fields():
@@ -1587,11 +1592,16 @@ def test_document_results_preserve_docx_conversion_audit_fields():
     class FakeClassificationService:
         """不执行分类的测试替身。"""
 
+        def __init__(self):
+            self.calls = []
+
         def classify(self, **kwargs):
             """返回空分类。"""
 
+            self.calls.append(kwargs)
             return {"categories": []}
 
+    classification_service = FakeClassificationService()
     results = build_document_results_from_extraction_results(
         extraction_results=[
             {
@@ -1608,10 +1618,14 @@ def test_document_results_preserve_docx_conversion_audit_fields():
             }
         ],
         context_documents=[{"document_id": "legacy-doc-id", "filename": "legacy.doc"}],
-        classification_service=FakeClassificationService(),
+        classification_service=classification_service,
         include_categories=False,
     )
 
+    # 不展示分类仅影响回执投影，不能跳过后台分类。
+    assert len(classification_service.calls) == 1
+    assert classification_service.calls[0]["document_id"] == "legacy-doc-id"
+    assert results[0]["categories"] == []
     assert results[0]["conversion_artifact_id"] == "artifact-id"
     assert results[0]["conversion_reused"] is True
     assert results[0]["conversion_converter"] == "libreoffice"
@@ -2468,6 +2482,238 @@ def test_llm_intent_extracts_document_text():
     assert [item.tool_name for item in result.tool_invocations] == ["extract-document-text"]
 
 
+def test_llm_image_field_request_reprocesses_then_returns_requested_values():
+    """图片字段请求必须在重新 OCR 后继续回答，不能停在解析字符数回执。"""
+
+    class ImageFieldIntentService:
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            return UserIntentPlan(
+                intent="EXTRACT_AND_RECOGNIZE_IMAGE_CONTENT",
+                user_goal=message,
+                needs_file_context=True,
+                target_scope="current_message",
+                referenced_document_ids=[attachments[0]["document_id"]],
+                required_capabilities=["document_read", "evidence_answer"],
+                tool_plan_hint=["extract-document-text", "evidence-answer"],
+            )
+
+    class ImageFieldRegistry:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, tool_name, input_json):
+            self.calls.append((tool_name, input_json))
+            if tool_name == "extract-document-text":
+                output = {
+                    "ok": True,
+                    "document_id": input_json["document_id"],
+                    "extraction_run_id": "ocr-run-1",
+                    "status": "COMPLETED",
+                    "extractor": "tencent_cloud_general_accurate",
+                    "pages": [{"page_number": 1, "text_preview": "申请人：张三", "char_count": 30}],
+                    "error": None,
+                }
+            else:
+                output = {
+                    "kind": "evidence_answer",
+                    "ok": True,
+                    "status": "COMPLETED",
+                    "answer": "申请人：张三；资助金额：5000元；使用情况登记：已填写。",
+                    "references": [
+                        {
+                            "document_id": "image-document-1",
+                            "filename": "20260824-182402.jpg",
+                            "reference_indexes": [1],
+                            "evidence_items": [
+                                {"page_number": 1, "quote": "申请人：张三"}
+                            ],
+                        }
+                    ],
+                }
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json=output,
+                status="COMPLETED",
+            )
+
+    registry = ImageFieldRegistry()
+    result = AgentRuntimeService(
+        registry_factory=lambda db, user_id: registry,
+        llm_intent_service=ImageFieldIntentService(),
+    ).run_message(
+        conversation_id="conv-image-fields",
+        user_id="user-image-fields",
+        message_id="msg-image-fields",
+        message="重新识别图片中的申请人、资助金额和使用情况登记",
+        attachments=[
+            {
+                "document_id": "image-document-1",
+                "filename": "20260824-182402.jpg",
+                "content_type": "image/jpeg",
+            }
+        ],
+    )
+
+    assert [name for name, _input in registry.calls] == [
+        "extract-document-text",
+        "evidence-answer",
+    ]
+    assert registry.calls[0][1]["force_reprocess"] is True
+    assert result.intent == "EVIDENCE_ANSWER"
+    assert result.final_response == "申请人：张三；资助金额：5000元；使用情况登记：已填写。"
+    # 内部引用继续保留用于事实校验和审计，但普通 OCR 字段识别回执不重复展示原文。
+    assert result.tool_invocations[1].output_json["references"][0]["evidence_items"]
+    receipt = build_user_task_receipt(result)
+    assert receipt.evidence_answer_result is not None
+    assert receipt.evidence_answer_result["files"][0]["evidence_items"] == []
+    assert receipt.evidence_answer_result["files"][0]["reference_indexes"] == []
+    # 标记上线前保存的同类两步计划也要兼容，否则刷新历史消息后仍会看到原文依据。
+    legacy_result = result.model_copy(deep=True)
+    legacy_result.tool_plan["slots"].pop("show_evidence")
+    legacy_receipt = build_user_task_receipt(legacy_result)
+    assert legacy_receipt.evidence_answer_result is not None
+    assert legacy_receipt.evidence_answer_result["files"][0]["evidence_items"] == []
+
+
+def test_plain_ocr_request_returns_recognized_text_without_evidence_answer():
+    """纯 OCR 只展示识别正文，不得为了展示原文而伪造证据回答。"""
+
+    class PlainOcrIntentService:
+        """固定返回图片正文识别意图。"""
+
+        enabled = True
+
+        def understand_user_request(self, *, message, attachments, context_documents):
+            """让 Planner 只执行 OCR 正文抽取。"""
+
+            return UserIntentPlan(
+                intent="EXTRACT_AND_RECOGNIZE_IMAGE_CONTENT",
+                user_goal=message,
+                needs_file_context=True,
+                target_scope="current_message",
+                referenced_document_ids=[attachments[0]["document_id"]],
+                required_capabilities=["extract_document_text"],
+                tool_plan_hint=["extract-document-text"],
+            )
+
+    class PlainOcrRegistry:
+        """返回确定性的 OCR 文本预览，模拟无数据库测试环境。"""
+
+        def invoke(self, tool_name, input_json):
+            """记录实际 OCR Provider，并返回识别正文。"""
+
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json={
+                    "ok": True,
+                    "document_id": input_json["document_id"],
+                    "extraction_run_id": "plain-ocr-run",
+                    "status": "COMPLETED",
+                    "extractor": "tencent_cloud_general_accurate",
+                    "read_profile": {"ocr_used": True},
+                    "pages": [
+                        {
+                            "page_number": 1,
+                            "text_preview": "申请人：张三\n资助金额：5000元",
+                            "char_count": 22,
+                        }
+                    ],
+                    "error": None,
+                },
+                status="COMPLETED",
+            )
+
+    result = AgentRuntimeService(
+        registry_factory=lambda db, user_id: PlainOcrRegistry(),
+        llm_intent_service=PlainOcrIntentService(),
+    ).run_message(
+        conversation_id="conv-plain-ocr",
+        user_id="user-plain-ocr",
+        message_id="msg-plain-ocr",
+        message="请重新读取这张图片",
+        attachments=[
+            {
+                "document_id": "plain-ocr-image",
+                "filename": "申请表.jpg",
+                "content_type": "image/jpeg",
+            }
+        ],
+    )
+
+    assert result.tool_plan["slots"]["requested_outputs"] == ["text", "receipt"]
+    assert [item.tool_name for item in result.tool_invocations] == ["extract-document-text"]
+    assert result.tool_invocations[0].input_json["force_reprocess"] is True
+    assert result.final_response == "OCR 识别结果：\n\n申请人：张三\n资助金额：5000元"
+    assert "原文依据" not in result.final_response
+    assert not any(
+        item.tool_name == "evidence-answer" for item in result.tool_invocations
+    )
+    receipt = build_user_task_receipt(result)
+    assert receipt.response_type == "file_results"
+    assert receipt.evidence_answer_result is None
+    assert receipt.references == []
+
+
+def test_plain_ocr_response_reads_complete_persisted_text_instead_of_preview():
+    """纯 OCR 展示必须读取完整持久化正文，不能停在 Tool 的 300 字预览。"""
+
+    full_text = "申请人：张三\n" + "完整识别内容" * 80
+
+    class FullTextContextLoader:
+        """模拟按 extraction_run_id 读取完整 document_pages。"""
+
+        def load_extraction_texts(self, *, extraction_run_ids):
+            """只返回本轮 OCR 运行的完整正文。"""
+
+            assert extraction_run_ids == ["persisted-ocr-run"]
+            return {"persisted-ocr-run": full_text}
+
+    state = {
+        "intent": "EXTRACT_DOCUMENT_TEXT",
+        "slots": {"requested_outputs": ["text", "receipt"]},
+        "result_summary": {
+            "evidence_answer": {},
+            "document_results": [
+                {
+                    "document_id": "ocr-document",
+                    "filename": "申请表.jpg",
+                    "extraction_status": "COMPLETED",
+                }
+            ],
+            "extraction_results": [
+                {
+                    "document_id": "ocr-document",
+                    "extraction_run_id": "persisted-ocr-run",
+                    "status": "COMPLETED",
+                    "extractor": "tencent_cloud_general_accurate",
+                    "read_profile": {"ocr_used": True},
+                    "pages": [
+                        {
+                            "page_number": 1,
+                            "text_preview": full_text[:300],
+                            "char_count": len(full_text),
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(context_loader=FullTextContextLoader())
+    )
+
+    result = response(state, runtime)
+
+    assert result["status"] == "COMPLETED"
+    assert result["final_response"] == f"OCR 识别结果：\n\n{full_text}"
+    assert len(result["final_response"]) > 300
+    assert "原文依据" not in result["final_response"]
+
+
 def test_llm_intent_extracts_text_for_all_referenced_documents():
     """LLM 解析出多个附件时，Planner 必须为每个文件生成独立解析步骤。"""
 
@@ -2628,6 +2874,35 @@ def test_document_results_response_lists_multiple_categories_with_confidence():
         "  置信度：0.78\n"
         "  依据：干部工作"
     ) in response
+
+
+def test_background_classification_is_hidden_from_non_classification_response():
+    """当前任务未要求分类时，后台分类结果只保留在内部。"""
+
+    document_results = [
+        {
+            "document_id": "document-1",
+            "filename": "制度.docx",
+            "classification_reused": True,
+            "categories": [{"name": "学校/审计", "confidence": 0.9}],
+        }
+    ]
+
+    hidden = _document_results_for_response(
+        {"intent": "READ_DOCUMENT", "slots": {"requested_outputs": ["text"]}},
+        document_results,
+    )
+    visible = _document_results_for_response(
+        {
+            "intent": "CLASSIFY_FILES",
+            "slots": {"requested_outputs": ["classification", "receipt"]},
+        },
+        document_results,
+    )
+
+    assert "categories" not in hidden[0]
+    assert "classification_reused" not in hidden[0]
+    assert visible[0]["categories"][0]["name"] == "学校/审计"
 
 
 def test_document_results_response_hides_extra_low_confidence_categories():
@@ -3169,6 +3444,130 @@ def test_unscoped_business_question_starts_with_workspace_search():
     assert [step.tool_name for step in plan.steps] == ["hybrid-search"]
     assert plan.steps[0].input == {"query": message, "document_ids": []}
     assert plan.slots["question"] == message
+
+
+def test_unscoped_spreadsheet_statistic_starts_with_subject_search():
+    """点名表格主题的统计请求必须先检索，不能因无附件直接要求上传。"""
+
+    message = "从审计整改自查表中统计已整改、未整改和持续整改事项"
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-audit-remediation",
+        user_id="user-1",
+        message_id="msg-audit-remediation",
+        message=message,
+        attachments=[],
+    )
+
+    assert plan.intent == "SPREADSHEET_DISCOVERY"
+    assert [step.tool_name for step in plan.steps] == ["hybrid-search"]
+    assert plan.steps[0].input["query"] == "审计整改自查表"
+    assert plan.steps[0].input["document_ids"] == []
+    assert [
+        item["phrase"]
+        for item in plan.steps[0].input["semantic_plan"]["core_topics"]
+    ] == ["审计", "整改", "自查表"]
+    assert all(
+        item["required"] is True
+        for item in plan.steps[0].input["semantic_plan"]["core_topics"]
+    )
+    assert plan.slots["question"] == message
+
+
+def test_workspace_spreadsheet_statistic_analyzes_verified_search_hit():
+    """检索严格命中的真实文件 ID 必须进入表格分析，而不是 evidence-answer。"""
+
+    class DisabledLLMIntentService:
+        enabled = False
+
+    class SearchThenAnalyzeRegistry:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, tool_name, input_json):
+            self.calls.append((tool_name, input_json))
+            if tool_name == "hybrid-search":
+                output = {
+                    "kind": "workspace_file_search",
+                    "ok": True,
+                    "status": "COMPLETED",
+                    "query": input_json["query"],
+                    "total_returned": 2,
+                    "results": [
+                        {
+                            "document_id": "doc-audit-remediation",
+                            "filename": "审计整改自查表.xlsx",
+                            "relevance_tier": "SUPPORTED",
+                        },
+                        {
+                            "document_id": "doc-audit-notice",
+                            "filename": "关于开展审计整改检查的通知.doc",
+                            "relevance_tier": "SUPPORTED",
+                        },
+                    ],
+                    "document_ids": [
+                        "doc-audit-remediation",
+                        "doc-audit-notice",
+                    ],
+                    "effective_conditions": [],
+                    "index_status": "READY",
+                    "result_status": "MATCHED",
+                }
+            else:
+                assert tool_name == "analyze-spreadsheet"
+                output = {
+                    "kind": "spreadsheet_analysis",
+                    "ok": True,
+                    "status": "COMPLETED",
+                    "document_id": input_json["document_id"],
+                    "filename": "审计整改自查表.xlsx",
+                    "sheet_name": "整改事项",
+                    "metric": {
+                        "operation": "count_by_category",
+                        "column_name": "整改状态",
+                        "label": "整改事项",
+                    },
+                    "group_by": {
+                        "column_id": "status",
+                        "column_name": "整改状态",
+                    },
+                    "results": [
+                        {"group": "已整改", "value": "3"},
+                        {"group": "未整改", "value": "1"},
+                        {"group": "持续整改", "value": "2"},
+                    ],
+                    "rows_scanned": 6,
+                    "rows_matched": 6,
+                    "warnings": [],
+                }
+            return ToolInvocationRecord(
+                tool_name=tool_name,
+                input_json=input_json,
+                output_json=output,
+                status="COMPLETED",
+            )
+
+    registry = SearchThenAnalyzeRegistry()
+    message = "从审计整改自查表中统计已整改、未整改和持续整改事项"
+    result = AgentRuntimeService(
+        registry_factory=lambda _db, _user_id: registry,
+        llm_intent_service=DisabledLLMIntentService(),
+    ).run_message(
+        conversation_id="conv-audit-remediation",
+        user_id="user-1",
+        message_id="msg-audit-remediation",
+        message=message,
+    )
+
+    assert [name for name, _input in registry.calls] == [
+        "hybrid-search",
+        "analyze-spreadsheet",
+    ]
+    assert registry.calls[1][1] == {
+        "document_id": "doc-audit-remediation",
+        "question": message,
+    }
+    assert result.intent == "ANALYZE_SPREADSHEET"
+    assert "已整改" in (result.final_response or "")
 
 
 def test_llm_file_question_intent_is_normalized_to_workspace_discovery():

@@ -15,7 +15,32 @@ from .schemas import ColumnProfile, ColumnType, SheetProfile, WorkbookProfile
 
 MAX_PROFILE_SAMPLE_ROWS = 100
 MAX_SAMPLE_VALUES_PER_COLUMN = 5
+MAX_HEADER_SCAN_ROWS = 20
 SUPPORTED_SPREADSHEET_SUFFIXES = {".xls", ".xlsx", ".xlsm", ".csv", ".tsv"}
+
+_HEADER_MARKERS = (
+    "序号",
+    "编号",
+    "姓名",
+    "申请人",
+    "申报人",
+    "单位",
+    "部门",
+    "学科",
+    "系所",
+    "名称",
+    "类型",
+    "类别",
+    "数量",
+    "人数",
+    "金额",
+    "日期",
+    "时间",
+    "计划",
+    "要求",
+    "联系方式",
+    "备注",
+)
 
 
 def profile_workbook(
@@ -50,7 +75,9 @@ def profile_workbook(
 def _profile_excel(*, file_path: Path) -> list[SheetProfile]:
     workbook = openpyxl.load_workbook(
         filename=file_path,
-        read_only=True,
+        # 多级表头需要读取 merged_cells；只读 Worksheet 不提供完整合并区域信息。
+        # 这里只构建受控 Profile，不修改或保存工作簿。
+        read_only=False,
         data_only=True,
     )
 
@@ -58,8 +85,12 @@ def _profile_excel(*, file_path: Path) -> list[SheetProfile]:
         sheets: list[SheetProfile] = []
 
         for sheet_index, worksheet in enumerate(workbook.worksheets, start=1):
-            header_row = detect_header_row(worksheet)
-            headers = read_headers(worksheet, header_row)
+            header_start_row, header_row = detect_header_span(worksheet)
+            headers = read_headers(
+                worksheet,
+                header_row,
+                header_start_row=header_start_row,
+            )
 
             if not headers:
                 continue
@@ -125,20 +156,66 @@ def _profile_delimited_text(*, file_path: Path, suffix: str) -> SheetProfile:
 
 
 def detect_header_row(worksheet: Any) -> int:
-    """
-    将第一个非空行固定作为 Excel 表头。
+    """返回数据开始前的最后一行表头，兼容单行与合并多级表头。"""
 
-    规则：
-    - 第 1 行有任何非空单元格：第 1 行就是表头；
-    - 第 1 行完全为空：继续查找第 2 行、第 3 行……；
-    - 整个 Sheet 都为空：兜底返回第 1 行。
+    return detect_header_span(worksheet)[1]
 
-    本函数不再根据单元格数量、唯一值或数值比例“猜测”表头，
-    以避免把内容完整的数据行误判为表头。
+
+def detect_header_span(worksheet: Any) -> tuple[int, int]:
+    """识别 Excel 表头起止行。
+
+    标题、填报单位和日期通常位于真正表头之前，不能再把第一个非空行固定当作表头。
+    候选行只根据真实单元格内容评分；确定起始行后，再使用工作簿声明的纵向合并区域扩展
+    多级表头范围。无法识别业务表头时仍回退到第一个非空行，保持简单表格兼容性。
     """
-    return _first_non_empty_row_index(
-        worksheet.iter_rows(values_only=True)
-    ) + 1
+
+    max_row = min(int(getattr(worksheet, "max_row", 1) or 1), MAX_HEADER_SCAN_ROWS)
+    rows = list(
+        worksheet.iter_rows(
+            min_row=1,
+            max_row=max_row,
+            values_only=True,
+        )
+    )
+    first_non_empty = _first_non_empty_row_index(rows) + 1
+
+    best_row = first_non_empty
+    best_score = 0
+    for row_number, row in enumerate(rows, start=1):
+        score = _header_candidate_score(row)
+        if score > best_score:
+            best_row = row_number
+            best_score = score
+
+    if best_score == 0:
+        return first_non_empty, first_non_empty
+
+    header_end = best_row
+    for merged_range in getattr(worksheet.merged_cells, "ranges", ()):
+        if (
+            merged_range.min_row <= best_row <= merged_range.max_row
+            and merged_range.max_row - best_row <= 3
+        ):
+            header_end = max(header_end, int(merged_range.max_row))
+    return best_row, header_end
+
+
+def _header_candidate_score(row: Sequence[Any]) -> int:
+    """让包含多个稳定字段名的行优先于标题行、日期行和普通数据行。"""
+
+    values = [_normalize_header_value(value) for value in row]
+    values = [value for value in values if value]
+    if not values:
+        return 0
+    marker_hits = sum(
+        1
+        for value in values
+        if any(marker in value for marker in _HEADER_MARKERS)
+    )
+    if marker_hits == 0:
+        return 0
+    numeric_values = sum(1 for value in values if _is_number_value(value))
+    return marker_hits * 20 + len(values) - numeric_values * 4
 
 
 def _first_non_empty_row_index(
@@ -152,17 +229,97 @@ def _first_non_empty_row_index(
     return 0
 
 
-def read_headers(worksheet: Any, header_row: int) -> list[str]:
-    """读取并去重 Excel 表头，跳过尾部全空列。"""
-    row = next(
-        worksheet.iter_rows(
-            min_row=header_row,
+def read_headers(
+    worksheet: Any,
+    header_row: int,
+    *,
+    header_start_row: int | None = None,
+) -> list[str]:
+    """读取并去重 Excel 表头，合并父级与子级字段名。"""
+
+    start_row = header_start_row or header_row
+    rows = [
+        list(row)
+        for row in worksheet.iter_rows(
+            min_row=start_row,
             max_row=header_row,
             values_only=True,
+        )
+    ]
+    if not rows:
+        return []
+
+    last_non_empty = max(
+        (
+            index
+            for row in rows
+            for index, value in enumerate(row, start=1)
+            if _normalize_header_value(value)
         ),
-        (),
+        default=0,
     )
-    return _read_headers_from_values(row)
+    for merged_range in getattr(worksheet.merged_cells, "ranges", ()):
+        if merged_range.max_row < start_row or merged_range.min_row > header_row:
+            continue
+        last_non_empty = max(last_non_empty, int(merged_range.max_col))
+        value = worksheet.cell(merged_range.min_row, merged_range.min_col).value
+        for row_number in range(
+            max(start_row, merged_range.min_row),
+            min(header_row, merged_range.max_row) + 1,
+        ):
+            matrix_row = rows[row_number - start_row]
+            if len(matrix_row) < merged_range.max_col:
+                matrix_row.extend([None] * (merged_range.max_col - len(matrix_row)))
+            for column_number in range(merged_range.min_col, merged_range.max_col + 1):
+                matrix_row[column_number - 1] = value
+
+    # 部分旧版 XLS 转换后，跨列父表头的最后一列可能没有保留在 merged_cells 中。
+    # 在同一表头行内，仅对两个已命名字段之间的空白列继承左侧父字段；尾部空白不扩展。
+    for row_index, row in enumerate(rows):
+        if len(row) < last_non_empty:
+            row.extend([None] * (last_non_empty - len(row)))
+        last_value: Any | None = None
+        for column_index in range(last_non_empty):
+            normalized = _normalize_header_value(row[column_index])
+            if normalized:
+                last_value = row[column_index]
+                continue
+            has_named_cell_to_the_right = any(
+                _normalize_header_value(value)
+                for value in row[column_index + 1 : last_non_empty]
+            )
+            has_child_header = any(
+                column_index < len(child_row)
+                and bool(_normalize_header_value(child_row[column_index]))
+                for child_row in rows[row_index + 1 :]
+            )
+            if last_value is not None and (
+                has_named_cell_to_the_right or has_child_header
+            ):
+                row[column_index] = last_value
+
+    if last_non_empty == 0:
+        return []
+
+    raw_headers: list[str] = []
+    for column_number in range(1, last_non_empty + 1):
+        parts: list[str] = []
+        for row in rows:
+            value = row[column_number - 1] if column_number <= len(row) else None
+            normalized = _normalize_header_value(value)
+            if normalized and normalized not in parts:
+                parts.append(normalized)
+        raw_headers.append(" / ".join(parts) or f"列{column_number}")
+    return _deduplicate_headers(raw_headers)
+
+
+def _deduplicate_headers(headers: Sequence[str]) -> list[str]:
+    used: dict[str, int] = {}
+    result: list[str] = []
+    for header in headers:
+        used[header] = used.get(header, 0) + 1
+        result.append(header if used[header] == 1 else f"{header}_{used[header]}")
+    return result
 
 
 def _read_headers_from_values(row: Sequence[Any]) -> list[str]:

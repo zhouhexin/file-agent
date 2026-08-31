@@ -309,9 +309,10 @@ def _system_lifecycle_task_kind(
             and isinstance(invocation.output_json, dict)
         ):
             return "CLARIFICATION"
-        return "CLASSIFY"
+        # 上传时分类属于内部存储路由事实，独立生命周期任务不能将其当作用户主动要求的分类结果展示。
+        return None
     if "managed-source-auto-classification" in tool_names:
-        return "CLASSIFY"
+        return None
     if tool_names.intersection(
         {
             "upload-archive",
@@ -496,8 +497,11 @@ def _build_outcome(
     if task_kind == "SPREADSHEET":
         completed, failed = _spreadsheet_result_counts(result)
         total = completed + failed or _document_scope_count(result)
+        direct_answer = _spreadsheet_direct_answer(result)
         if completed == 0 and failed == 0 and result.status != "COMPLETED":
             headline = f"正在分析 {total or 1} 个表格文件"
+        elif failed == 0 and direct_answer:
+            headline = direct_answer
         elif failed == 0:
             headline = f"已完成 {completed} 个表格分析结果"
         else:
@@ -789,6 +793,40 @@ def _spreadsheet_result_counts(result: AgentRunResult) -> tuple[int, int]:
         else:
             completed += 1
     return completed, failed
+
+
+def _spreadsheet_direct_answer(result: AgentRunResult) -> str:
+    """从确定性 Tool 输出提取单值结论，让公共回执首屏直接回答用户问题。"""
+
+    completed_outputs: list[dict[str, Any]] = []
+    for invocation in result.tool_invocations:
+        if invocation.tool_name != "analyze-spreadsheet":
+            continue
+        output = invocation.output_json if isinstance(invocation.output_json, dict) else {}
+        if (
+            invocation.status == "FAILED"
+            or output.get("ok") is False
+            or str(output.get("status") or "").upper() != "COMPLETED"
+        ):
+            continue
+        completed_outputs.append(output)
+    if len(completed_outputs) != 1:
+        return ""
+
+    output = completed_outputs[0]
+    rows = [item for item in output.get("results", []) if isinstance(item, dict)]
+    if len(rows) != 1 or output.get("group_by"):
+        return ""
+    value = str(rows[0].get("value") or "").strip()
+    metric = output.get("metric") if isinstance(output.get("metric"), dict) else {}
+    label = str(metric.get("label") or metric.get("column_name") or "统计结果").strip()
+    if not value:
+        return ""
+    if "岗位" in label:
+        return f"{label}为 {value} 个"
+    if "人数" in label:
+        return f"{label}为 {value} 人"
+    return f"{label}为 {value}"
 
 
 def _search_completeness(payload: dict[str, Any]) -> Literal[

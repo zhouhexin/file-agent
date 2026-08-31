@@ -34,7 +34,8 @@ SPREADSHEET_QUERY_PLAN_PROMPT = """你是 File Agent 的受控表格分析规划
 6. 用户问题语义不明确，或者当前列不足以确认请求时，返回：
    {"clarification_required": true, "clarification_question": "..."}
    此时不要输出 sheet_id、metric、group_by_column_id 或 filters。
-7. 用户明确问“多少条/有几条/数量”时使用 count_rows；问“合计/总和”时选择 sum；问“平均”选择 avg；问“最大/最小”选择 max/min。
+7. 只有用户明确问“多少条记录/有几条/记录数/行数”时使用 count_rows。业务对象的“数量”不是行数：
+   “岗位数量/招聘人数/计划人数/预算金额”等必须对对应数值列使用 sum；无法唯一确定数值列时返回 clarification_required，禁止用 count_rows 代替。
 8. 你只做计划，不计算结果。
 """
 
@@ -48,6 +49,37 @@ PERSON_COLUMN_TERMS = (
     "作者",
     "获奖人",
     "学生",
+)
+
+JOB_QUANTITY_TERMS = (
+    "岗位数量",
+    "岗位数",
+    "招聘人数",
+    "招聘数量",
+    "计划人数",
+    "计划岗位",
+)
+
+JOB_METRIC_COLUMN_TERMS = (
+    "招聘计划",
+    "岗位数量",
+    "岗位数",
+    "招聘人数",
+    "招聘数量",
+    "计划人数",
+    "优秀人才",
+    "青年人才",
+    "预聘制",
+    "事业编制",
+)
+
+JOB_METRIC_EXCLUDED_TERMS = (
+    "现有",
+    "当前",
+    "在岗",
+    "序号",
+    "编号",
+    "方向",
 )
 
 
@@ -81,9 +113,22 @@ def build_query_plan(
         user_payload=payload,
     )
     try:
-        return SpreadsheetQueryPlan.model_validate(parsed)
+        plan = SpreadsheetQueryPlan.model_validate(parsed)
     except ValidationError as exc:
         raise LLMResponseError(f"表格分析计划不符合受控 schema：{exc}") from exc
+    if (
+        _asks_for_job_quantity(question)
+        and plan.metric is not None
+        and plan.metric.operation == Aggregation.COUNT_ROWS
+    ):
+        return SpreadsheetQueryPlan(
+            clarification_required=True,
+            clarification_question=(
+                "“岗位数量”需要汇总岗位数值列，不能按数据行数代替。"
+                "请确认要统计的招聘类别，或补充包含岗位数的列名。"
+            ),
+        )
+    return plan
 
 
 def build_query_plans(
@@ -117,6 +162,13 @@ def build_deterministic_query_plans(
     规则只引用真实 Profile 中的 Sheet/列 ID。无法唯一确认数值列、筛选列或筛选值时返回空列表，
     让 LLM 规划器或澄清流程接管，不能猜测字段。
     """
+
+    job_quantity_plans = _build_job_quantity_plans(
+        question=question,
+        profile=profile,
+    )
+    if job_quantity_plans:
+        return job_quantity_plans
 
     operation = _deterministic_operation(question)
     filter_value = _person_filter_value(question, profile=profile)
@@ -158,6 +210,60 @@ def build_deterministic_query_plans(
     # Profile 只保留每列前五个样本，样本未出现不能证明目标不存在。
     # 必须扫描全部结构兼容 Sheet，再由执行器以 rows_matched=0 排除未命中 Sheet。
     return plans
+
+
+def _build_job_quantity_plans(
+    *,
+    question: str,
+    profile: WorkbookProfile,
+) -> list[SpreadsheetQueryPlan]:
+    """把岗位数量解释为招聘计划数值列合计，绝不退化为数据行计数。"""
+
+    if not _asks_for_job_quantity(question):
+        return []
+
+    plans: list[SpreadsheetQueryPlan] = []
+    for sheet in profile.sheets:
+        candidates: list[ColumnProfile] = []
+        for column in sheet.columns:
+            normalized_name = _normalize_text(column.name)
+            if column.value_type != ColumnType.NUMBER:
+                continue
+            if any(term in normalized_name for term in JOB_METRIC_EXCLUDED_TERMS):
+                continue
+            if not any(term in normalized_name for term in JOB_METRIC_COLUMN_TERMS):
+                continue
+            candidates.append(column)
+
+        # 同时存在“合计/总计”列和明细列时只采用合计列，避免重复累计。
+        total_columns = [
+            column
+            for column in candidates
+            if any(
+                term in _normalize_text(column.name)
+                for term in ("合计", "总计", "总数", "总人数")
+            )
+        ]
+        selected_columns = total_columns or candidates
+        for column in selected_columns:
+            plans.append(
+                SpreadsheetQueryPlan(
+                    sheet_id=sheet.sheet_id,
+                    metric=MetricSpec(
+                        operation=Aggregation.SUM,
+                        column_id=column.column_id,
+                        label="岗位总数",
+                    ),
+                    sort_direction="desc",
+                    limit=50,
+                )
+            )
+    return plans
+
+
+def _asks_for_job_quantity(question: str) -> bool:
+    normalized = _normalize_text(question)
+    return any(term in normalized for term in JOB_QUANTITY_TERMS)
 
 
 def _deterministic_operation(question: str) -> Aggregation | None:

@@ -53,7 +53,8 @@ def _format_one_result(result: dict[str, Any]) -> str:
         )
     else:
         value = _format_number(rows[0].get("value"))
-        lines.append(f"结果：{value}")
+        metric_label = str(metric.get("label") or column_name or "统计结果")
+        lines.append(f"结果：{_format_direct_metric(metric_label, value)}")
 
     sheet_breakdown = [
         item for item in result.get("sheet_breakdown", [])
@@ -62,7 +63,8 @@ def _format_one_result(result: dict[str, Any]) -> str:
     if sheet_breakdown:
         lines.append("分工作表明细：")
         lines.extend(
-            f"- Sheet“{item.get('sheet_name') or '未知'}”："
+            f"- Sheet“{item.get('sheet_name') or '未知'}”"
+            f" / “{item.get('metric_column_name') or '未命名列'}”："
             f"{_format_number(item.get('value'))}"
             for item in sheet_breakdown
         )
@@ -76,6 +78,17 @@ def _format_one_result(result: dict[str, Any]) -> str:
     if warnings:
         lines.append("提示：" + "；".join(warnings))
     return "\n".join(lines)
+
+
+def _format_direct_metric(label: str, value: str) -> str:
+    """让单值统计直接回答业务问题，而不是只展示一个脱离语义的数字。"""
+
+    normalized = "".join(str(label or "").split())
+    if "岗位" in normalized:
+        return f"{label}为 {value} 个。"
+    if "人数" in normalized:
+        return f"{label}为 {value} 人。"
+    return f"{label}为 {value}。"
 
 
 def _format_clarification(result: dict[str, Any]) -> str:

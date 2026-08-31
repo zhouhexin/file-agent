@@ -190,6 +190,51 @@ def test_service_returns_clarification_without_executing(tmp_path: Path) -> None
     assert "论文类型" in result["available_sheets"][0]["columns"]
 
 
+def test_remediation_status_statistics_include_requested_zero_categories(
+    tmp_path: Path,
+) -> None:
+    """整改状态统计必须补齐零值类别，并把“正在整改”归入用户所说的“持续整改”。"""
+
+    path = tmp_path / "审计整改自查表.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "整改事项"
+    worksheet.append(
+        ["序号", "问题描述", "整改完成情况（已整改完成、正在整改、未整改）"]
+    )
+    worksheet.append([1, "问题一", "已整改完成"])
+    worksheet.append([2, "问题二", "已整改完成"])
+    worksheet.append([3, "问题三", "已整改完成"])
+    workbook.save(path)
+
+    result = SpreadsheetAnalysisService(
+        settings=SimpleNamespace(llm_enabled=True),
+        client=FakeJsonClient(
+            {
+                "sheet_id": "sheet_1",
+                "metric": {"operation": "count_rows", "label": "事项数量"},
+                "group_by_column_id": "sheet_1_col_3",
+            }
+        ),
+    ).analyze(
+        document_id="doc-audit-remediation",
+        filename=path.name,
+        file_path=path,
+        question="从审计整改自查表中统计已整改、未整改和持续整改事项",
+    )
+    response = format_spreadsheet_analysis_response([result])
+
+    assert result["results"] == [
+        {"group": "已整改", "value": "3"},
+        {"group": "未整改", "value": "0"},
+        {"group": "持续整改", "value": "0"},
+    ]
+    assert "“持续整改”按表内“正在整改/整改中”口径统计。" in result["warnings"]
+    assert "- 已整改：3" in response
+    assert "- 未整改：0" in response
+    assert "- 持续整改：0" in response
+
+
 def test_deterministic_planner_routes_uploaded_xlsx_to_spreadsheet_tool() -> None:
     """上传 Excel 后的统计请求必须路由到只读表格分析 Tool。"""
 
@@ -261,9 +306,9 @@ def test_person_total_amount_uses_deterministic_multi_sheet_plan_without_llm(tmp
     assert result["results"] == [{"group": "全部", "value": "6500"}]
     assert result["rows_matched"] == 3
     assert [item["sheet_name"] for item in result["sheet_breakdown"]] == ["论文", "专利"]
-    assert "结果：6,500" in response
-    assert "Sheet“论文”：5,000" in response
-    assert "Sheet“专利”：1,500" in response
+    assert "资助金额合计为 6,500" in response
+    assert "Sheet“论文” / “资助金额”：5,000" in response
+    assert "Sheet“专利” / “资助金额”：1,500" in response
     assert "计算方式：5,000 + 1,500 = 6,500" in response
     assert " B3" not in response
 
@@ -277,3 +322,93 @@ def test_person_total_amount_uses_deterministic_multi_sheet_plan_without_llm(tmp
     )
     assert scoped_result["results"] == [{"group": "全部", "value": "6500"}]
     assert scoped_result["filters"][0]["value"] == "金海燕"
+
+
+def test_job_quantity_uses_merged_multi_level_headers_and_sums_job_columns(
+    tmp_path: Path,
+) -> None:
+    """“岗位数量”必须汇总招聘计划数值列，不能把学科行数当成岗位数。"""
+
+    path = tmp_path / "2026年师资招聘计划申报表.xlsx"
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "专任教师岗位"
+    worksheet["A1"] = "附件4："
+    worksheet.merge_cells("A2:H2")
+    worksheet["A2"] = "西安理工大学2026年师资招聘计划申报表"
+    worksheet.append(["单位（盖章）：", None, None, None, None, None, None, "填报日期：2026年1月5日"])
+    worksheet.append(["序号", "拟补充学科", "拟补充系所", "现有人数", "招聘计划", None, None, None])
+    worksheet.append([None, None, None, None, "拟补充方向（团队）", "优秀人才", "青年人才（事业编制）", "青年人才（预聘制）"])
+    for merged_range in ("A4:A5", "B4:B5", "C4:C5", "D4:D5", "E4:G4"):
+        worksheet.merge_cells(merged_range)
+    rows = [
+        [1, "计算机科学与技术", "计算机科学与技术系", 27, "智能信息处理", 2, None, 1],
+        [2, None, "软件工程系", 25, "智能图像处理", 1, None, 1],
+        [3, None, "物联网工程系", 27, "物联网系统", 1, None, 1],
+        [4, None, "人工智能系", 15, "人工智能", 2, None, 1],
+        [5, "网络空间安全", "网络空间安全系", 27, "信息安全", 1, None, 1],
+    ]
+    for row_number, row in enumerate(rows, start=6):
+        worksheet.append(row)
+        worksheet.merge_cells(start_row=row_number, start_column=6, end_row=row_number, end_column=7)
+    worksheet["A13"] = "填报说明：招聘计划人数按类别填报。"
+    worksheet.merge_cells("A13:H13")
+    workbook.save(path)
+
+    profile = profile_workbook(
+        document_id="doc-recruitment",
+        filename=path.name,
+        file_path=path,
+    )
+    assert profile.sheets[0].header_row == 5
+    assert profile.sheets[0].columns[5].name == "招聘计划 / 优秀人才"
+    assert profile.sheets[0].columns[7].name == "招聘计划 / 青年人才（预聘制）"
+
+    plans = build_deterministic_query_plans(
+        question="统计2026年师资招聘计划申报表中的岗位数量",
+        profile=profile,
+    )
+    assert [plan.metric.column_id for plan in plans if plan.metric] == [
+        "sheet_1_col_6",
+        "sheet_1_col_8",
+    ]
+    assert all(plan.metric and plan.metric.operation.value == "sum" for plan in plans)
+
+    result = SpreadsheetAnalysisService(
+        settings=SimpleNamespace(llm_enabled=False),
+    ).analyze(
+        document_id="doc-recruitment",
+        filename=path.name,
+        file_path=path,
+        question="统计2026年师资招聘计划申报表中的岗位数量",
+    )
+    response = format_spreadsheet_analysis_response([result])
+
+    assert result["results"] == [{"group": "全部", "value": "12"}]
+    assert [item["value"] for item in result["sheet_breakdown"]] == ["7", "5"]
+    assert result["warnings"] == []
+    assert "岗位总数为 12 个" in response
+    assert "7 + 5 = 12" in response
+
+
+def test_job_quantity_rejects_llm_row_count_substitution(tmp_path: Path) -> None:
+    """没有可确认的岗位数值列时，LLM 不得用 count_rows 冒充岗位数量。"""
+
+    path = _make_workbook(tmp_path)
+    result = SpreadsheetAnalysisService(
+        settings=SimpleNamespace(llm_enabled=True),
+        client=FakeJsonClient(
+            {
+                "sheet_id": "sheet_1",
+                "metric": {"operation": "count_rows", "label": "岗位数量"},
+            }
+        ),
+    ).analyze(
+        document_id="doc-1",
+        filename=path.name,
+        file_path=path,
+        question="统计岗位数量",
+    )
+
+    assert result["status"] == "NEEDS_CLARIFICATION"
+    assert "不能按数据行数代替" in result["message"]

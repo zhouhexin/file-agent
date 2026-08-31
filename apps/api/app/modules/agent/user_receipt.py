@@ -396,27 +396,42 @@ def _project_document_results_for_intent(
 ) -> list[dict[str, Any]]:
     """按用户明确任务收窄逐文件展示字段，不改写持久化审计结果。
 
-    单纯分类或分类归档不包含文件命名工作。后台可以继续生成并保存命名候选，但普通
+    后台始终执行分类，但只有明确分类意图才投影分类结果。单纯分类或分类归档不包含文件命名工作。
+    后台可以继续生成并保存命名候选，但普通
     回执不得因此展示建议名称、命名确认提示或改名入口。复合意图
     ``CLASSIFY_AND_SUGGEST_RENAME`` 仍保留这些字段。
     """
 
-    if str(result.intent or "").upper() not in {
-        "CLASSIFY_FILES",
-        "CLASSIFY_MANAGED_FILES",
-    }:
-        return document_results
+    intent = str(result.intent or "").upper()
+    slots = result.tool_plan.get("slots") if isinstance(result.tool_plan, dict) else {}
+    requested_outputs = {
+        str(item).lower()
+        for item in (
+            slots.get("requested_outputs", [])
+            if isinstance(slots, dict)
+            else []
+        )
+        if str(item)
+    }
+    classification_requested = (
+        "CLASSIF" in intent
+        or any(item.startswith("classification") for item in requested_outputs)
+    )
 
     projected: list[dict[str, Any]] = []
     for item in document_results:
         safe_item = dict(item)
-        safe_item.pop("rename_suggestion", None)
-        pending = safe_item.get("pending_decision")
-        if isinstance(pending, dict) and str(pending.get("type") or "") in {
-            "rename_suggestion",
-            "rename_review",
-        }:
-            safe_item.pop("pending_decision", None)
+        if not classification_requested:
+            safe_item.pop("categories", None)
+            safe_item.pop("classification_reused", None)
+        if intent in {"CLASSIFY_FILES", "CLASSIFY_MANAGED_FILES"}:
+            safe_item.pop("rename_suggestion", None)
+            pending = safe_item.get("pending_decision")
+            if isinstance(pending, dict) and str(pending.get("type") or "") in {
+                "rename_suggestion",
+                "rename_review",
+            }:
+                safe_item.pop("pending_decision", None)
         projected.append(safe_item)
     return projected
 
@@ -973,7 +988,10 @@ def _evidence_answer_result(result: AgentRunResult) -> dict[str, Any] | None:
     防止后续 Tool 改动把 Evidence ID、Chunk ID、路径或完整正文意外暴露到聊天接口。
     """
 
-    # Planner 在检索后可能继续读取文件，以最后一次证据回答为准。
+    slots = result.tool_plan.get("slots") if isinstance(result.tool_plan, dict) else {}
+    show_evidence = _should_show_evidence(result=result, slots=slots)
+    # Planner 在检索后可能继续读取文件，以最后一次证据回答为准。OCR 字段识别只在
+    # 普通用户投影中隐藏原文片段，内部 Tool 输出、引用持久化和审计事实保持不变。
     for invocation in reversed(result.tool_invocations):
         output = invocation.output_json
         if invocation.tool_name != "evidence-answer" or output.get("kind") != "evidence_answer":
@@ -1003,9 +1021,13 @@ def _evidence_answer_result(result: AgentRunResult) -> dict[str, Any] | None:
                 )
                 if key in item
             }
-            projected["evidence_items"] = _safe_evidence_answer_items(
-                item.get("evidence_items")
+            projected["evidence_items"] = (
+                _safe_evidence_answer_items(item.get("evidence_items"))
+                if show_evidence
+                else []
             )
+            if not show_evidence:
+                projected["reference_indexes"] = []
             references.append(projected)
         return {
             "answer_id": output.get("answer_id"),
@@ -1018,6 +1040,40 @@ def _evidence_answer_result(result: AgentRunResult) -> dict[str, Any] | None:
             "cached": bool(output.get("cached", False)),
         }
     return None
+
+
+def _should_show_evidence(
+    *,
+    result: AgentRunResult,
+    slots: Any,
+) -> bool:
+    """确定证据回答是否应向普通用户展开原文片段。
+
+    新计划使用显式 ``show_evidence``。兼容标记上线前已经持久化的历史 OCR 字段
+    计划：只有“强制重新解析图片后紧接证据回答”的受控两步链路才隐藏片段，不能
+    仅凭 ``EVIDENCE_ANSWER`` 意图扩大到普通问答。
+    """
+
+    if isinstance(slots, dict) and "show_evidence" in slots:
+        return slots.get("show_evidence") is not False
+    steps = (
+        result.tool_plan.get("steps")
+        if isinstance(result.tool_plan, dict)
+        else None
+    )
+    if not isinstance(steps, list) or len(steps) < 2:
+        return True
+    tool_names = [
+        str(step.get("tool_name") or "")
+        for step in steps
+        if isinstance(step, dict)
+    ]
+    first_input = steps[0].get("input") if isinstance(steps[0], dict) else {}
+    return not (
+        tool_names[:2] == ["extract-document-text", "evidence-answer"]
+        and isinstance(first_input, dict)
+        and first_input.get("force_reprocess") is True
+    )
 
 
 def _safe_evidence_answer_items(value: Any) -> list[dict[str, Any]]:

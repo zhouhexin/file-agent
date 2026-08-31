@@ -392,9 +392,11 @@ def test_llm_message_extracts_document_text_and_persists_pages():
         document_results = stored_run.graph_state_json["document_results"]
         assert document_results[0]["document_id"] == document_id
         assert document_results[0]["extraction_status"] == "COMPLETED"
-        assert document_results[0]["categories"] == []
-        assert db.query(DocumentClassificationRun).count() == 0
-        assert db.query(DocumentCategorySuggestion).count() == 0
+        # 上传后的分类属于内部持久化事实，即使当前读取任务不向前端展示分类，
+        # AgentGraphState 仍应保留本轮轻量分类摘要。
+        assert document_results[0]["categories"]
+        assert db.query(DocumentClassificationRun).count() == 1
+        assert db.query(DocumentCategorySuggestion).count() > 0
         assert response.agent_run.changeset_id
         assert stored_run.changeset_id == response.agent_run.changeset_id
         changeset = db.query(ChangeSet).one()
@@ -402,7 +404,7 @@ def test_llm_message_extracts_document_text_and_persists_pages():
         assert changeset.summary == f"已处理 1 个文件，生成 {db.query(ChangeItem).count()} 项变更记录。"
         change_types = [item.change_type for item in db.query(ChangeItem).order_by(ChangeItem.created_at.asc()).all()]
         assert change_types[:2] == ["TEXT_EXTRACTED", "DOCUMENT_PAGES_CREATED"]
-        assert "CATEGORY_SUGGESTED" not in change_types
+        assert "CATEGORY_SUGGESTED" in change_types
     finally:
         db.close()
         app.dependency_overrides.clear()

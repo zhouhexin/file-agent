@@ -62,6 +62,51 @@ def test_structured_image_request_detector_requires_source_action_and_output():
     assert not is_structured_image_extraction_request("查找工作总结表格")
 
 
+def test_image_field_request_without_format_returns_values_after_forced_ocr():
+    """列出图片字段已足以表达返回值目标，不应要求用户额外说“字段”或“表格”。"""
+
+    message = "重新识别图片中的申请人、资助金额和使用情况登记"
+    attachments = [
+        {
+            "document_id": "image-document-1",
+            "filename": "20260824-182402.jpg",
+            "content_type": "image/jpeg",
+        }
+    ]
+
+    deterministic = DeterministicPlanner().plan(
+        conversation_id="conversation-image-fields",
+        user_id="user-image-fields",
+        message_id="message-image-fields",
+        message=message,
+        attachments=attachments,
+    )
+    llm_converted = build_plan_from_user_intent(
+        intent_plan=UserIntentPlan(
+            intent="EXTRACT_AND_RECOGNIZE_IMAGE_CONTENT",
+            user_goal=message,
+            needs_file_context=True,
+            target_scope="current_message",
+            referenced_document_ids=["image-document-1"],
+            required_capabilities=["document_read", "evidence_answer"],
+            tool_plan_hint=["extract-document-text", "evidence-answer"],
+        ),
+        message=message,
+        attachments=attachments,
+    )
+
+    assert not is_structured_image_extraction_request(message)
+    for plan in (deterministic, llm_converted):
+        assert plan.intent == "EVIDENCE_ANSWER"
+        assert [step.tool_name for step in plan.steps] == [
+            "extract-document-text",
+            "evidence-answer",
+        ]
+        assert plan.steps[0].input["force_reprocess"] is True
+        assert plan.slots["requested_outputs"] == ["answer", "references", "receipt"]
+        assert plan.slots["show_evidence"] is False
+
+
 def test_relative_time_work_summary_routes_to_hybrid_search_not_directory_list():
     """“找去年的工作总结”必须交给可应用年份硬过滤的正文检索。"""
 

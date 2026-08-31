@@ -121,6 +121,10 @@ class SpreadsheetAnalysisService:
                 for validated_plan in validated_plans
             ]
             result = _combine_sheet_results(sheet_results)
+            result = _normalize_requested_remediation_statuses(
+                result=result,
+                question=question,
+            )
         except Exception as exc:
             return _failed(
                 code="SPREADSHEET_EXECUTION_FAILED",
@@ -171,17 +175,25 @@ def _combine_sheet_results(results: list[dict[str, Any]]) -> dict[str, Any]:
         sheet_breakdown.append(
             {
                 "sheet_name": result.get("sheet_name"),
+                "metric_column_name": (result.get("metric") or {}).get("column_name"),
                 "value": _format_decimal(value),
                 "rows_matched": int(result.get("rows_matched") or 0),
                 "evidence_items": list(result.get("evidence_items") or []),
             }
         )
 
+    sheet_names = list(
+        dict.fromkeys(
+            str(item.get("sheet_name") or "")
+            for item in results
+            if str(item.get("sheet_name") or "").strip()
+        )
+    )
     return {
         "kind": "spreadsheet_analysis",
         "ok": True,
         "status": "COMPLETED",
-        "sheet_name": "多个工作表",
+        "sheet_name": sheet_names[0] if len(sheet_names) == 1 else "多个工作表",
         "metric": dict(first.get("metric") or {}),
         "group_by": None,
         "filters": list(first.get("filters") or []),
@@ -201,12 +213,14 @@ def _combine_sheet_results(results: list[dict[str, Any]]) -> dict[str, Any]:
             for evidence in item.get("evidence_items", [])
             if isinstance(evidence, dict)
         ],
-        "warnings": [
-            warning
-            for item in results
-            for warning in item.get("warnings", [])
-            if str(warning).strip()
-        ],
+        "warnings": list(
+            dict.fromkeys(
+                warning
+                for item in results
+                for warning in item.get("warnings", [])
+                if str(warning).strip()
+            )
+        ),
     }
 
 
@@ -225,6 +239,72 @@ def _format_decimal(value: Decimal) -> str:
     if value == value.to_integral_value():
         return str(int(value))
     return format(value.normalize(), "f")
+
+
+def _normalize_requested_remediation_statuses(
+    *,
+    result: dict[str, Any],
+    question: str,
+) -> dict[str, Any]:
+    """按用户明确要求补齐审计整改状态，并统一业务同义口径。"""
+
+    requested_aliases = [
+        ("已整改", ("已整改", "整改完成")),
+        ("未整改", ("未整改",)),
+        ("持续整改", ("持续整改", "正在整改", "整改中")),
+    ]
+    requested = [
+        (label, aliases)
+        for label, aliases in requested_aliases
+        if label in question or any(alias in question for alias in aliases)
+    ]
+    group_by = result.get("group_by") if isinstance(result.get("group_by"), dict) else {}
+    group_column_name = str(group_by.get("column_name") or "")
+    metric = result.get("metric") if isinstance(result.get("metric"), dict) else {}
+    if (
+        len(requested) < 2
+        or "整改" not in question
+        or "整改" not in group_column_name
+        or str(metric.get("operation") or "") != "count_rows"
+    ):
+        return result
+
+    source_rows = [
+        item for item in result.get("results", [])
+        if isinstance(item, dict)
+    ]
+    normalized_rows: list[dict[str, str]] = []
+    matched_indexes: set[int] = set()
+    for label, aliases in requested:
+        total = Decimal("0")
+        for index, item in enumerate(source_rows):
+            group = "".join(str(item.get("group") or "").split())
+            if any(group.startswith("".join(alias.split())) for alias in aliases):
+                total += _decimal_value(item.get("value"))
+                matched_indexes.add(index)
+        normalized_rows.append({"group": label, "value": _format_decimal(total)})
+
+    normalized_rows.extend(
+        {
+            "group": str(item.get("group") or ""),
+            "value": _format_decimal(_decimal_value(item.get("value"))),
+        }
+        for index, item in enumerate(source_rows)
+        if index not in matched_indexes
+    )
+    normalized_result = {**result, "results": normalized_rows}
+    if any(label == "持续整改" for label, _aliases in requested) and (
+        "正在整改" in group_column_name or "整改中" in group_column_name
+    ):
+        normalized_result["warnings"] = list(
+            dict.fromkeys(
+                [
+                    *list(result.get("warnings") or []),
+                    "“持续整改”按表内“正在整改/整改中”口径统计。",
+                ]
+            )
+        )
+    return normalized_result
 
 
 def _failed(*, code: str, message: str) -> dict[str, Any]:

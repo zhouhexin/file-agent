@@ -28,6 +28,7 @@ def build_document_results_from_extraction_results(
         char_count = sum(int(page.get("char_count", 0) or 0) for page in pages)
         text_preview = "\n".join(str(page.get("text_preview") or "") for page in pages)
         error = result.get("error") if isinstance(result.get("error"), dict) else None
+    # 分类是默认生成的后台事实；``include_categories`` 只控制本次对话是否向用户展示该结果。
         classification_result = (
             classification_service.classify(
                 document_id=document_id,
@@ -40,10 +41,14 @@ def build_document_results_from_extraction_results(
                 fallback_text=text_preview,
                 force_reprocess=bool(result.get("classification_force_reprocess", False)),
             )
-            if include_categories and result.get("status") == "COMPLETED"
+            if result.get("status") == "COMPLETED"
             else {}
         )
-        categories = classification_result.get("categories", [])
+        categories = (
+            classification_result.get("categories", [])
+            if include_categories
+            else []
+        )
         document_results.append(
             {
                 "document_id": document_id,

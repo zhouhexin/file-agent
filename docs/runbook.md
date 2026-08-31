@@ -1175,12 +1175,13 @@ embedding Provider、异步回填、模型版本与维度管理、pgvector 索�
 
 ### 9.7 置信门控首次自动分类发布
 
-迁移到 `20260827_0001` 后，生产环境必须先保持以下安全默认值：
+从 2026-08-31 起，新部署使用以下正式默认值：上传文件先完成分类，再将工作副本发布到分类目录。
+低置信度、解析失败或目标冲突仍降级到中性路径或复核状态，不覆盖原件。
 
 ```dotenv
-AUTO_PRIMARY_CLASSIFICATION_ENABLED=false
-AUTO_INITIAL_PLACEMENT_ENABLED=false
-AUTO_CLASSIFICATION_SHADOW_MODE=true
+AUTO_PRIMARY_CLASSIFICATION_ENABLED=true
+AUTO_INITIAL_PLACEMENT_ENABLED=true
+AUTO_CLASSIFICATION_SHADOW_MODE=false
 AUTO_CLASSIFICATION_POLICY_VERSION=auto-placement-top1-test-v1
 AUTO_CLASSIFICATION_CALIBRATION_VERSION=unpublished
 AUTO_CLASSIFICATION_TARGET_PRECISION=0.99
@@ -1194,15 +1195,9 @@ Shadow 会写 `document_organization_decisions`，但不会移动已有 `ACTIVE`
 `AUTO_APPLIED` 关系。运维抽检必须排除 `feature_snapshot_json.shadow_only=true` 的结果，或将其单独
 作为“如果启用会怎样”的回放数据统计。
 
-只有冻结评测集达到方案中的精度门槛、校准版本已经发布且同名冲突/失败恢复测试通过后，才允许按以下
-顺序灰度新上传文件：
-
-1. 先设置已发布的 `AUTO_CLASSIFICATION_CALIBRATION_VERSION`，保持 Shadow 观察。
-2. 开启 `AUTO_PRIMARY_CLASSIFICATION_ENABLED=true`，仍保持首次物理落位关闭。
-3. 小流量实例同时设置 `AUTO_INITIAL_PLACEMENT_ENABLED=true` 和
-   `AUTO_CLASSIFICATION_SHADOW_MODE=false`；此时只有新上传归档进入 `ORGANIZING`。
-4. 观察 `AUTO_ORGANIZED`、`NEEDS_REVIEW`、`TARGET_NAME_CONFLICT`、失败率和
-   `ORGANIZING -> ACTIVE` 时延，再逐步扩大实例或流量。
+正式默认开启后，运维应持续观察 `AUTO_ORGANIZED`、`NEEDS_REVIEW`、
+`TARGET_NAME_CONFLICT`、失败率和 `ORGANIZING -> ACTIVE` 时延。如果分类定义、校准版本或
+存储冲突出现系统性异常，应使用下述紧急开关停止后续新文件落位，再进行排查。
 
 紧急停止新的自动落位只需把 `AUTO_INITIAL_PLACEMENT_ENABLED=false` 或
 `AUTO_PRIMARY_CLASSIFICATION_ENABLED=false` 并重启 Worker。该操作不会移动或回写既有

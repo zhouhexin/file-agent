@@ -1,9 +1,9 @@
 # 高精度主分类自动落位与少量异常复核实施方案
 
 > 日期：2026-08-26  
-> 最近更新：2026-08-27  
-> 状态：核心后端链路已实施，默认 Shadow，分类树与异常复核 UI 待实施
-> 当前授权边界：已按用户 2026-08-27 指令开始开发；生产真实落位仍须完成校准与灰度验收
+> 最近更新：2026-08-31
+> 状态：核心后端链路已实施，新上传默认分类并按分类首次落位
+> 当前授权边界：新上传默认执行置信门控分类落位；异常仍关闭式降级并保留审计
 > 适用范围：新上传文件及外部目录自动导入文件的首次整理、主分类选择、工作副本首次发布和异常复核
 > 核心目标：大多数文件无需用户确认即可准确存入主分类目录，仅让极少数真正不确定的文件进入复核
 
@@ -882,9 +882,9 @@ page / page_size 或 cursor
 建议新增：
 
 ```text
-AUTO_PRIMARY_CLASSIFICATION_ENABLED=false
-AUTO_INITIAL_PLACEMENT_ENABLED=false
-AUTO_CLASSIFICATION_SHADOW_MODE=true
+AUTO_PRIMARY_CLASSIFICATION_ENABLED=true
+AUTO_INITIAL_PLACEMENT_ENABLED=true
+AUTO_CLASSIFICATION_SHADOW_MODE=false
 AUTO_CLASSIFICATION_POLICY_VERSION=auto-placement-top1-test-v1
 AUTO_CLASSIFICATION_CALIBRATION_VERSION=unpublished
 AUTO_CLASSIFICATION_TARGET_PRECISION=0.99
@@ -1123,8 +1123,8 @@ time_to_active_p50/p95
 - 分类证据/摘要行展开、父节点“仅本级”切换、批量复核和基于 OperationPlan 的拖拽预览。
 - 用户明确“只保存不整理”到 `SKIPPED` 的消息级参数贯通。
 
-因此部署默认值仍为“自动主分类关闭、首次落位关闭、Shadow 开启”。在校准版本仍为
-`unpublished` 时，不建议生产环境退出 Shadow。
+从 2026-08-31 起，新部署默认为“自动主分类开启、首次落位开启、Shadow 关闭”。
+上述开关仍保留为运维紧急回退边界；回退只影响后续新文件，不移动已有活动工作副本。
 
 ## 22. 2026-08-27 外部自动导入首次落位补充实施
 
@@ -1263,3 +1263,14 @@ OperationConfirmation 记录当前显式分类指令本身，不代表要求用�
 重新分类仍必须通过本次 AgentRun 和当前 DocumentVersion 的新建议，并继续遵守自动分类硬门槛及人工
 `CONFIRMED` 分类保护；只有分类变化且达标时直接归位。普通后台分类、首次分类 Shadow 回放、只读查询、
 分类建议展示以及用户明确说“不要移动/位置不变/只修改分类”时，不得借此规则移动文件。
+
+## 30. 2026-08-31 上传默认分类、按类保存与按需展示
+
+文件上传后无论用户当前消息是读取、OCR、总结还是其他文件任务，成功解析后都必须执行分类。
+上传原件继续保持 `ARCHIVED` 且位置不变；新建工作副本先保持 `ORGANIZING`，在正文分类完成后按
+taxonomy 的 `organization_path` 原子发布。未达自动门槛、解析失败、目标路径不可用或同名冲突时，发布到中性路径并保留
+`NEEDS_REVIEW` 事实，不覆盖任何文件。
+
+分类“是否执行”与“是否展示”必须分离。`DocumentClassificationService` 仍写入分类运行、建议、证据和审计事实；
+普通读取、OCR、总结和后台生命周期回执在普通用户投影中移除 `categories` 及 `classification_reused`，也不生成
+“文件分类结果”展示外壳。只有当前用户消息的意图或 `requested_outputs` 明确包含分类时，才把分类路径、置信度和可定位证据展示给前端。

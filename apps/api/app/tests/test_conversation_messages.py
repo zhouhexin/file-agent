@@ -285,10 +285,10 @@ def test_uploaded_xlsx_person_total_routes_to_deterministic_analysis(monkeypatch
     assert response.status_code == 200
     task_result = response.json()["task_result"]
     assert task_result["response_type"] == "text"
-    assert "结果：6,500" in task_result["final_response"]
+    assert "资助金额合计为 6,500" in task_result["final_response"]
     assert "筛选条件：“申请人”等于“金海燕”" in task_result["final_response"]
-    assert "Sheet“论文”：5,000" in task_result["final_response"]
-    assert "Sheet“专利”：1,500" in task_result["final_response"]
+    assert "Sheet“论文” / “资助金额”：5,000" in task_result["final_response"]
+    assert "Sheet“专利” / “资助金额”：1,500" in task_result["final_response"]
     assert "计算方式：5,000 + 1,500 = 6,500" in task_result["final_response"]
     assert " B3" not in task_result["final_response"]
     assert "分类建议" not in task_result["final_response"]
@@ -304,7 +304,7 @@ def test_uploaded_xlsx_person_total_routes_to_deterministic_analysis(monkeypatch
 
     assert scoped_response.status_code == 200
     scoped_result = scoped_response.json()["task_result"]
-    assert "结果：6,500" in scoped_result["final_response"]
+    assert "资助金额合计为 6,500" in scoped_result["final_response"]
     assert "筛选条件：“申请人”等于“金海燕”" in scoped_result["final_response"]
     assert "研成果资助汇总表中金海燕" not in scoped_result["final_response"]
     run, tool_names = _latest_agent_audit(session_factory)
@@ -719,8 +719,10 @@ def test_message_can_reference_previous_attachment_by_fuzzy_filename_tokens():
     data = second_response.json()
     assert data["message"]["attachments"] == []
     run, tool_names = _latest_agent_audit(session_factory)
-    assert run.intent == "EVIDENCE_ANSWER"
-    assert tool_names == ["evidence-answer"]
+    # 文件名只有模糊核心词时不能静默绑定某个历史附件；先检索真实表格范围，
+    # 后续仅允许严格命中的电子表格进入分析链路。
+    assert run.intent == "SPREADSHEET_DISCOVERY"
+    assert tool_names == ["hybrid-search"]
     assert "AgentRun completed" not in (data["task_result"]["final_response"] or "")
     clear_overrides()
 

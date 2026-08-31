@@ -24,6 +24,7 @@ from app.modules.agent.binding_resolver import (
 from app.modules.agent.planner import (
     build_structured_image_extraction_plan,
     build_workspace_evidence_followup_plan,
+    build_workspace_spreadsheet_followup_plan,
     build_plan_from_user_intent,
     has_explicit_attachment_classification_request,
     has_explicit_filename_content_request,
@@ -48,6 +49,7 @@ from app.modules.classification.result_builder import build_document_results_fro
 from app.modules.llm.client import LLMResponseError
 # 两个表格结果格式化器，用于最终 response 阶段生成自然语言回复。
 from app.modules.spreadsheet_analysis.formatter import format_spreadsheet_analysis_response
+from app.modules.spreadsheet_analysis.profiler import SUPPORTED_SPREADSHEET_SUFFIXES
 from app.modules.spreadsheet_workbench.formatter import format_spreadsheet_workbench_response
 
 
@@ -242,7 +244,7 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
     planning_round = int(state.get("planning_round", 0)) + 1
     planning_attachments = _planning_attachments(state)
     shadow_planner_decision: Dict[str, Any] = {}
-    verified_followup = _verified_workspace_evidence_followup_plan(state)
+    verified_followup = _verified_workspace_followup_plan(state)
     if verified_followup is not None:
         # 第二阶段范围只能来自 hybrid-search 的脱敏后端观察。这里固定安全链路，
         # 避免 LLM 网关或 schema 异常把已找到的证据候选重新退回“请提供文件名”。
@@ -269,6 +271,10 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
             not in {
                 "OUTPUT_NOT_VISIBLE_FEEDBACK",
                 "STRUCTURED_EXTRACTION_UNAVAILABLE",
+                # 源文件名和目标文件名均由用户明确给出时，确定性预检已经把请求
+                # 收敛为活动工作副本解析。Adaptive 不得再将其改写成受管原件范围
+                # 的命名建议查询，否则工作副本改名后的当前名称必然无法命中原件。
+                "RESOLVE_RENAME_REVIEW",
                 # 用户已经明确要求对后端解析出的附件进行分类时，真实附件范围和
                 # extract-document-text 链路都是确定性硬约束，不能再让模型改选
                 # read-classification-taxonomy 只返回分类目录。
@@ -279,7 +285,8 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                     preflight_plan.intent == "EVIDENCE_ANSWER"
                     and has_explicit_filename_content_request(state["message"])
                 )
-                or preflight_plan.intent == "EVIDENCE_DISCOVERY"
+                or preflight_plan.intent
+                in {"EVIDENCE_DISCOVERY", "SPREADSHEET_DISCOVERY"}
             )
         ):
             # enabled 模式由 Catalog Planner 选择成熟 Tool；完整文件名构成后端已验证的硬对象范围，
@@ -686,6 +693,8 @@ def _deterministic_preflight_plan(
         state["message"]
     ):
         return plan
+    if plan.intent == "SPREADSHEET_DISCOVERY":
+        return plan
     return None
 
 
@@ -749,10 +758,11 @@ def _enforce_structured_extraction_goal(
     }
 
 
-def _verified_workspace_evidence_followup_plan(state: AgentGraphState):
-    """仅将 hybrid-search 的严格命中 ID 交给 evidence-answer。"""
+def _verified_workspace_followup_plan(state: AgentGraphState):
+    """仅将 hybrid-search 的严格命中 ID 交给目标读取或分析 Tool。"""
 
-    if str(state.get("intent") or "") != "EVIDENCE_DISCOVERY":
+    discovery_intent = str(state.get("intent") or "")
+    if discovery_intent not in {"EVIDENCE_DISCOVERY", "SPREADSHEET_DISCOVERY"}:
         return None
     if str(state.get("last_dispatch_tool_name") or "") != "hybrid-search":
         return None
@@ -768,6 +778,12 @@ def _verified_workspace_evidence_followup_plan(state: AgentGraphState):
     if not document_ids:
         return None
     slots = dict(state.get("slots") or {})
+    if discovery_intent == "SPREADSHEET_DISCOVERY":
+        return build_workspace_spreadsheet_followup_plan(
+            user_goal=str(state.get("message") or "分析工作区表格"),
+            question=str(slots.get("question") or state.get("message") or ""),
+            document_ids=document_ids,
+        )
     return build_workspace_evidence_followup_plan(
         user_goal=str(state.get("message") or "回答工作区文件问题"),
         question=str(slots.get("question") or state.get("message") or ""),
@@ -1465,6 +1481,19 @@ def observe_tool_result(
         _safe_tool_observation(item, tool_name=tool_name)
         for item in last_results
     ]
+    if (
+        str(state.get("intent") or "") == "SPREADSHEET_DISCOVERY"
+        and tool_name == "hybrid-search"
+    ):
+        # 表格发现链路只能授权真实电子表格进入下一轮。检索正文可能同时命中通知、
+        # 报告或附件说明；这些非表格文件不能成为 analyze-spreadsheet 的候选范围。
+        for raw_result, observation_item in zip(last_results, observation_items):
+            spreadsheet_ids = _spreadsheet_document_ids_from_search(raw_result)
+            observation_item["document_ids"] = spreadsheet_ids
+            observation_item["result_count"] = len(spreadsheet_ids)
+            observation_item["result_status"] = (
+                "MATCHED" if spreadsheet_ids else "ZERO_RESULTS"
+            )
     has_failed_result = any(
         item.get("ok") is False or str(item.get("status") or "").upper() == "FAILED"
         for item in last_results
@@ -1516,7 +1545,8 @@ def observe_tool_result(
         for observation_item in observation_items:
             observation_item["available_next_decisions"] = ["FINISH", "CLARIFY"]
     verified_workspace_answer_followup = (
-        str(state.get("intent") or "") == "EVIDENCE_DISCOVERY"
+        str(state.get("intent") or "")
+        in {"EVIDENCE_DISCOVERY", "SPREADSHEET_DISCOVERY"}
         and tool_name == "hybrid-search"
         and any(
             item.get("result_status") == "MATCHED"
@@ -1708,6 +1738,24 @@ def _observation_document_ids(
         values.append(result["document_id"])
     values.extend(item.get("document_id") for item in nested_extractions)
     return list(dict.fromkeys(str(value) for value in values if str(value)))[:50]
+
+
+def _spreadsheet_document_ids_from_search(result: Dict[str, Any]) -> List[str]:
+    """从严格命中的检索结果中只保留受支持电子表格的文档 ID。"""
+
+    document_ids: List[str] = []
+    for item in list(result.get("results") or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("relevance_tier") or "").upper() != "SUPPORTED":
+            continue
+        filename = str(item.get("filename") or item.get("relative_path") or "")
+        if Path(filename).suffix.lower() not in SUPPORTED_SPREADSHEET_SUFFIXES:
+            continue
+        document_id = str(item.get("document_id") or "")
+        if document_id and document_id not in document_ids:
+            document_ids.append(document_id)
+    return document_ids[:50]
 
 
 def _safe_nonnegative_int(value: Any) -> int | None:
@@ -1927,7 +1975,12 @@ def _aggregate_tool_results(
         allowed_document_ids=requested_document_ids or None,
     )
     insight_documents = _insight_documents_from_results(tool_results)
-    classification_documents = _classification_documents_from_results(tool_results)
+    show_classification_results = _should_classify_documents(state)
+    classification_documents = (
+        _classification_documents_from_results(tool_results)
+        if show_classification_results
+        else []
+    )
     return {
         "evidence_answer": _evidence_answer_from_results(tool_results),
         "spreadsheet_workbench_results": _spreadsheet_workbench_results_from_results(tool_results),
@@ -1936,7 +1989,8 @@ def _aggregate_tool_results(
             extraction_results=extraction_results,
             context_documents=context_documents,
             classification_service=classification_service,
-            include_categories=_should_classify_documents(state),
+            # 成功抽取后始终执行分类；响应层再独立判断是否需要向用户展示。
+            include_categories=True,
         ),
         "extraction_results": extraction_results,
         "insight_documents": insight_documents,
@@ -2016,11 +2070,35 @@ def _filesystem_job_from_results(tool_results: List[Dict[str, Any]]) -> Dict[str
 
 
 def _should_classify_documents(state: AgentGraphState) -> bool:
-    """判断本次文件读取是否需要执行和展示分类建议。"""
+    """判断当前用户任务是否要向前端展示分类建议。"""
 
-    requested_outputs = set(state.get("slots", {}).get("requested_outputs", []))
+    requested_outputs = {
+        str(item).lower()
+        for item in state.get("slots", {}).get("requested_outputs", [])
+        if str(item)
+    }
     intent = str(state.get("intent") or "").upper()
-    return "classification" in requested_outputs or "CLASSIFY" in intent
+    return (
+        any(item.startswith("classification") for item in requested_outputs)
+        or "CLASSIF" in intent
+    )
+
+
+def _document_results_for_response(
+    state: AgentGraphState,
+    document_results: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """仅在当前任务明确要求分类时展示后台分类事实。"""
+
+    if _should_classify_documents(state):
+        return document_results
+    projected: List[Dict[str, Any]] = []
+    for item in document_results:
+        safe_item = dict(item)
+        safe_item.pop("categories", None)
+        safe_item.pop("classification_reused", None)
+        projected.append(safe_item)
+    return projected
 
 
 def _spreadsheet_analysis_results_from_results(
@@ -2072,7 +2150,17 @@ def response(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
     deterministic_result = _deterministic_response(state, runtime)
     # 证据回答本身已经由 EvidenceAnswerService 使用原文证据和引用约束生成；再由通用回执模型改写会
     # 损失“回答—引用”对应关系，因此它是统一回执节点的受控例外。
-    if state.get("result_summary", {}).get("evidence_answer"):
+    if (
+        state.get("result_summary", {}).get("evidence_answer")
+        or _is_plain_ocr_text_request(
+            state=state,
+            extraction_results=state.get("result_summary", {}).get(
+                "extraction_results", []
+            ),
+        )
+    ):
+        # 纯 OCR 正文是用户明确请求的最终业务结果，不是需要再次概括的回执；若交给
+        # 通用回执 LLM 改写，可能丢字或把识别原文误写成摘要。
         return deterministic_result
     final_response = deterministic_result.get("final_response")
     if not final_response or runtime is None:
@@ -2173,7 +2261,10 @@ def _deterministic_response(
     ]
     if dispatch_rejections:
         # 调度限制属于安全边界，必须向用户明确说明；已经完成的文件仍保留逐文件回执。
-        document_results = result_summary.get("document_results", [])
+        document_results = _document_results_for_response(
+            state,
+            result_summary.get("document_results", []),
+        )
         completed_receipt = (
             _build_document_results_response(document_results)
             if document_results
@@ -2308,7 +2399,10 @@ def _deterministic_response(
             "final_response": None,
         }
 
-    document_results = result_summary.get("document_results", [])
+    document_results = _document_results_for_response(
+        state,
+        result_summary.get("document_results", []),
+    )
     if document_results:
         requested_outputs = set(state.get("slots", {}).get("requested_outputs", []))
         is_summary_intent = "SUMMAR" in str(state.get("intent") or "").upper()
@@ -2326,6 +2420,17 @@ def _deterministic_response(
                     document_results=document_results,
                     extraction_results=result_summary.get("extraction_results", []),
                 ),
+            }
+        plain_ocr_response = _build_plain_ocr_text_response(
+            state=state,
+            runtime=runtime,
+            extraction_results=result_summary.get("extraction_results", []),
+            document_results=document_results,
+        )
+        if plain_ocr_response is not None:
+            return {
+                "status": "COMPLETED",
+                "final_response": plain_ocr_response,
             }
         return {
             "status": "COMPLETED",
@@ -2512,6 +2617,114 @@ def _build_extraction_response(extraction_results: List[Dict[str, Any]]) -> str:
     if failed_messages:
         response_text += f" 另有 {len(failed_messages)} 个文件解析失败：{failed_messages[0]}。"
     return response_text
+
+
+def _is_plain_ocr_text_request(
+    *,
+    state: AgentGraphState,
+    extraction_results: List[Dict[str, Any]],
+) -> bool:
+    """判断本轮是否只需展示 OCR 识别正文，而不是生成带引用的证据结论。
+
+    是否真的调用 OCR 以持久化解析结果为准；同时排除总结、问答和分类，避免这些需要
+    原文依据的任务因为底层恰好使用 OCR 而丢失引用。
+    """
+
+    requested_outputs = {
+        str(item).lower()
+        for item in state.get("slots", {}).get("requested_outputs", [])
+        if str(item)
+    }
+    if "text" not in requested_outputs:
+        return False
+    if requested_outputs.intersection(
+        {"answer", "references", "summary", "classification", "structured_records"}
+    ):
+        return False
+    return any(
+        result.get("status") == "COMPLETED" and _extraction_used_ocr(result)
+        for result in extraction_results
+        if isinstance(result, dict)
+    )
+
+
+def _extraction_used_ocr(result: Dict[str, Any]) -> bool:
+    """依据解析 Profile 和受控解析器名称识别实际 OCR 执行结果。"""
+
+    read_profile = result.get("read_profile")
+    if isinstance(read_profile, dict) and read_profile.get("ocr_used") is True:
+        return True
+    extractor = str(result.get("extractor") or "").lower()
+    return "ocr" in extractor or "tencent_cloud_general_accurate" in extractor
+
+
+def _build_plain_ocr_text_response(
+    *,
+    state: AgentGraphState,
+    runtime: Runtime[AgentRuntimeContext] | None,
+    extraction_results: List[Dict[str, Any]],
+    document_results: List[Dict[str, Any]],
+) -> str | None:
+    """读取持久化页面并生成不附加证据卡的纯 OCR 正文结果。
+
+    这里展示的是用户要求识别的原文本身，不是系统据此推导出的结论，因此不再重复
+    生成“原文依据”。完整正文只在 response 节点临时读取，不进入 Tool 输出或
+    ``document_results``；测试或降级环境无法读取数据库时才使用受限预览。
+    """
+
+    if not _is_plain_ocr_text_request(
+        state=state,
+        extraction_results=extraction_results,
+    ):
+        return None
+
+    completed_results = [
+        item
+        for item in extraction_results
+        if isinstance(item, dict) and item.get("status") == "COMPLETED"
+    ]
+    extraction_run_ids = [
+        str(item.get("extraction_run_id") or "")
+        for item in completed_results
+        if item.get("extraction_run_id")
+    ]
+    full_texts: Dict[str, str] = {}
+    context_loader = (
+        getattr(runtime.context, "context_loader", None)
+        if runtime is not None
+        else None
+    )
+    if context_loader is not None and extraction_run_ids:
+        full_texts = context_loader.load_extraction_texts(
+            extraction_run_ids=extraction_run_ids
+        )
+
+    filenames = {
+        str(item.get("document_id") or ""): str(item.get("filename") or "").strip()
+        for item in document_results
+        if isinstance(item, dict)
+    }
+    blocks: List[str] = []
+    for result in completed_results:
+        run_id = str(result.get("extraction_run_id") or "")
+        text = str(full_texts.get(run_id) or "").strip()
+        if not text:
+            # 无数据库的 deterministic fake 仍可验证展示分支；生产运行会优先读取完整
+            # document_pages，不能把每页 300 字预览当作完整 OCR 事实。
+            text = "\n".join(
+                str(page.get("text_preview") or "").strip()
+                for page in result.get("pages", [])
+                if isinstance(page, dict) and str(page.get("text_preview") or "").strip()
+            ).strip()
+        filename = filenames.get(str(result.get("document_id") or ""), "")
+        blocks.append(
+            f"{filename}\n{text}" if filename and len(completed_results) > 1 else text
+        )
+
+    visible_blocks = [block for block in blocks if block]
+    if not visible_blocks:
+        return "OCR 识别已完成，但没有识别到可展示的文字。"
+    return "OCR 识别结果：\n\n" + "\n\n".join(visible_blocks)
 
 
 def _insight_documents_from_results(tool_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

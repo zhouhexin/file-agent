@@ -205,13 +205,13 @@ def test_upload_is_archived_then_imported_by_separate_jobs(monkeypatch, tmp_path
         db.close()
 
 
-def test_confidence_gated_upload_is_first_published_to_taxonomy_path(monkeypatch, tmp_path):
+def test_default_upload_is_classified_then_first_published_to_taxonomy_path(monkeypatch, tmp_path):
     """高可靠新上传必须从隐藏 ORGANIZING 一次发布到 taxonomy 主分类目录。"""
 
     _configure(monkeypatch, tmp_path)
-    monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "true")
-    monkeypatch.setenv("AUTO_INITIAL_PLACEMENT_ENABLED", "true")
-    monkeypatch.setenv("AUTO_CLASSIFICATION_SHADOW_MODE", "false")
+    monkeypatch.delenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", raising=False)
+    monkeypatch.delenv("AUTO_INITIAL_PLACEMENT_ENABLED", raising=False)
+    monkeypatch.delenv("AUTO_CLASSIFICATION_SHADOW_MODE", raising=False)
     monkeypatch.setenv("AUTO_CLASSIFICATION_FALLBACK_MARGIN", "0.01")
     config.get_settings.cache_clear()
     client, SessionLocal = client_with_database()
@@ -528,6 +528,107 @@ def test_uploaded_low_confidence_name_can_be_corrected_in_same_conversation(monk
     with SessionLocal() as db:
         working_copy = db.query(WorkingCopy).filter(WorkingCopy.status == "ACTIVE").one()
         assert working_copy.filename == "2026_用印申请单.docx"
+    clear_overrides()
+
+
+def test_explicit_re_rename_uses_current_working_copy_name(monkeypatch, tmp_path):
+    """工作副本改名后再说“重新命名为”时，不得按当前名称反查受管原件。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "explicit-current-working-copy-rename-owner")
+    original_name = "计算机科学与工程学院下载监控视频申请20250127.docx"
+    current_name = "2025_计算机科学与工程学院下载监控视频申请.docx"
+    target_name = "2025_计算机科学与工程学院下载监控视频申请1.docx"
+    uploaded = _upload(
+        client,
+        headers,
+        filename=original_name,
+        content=b"explicit-current-working-copy-rename-content",
+    )
+    _drain(SessionLocal)
+    working_copy = next(
+        item
+        for item in client.get("/api/working-copies", headers=headers).json()
+        if item["filename"] == original_name
+    )
+    first_plan = client.post(
+        "/api/operations/plans",
+        headers=headers,
+        json={
+            "conversation_id": "explicit-current-working-copy-rename-setup",
+            "operation_type": "RENAME_WORKING_COPIES",
+            "reason": "构造工作副本名称已不同于上传原件的回归场景",
+            "items": [
+                {
+                    "working_copy_id": working_copy["id"],
+                    "after": {"filename": current_name},
+                }
+            ],
+        },
+    )
+    assert first_plan.status_code == 200
+    first_confirmation = client.post(
+        f"/api/operations/plans/{first_plan.json()['id']}/confirm",
+        headers=headers,
+        json={"confirmation": "确认第一次重命名"},
+    )
+    assert first_confirmation.status_code == 200
+    assert first_confirmation.json()["status"] == "EXECUTED"
+
+    response = client.post(
+        "/api/conversations/explicit-current-working-copy-rename/messages",
+        headers=headers,
+        json={
+            "content": f"将 {current_name} 重新命名为 {target_name}",
+            "attachments": [],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    task_result = payload["task_result"]
+    assert task_result["response_type"] == "operation_plan"
+    plan_id = task_result["operation_plan_id"]
+    assert plan_id
+    with SessionLocal() as db:
+        run = db.get(AgentRun, task_result["task_id"])
+        assert run is not None
+        assert run.intent == "RESOLVE_RENAME_REVIEW"
+        invocations = (
+            db.query(ToolInvocation)
+            .filter(ToolInvocation.agent_run_id == run.id)
+            .order_by(ToolInvocation.created_at.asc())
+            .all()
+        )
+        assert [item.tool_name for item in invocations] == [
+            "resolve-rename-reviews"
+        ]
+    plan = client.get(f"/api/operations/plans/{plan_id}", headers=headers).json()
+    assert plan["items"][0]["before"]["filename"] == current_name
+    assert plan["items"][0]["after"]["filename"] == target_name
+
+    # 显式请求只生成受控计划；确认前工作副本和上传原件都不能被提前修改。
+    with SessionLocal() as db:
+        working_copy = db.query(WorkingCopy).filter(WorkingCopy.status == "ACTIVE").one()
+        assert working_copy.filename == current_name
+        upload_document = db.get(Document, uploaded["document_id"])
+        assert upload_document is not None
+        assert upload_document.original_filename == original_name
+
+    confirmation = client.post(
+        f"/api/operations/plans/{plan_id}/confirm",
+        headers=headers,
+        json={"confirmation": "确认重命名"},
+    )
+    assert confirmation.status_code == 200
+    assert confirmation.json()["status"] == "EXECUTED"
+    with SessionLocal() as db:
+        working_copy = db.query(WorkingCopy).filter(WorkingCopy.status == "ACTIVE").one()
+        assert working_copy.filename == target_name
+        upload_document = db.get(Document, uploaded["document_id"])
+        assert upload_document is not None
+        assert upload_document.original_filename == original_name
     clear_overrides()
 
 

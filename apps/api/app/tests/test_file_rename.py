@@ -904,6 +904,58 @@ def test_llm_planner_cannot_replace_backend_attachment_scope_for_rename():
     assert plan.steps[0].input == {"document_ids": ["backend-resolved-document"]}
 
 
+def test_explicit_re_rename_routes_to_controlled_working_copy_resolution():
+    """“将 A 重新命名为 B”必须进入显式工作副本改名，不能反查受管原始目录。"""
+
+    message = (
+        "将 2025_计算机科学与工程学院下载监控视频申请.docx "
+        "重新命名为 2025_计算机科学与工程学院下载监控视频申请1.docx"
+    )
+    deterministic = DeterministicPlanner().plan(
+        conversation_id="conversation-explicit-re-rename",
+        user_id="user-explicit-re-rename",
+        message_id="message-explicit-re-rename",
+        message=message,
+        attachments=[],
+    )
+    adaptive = build_plan_from_user_intent(
+        intent_plan=UserIntentPlan(
+            intent="SUGGEST_RENAME",
+            user_goal=message,
+            required_capabilities=["suggest_rename"],
+            tool_plan_hint=["generate-rename-suggestions"],
+            managed_filename_contains=(
+                "2025_计算机科学与工程学院下载监控视频申请"
+            ),
+        ),
+        message=message,
+        attachments=[],
+    )
+
+    for plan in (deterministic, adaptive):
+        assert plan.intent == "RESOLVE_RENAME_REVIEW"
+        assert [step.tool_name for step in plan.steps] == ["resolve-rename-reviews"]
+        assert plan.steps[0].input == {"message": message}
+
+
+def test_uploaded_attachment_rename_suggestion_route_is_unchanged():
+    """本修复不能改变上传附件的自动命名建议入口及其 document_id 边界。"""
+
+    plan = DeterministicPlanner().plan(
+        conversation_id="conversation-upload-rename-regression",
+        user_id="user-upload-rename-regression",
+        message_id="message-upload-rename-regression",
+        message="按年份和正文标题重命名这个文件",
+        attachments=[{"document_id": "uploaded-document-regression"}],
+    )
+
+    assert plan.intent == "SUGGEST_RENAME"
+    assert [step.tool_name for step in plan.steps] == ["generate-rename-suggestions"]
+    assert plan.steps[0].input == {
+        "document_ids": ["uploaded-document-regression"]
+    }
+
+
 def test_uploaded_attachment_rename_confirms_into_private_temporary_path(monkeypatch, tmp_path):
     """上传附件确认后只改临时存储名称；共享物理对象必须写时复制并保留其他用户文件。"""
 

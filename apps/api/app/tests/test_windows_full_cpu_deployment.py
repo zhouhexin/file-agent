@@ -138,6 +138,9 @@ def test_api_image_installs_programs_and_preloads_every_required_model() -> None
     assert '"memory_gb": 32' in preloader
     assert "git-lfs" in dockerfile
     assert "from=local-model-cache" in dockerfile
+    assert "/var/cache/file-agent-paddlex-models" in dockerfile
+    assert "PaddleOCR-VL-1.6-0.9B" in dockerfile
+    assert "ln -s PaddleOCR-VL-1.6" in dockerfile
     assert dockerfile.count("preload_models.py") >= 7
     assert "snapshot_download" not in preloader
     assert "DOCLING_REPOSITORIES" in preloader

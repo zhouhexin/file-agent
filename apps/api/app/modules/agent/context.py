@@ -54,7 +54,11 @@ class AgentContextLoader:
         ]
 
     def load_extraction_texts(self, *, extraction_run_ids: List[str]) -> Dict[str, str]:
-        """按解析运行读取已持久化的完整页面正文，用作分类依据。"""
+        """按解析运行读取已持久化的完整页面正文。
+
+        完整正文只在运行时按明确业务需要读取，例如纯 OCR 结果展示或后续证据处理；调用方
+        不得把它写入 Tool 输出、日志或通用 ``document_results``。
+        """
 
         if self.db is None or not extraction_run_ids:
             return {}
