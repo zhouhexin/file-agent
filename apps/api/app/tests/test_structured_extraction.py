@@ -62,7 +62,8 @@ from app.modules.structured_extraction.pp_structure_provider import (
 )
 from app.modules.structured_extraction.repository import StructuredExtractionRepository
 from app.modules.structured_extraction.schemas import CandidateExtraction, StructuredExtractionResult
-from app.modules.structured_extraction.service import StructuredExtractionService
+from app.modules.structured_extraction.service import StructuredExtractionService, _build_layout_provider
+from app.modules.structured_extraction.tencent_cloud_table_provider import TencentCloudTableOcrProvider
 from app.modules.structured_extraction.vision_provider import (
     PaddleOcrVlVisionRetryProvider,
     VisionTextBlock,
@@ -72,6 +73,28 @@ from app.modules.structured_extraction.worker import (
     _resume_agent_run,
     fail_structured_extraction_agent_run,
 )
+
+
+def test_layout_provider_factory_selects_tencent_table_provider():
+    """结构化抽取选择腾讯云表格 Provider 时不应初始化 Paddle pipeline。"""
+
+    settings = SimpleNamespace(
+        structured_extraction_layout_provider="tencent_cloud_table",
+        tencent_cloud_ocr_secret_id="secret-id",
+        tencent_cloud_ocr_secret_key="secret-key",
+        tencent_cloud_ocr_region="ap-guangzhou",
+        tencent_cloud_ocr_endpoint="ocr.tencentcloudapi.com",
+        tencent_cloud_ocr_timeout_seconds=30,
+        tencent_cloud_ocr_max_retries=2,
+        tencent_cloud_ocr_max_image_bytes=10 * 1024 * 1024,
+        tencent_cloud_table_ocr_max_qps=2,
+        ocr_external_content_authorized=True,
+    )
+
+    provider = _build_layout_provider(settings=settings)
+
+    assert isinstance(provider, TencentCloudTableOcrProvider)
+    assert provider.name == "tencent_cloud_table"
 
 
 def test_dynamic_schema_rejects_extra_prompt_and_invalid_retry_targets():
@@ -119,6 +142,23 @@ def test_catalog_only_exposes_skill_when_deployment_enables_real_tool(monkeypatc
     enabled = AgentCatalogService(registry=ToolRegistry()).build_snapshot()
     assert "image-structured-extraction" in enabled["enabled_skill_ids"]
     assert "extract-image-structured-data" in enabled["enabled_tool_names"]
+
+    monkeypatch.setenv("STRUCTURED_EXTRACTION_LAYOUT_PROVIDER", "tencent_cloud_table")
+    monkeypatch.setenv("PP_STRUCTURE_ENABLED", "false")
+    monkeypatch.setenv("OCR_EXTERNAL_CONTENT_AUTHORIZED", "false")
+    monkeypatch.delenv("TENCENT_CLOUD_OCR_SECRET_ID", raising=False)
+    monkeypatch.delenv("TENCENT_CLOUD_OCR_SECRET_KEY", raising=False)
+    config.get_settings.cache_clear()
+    unavailable = AgentCatalogService(registry=ToolRegistry()).build_snapshot()
+    assert "extract-image-structured-data" not in unavailable["enabled_tool_names"]
+
+    monkeypatch.setenv("OCR_EXTERNAL_CONTENT_AUTHORIZED", "true")
+    monkeypatch.setenv("TENCENT_CLOUD_OCR_SECRET_ID", "test-secret-id")
+    monkeypatch.setenv("TENCENT_CLOUD_OCR_SECRET_KEY", "test-secret-key")
+    config.get_settings.cache_clear()
+    tencent_enabled = AgentCatalogService(registry=ToolRegistry()).build_snapshot()
+    assert "image-structured-extraction" in tencent_enabled["enabled_skill_ids"]
+    assert "extract-image-structured-data" in tencent_enabled["enabled_tool_names"]
 
 
 def test_structured_goal_guard_rejects_basic_insight_substitution():
@@ -1419,7 +1459,9 @@ def test_async_failure_persists_run_and_failure_changeset():
         model_name="fake",
         prompt_version="v1",
         retry_strategy="INITIAL",
-        status="PENDING",
+        status="FAILED",
+        error_code="OCR_PROVIDER_TEMPORARY_FAILURE",
+        error_message="腾讯云 OCR 暂时不可用，请稍后重试。",
     )
     invocation = ToolInvocation(
         id="invocation-failed",
@@ -1450,13 +1492,16 @@ def test_async_failure_persists_run_and_failure_changeset():
     db.flush()
 
     assert structured_run.status == "FAILED"
+    assert structured_run.error_code == "OCR_PROVIDER_TEMPORARY_FAILURE"
     assert agent_run.status == "FAILED"
     assert invocation.status == "FAILED"
+    assert invocation.output_json["error"]["code"] == "OCR_PROVIDER_TEMPORARY_FAILURE"
     assert agent_run.changeset_id == invocation.changeset_id
     failure = db.query(ChangeItem).filter(
         ChangeItem.change_type == "STRUCTURED_EXTRACTION_FAILED"
     ).one()
     assert failure.after_value_json["original_unchanged"] is True
+    assert failure.after_value_json["error_code"] == "OCR_PROVIDER_TEMPORARY_FAILURE"
 
     structured_run.status = "COMPLETED"
     _resume_agent_run(

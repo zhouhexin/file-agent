@@ -109,10 +109,22 @@ class AgentCatalogService:
                 continue
             if manifest.deployment_gate == "structured_extraction":
                 settings = get_settings()
-                if not (
-                    settings.structured_extraction_enabled
-                    and settings.pp_structure_enabled
-                ):
+                provider = str(
+                    getattr(
+                        settings,
+                        "structured_extraction_layout_provider",
+                        "pp_structure_v3",
+                    )
+                )
+                provider_ready = (
+                    provider == "pp_structure_v3" and settings.pp_structure_enabled
+                ) or (
+                    provider == "tencent_cloud_table"
+                    and settings.ocr_external_content_authorized
+                    and bool(settings.tencent_cloud_ocr_secret_id)
+                    and bool(settings.tencent_cloud_ocr_secret_key)
+                )
+                if not (settings.structured_extraction_enabled and provider_ready):
                     continue
             unknown_tools = sorted(
                 set(manifest.allowed_tools) - known_tool_names

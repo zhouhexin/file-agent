@@ -3813,7 +3813,24 @@ def _build_mvp_tools(
             output_model=StructuredExtractionToolOutput,
             adaptive_ready=(
                 get_settings().structured_extraction_enabled
-                and get_settings().pp_structure_enabled
+                and (
+                    (
+                        getattr(get_settings(), "structured_extraction_layout_provider", "pp_structure_v3")
+                        == "pp_structure_v3"
+                        and get_settings().pp_structure_enabled
+                    )
+                    or (
+                        getattr(
+                            get_settings(),
+                            "structured_extraction_layout_provider",
+                            "pp_structure_v3",
+                        )
+                        == "tencent_cloud_table"
+                        and get_settings().ocr_external_content_authorized
+                        and bool(get_settings().tencent_cloud_ocr_secret_id)
+                        and bool(get_settings().tencent_cloud_ocr_secret_key)
+                    )
+                )
             ),
             observation_policy="PLANNER_AFTER_EXECUTION",
             risk_level="medium",

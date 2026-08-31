@@ -296,6 +296,20 @@ def test_settings_loads_tencent_cloud_ocr_provider_options(monkeypatch, tmp_path
     assert settings.tencent_cloud_ocr_action == "GeneralAccurateOCR"
 
 
+def test_settings_loads_tencent_cloud_table_layout_provider(monkeypatch, tmp_path):
+    """结构化抽取可以独立选择腾讯云表格版面 Provider。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.setenv("STRUCTURED_EXTRACTION_LAYOUT_PROVIDER", "tencent_cloud_table")
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.structured_extraction_layout_provider == "tencent_cloud_table"
+    assert settings.tencent_cloud_table_ocr_max_qps == 2
+
+
 def test_settings_loads_legacy_office_conversion_options(monkeypatch, tmp_path):
     """旧版 Office 转换配置必须由统一 Settings 读取。"""
 

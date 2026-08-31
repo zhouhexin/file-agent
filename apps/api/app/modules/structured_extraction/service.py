@@ -49,6 +49,10 @@ from app.modules.structured_extraction.pp_structure_provider import (
     LayoutParsingProviderProtocol,
     PpStructureV3Provider,
 )
+from app.modules.structured_extraction.tencent_cloud_table_provider import (
+    TencentCloudTableOcrError,
+    TencentCloudTableOcrProvider,
+)
 from app.modules.structured_extraction.repository import StructuredExtractionRepository
 from app.modules.structured_extraction.schemas import (
     CandidateExtraction,
@@ -79,7 +83,7 @@ class _VisionCrop:
 
 
 class StructuredExtractionService:
-    """受控执行 PP-StructureV3 与动态字段映射的应用服务。"""
+    """受控执行版面 Provider 与动态字段映射的应用服务。"""
 
     def __init__(
         self,
@@ -100,7 +104,7 @@ class StructuredExtractionService:
         self.conversation_id = conversation_id
         self.agent_run_id = agent_run_id
         self.settings = settings or get_settings()
-        self.layout_provider = layout_provider or PpStructureV3Provider(settings=self.settings)
+        self.layout_provider = layout_provider or _build_layout_provider(settings=self.settings)
         self.extraction_provider = extraction_provider or build_structured_extraction_provider(
             settings=self.settings
         )
@@ -140,12 +144,22 @@ class StructuredExtractionService:
     def enqueue(self, tool_input: StructuredImageExtractionInput) -> dict[str, Any]:
         """校验授权文件，创建或复用运行，并提交独立推理队列。"""
 
-        if not self.settings.structured_extraction_enabled or not self.settings.pp_structure_enabled:
+        if not self.settings.structured_extraction_enabled or not _layout_provider_enabled(self.settings):
             return _failure_output(
                 document_id=tool_input.document_id,
                 code="STRUCTURED_EXTRACTION_DISABLED",
                 message="图片结构化抽取尚未由部署启用。",
             )
+        layout_provider = getattr(self, "layout_provider", None)
+        if isinstance(layout_provider, TencentCloudTableOcrProvider):
+            try:
+                layout_provider.validate_configuration()
+            except TencentCloudTableOcrError as exc:
+                return _failure_output(
+                    document_id=tool_input.document_id,
+                    code=exc.code,
+                    message=str(exc),
+                )
         if len(tool_input.fields) > self.settings.structured_extraction_max_fields:
             return _failure_output(
                 document_id=tool_input.document_id,
@@ -299,7 +313,7 @@ class StructuredExtractionService:
         )
         layout = self.layout_provider.parse(file_path=source_path)
         if not layout.pages:
-            raise RuntimeError("PP-StructureV3 未返回可用页面。")
+            raise RuntimeError("版面解析 Provider 未返回可用页面。")
         layout_run, elements = self.repository.create_layout_extraction(
             run=run,
             layout=layout,
@@ -1094,6 +1108,24 @@ def _limit_image_pixels(image: Image.Image, *, maximum: int) -> Image.Image:
         (max(1, int(image.width * factor)), max(1, int(image.height * factor))),
         Image.Resampling.LANCZOS,
     )
+
+
+def _layout_provider_enabled(settings: Settings) -> bool:
+    """判断结构化版面 Provider 是否已由部署显式启用。"""
+
+    provider = str(getattr(settings, "structured_extraction_layout_provider", "pp_structure_v3"))
+    if provider == "tencent_cloud_table":
+        return True
+    return provider == "pp_structure_v3" and bool(getattr(settings, "pp_structure_enabled", False))
+
+
+def _build_layout_provider(*, settings: Settings) -> LayoutParsingProviderProtocol:
+    """按配置构造 PP-Structure 或腾讯云表格版面 Provider。"""
+
+    provider = str(getattr(settings, "structured_extraction_layout_provider", "pp_structure_v3"))
+    if provider == "tencent_cloud_table":
+        return TencentCloudTableOcrProvider(settings=settings)
+    return PpStructureV3Provider(settings=settings)
 
 
 def structured_extraction_fingerprint(tool_input: StructuredImageExtractionInput) -> str:

@@ -55,6 +55,7 @@ class LayoutPage(BaseModel):
     width: int | None = Field(default=None, ge=1)
     height: int | None = Field(default=None, ge=1)
     rotation: float = 0
+    provider_request_id: str | None = Field(default=None, max_length=128)
     elements: list[LayoutElement] = Field(default_factory=list)
 
 

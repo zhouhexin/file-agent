@@ -282,6 +282,9 @@ OCR_LLM_FALLBACK_QUALITY_THRESHOLD=0.68
 DOCLING_ENABLED=true
 DOCLING_FORMATS=pdf,docx
 DOCLING_OCR_ENABLED=false
+# 图片/扫描 PDF 表格结构 Provider：pp_structure_v3 或 tencent_cloud_table。
+STRUCTURED_EXTRACTION_LAYOUT_PROVIDER=tencent_cloud_table
+TENCENT_CLOUD_TABLE_OCR_MAX_QPS=2
 ```
 
 当前客户端调用 OpenAI-compatible `/chat/completions` 接口，并要求模型返回符合 `UserIntentPlan` 的 JSON 对象。上传阶段的 deterministic ingest 不依赖 LLM；对话阶段启用 LLM 后，会先理解用户需求，再通过白名单 Tool 读取 `document_insights` 或执行后续受控工具。
@@ -365,7 +368,7 @@ LexRank 选择可定位原文句子，不下载模型、不要求 GPU，也不�
 
 本次基础 OCR Provider 切换不新增数据库表或字段，不需要单独执行数据库迁移；部署时需要先安装更新后的 `requirements.txt`，再修改真实 `.env` 并重启 API、SOURCE_ANALYSIS/ANALYSIS worker。受管源文件若已有旧 OCR 解析结果，会按新解析指纹异步重建，不需要删除历史页面或解析运行。
 
-PDF、DOCX 默认使用 Docling 进行本地结构化解析，并将标题、章节、正文、页眉页脚和位置元素写入 `document_elements`。腾讯云基础 OCR 上线时必须保持 `DOCLING_OCR_ENABLED=false`，否则扫描 PDF 可能先由 Docling 本地 OCR 处理而不会进入腾讯云；Docling 缺失、转换失败或正文为空时自动回退现有 PyMuPDF/python-docx 解析器。PP-StructureV3 和 PaddleOCR-VL 属于独立的表格/结构化抽取能力，不受 `OCR_PROVIDER` 替换影响。
+PDF、DOCX 默认使用 Docling 进行本地结构化解析，并将标题、章节、正文、页眉页脚和位置元素写入 `document_elements`。腾讯云基础 OCR 上线时必须保持 `DOCLING_OCR_ENABLED=false`，否则扫描 PDF 可能先由 Docling 本地 OCR 处理而不会进入腾讯云；Docling 缺失、转换失败或正文为空时自动回退现有 PyMuPDF/python-docx 解析器。表格结构抽取通过 `STRUCTURED_EXTRACTION_LAYOUT_PROVIDER` 选择：`pp_structure_v3` 继续使用本地 PP-StructureV3，`tencent_cloud_table` 使用腾讯云 `RecognizeTableAccurateOCR` 按页返回单元格、行列索引和坐标。腾讯云表格 Provider 复用 `OCR_EXTERNAL_CONTENT_AUTHORIZED` 与腾讯云凭证，未授权时关闭式失败，不回退本地模型；字段归一化、证据校验和导出仍由 `StructuredExtractionService` 完成。
 
 升级到结构化解析版本后，在仓库根目录执行：
 

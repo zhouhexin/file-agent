@@ -38,7 +38,7 @@ def process_structured_extraction_job(*, db: Any, job: FilesystemJob) -> None:
     except Exception as exc:
         service.repository.fail_run(
             run=run,
-            code=exc.__class__.__name__,
+            code=str(getattr(exc, "code", "") or exc.__class__.__name__),
             message="图片结构化抽取执行失败，请稍后重试或联系管理员。",
         )
         raise
@@ -82,8 +82,10 @@ def fail_structured_extraction_agent_run(
         "NEEDS_REVIEW",
     }:
         structured_run.status = "FAILED"
-        structured_run.error_code = "STRUCTURED_EXTRACTION_ASYNC_FAILED"
-        structured_run.error_message = error_message[:2000]
+        structured_run.error_code = (
+            structured_run.error_code or "STRUCTURED_EXTRACTION_ASYNC_FAILED"
+        )
+        structured_run.error_message = structured_run.error_message or error_message[:2000]
         structured_run.updated_at = utcnow()
     agent_run_id = str(payload.get("agent_run_id") or "")
     run = db.get(AgentRun, agent_run_id) if agent_run_id else None
@@ -91,11 +93,16 @@ def fail_structured_extraction_agent_run(
         return True
     changeset_id = None
     if structured_run is not None:
+        failure_code = (
+            structured_run.error_code or "STRUCTURED_EXTRACTION_ASYNC_FAILED"
+        )
         changeset_id = StructuredExtractionRepository(db).record_failure_changeset(
             run=structured_run,
             agent_run=run,
-            error_code="STRUCTURED_EXTRACTION_ASYNC_FAILED",
+            error_code=failure_code,
         )
+    else:
+        failure_code = "STRUCTURED_EXTRACTION_ASYNC_FAILED"
     invocation = _structured_invocation(db=db, agent_run_id=run.id)
     if invocation is not None:
         invocation.status = "FAILED"
@@ -106,7 +113,7 @@ def fail_structured_extraction_agent_run(
             "status": "FAILED",
             "changeset_id": changeset_id,
             "error": {
-                "code": "STRUCTURED_EXTRACTION_ASYNC_FAILED",
+                "code": failure_code,
                 "message": error_message,
                 "retryable": False,
                 "user_action_required": False,

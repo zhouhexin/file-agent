@@ -174,6 +174,7 @@ class StructuredExtractionRepository:
                         "width": page.width,
                         "height": page.height,
                         "rotation": page.rotation,
+                        "provider_request_id": page.provider_request_id,
                         "read_quality": "GOOD" if page_text else "PARTIAL",
                     },
                 )

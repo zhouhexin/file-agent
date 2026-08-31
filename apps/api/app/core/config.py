@@ -40,6 +40,7 @@ DEFAULT_TENCENT_CLOUD_OCR_TIMEOUT_SECONDS = 30
 DEFAULT_TENCENT_CLOUD_OCR_MAX_RETRIES = 2
 DEFAULT_TENCENT_CLOUD_OCR_MAX_QPS = 2
 DEFAULT_TENCENT_CLOUD_OCR_MAX_IMAGE_BYTES = 10 * 1024 * 1024
+DEFAULT_TENCENT_CLOUD_TABLE_OCR_MAX_QPS = 2
 DEFAULT_DOCLING_FORMATS = ("pdf", "docx")
 DEFAULT_FILE_RENAME_EXECUTOR = "native"
 DEFAULT_FILE_RENAME_PARSE_MODE = "hybrid"
@@ -240,6 +241,7 @@ class Settings(BaseModel):
     tencent_cloud_ocr_max_retries: int = DEFAULT_TENCENT_CLOUD_OCR_MAX_RETRIES
     tencent_cloud_ocr_max_qps: int = DEFAULT_TENCENT_CLOUD_OCR_MAX_QPS
     tencent_cloud_ocr_max_image_bytes: int = DEFAULT_TENCENT_CLOUD_OCR_MAX_IMAGE_BYTES
+    tencent_cloud_table_ocr_max_qps: int = DEFAULT_TENCENT_CLOUD_TABLE_OCR_MAX_QPS
     ocr_local_fallback_enabled: bool = False
     ocr_paddle_model_source: str = DEFAULT_OCR_PADDLE_MODEL_SOURCE
     ocr_llm_enabled: bool = False
@@ -263,6 +265,7 @@ class Settings(BaseModel):
     pp_structure_max_image_pixels: int = DEFAULT_PP_STRUCTURE_MAX_IMAGE_PIXELS
     pp_structure_max_pdf_pages: int = DEFAULT_PP_STRUCTURE_MAX_PDF_PAGES
     structured_extraction_enabled: bool = False
+    structured_extraction_layout_provider: str = "pp_structure_v3"
     structured_extraction_llm_provider: str = "disabled"
     structured_extraction_llm_base_url: str = ""
     structured_extraction_llm_api_key: str = ""
@@ -851,6 +854,12 @@ def get_settings() -> Settings:
             minimum=1_024,
             maximum=10 * 1024 * 1024,
         ),
+        tencent_cloud_table_ocr_max_qps=_bounded_int_env(
+            "TENCENT_CLOUD_TABLE_OCR_MAX_QPS",
+            DEFAULT_TENCENT_CLOUD_TABLE_OCR_MAX_QPS,
+            minimum=1,
+            maximum=20,
+        ),
         ocr_local_fallback_enabled=os.getenv(
             "OCR_LOCAL_FALLBACK_ENABLED", "false"
         ).lower() == "true",
@@ -920,6 +929,11 @@ def get_settings() -> Settings:
             "STRUCTURED_EXTRACTION_ENABLED", "false"
         ).lower()
         == "true",
+        structured_extraction_layout_provider=_choice(
+            os.getenv("STRUCTURED_EXTRACTION_LAYOUT_PROVIDER", "pp_structure_v3"),
+            allowed={"pp_structure_v3", "tencent_cloud_table", "disabled"},
+            default="pp_structure_v3",
+        ),
         structured_extraction_llm_provider=_choice(
             os.getenv("STRUCTURED_EXTRACTION_LLM_PROVIDER", "disabled"),
             allowed={"disabled", "openai_compatible"},

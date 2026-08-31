@@ -1,8 +1,8 @@
 # 腾讯云 OCR Provider 替换实施方案
 
-> 状态：基础通用文字识别已实施，腾讯云表格识别待实施  
-> 更新日期：2026-08-29  
-> 适用范围：File Agent 图片、扫描 PDF 的基础 OCR，以及后续可选的表格 OCR
+> 状态：基础通用文字识别与腾讯云表格识别适配器已实施
+> 更新日期：2026-08-31
+> 适用范围：File Agent 图片、扫描 PDF 的基础 OCR 与表格结构 OCR
 
 ## 1. 结论
 
@@ -18,9 +18,9 @@
 - 原生 PDF、DOCX、XLSX、TXT 等已有正文的文件：仍使用确定性本地解析器，不调用 OCR。
 - 分类、摘要、Chunk 和检索：继续消费 `document_pages.text_content`，无需知道 OCR Provider。
 
-腾讯云基础 OCR 不等于现有 PP-StructureV3 表格结构恢复。要完全移除 Paddle 相关能力，还需要在
-第二阶段为 `RecognizeTableAccurateOCR`（表格识别 V3）增加独立表格 Provider；在此之前不能把
-通用 OCR 的纯文本结果冒充表格单元格结构。
+腾讯云基础 OCR 不等于表格结构恢复。本次已增加独立的 `TencentCloudTableOcrProvider`，通过
+`RecognizeTableAccurateOCR` 返回可定位单元格、行列索引和表格 ID；不能把通用 OCR 的纯文本结果冒充
+表格单元格结构。PP-StructureV3 仍可作为显式配置的本地 Provider。
 
 ## 2. 当前代码依据
 
@@ -65,7 +65,7 @@ extract-document-text
 腾讯云官方限制要求以接口文档为准。当前高精度接口要求图片编码后不超过 10 MB，支持 PNG、JPG、
 JPEG、BMP。项目必须在发送前校验真实 MIME、编码后大小和页面尺寸，不能只相信扩展名。
 
-### 3.2 第二阶段：表格 OCR
+### 3.2 表格 OCR
 
 使用 `RecognizeTableAccurateOCR`：
 
@@ -74,8 +74,9 @@ JPEG、BMP。项目必须在发送前校验真实 MIME、编码后大小和页�
 - 官方默认频率限制为 2 次/秒，因此必须使用独立并发预算。
 - 腾讯云返回的 Excel Base64 只能作为派生件候选，不能覆盖原文件。
 
-第一阶段上线时可以继续保留 PP-StructureV3 处理用户明确要求的结构化表格抽取；如果要求所有 OCR
-都不再使用 Paddle，则必须完成第二阶段后再关闭 PP-StructureV3 和 PaddleOCR-VL。
+表格结构抽取通过 `STRUCTURED_EXTRACTION_LAYOUT_PROVIDER=tencent_cloud_table` 显式切换；如果要求
+所有图片能力都不再使用 Paddle，可在腾讯云表格 Provider 烟测通过后关闭 `PP_STRUCTURE_ENABLED` 与
+`STRUCTURED_EXTRACTION_VISION_PROVIDER`。
 
 ## 4. 统一名词与目标架构
 
@@ -86,6 +87,8 @@ JPEG、BMP。项目必须在发送前校验真实 MIME、编码后大小和页�
 - **本地 OCR Provider**：现有 `PaddleOcrProvider`。
 - **表格 OCR Provider**：负责恢复单元格结构，不与基础 OCR Provider 混用。
 - **OCR 外发授权**：部署级明确配置，允许把页面图片发送到腾讯云 OCR。
+- **腾讯云表格 OCR Provider**：`TencentCloudTableOcrProvider`，调用 `RecognizeTableAccurateOCR`
+  并返回单元格结构。
 
 目标调用链：
 
@@ -139,16 +142,27 @@ DOCLING_OCR_ENABLED=false
 `DOCLING_OCR_ENABLED=true` 时，Docling 可能先在本地完成扫描 PDF OCR，腾讯云 Provider 不会被调用。
 Docling 本身仍可保留，用于读取 PDF/DOCX 原生结构。
 
-若第一阶段继续保留本地结构化表格能力：
+若继续保留本地结构化表格能力：
 
 ```dotenv
 PP_STRUCTURE_ENABLED=true
 STRUCTURED_EXTRACTION_VISION_PROVIDER=paddleocr_vl
 ```
 
-若要求所有图片能力都不再使用 Paddle，在腾讯云表格 Provider 完成前应关闭：
+使用腾讯云表格结构识别时：
 
 ```dotenv
+STRUCTURED_EXTRACTION_ENABLED=true
+STRUCTURED_EXTRACTION_LAYOUT_PROVIDER=tencent_cloud_table
+TENCENT_CLOUD_TABLE_OCR_MAX_QPS=2
+PP_STRUCTURE_ENABLED=false
+STRUCTURED_EXTRACTION_VISION_PROVIDER=disabled
+```
+
+如果暂时不使用腾讯云表格 Provider，应关闭结构化抽取：
+
+```dotenv
+STRUCTURED_EXTRACTION_ENABLED=false
 PP_STRUCTURE_ENABLED=false
 STRUCTURED_EXTRACTION_VISION_PROVIDER=disabled
 ```
@@ -168,7 +182,7 @@ STRUCTURED_EXTRACTION_VISION_PROVIDER=disabled
 
 两个包应使用兼容版本。测试不能调用真实腾讯云。
 
-### 6.2 Provider 文件
+### 6.2 基础 OCR Provider 文件
 
 新增：
 
@@ -228,7 +242,32 @@ class TencentCloudOcrProvider:
 }
 ```
 
-### 6.3 Provider Factory
+### 6.3 腾讯云表格 OCR Provider
+
+新增：
+
+```text
+apps/api/app/modules/structured_extraction/tencent_cloud_table_provider.py
+```
+
+`TencentCloudTableOcrProvider` 实现 `LayoutParsingProviderProtocol`，按页将图片或扫描 PDF 渲染页
+编码为 `ImageBase64`，调用 `RecognizeTableAccurateOCR`。Provider 将
+`TableDetections[].Cells[]` 转换为 `LayoutElement(element_type="table_cell")`，保留：
+
+- `Text` -> 单元格文本；
+- `RowTl`/`RowBr`、`ColTl`/`ColBr` -> 0 起始的行列范围；
+- `Polygon`/`ItemPolygon` -> 页面坐标 bbox；
+- `Confidence` -> 0~1 置信度；
+- 腾讯云未返回表格 ID 时，由适配器按页面内表格顺序生成本次解析使用的稳定表格 ID。
+- `RequestId` -> 页面元数据中的腾讯云请求 ID，用于运维关联，不写入普通 Agent 回复。
+
+结构化抽取服务通过 `STRUCTURED_EXTRACTION_LAYOUT_PROVIDER` 选择该 Provider。它复用腾讯云基础 OCR
+的凭证、外发授权、MIME 校验、图片预处理和错误映射，但使用独立的 `TENCENT_CLOUD_TABLE_OCR_MAX_QPS`
+进程内 QPS 预算；未授权、超限、
+鉴权失败和无表格结果均产生可审计的稳定错误或 warning，不回退到 PaddleOCR。后续字段映射、证据
+校验、敏感字段遮罩和 CSV/XLSX 导出仍由现有 `StructuredExtractionService` 负责。
+
+### 6.4 基础 OCR Provider Factory
 
 修改 `build_default_ocr_service()`：
 
@@ -250,7 +289,7 @@ OCR_PROVIDER=tencent_cloud
 如 `OCR_LOCAL_FALLBACK_ENABLED=true`，腾讯云的可重试技术失败最终仍失败后才调用本地 Provider，并在
 结果中写入 `is_fallback=true` 和 `fallback_from=tencent_cloud_general_accurate`。
 
-### 6.4 页面元数据
+### 6.5 页面元数据
 
 扩展 `_page_from_ocr_result()`，持久化以下轻量审计字段：
 
@@ -267,7 +306,7 @@ ocr_blocks
 
 正文仍只进入 `document_pages.text_content`。普通日志和 AgentGraphState 不保存 OCR 正文、Base64 或坐标全集。
 
-### 6.5 解析复用指纹
+### 6.6 解析复用指纹
 
 必须修改 `extraction_config_hash()`，将以下内容纳入图片和可能进入 OCR 的 PDF 指纹：
 
@@ -349,9 +388,9 @@ local-fallback=0
 - 表格标题与表头层级。
 - 公式、印章、图表和字段级业务结构。
 
-第二阶段应新增 `TencentCloudTableOcrProvider`，把 `RecognizeTableAccurateOCR.TableDetections[].Cells`
-映射到现有结构化抽取 schema。腾讯返回的表格坐标、行列范围和单元格文本属于确定性 Tool 输出；LLM
-只能在这些已验证结果上做字段映射和总结，不能自行补造单元格。
+`TencentCloudTableOcrProvider` 把 `RecognizeTableAccurateOCR.TableDetections[].Cells` 映射到现有
+结构化抽取 schema。腾讯返回的表格坐标、行列范围和单元格文本属于确定性 Tool 输出；LLM 只能在这些
+已验证结果上做字段映射和总结，不能自行补造单元格。
 
 ## 10. 测试方案
 
@@ -369,6 +408,8 @@ local-fallback=0
 10. Provider 配置变化会改变 `parser_config_hash`，不会复用旧 PaddleOCR 结果。
 11. 原生文本 PDF 不调用腾讯云。
 12. 本地 fallback 默认关闭，显式开启后才允许执行。
+13. 表格 Provider 正确映射单元格、行列、坐标、置信度和多页输入。
+14. 表格 Provider 未授权、超限和限流错误按稳定错误码处理。
 
 上线前使用已脱敏且获得授权的代表性材料做人工烟测，至少覆盖：
 
@@ -416,11 +457,12 @@ local-fallback=0
 3. 再将生产环境 `OCR_PROVIDER` 切换为 `tencent_cloud`。
 4. 历史文件按访问触发或后台低优先级批次重新 OCR，不在服务启动时同步重跑全部文件。
 
-### 阶段四：腾讯云表格 Provider
+### 阶段四：腾讯云表格 Provider（已实施）
 
-1. 实现 `RecognizeTableAccurateOCR` 适配器。
-2. 映射单元格、行列范围和表格位置。
-3. 通过结构化抽取回归测试后，再评估关闭 PP-StructureV3 和 PaddleOCR-VL。
+1. 已实现 `TencentCloudTableOcrProvider`，支持图片与扫描 PDF 按页调用。
+2. 已映射单元格文本、置信度、行列范围、表格 ID 和坐标。
+3. 已接入 `StructuredExtractionService`，通过 `STRUCTURED_EXTRACTION_LAYOUT_PROVIDER` 选择。
+4. 生产切换前仍需用已授权业务样本进行人工烟测，再评估关闭 PP-StructureV3 和 PaddleOCR-VL。
 
 ## 12. 验收标准
 
@@ -431,7 +473,7 @@ local-fallback=0
 - 腾讯云失败不会让原件丢失或被修改。
 - 日志不包含文件正文、Base64 和密钥。
 - 所有测试使用 fake Client，测试环境不产生腾讯云费用。
-- 表格结构能力未实现腾讯适配器前，不宣称腾讯通用 OCR 已替代 PP-StructureV3。
+- 腾讯云表格 Provider 已实现，但尚未宣称其在所有业务样本上等价替代 PP-StructureV3；生产切换前必须完成人工烟测。
 
 ## 13. 官方参考
 
