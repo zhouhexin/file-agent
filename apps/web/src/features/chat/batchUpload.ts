@@ -1,4 +1,7 @@
-// 批量上传辅助函数只整理浏览器文件元数据，不访问文件系统或替代后端路径校验。
+// 批量上传辅助函数只整理浏览器文件元数据和后端状态投影，不执行分类判断。
+
+import type { DocumentResult, UploadArchiveStatus } from '../../types';
+import type { ChatAttachment } from './presentation';
 
 export type FolderSelectedFile = {
   name: string;
@@ -18,10 +21,19 @@ export type UploadBatchProgressState = {
   completed: number;
   processed: number;
   succeeded: number;
+  needsReview: number;
   failed: number;
   failures: UploadBatchFailure[];
-  agentRunId?: string;
-  status: 'uploading' | 'waiting_review' | 'submitting' | 'submitted' | 'completed' | 'failed';
+  files: UploadBatchFileState[];
+  status: 'uploading' | 'processing' | 'completed' | 'failed';
+};
+
+export type UploadBatchFileState = {
+  id: string;
+  relativePath: string;
+  uploadVersionId?: string;
+  attachment?: ChatAttachment;
+  result: DocumentResult;
 };
 
 export function getSelectedFileRelativePath(file: FolderSelectedFile): string {
@@ -36,12 +48,48 @@ export function inferSelectedFolderName(files: FolderSelectedFile[]): string {
   return relativePath.includes('/') && firstSegment ? firstSegment : '所选文件夹';
 }
 
-export function buildFolderClassificationInstruction(folderName: string, fileCount: number): string {
-  // 文件夹上传是用户已明确授权的默认分类入口，仍生成一条可审计的显式任务消息。
-  return `请读取并分类文件夹“${folderName}”中的 ${fileCount} 个文件，逐文件展示分类、置信度、证据和处理状态。`;
+export function createPendingUploadResult(id: string, filename: string): DocumentResult {
+  return {
+    document_id: id,
+    filename,
+    original_filename: filename,
+    renamed_filename: filename,
+    rename_status: 'PROCESSING',
+    processing_status: 'PROCESSING',
+    extraction_status: 'PROCESSING',
+    page_count: 0,
+    text_reused: false,
+    classification_reused: false,
+    categories: [],
+    warnings: [],
+    errors: [],
+  };
 }
 
-export function buildUploadOrganizationInstruction(batchName: string, fileCount: number): string {
-  // 上传即代表用户授权执行默认整理链路；仍生成显式消息，以保留 AgentRun 和逐文件回执。
-  return `请读取并分类“${batchName}”中的 ${fileCount} 个文件。系统已完成工作副本标准名称整理，请逐文件展示上传时名称、整理后名称、分类结果、处理状态，以及失败或待复核原因。`;
+export function archiveStatusToDocumentResult(status: UploadArchiveStatus): DocumentResult {
+  const failed = status.processing_status === 'FAILED';
+  return {
+    document_id: status.document_id,
+    working_copy_id: status.working_copy_id || undefined,
+    filename: status.renamed_filename || status.original_filename,
+    original_filename: status.original_filename,
+    renamed_filename: status.renamed_filename || status.original_filename,
+    rename_status: status.rename_status,
+    processing_status: status.processing_status,
+    organization_status: status.organization_status === 'NEEDS_REVIEW'
+      ? 'NEEDS_REVIEW'
+      : 'READY',
+    extraction_status: failed ? 'FAILED' : status.classification_status,
+    page_count: 0,
+    text_reused: false,
+    classification_reused: false,
+    categories: status.categories,
+    pending_decision: status.pending_decision,
+    review_reasons: status.review_reasons,
+    managed_original_unchanged: true,
+    warnings: status.review_reasons,
+    errors: failed
+      ? [{ code: status.error_code || 'UPLOAD_PROCESSING_FAILED', message: status.error_message || '文件自动处理失败。' }]
+      : [],
+  };
 }

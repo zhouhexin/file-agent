@@ -68,6 +68,7 @@ class ArchiveStatusResponse(BaseModel):
     """上传附件归档和后续导入状态。"""
 
     upload_document_version_id: str
+    document_id: str
     status: str
     managed_file_id: str | None
     working_copy_id: str | None
@@ -75,6 +76,12 @@ class ArchiveStatusResponse(BaseModel):
     original_filename: str
     renamed_filename: str | None = None
     processing_status: str
+    rename_status: str = "PROCESSING"
+    classification_status: str = "PROCESSING"
+    categories: list[dict[str, Any]] = Field(default_factory=list)
+    organization_status: str | None = None
+    review_reasons: list[str] = Field(default_factory=list)
+    pending_decision: dict[str, Any] | None = None
     filesystem_job_id: str | None
     error_code: str | None
     error_message: str | None

@@ -674,6 +674,7 @@ export type DuplicateDecisionResponse = {
 
 export type UploadArchiveStatus = {
   upload_document_version_id: string;
+  document_id: string;
   status: string;
   managed_file_id: string | null;
   working_copy_id: string | null;
@@ -681,6 +682,12 @@ export type UploadArchiveStatus = {
   original_filename: string;
   renamed_filename: string | null;
   processing_status: string;
+  rename_status: string;
+  classification_status: string;
+  categories: DocumentCategory[];
+  organization_status: string | null;
+  review_reasons: string[];
+  pending_decision: Record<string, unknown> | null;
   filesystem_job_id: string | null;
   error_code: string | null;
   error_message: string | null;
@@ -831,6 +838,7 @@ export type DocumentResult = {
   managed_original_unchanged?: boolean;
   risk_warnings?: Array<{ code?: string; message?: string }>;
   pending_decision?: Record<string, unknown> | null;
+  review_reasons?: string[];
   /** 历史或非分类类生命周期回执可能不包含分类数组。 */
   categories?: DocumentCategory[];
   warnings: Array<Record<string, unknown> | string>;

@@ -248,6 +248,17 @@ def test_default_upload_is_classified_then_first_published_to_taxonomy_path(monk
         f"/api/uploads/{upload['upload_document_version_id']}/archive-status",
         headers=headers,
     ).json()
+    assert status["processing_status"] == "COMPLETED"
+    assert status["rename_status"] == "COMPLETED"
+    assert status["classification_status"] == "COMPLETED"
+    assert status["organization_status"] == "AUTO_ORGANIZED"
+    assert status["categories"][0]["category_path"] == [
+        "学校",
+        "行政综合管理类",
+        "会议纪要",
+    ]
+    assert status["categories"][0]["evidence"]
+    assert status["review_reasons"] == []
     db = SessionLocal()
     try:
         working_copy = db.get(WorkingCopy, status["working_copy_id"])
@@ -304,6 +315,10 @@ def test_rejected_auto_classification_publishes_active_neutral_copy(monkeypatch,
         f"/api/uploads/{upload['upload_document_version_id']}/archive-status",
         headers=headers,
     ).json()
+    assert status["processing_status"] == "NEEDS_REVIEW"
+    assert status["organization_status"] == "NEEDS_REVIEW"
+    assert status["categories"]
+    assert "只能确定为其他分类，需要人工确认。" in status["review_reasons"]
     db = SessionLocal()
     try:
         working_copy = db.get(WorkingCopy, status["working_copy_id"])
@@ -1360,6 +1375,14 @@ def test_duplicate_upload_waits_for_dialog_and_can_use_existing(monkeypatch, tmp
     assert decision.status_code == 202
     assert decision.json()["selected_existing_document_id"] == existing_document_id
     assert decision.json()["archive_status"] == "EXISTING_FILE_SELECTED"
+    selected_status = client.get(
+        f"/api/uploads/{second['upload_document_version_id']}/archive-status",
+        headers=headers,
+    ).json()
+    assert selected_status["processing_status"] in {"COMPLETED", "NEEDS_REVIEW"}
+    assert selected_status["working_copy_id"] == existing_copy_id
+    assert selected_status["renamed_filename"] == "first.txt"
+    assert selected_status["categories"]
     db = SessionLocal()
     try:
         second_archive = db.query(UploadArchiveRecord).filter_by(
@@ -2216,6 +2239,11 @@ def test_encrypted_pdf_archives_original_but_stops_before_working_copy(monkeypat
         headers=headers,
     ).json()
     assert status["status"] == "NEEDS_REVIEW"
+    assert status["processing_status"] == "NEEDS_REVIEW"
+    assert status["rename_status"] == "NEEDS_REVIEW"
+    assert status["classification_status"] == "NEEDS_REVIEW"
+    assert status["organization_status"] == "NEEDS_REVIEW"
+    assert status["review_reasons"]
     assert status["working_copy_id"] is None
     history = client.get("/api/conversations/encrypted-file-conv", headers=headers).json()
     task_result = history["messages"][-1]["task_result"]

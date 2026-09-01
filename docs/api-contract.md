@@ -1702,6 +1702,17 @@ GET  /api/trash-entries
 POST /api/trash-entries/{trash_entry_id}/restore-plan
 ```
 
+`GET /api/uploads/{upload_version_id}/archive-status` 是上传后默认处理流程的逐文件状态与结果投影。
+除归档和工作副本标识外，响应必须包含 `document_id`、`original_filename`、`renamed_filename`、
+`processing_status`、`rename_status`、`classification_status`、`categories`、
+`organization_status`、`review_reasons` 和 `pending_decision`。`categories` 同时保留可定位
+`evidence_items` 和现有分类卡使用的 `evidence` 摘要。终态为 `COMPLETED`、`NEEDS_REVIEW` 或
+`FAILED`；处于终态时，分类或命名子状态不得继续返回 `PROCESSING`。
+
+单文件、多文件和文件夹上传均由前端按本次选择建立批次，并用每个文件返回的
+`upload_document_version_id` 轮询上述接口。上传本身不创建或发送隐式聊天任务消息；批次进度、
+逐文件原名、重命名后名称、分类、状态及失败/待复核原因直接由状态响应汇总展示。
+
 普通文件检索只读取 `ACTIVE` 工作副本。只有用户消息明确包含带扩展名的完整文件名，且不存在
 同名活动副本时，消息接口才可以返回 `response_type=trash_restore_selection`。对应
 `trash_restore_result` 逐条返回当前用户可恢复的回收站候选；同名、同版本或同内容哈希候选不得

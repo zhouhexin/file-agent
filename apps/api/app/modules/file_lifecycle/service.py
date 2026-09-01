@@ -73,6 +73,7 @@ from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.path_policy import resolve_managed_relative_path
 from app.modules.classification.service import persist_document_results_classifications
 from app.modules.classification.auto_placement_policy import AutoPlacementPolicy
+from app.modules.classification.evidence_reader import CurrentClassificationEvidenceReader
 from app.modules.classification.freshness import (
     ClassificationFreshness,
     classification_refresh_deduplication_key,
@@ -430,6 +431,7 @@ class UploadLifecycleService:
         if archive is None:
             raise HTTPException(status_code=404, detail="Archive status not found")
         shared_workspace_id = get_shared_workspace_id(self.db)
+        review = self.repository.get_review_by_version(upload_version_id)
         working_copy = (
             self.db.query(WorkingCopy)
             .filter(WorkingCopy.managed_file_id == archive.managed_file_id, WorkingCopy.workspace_id == shared_workspace_id)
@@ -437,25 +439,202 @@ class UploadLifecycleService:
             if archive.managed_file_id
             else None
         )
+        if (
+            working_copy is None
+            and review is not None
+            and review.selected_existing_working_copy_id
+        ):
+            working_copy = (
+                self.db.query(WorkingCopy)
+                .filter(
+                    WorkingCopy.id == review.selected_existing_working_copy_id,
+                    WorkingCopy.workspace_id == shared_workspace_id,
+                    WorkingCopy.status == "ACTIVE",
+                )
+                .one_or_none()
+            )
+        classification = (
+            CurrentClassificationEvidenceReader(
+                db=self.db,
+                user_id=None,
+                workspace_id=shared_workspace_id,
+            ).read(document_ids=[working_copy.document_id])[0]
+            if working_copy is not None
+            else None
+        )
+        decision = (
+            self.db.query(DocumentOrganizationDecision)
+            .filter(
+                DocumentOrganizationDecision.working_copy_id == working_copy.id,
+                DocumentOrganizationDecision.document_version_id
+                == str(working_copy.current_version_id or ""),
+            )
+            .order_by(DocumentOrganizationDecision.created_at.desc())
+            .first()
+            if working_copy is not None
+            else None
+        )
+        rename_review = (
+            self.db.query(FileRenameReviewItem)
+            .filter(
+                FileRenameReviewItem.document_id == working_copy.document_id,
+                FileRenameReviewItem.status == "NEEDS_REVIEW",
+            )
+            .order_by(FileRenameReviewItem.created_at.desc())
+            .first()
+            if working_copy is not None
+            else None
+        )
+        pending_decision = (
+            dict(rename_review.review_context_json or {})
+            if rename_review is not None
+            else None
+        )
+        classification_status = (
+            str(classification.get("status") or "PROCESSING")
+            if classification is not None
+            else "PROCESSING"
+        )
+        categories = self._upload_status_categories(classification)
+        review_reasons = self._upload_status_review_reasons(
+            archive=archive,
+            decision=decision,
+            pending_decision=pending_decision,
+        )
+        classification_missing = (
+            working_copy is not None
+            and working_copy.status == "ACTIVE"
+            and (classification_status != "COMPLETED" or not categories)
+        )
+        if classification_missing:
+            review_reasons.append("当前工作副本没有可展示的分类证据，需要人工复核。")
+            review_reasons = list(dict.fromkeys(review_reasons))
+        processing_status = (
+            "FAILED"
+            if archive.status == "FAILED"
+            else "NEEDS_REVIEW"
+            if archive.status == "NEEDS_REVIEW"
+            or rename_review is not None
+            or classification_missing
+            or (decision is not None and decision.decision == "NEEDS_REVIEW")
+            else "COMPLETED"
+            if working_copy is not None and working_copy.status == "ACTIVE"
+            else "PROCESSING"
+        )
+        renamed_filename = working_copy.filename if working_copy else None
         return ArchiveStatusResponse(
             upload_document_version_id=upload_version_id,
+            document_id=working_copy.document_id if working_copy else document.id,
             status=archive.status,
             managed_file_id=archive.managed_file_id,
             working_copy_id=working_copy.id if working_copy else None,
             working_copy_status=working_copy.status if working_copy else None,
             original_filename=document.original_filename,
-            renamed_filename=working_copy.filename if working_copy else None,
-            processing_status=(
-                "COMPLETED"
-                if working_copy is not None and working_copy.status == "ACTIVE"
-                else "FAILED"
+            renamed_filename=renamed_filename,
+            processing_status=processing_status,
+            rename_status=(
+                "FAILED"
                 if archive.status == "FAILED"
+                else "NEEDS_REVIEW"
+                if rename_review is not None
+                or (archive.status == "NEEDS_REVIEW" and renamed_filename is None)
+                else "COMPLETED"
+                if renamed_filename is not None
+                and renamed_filename != document.original_filename
+                else "NO_CHANGE"
+                if renamed_filename is not None
                 else "PROCESSING"
             ),
+            classification_status=(
+                "FAILED"
+                if archive.status == "FAILED"
+                else "NEEDS_REVIEW"
+                if archive.status == "NEEDS_REVIEW" and classification is None
+                else classification_status
+            ),
+            categories=categories,
+            organization_status=(
+                decision.decision
+                if decision is not None
+                else "NEEDS_REVIEW"
+                if processing_status == "NEEDS_REVIEW"
+                else None
+            ),
+            review_reasons=review_reasons,
+            pending_decision=pending_decision,
             filesystem_job_id=archive.filesystem_job_id,
             error_code=archive.last_error_code,
             error_message=archive.last_error_message,
         )
+
+    @staticmethod
+    def _upload_status_review_reasons(
+        *,
+        archive: UploadArchiveRecord,
+        decision: DocumentOrganizationDecision | None,
+        pending_decision: dict[str, Any] | None,
+    ) -> list[str]:
+        """把后台审计原因投影为上传批次可直接展示的用户文案。"""
+
+        reasons: list[str] = []
+        if archive.status == "NEEDS_REVIEW":
+            reasons.append("文件存在需要人工处理的格式或安全风险，原件未被修改。")
+        reason_messages = {
+            "PARSE_FAILED": "文件正文解析未完成，分类结果需要复核。",
+            "RISK_CHECK_FAILED": "文件风险检查未通过，暂未自动归入正式分类。",
+            "NO_TAXONOMY_CANDIDATE": "没有找到可靠的具体分类。",
+            "OTHER_CATEGORY": "只能确定为其他分类，需要人工确认。",
+            "FREE_PATH_NOT_ALLOWED": "分类候选不属于当前正式分类目录。",
+            "EVIDENCE_MISSING": "正文中缺少可定位的分类证据。",
+            "POLICY_VERSION_UNAVAILABLE": "分类规则版本信息不完整。",
+            "TARGET_NAME_CONFLICT": "标准文件名与现有文件冲突，已保留在待复核位置。",
+            "TARGET_PATH_UNAVAILABLE": "目标分类路径当前不可用。",
+        }
+        if decision is not None:
+            reasons.extend(
+                reason_messages.get(code, "文件分类需要人工复核。")
+                for code in list(decision.reason_codes_json or [])
+            )
+        if pending_decision:
+            reasons.append(
+                str(pending_decision.get("message") or "标准文件名依据不足，需要人工复核。")
+            )
+        if archive.status == "FAILED" and archive.last_error_message:
+            reasons.append(str(archive.last_error_message))
+        return list(dict.fromkeys(reason for reason in reasons if reason))
+
+    @staticmethod
+    def _upload_status_categories(
+        classification: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        """补齐现有分类卡依赖的兼容证据字段，同时保留可定位证据。"""
+
+        projected: list[dict[str, Any]] = []
+        for category in list((classification or {}).get("categories") or []):
+            if not isinstance(category, dict):
+                continue
+            evidence: list[str] = []
+            for item in list(category.get("evidence_items") or []):
+                if isinstance(item, str) and item.strip():
+                    evidence.append(item.strip())
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                evidence.extend(
+                    str(signal).strip()
+                    for signal in list(item.get("signals") or [])
+                    if str(signal).strip()
+                )
+                quote = str(item.get("quote") or "").strip()
+                if quote:
+                    evidence.append(quote)
+            projected.append(
+                {
+                    **category,
+                    "evidence": list(dict.fromkeys(evidence)),
+                }
+            )
+        return projected
 
     def to_review_response(self, review: UploadDuplicateReview) -> DuplicateReviewResponse:
         """把内部候选转换为脱敏 API 响应。"""

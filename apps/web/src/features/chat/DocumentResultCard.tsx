@@ -39,7 +39,12 @@ export function DocumentResultCard({
   const primaryCategory = categories[0];
   const canOpen = Boolean((attachment && onOpenFile) || onOpenDocument);
   const openFile = () => {
-    // 当前轮优先复用完整附件信息；历史回执则只用稳定 document_id 重新鉴权预览。
+    // 已生成工作副本的结果必须走共享文件读取边界；上传附件接口只适用于原始上传文档。
+    if (result.working_copy_id && onOpenDocument) {
+      onOpenDocument(result.document_id, filename);
+      return;
+    }
+    // 当前轮原始附件优先复用完整附件信息；历史回执只用稳定 document_id 重新鉴权预览。
     if (attachment && onOpenFile) {
       onOpenFile(attachment);
       return;
@@ -160,6 +165,13 @@ export function DocumentResultCard({
                     ? '标准名称与原名一致，无需改名。'
                     : '工作副本已完成标准化命名；不可变原件未修改。'}
               </small>
+            </div>
+          ) : null}
+          {result.review_reasons && result.review_reasons.length > 0 ? (
+            <div className="document-result-risk-warnings">
+              {result.review_reasons.map((reason, reasonIndex) => (
+                <p key={`${reason}-${reasonIndex}`}>待复核原因：{reason}</p>
+              ))}
             </div>
           ) : null}
           {result.risk_warnings && result.risk_warnings.length > 0 ? (

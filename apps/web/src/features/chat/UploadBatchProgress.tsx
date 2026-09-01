@@ -1,29 +1,40 @@
 import { AlertCircle, CheckCircle2, FolderUp, Loader2, X } from 'lucide-react';
 
 import type { UploadBatchProgressState } from './batchUpload';
+import { ClassificationTreeReceipt } from './ClassificationTreeReceipt';
+import type { ChatAttachment } from './presentation';
 
 type UploadBatchProgressProps = {
   batch: UploadBatchProgressState;
+  token: string;
   onDismiss: () => void;
+  onOpenAttachment: (file: ChatAttachment) => void;
+  onOpenDocument: (documentId: string, filename: string) => void;
 };
 
-export function UploadBatchProgress({ batch, onDismiss }: UploadBatchProgressProps) {
-  // 批次卡只聚合界面进度；每个成功文件仍由附件卡和后续 Agent 回执逐项展示。
+export function UploadBatchProgress({
+  batch,
+  token,
+  onDismiss,
+  onOpenAttachment,
+  onOpenDocument,
+}: UploadBatchProgressProps) {
+  // 上传批次直接消费归档状态，不再依赖前端伪造聊天任务来取得树形回执。
   const percent = batch.total > 0
     ? Math.round(((batch.completed + batch.processed) / (batch.total * 2)) * 100)
     : 0;
-  const active = ['uploading', 'waiting_review', 'submitting', 'submitted'].includes(batch.status);
+  const active = ['uploading', 'processing'].includes(batch.status);
+  const settledResults = batch.files
+    .map((file) => file.result)
+    .filter((result) => ['COMPLETED', 'NEEDS_REVIEW', 'FAILED'].includes(result.processing_status || ''));
+  const attachments = batch.files.flatMap((file) => file.attachment ? [file.attachment] : []);
   const statusText = batch.status === 'uploading'
     ? `正在上传 ${batch.completed}/${batch.total}`
-    : batch.status === 'waiting_review'
+    : batch.status === 'processing'
       ? '正在查重并自动执行解析、分类和标准化命名'
-      : batch.status === 'submitting'
-        ? '正在生成逐文件树形回执'
-        : batch.status === 'submitted'
-          ? '自动整理已完成，正在汇总逐文件结果'
-          : batch.status === 'failed'
-            ? '批次处理未全部完成'
-            : '本批次自动整理完成';
+      : batch.status === 'failed'
+        ? '批次处理未全部完成'
+        : '本批次自动整理完成';
 
   return (
     <section className="upload-batch-progress" aria-live="polite">
@@ -42,7 +53,8 @@ export function UploadBatchProgress({ batch, onDismiss }: UploadBatchProgressPro
         {active ? <Loader2 className="upload-batch-spinner" size={15} /> : <CheckCircle2 size={15} />}
         <span>{statusText}</span>
         <span>已处理 {batch.processed}/{batch.total}</span>
-        <span>成功 {batch.succeeded}</span>
+        <span>完成 {batch.succeeded}</span>
+        <span>待复核 {batch.needsReview}</span>
         <span>失败 {batch.failed}</span>
       </div>
       <div className="upload-batch-track" aria-label={`批次完成进度 ${percent}%`}>
@@ -60,6 +72,15 @@ export function UploadBatchProgress({ batch, onDismiss }: UploadBatchProgressPro
             ))}
           </ul>
         </details>
+      ) : null}
+      {settledResults.length > 0 ? (
+        <ClassificationTreeReceipt
+          attachments={attachments}
+          results={settledResults}
+          token={token}
+          onOpenAttachment={onOpenAttachment}
+          onOpenDocument={onOpenDocument}
+        />
       ) : null}
     </section>
   );
