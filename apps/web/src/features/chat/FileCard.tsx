@@ -69,6 +69,9 @@ export function FileCard({
         <p className="file-card-filename">
           {file.filename}
         </p>
+        {file.relative_path && file.relative_path !== file.filename ? (
+          <p className="file-card-relative-path">{file.relative_path}</p>
+        ) : null}
         <p className="file-card-size">
           {missing
             ? (file.availability_message || '文件不存在')
@@ -78,6 +81,8 @@ export function FileCard({
                 ? (file.availability_message || '文件正在后台处理')
             : waitingForDuplicateDecision
               ? '等待重复文件确认'
+              : file.duplicate_review_status === 'FAILED'
+                ? (file.upload_error || '上传检查失败')
               : lifecyclePending
                 ? `${formatFileSize(file.size_bytes)} · 后台处理中`
                 : formatFileSize(file.size_bytes)}

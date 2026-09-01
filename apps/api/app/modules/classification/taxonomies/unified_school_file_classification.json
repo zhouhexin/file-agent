@@ -1,8 +1,45 @@
 {
   "key": "unified_school_file_classification",
   "name": "学校文件统一分类体系",
-  "version": "2026-08-v6",
-  "source": "文件归类(1).xlsx + managed-directory-inventory@managed-downloads-2026-07-15-v1 + managed-directory-inventory@managed-downloads-2026-07-18-v2 + physical-path-completion@2026-08-27-v3 + college-talent-work-samples@workdata-2026-08-28-v4 + college-taxonomy-workdata-samples@workdata-2026-08-28-v5 + organization-scope-signals@workdata-2026-08-29-v6",
+  "version": "2026-09-v8",
+  "source": "文件归类(1).xlsx + managed-directory-inventory@managed-downloads-2026-07-15-v1 + managed-directory-inventory@managed-downloads-2026-07-18-v2 + physical-path-completion@2026-08-27-v3 + college-talent-work-samples@workdata-2026-08-28-v4 + college-taxonomy-workdata-samples@workdata-2026-08-28-v5 + organization-scope-signals@workdata-2026-08-29-v6 + organization-department-document-number-fallback@2026-09-01-v7 + fallback-node-materialization@2026-09-01-v8",
+  "fallback_policy": {
+    "department_category_ids": [
+      "school.admin",
+      "school.hr",
+      "school.finance",
+      "school.logistics-assets",
+      "school.undergraduate-teaching",
+      "school.postgraduate",
+      "school.discipline",
+      "school.research",
+      "school.party",
+      "school.international-cooperation",
+      "school.domestic-cooperation-alumni",
+      "school.audit",
+      "school.student-affairs",
+      "school.safety-stability",
+      "school.laboratory-management",
+      "college.party-building",
+      "college.admin",
+      "college.hr",
+      "college.finance",
+      "college.teaching",
+      "college.research",
+      "college.postgraduate",
+      "college.discipline",
+      "college.student-affairs",
+      "college.safety-stability"
+    ],
+    "issued": {
+      "id_suffix": "issued",
+      "name": "发文"
+    },
+    "other": {
+      "id_suffix": "other",
+      "name": "其他"
+    }
+  },
   "categories": [
     {
       "id": "school",

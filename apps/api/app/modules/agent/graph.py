@@ -324,6 +324,7 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                     ),
                     has_tool_observation=bool(state.get("observation")),
                     observation=state.get("observation") or None,
+                    prior_intent=state.get("intent"),
                 )
             else:
                 plan, user_intent_plan = _run_legacy_llm_planner(
@@ -463,11 +464,21 @@ def _finish_after_observation_failure(
             ]
         )
     )
+    enabled_skill_ids = set(
+        runtime.context.catalog_snapshot.get("enabled_skill_ids", [])
+    )
+    selected_skill_ids = [
+        skill_id
+        for skill_id in state.get("selected_skills", [])
+        if skill_id in enabled_skill_ids
+    ]
     decision = PlannerDecision(
         decision_type="FINISH",
         intent=str(state.get("intent") or "TOOL_RESULT_AVAILABLE"),
         user_goal=str(state.get("message") or "完成当前文件任务"),
-        selected_skill_ids=list(state.get("selected_skills") or ["chat-intake"]),
+        # Legacy 确定性计划可能保留尚未迁移成 manifest 的内部 Skill 名。
+        # FINISH 不含 ToolStep，只需保留当前 Catalog 已启用的审计项。
+        selected_skill_ids=selected_skill_ids or ["chat-intake"],
         scope=PlannerScope(
             document_ids=document_ids,
             source="tool_observation",
@@ -597,6 +608,7 @@ def _run_shadow_planner(
             observed_document_ids=state.get("observed_document_ids", []),
             has_tool_observation=bool(state.get("observation")),
             observation=state.get("observation") or None,
+            prior_intent=state.get("intent"),
         )
         return {
             "validation_status": "COMPLETED",
@@ -1523,6 +1535,12 @@ def observe_tool_result(
         and str(state.get("intent") or "") == "EVIDENCE_ANSWER"
         and has_explicit_filename_content_request(state.get("message") or "")
     )
+    has_backend_fixed_attachment_classification = (
+        str(state.get("intent") or "") == "CLASSIFY_FILES"
+        and str((state.get("user_intent_plan") or {}).get("source") or "")
+        == "deterministic_preflight"
+        and tool_name == "extract-document-text"
+    )
     explicit_replan = any(item.get("replan_required") is True for item in last_results)
     observation_policy = _tool_observation_policy(
         registry=runtime.context.registry,
@@ -1561,6 +1579,7 @@ def observe_tool_result(
         and not has_user_decision
         and not has_pending_confirmation
         and not has_completed_hard_filename_answer
+        and not has_backend_fixed_attachment_classification
         and int(state.get("planning_round", 0)) < MAX_PLANNING_ROUNDS
         and int(state.get("tool_call_count", 0)) < MAX_TOOL_CALLS
     )
@@ -2078,10 +2097,32 @@ def _should_classify_documents(state: AgentGraphState) -> bool:
         if str(item)
     }
     intent = str(state.get("intent") or "").upper()
-    return (
+    if (
         any(item.startswith("classification") for item in requested_outputs)
         or "CLASSIF" in intent
-    )
+    ):
+        return True
+
+    # 兼容旧 checkpoint 或异常 LLM 意图：只信任已经过 Catalog 校验的当前计划，
+    # 不根据 document_results 中恰好存在后台分类字段反推用户意图。
+    tool_plan = state.get("tool_plan", {})
+    steps = tool_plan.get("steps", []) if isinstance(tool_plan, dict) else []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        skill = str(step.get("skill") or step.get("skill_id") or "")
+        tool_name = str(step.get("tool_name") or "")
+        if tool_name in {
+            "read-document-classifications",
+            "classify-managed-files",
+        }:
+            return True
+        if (
+            skill == "document-classification"
+            and tool_name == "extract-document-text"
+        ):
+            return True
+    return False
 
 
 def _document_results_for_response(

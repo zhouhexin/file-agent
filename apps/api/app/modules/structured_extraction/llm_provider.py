@@ -32,6 +32,10 @@ raw_text 必须来自 evidence_elements 的原文，并返回真实 evidence_ele
 _DATE_TOKEN_RE = re.compile(
     r"(?<!\d)(?:19|20)\d{2}[年./-]\d{1,2}[月./-]\d{1,2}日?"
 )
+_YEAR_TOKEN_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
+_MONTH_DAY_TOKEN_RE = re.compile(
+    r"(?<!\d)(0?[1-9]|1[0-2])[./-](0?[1-9]|[12]\d|3[01])(?!\d)"
+)
 
 
 class StructuredExtractionProviderProtocol(Protocol):
@@ -314,22 +318,17 @@ def _extract_table_records(
     elements: list[EvidenceElement],
     max_records: int,
 ) -> list[CandidateRecord]:
-    """按表头文本匹配字段并读取后续同列单元格。"""
+    """按表头、跨列范围和数据行读取字段，并合并仅含补充内容的延续行。
+
+    腾讯表格 OCR 可能把“资助金额 使用情况登记”返回为一个跨两列的表头，
+    也可能把右侧日期识别到下一物理行。这里仅依据 Provider 返回的真实行列元数据
+    做确定性拆分和合并；无法唯一映射的值继续留空，不能猜测业务事实。
+    """
 
     cells = [element for element in elements if _cell_position(element) is not None]
     if not cells:
         return []
-    header_locations: dict[str, tuple[int, int, str | None]] = {}
-    for field in fields:
-        labels = {field.label, *field.aliases}
-        header = next(
-            (element for element in cells if element.text.strip() in labels),
-            None,
-        )
-        if header is None:
-            continue
-        row, column = _cell_position(header)
-        header_locations[field.key] = (row, column, _table_id(header))
+    header_locations = _table_header_locations(fields=fields, cells=cells)
     if not header_locations:
         return []
     table_counts = Counter(
@@ -347,20 +346,22 @@ def _extract_table_records(
             for key, location in header_locations.items()
             if location[2] in {None, selected_table_id}
         }
+    mapped_columns = {column for _, column, _ in header_locations.values()}
     rows = sorted(
         {
             _cell_position(element)[0]
             for element in cells
-            if any(
+            if _cell_position(element)[1] in mapped_columns
+            and any(
                 _cell_position(element)[0] > header_row
-                and _cell_position(element)[1] == column
                 and (_table_id(element) == table_id or not table_id)
-                for header_row, column, table_id in header_locations.values()
+                for header_row, _, table_id in header_locations.values()
             )
         }
     )[:max_records]
-    records: list[CandidateRecord] = []
-    for record_index, row in enumerate(rows, start=1):
+    field_by_key = {field.key: field for field in fields}
+    pending_rows: list[tuple[int, dict[str, CandidateFieldValue]]] = []
+    for row in rows:
         values: dict[str, CandidateFieldValue] = {}
         for field in fields:
             location = header_locations.get(field.key)
@@ -384,9 +385,294 @@ def _extract_table_records(
                 confidence=_element_confidence(cell, default=0.8),
                 evidence_element_ids=[cell.id],
             )
+        for field in fields:
+            if field.key in values or field.field_type != "date":
+                continue
+            derived = _date_candidate_from_table_row(
+                row=row,
+                cells=cells,
+                table_ids={
+                    table_id
+                    for _, _, table_id in header_locations.values()
+                    if table_id is not None
+                },
+            )
+            if derived is not None:
+                values[field.key] = derived
         if values:
-            records.append(CandidateRecord(record_index=record_index, fields=values))
-    return records
+            pending_rows.append((row, values))
+
+    anchor_keys = {
+        field.key
+        for field in fields
+        if field.field_type
+        in {
+            "person_name",
+            "organization",
+            "money",
+            "decimal",
+            "integer",
+            "phone",
+            "id_number",
+            "boolean",
+            "enum",
+        }
+    }
+    merged_rows: list[dict[str, CandidateFieldValue]] = []
+    for _, values in pending_rows:
+        # 只有当 Schema 本身存在身份、金额等记录锚点时，才把“仅有用途/日期”的
+        # 物理行视为上一条记录的延续，避免普通纯文本表格被错误合并成一行。
+        is_continuation = bool(
+            merged_rows
+            and anchor_keys
+            and not any(key in values for key in anchor_keys)
+        )
+        if is_continuation:
+            _merge_table_continuation(
+                target=merged_rows[-1],
+                continuation=values,
+                field_by_key=field_by_key,
+            )
+            continue
+        merged_rows.append(values)
+    return [
+        CandidateRecord(record_index=index, fields=values)
+        for index, values in enumerate(merged_rows[:max_records], start=1)
+    ]
+
+
+def _table_header_locations(
+    *,
+    fields: list[StructuredFieldSpec],
+    cells: list[EvidenceElement],
+) -> dict[str, tuple[int, int, str | None]]:
+    """定位独立或跨列表头，并把复合表头按文字顺序映射到物理子列。"""
+
+    locations: dict[str, tuple[int, int, str | None]] = {}
+    for field in fields:
+        header = next(
+            (
+                element
+                for element in cells
+                if _header_match_position(element.text, field) == 0
+                and _canonical_header_text(element.text)
+                in {
+                    _canonical_header_text(field.label),
+                    *(
+                        _canonical_header_text(alias)
+                        for alias in field.aliases
+                        if alias.strip()
+                    ),
+                }
+            ),
+            None,
+        )
+        if header is None:
+            continue
+        row, column = _cell_position(header)
+        locations[field.key] = (row, column, _table_id(header))
+
+    unmatched = [field for field in fields if field.key not in locations]
+    for header in cells:
+        if not unmatched:
+            break
+        row, column_start = _cell_position(header)
+        _, column_end = _cell_span(header)
+        physical_columns = list(range(column_start, column_end))
+        if len(physical_columns) < 2:
+            continue
+        matches = [
+            (position, field)
+            for field in unmatched
+            if (position := _header_match_position(header.text, field)) is not None
+        ]
+        matches.sort(key=lambda item: (item[0], -len(item[1].label), item[1].key))
+        if not matches or len(matches) > len(physical_columns):
+            continue
+        for physical_column, (_, field) in zip(physical_columns, matches):
+            locations[field.key] = (row, physical_column, _table_id(header))
+        unmatched = [field for field in fields if field.key not in locations]
+    return locations
+
+
+def _canonical_header_text(value: str) -> str:
+    """消除表头空白和常见同义词序差异，不改变任何单元格值。"""
+
+    normalized = re.sub(r"[\s:：,，、/]+", "", str(value or ""))
+    return normalized.replace("使用情况登记", "使用登记情况")
+
+
+def _header_match_position(text: str, field: StructuredFieldSpec) -> int | None:
+    """返回字段标签在复合表头中的起点；未出现时返回 ``None``。"""
+
+    normalized_text = _canonical_header_text(text)
+    positions = [
+        normalized_text.find(normalized_label)
+        for label in (field.label, *field.aliases)
+        if (normalized_label := _canonical_header_text(label))
+        and normalized_text.find(normalized_label) >= 0
+    ]
+    return min(positions) if positions else None
+
+
+def _cell_span(element: EvidenceElement) -> tuple[int, int]:
+    """返回左闭右开的物理列范围，兼容 Provider 的零宽历史元数据。"""
+
+    _, column_start = _cell_position(element)
+    column_end = element.metadata.get("column_end")
+    if not isinstance(column_end, int) or column_end <= column_start:
+        column_end = column_start + 1
+    return column_start, column_end
+
+
+def _date_candidate_from_table_row(
+    *,
+    row: int,
+    cells: list[EvidenceElement],
+    table_ids: set[str],
+) -> CandidateFieldValue | None:
+    """从同一物理行单元格提取唯一完整日期；冲突日期保持缺失待复核。"""
+
+    matches: list[tuple[str, EvidenceElement]] = []
+    for element in cells:
+        if _cell_position(element)[0] != row:
+            continue
+        if table_ids and _table_id(element) not in table_ids:
+            continue
+        matches.extend((match.group(0), element) for match in _DATE_TOKEN_RE.finditer(element.text))
+    if not matches:
+        return _partial_date_candidate_from_adjacent_cell(
+            row=row,
+            cells=cells,
+            table_ids=table_ids,
+        )
+    normalized_dates = {
+        re.sub(r"[年./-]", "-", raw).replace("月", "-").replace("日", "")
+        for raw, _ in matches
+    }
+    if len(normalized_dates) != 1:
+        return None
+    raw, element = matches[0]
+    return CandidateFieldValue(
+        raw_text=raw,
+        value=raw,
+        confidence=_element_confidence(element, default=0.75),
+        evidence_element_ids=[element.id],
+    )
+
+
+def _partial_date_candidate_from_adjacent_cell(
+    *,
+    row: int,
+    cells: list[EvidenceElement],
+    table_ids: set[str],
+) -> CandidateFieldValue | None:
+    """将同一行末尾年份与紧邻表格右侧的月日块组合为待复核日期。
+
+    腾讯表格 OCR 有时把手写 ``2026.6.9`` 切成主表单元格中的 ``2026`` 和
+    独立小表中的 ``6.9``。只有页码一致、纵向相交且小块紧邻主表右边界时才组合；
+    组合值仍会因跨元素证据进入 ``NEEDS_REVIEW``，不会伪装成高置信度事实。
+    """
+
+    row_cells = [
+        element
+        for element in cells
+        if _cell_position(element)[0] == row
+        and (not table_ids or _table_id(element) in table_ids)
+        and _element_box(element) is not None
+    ]
+    if not row_cells:
+        return None
+    years = {
+        match.group(1)
+        for element in row_cells
+        for match in _YEAR_TOKEN_RE.finditer(element.text)
+    }
+    if len(years) != 1:
+        return None
+    page_numbers = {element.page_number for element in row_cells}
+    if len(page_numbers) != 1:
+        return None
+    row_top = min(_element_box(element)[1] for element in row_cells)
+    row_right = max(_element_box(element)[2] for element in row_cells)
+    row_bottom = max(_element_box(element)[3] for element in row_cells)
+    row_height = max(1.0, row_bottom - row_top)
+    adjacent: list[tuple[EvidenceElement, re.Match[str]]] = []
+    for element in cells:
+        if _table_id(element) in table_ids or element.page_number not in page_numbers:
+            continue
+        box = _element_box(element)
+        if box is None:
+            continue
+        match = _MONTH_DAY_TOKEN_RE.fullmatch(element.text.strip())
+        if match is None:
+            continue
+        center_y = _box_center(box)[1]
+        if not (row_top - row_height * 0.25 <= center_y <= row_bottom + row_height * 0.25):
+            continue
+        if not (row_right - 20 <= box[0] <= row_right + max(200.0, row_height * 4)):
+            continue
+        adjacent.append((element, match))
+    normalized_month_days = {
+        (int(match.group(1)), int(match.group(2)))
+        for _, match in adjacent
+    }
+    if len(normalized_month_days) != 1 or not adjacent:
+        return None
+    element, match = min(
+        adjacent,
+        key=lambda item: (
+            abs(_box_center(_element_box(item[0]))[1] - (row_top + row_bottom) / 2),
+            _element_box(item[0])[0],
+            item[0].id,
+        ),
+    )
+    year = next(iter(years))
+    raw = f"{year}.{int(match.group(1))}.{int(match.group(2))}"
+    year_evidence = next(
+        element for element in row_cells if _YEAR_TOKEN_RE.search(element.text)
+    )
+    return CandidateFieldValue(
+        raw_text=raw,
+        value=raw,
+        confidence=min(
+            0.8,
+            _element_confidence(year_evidence, default=0.8),
+            _element_confidence(element, default=0.8),
+        ),
+        evidence_element_ids=[year_evidence.id, element.id],
+    )
+
+
+def _merge_table_continuation(
+    *,
+    target: dict[str, CandidateFieldValue],
+    continuation: dict[str, CandidateFieldValue],
+    field_by_key: dict[str, StructuredFieldSpec],
+) -> None:
+    """把仅含用途或日期的延续物理行合并到上一逻辑记录。"""
+
+    for key, incoming in continuation.items():
+        current = target.get(key)
+        if current is None:
+            target[key] = incoming
+            continue
+        field = field_by_key.get(key)
+        if field is None or field.field_type != "string":
+            continue
+        current_text = str(current.raw_text or "").strip()
+        incoming_text = str(incoming.raw_text or "").strip()
+        if not incoming_text or incoming_text in current_text:
+            continue
+        combined = "\n".join(value for value in (current_text, incoming_text) if value)
+        target[key] = CandidateFieldValue(
+            raw_text=combined,
+            value=combined,
+            confidence=min(float(current.confidence), float(incoming.confidence)),
+            evidence_element_ids=list(
+                dict.fromkeys([*current.evidence_element_ids, *incoming.evidence_element_ids])
+            )[:20],
+        )
 
 
 def _extract_key_value_record(

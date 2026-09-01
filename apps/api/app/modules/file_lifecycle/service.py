@@ -442,6 +442,16 @@ class UploadLifecycleService:
             status=archive.status,
             managed_file_id=archive.managed_file_id,
             working_copy_id=working_copy.id if working_copy else None,
+            working_copy_status=working_copy.status if working_copy else None,
+            original_filename=document.original_filename,
+            renamed_filename=working_copy.filename if working_copy else None,
+            processing_status=(
+                "COMPLETED"
+                if working_copy is not None and working_copy.status == "ACTIVE"
+                else "FAILED"
+                if archive.status == "FAILED"
+                else "PROCESSING"
+            ),
             filesystem_job_id=archive.filesystem_job_id,
             error_code=archive.last_error_code,
             error_message=archive.last_error_message,
@@ -1159,7 +1169,6 @@ class FileLifecycleJobProcessor:
                     message="工作副本原子发布完成",
                 )
 
-            document.original_filename = filename
             document.ingest_status = "INGESTED"
             version.storage_path = (
                 staged_relative_path if gated_initial_placement else final_storage_relative_path
@@ -2054,8 +2063,15 @@ class FileLifecycleJobProcessor:
                     working_copy=working_copy,
                     working_root=working_root,
                 )
-                target_relative_path = target.target_relative_path
-                target_path = self.storage.working_copy_path(target.target_storage_path)
+                target_filename = self._initial_organization_filename(
+                    decision=organization_decision,
+                    fallback=working_copy.filename,
+                )
+                target_relative_path = (
+                    Path(target.target_relative_path).parent / target_filename
+                ).as_posix()
+                target_storage_path = f"{working_root.relative_storage_path}/{target_relative_path}"
+                target_path = self.storage.working_copy_path(target_storage_path)
                 staged_path = self.storage.working_copy_path(version.storage_path)
                 retry_after_publish = (
                     not staged_path.exists()
@@ -2094,7 +2110,13 @@ class FileLifecycleJobProcessor:
                 managed_file=managed_file,
                 version=version,
             )
-            final_relative_path = neutral.relative_path
+            target_filename = self._initial_organization_filename(
+                decision=organization_decision,
+                fallback=neutral.filename,
+            )
+            final_relative_path = (
+                Path(neutral.relative_path).parent / target_filename
+            ).as_posix()
             operation_type = "INITIAL_NEUTRAL_PLACEMENT"
 
         final_storage_path = f"{working_root.relative_storage_path}/{final_relative_path}"
@@ -2114,7 +2136,6 @@ class FileLifecycleJobProcessor:
         working_copy.status = "ACTIVE"
         version.storage_path = final_storage_path
         version.filename = working_copy.filename
-        document.original_filename = working_copy.filename
         document.ingest_status = "INDEXED" if extraction_status == "COMPLETED" else "INGESTED"
         file_object = (
             self.db.query(FileObject)
@@ -2185,6 +2206,29 @@ class FileLifecycleJobProcessor:
                     execution_status="COMPLETED",
                 )
             )
+        if working_copy.filename != managed_file.filename:
+            self.db.add(
+                ChangeItem(
+                    changeset_id=changeset.id,
+                    target_type="working_copy",
+                    target_id=working_copy.id,
+                    target_document_id=document.id,
+                    change_type="FILENAME_CHANGED",
+                    before_value_json={"filename": managed_file.filename},
+                    after_value_json={
+                        "filename": working_copy.filename,
+                        "managed_original_unchanged": True,
+                    },
+                    source="initial_upload_organization",
+                    confidence=1.0,
+                    evidence_json={
+                        "rename_status": organization_decision.rename_status
+                        if organization_decision is not None
+                        else "NO_CHANGE"
+                    },
+                    execution_status="COMPLETED",
+                )
+            )
         self.db.add(
             ChangeItem(
                 changeset_id=changeset.id,
@@ -2211,6 +2255,24 @@ class FileLifecycleJobProcessor:
         )
         DocumentSearchProfileService(db=self.db).upsert_current_profile(working_copy.id)
         return decision_row
+
+    def _initial_organization_filename(
+        self,
+        *,
+        decision: InitialOrganizationDecision | None,
+        fallback: str,
+    ) -> str:
+        """仅把已通过命名校验的候选用于首次工作副本发布。"""
+
+        if decision is None or decision.rename_status != "READY":
+            return self.storage.sanitize_filename(fallback)
+        proposed = str(decision.rename_metadata.get("proposed_filename") or "").strip()
+        if not proposed:
+            return self.storage.sanitize_filename(fallback)
+        sanitized = self.storage.sanitize_filename(proposed)
+        if Path(sanitized).suffix.lower() != Path(fallback).suffix.lower():
+            return self.storage.sanitize_filename(fallback)
+        return sanitized
 
     def _initial_organization_risk_status(
         self,
@@ -2746,27 +2808,11 @@ class FileLifecycleJobProcessor:
         decision: InitialOrganizationDecision,
         working_copy: WorkingCopy,
     ) -> dict[str, Any] | None:
-        """把命名建议或低置信度转换为普通用户可理解的待决策项。
+        """把低置信度命名转换为普通用户可理解的待复核项。"""
 
-        命名建议不代表已经创建重命名计划。用户必须在后续对话中明确提出“改名”，
-        系统才重新生成建议并展示待确认的 OperationPlan。
-        """
-
-        proposed_filename = str(decision.rename_metadata.get("proposed_filename") or "").strip()
-        if proposed_filename and proposed_filename != working_copy.filename:
-            return {
-                "type": "rename_suggestion",
-                "reason": "RENAME_SUGGESTION_AVAILABLE",
-                "working_copy_id": working_copy.id,
-                "filename": working_copy.filename,
-                "proposed_filename": proposed_filename,
-                "message": (
-                    f"系统建议将“{working_copy.filename}”改为“{proposed_filename}”，"
-                    "当前尚未改名。若需要，请回复“改名”或明确说明要改名的文件；"
-                    "系统会先展示待确认计划。"
-                ),
-                "allowed_decisions": ["REQUEST_RENAME_PLAN", "KEEP_CURRENT_NAME"],
-            }
+        # 上传后的高可信标准名称会在首次发布时直接应用，不再生成二次改名请求。
+        if decision.rename_status in {"READY", "NO_CHANGE"}:
+            return None
         if decision.rename_status not in {"READY", "NO_CHANGE"}:
             return {
                 "type": "rename_review",

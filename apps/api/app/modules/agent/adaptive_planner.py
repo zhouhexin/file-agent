@@ -27,7 +27,8 @@ ADAPTIVE_PLANNER_SYSTEM_PROMPT = """你是 File Agent 的 Adaptive Planner。
 不需要文件事实的普通对话使用 DIRECT_RESPONSE。缺少唯一文件范围或必要参数时使用 CLARIFY。
 当用户明确要求“对上传文件进行分类/归类/整理”且 attachments 已提供后端 document_id 时，
 必须使用 document-classification Skill 允许的 extract-document-text；不得改成
-read-classification-taxonomy。后者只用于用户明确询问分类目录、分类体系或支持哪些分类。
+read-classification-taxonomy，并把 intent 写为 CLASSIFY_FILES，不能复制用户原句作为 intent。
+后者只用于用户明确询问分类目录、分类体系或支持哪些分类。
 当 observation 已包含足以满足原始目标的 Tool 结果时使用 FINISH；FINISH 不生成文件事实文本，
 最终回复由后端根据已经验证的 Tool 结果生成。
 hybrid-search 属于发现型 Tool：首次计划只执行检索，观察命中数量、实际条件和受控 document_ids 后，
@@ -126,6 +127,7 @@ def validate_and_convert_decision(
     observed_document_ids: list[str] | None = None,
     has_tool_observation: bool = False,
     observation: dict[str, Any] | None = None,
+    prior_intent: str | None = None,
 ) -> tuple[PlannerOutput, dict[str, Any]]:
     """把 Adaptive 决策转换为现有执行计划，并以后端 Catalog 强制风险边界。"""
 
@@ -168,6 +170,11 @@ def validate_and_convert_decision(
         authorized_document_ids=authorized_document_ids,
         source="Planner scope",
     )
+    normalized_intent = _normalize_application_intent(
+        decision=decision,
+        observation=observation,
+        prior_intent=prior_intent,
+    )
     if decision.decision_type == "DIRECT_RESPONSE":
         safe_direct_intents = {
             "GENERAL_CHAT",
@@ -199,6 +206,8 @@ def validate_and_convert_decision(
         )
     user_intent_plan = {
         "decision_type": decision.decision_type,
+        "original_intent": decision.intent,
+        "normalized_intent": normalized_intent,
         "direct_response": decision.direct_response,
         "clarification_question": (
             decision.clarification.question
@@ -217,18 +226,22 @@ def validate_and_convert_decision(
         intent = (
             "MISSING_FILE_SCOPE"
             if decision.decision_type == "CLARIFY"
-            else decision.intent
+            else normalized_intent
         )
+        slots = {
+            "document_ids": decision.scope.document_ids,
+            "clarification_question": user_intent_plan[
+                "clarification_question"
+            ],
+        }
+        requested_outputs = _requested_outputs_for_intent(intent)
+        if requested_outputs:
+            slots["requested_outputs"] = requested_outputs
         return (
             PlannerOutput(
                 intent=intent,
                 user_goal=decision.user_goal,
-                slots={
-                    "document_ids": decision.scope.document_ids,
-                    "clarification_question": user_intent_plan[
-                        "clarification_question"
-                    ],
-                },
+                slots=slots,
                 selected_skills=decision.selected_skill_ids
                 or ["chat-intake"],
                 steps=[
@@ -294,11 +307,15 @@ def validate_and_convert_decision(
                 writes=list(definition.writes),
             )
         )
+    requested_outputs = _requested_outputs_for_intent(normalized_intent)
+    slots = {"document_ids": decision.scope.document_ids}
+    if requested_outputs:
+        slots["requested_outputs"] = requested_outputs
     return (
         PlannerOutput(
-            intent=decision.intent,
+            intent=normalized_intent,
             user_goal=decision.user_goal,
-            slots={"document_ids": decision.scope.document_ids},
+            slots=slots,
             selected_skills=decision.selected_skill_ids,
             steps=steps,
             evidence_policy={
@@ -313,6 +330,72 @@ def validate_and_convert_decision(
         ),
         user_intent_plan,
     )
+
+
+def _normalize_application_intent(
+    *,
+    decision: PlannerDecision,
+    observation: dict[str, Any] | None,
+    prior_intent: str | None,
+) -> str:
+    """根据已校验的 Skill/Tool 把分类自由文本收敛为应用层枚举。"""
+
+    steps = list(decision.tool_plan.steps) if decision.tool_plan is not None else []
+    tool_names = {step.tool_name for step in steps}
+    observed_tool_name = str((observation or {}).get("tool_name") or "")
+    if observed_tool_name:
+        tool_names.add(observed_tool_name)
+
+    if "classification-decision" in tool_names:
+        return "CLASSIFICATION_DECISION"
+    if "read-classification-taxonomy" in tool_names:
+        return "READ_CLASSIFICATION_TAXONOMY"
+    if "read-document-classifications" in tool_names:
+        return "READ_DOCUMENT_CLASSIFICATIONS"
+    if "classify-managed-files" in tool_names:
+        return "CLASSIFY_MANAGED_FILES"
+
+    selected_skills = set(decision.selected_skill_ids)
+    has_classification_extraction_step = any(
+        step.skill_id == "document-classification"
+        and step.tool_name == "extract-document-text"
+        for step in steps
+    )
+    if has_classification_extraction_step or (
+        observed_tool_name == "extract-document-text"
+        and "document-classification" in selected_skills
+    ):
+        return "CLASSIFY_FILES"
+
+    normalized = str(decision.intent or "").strip()
+    normalized_token = normalized.upper().replace("-", "_").replace(" ", "_")
+    if "CLASSIF" in normalized_token:
+        return normalized_token
+
+    # FINISH 是执行循环的终止信号，不应把上一轮已经规范化的业务意图改回
+    # 模型生成的中文描述，否则最终回执会失去分类展示条件。
+    prior_token = str(prior_intent or "").strip().upper()
+    if decision.decision_type == "FINISH" and "CLASSIF" in prior_token:
+        return prior_token
+    return normalized
+
+
+def _requested_outputs_for_intent(intent: str) -> list[str]:
+    """为已规范化分类意图补齐稳定的回执输出契约。"""
+
+    normalized = str(intent or "").upper()
+    if normalized in {
+        "CLASSIFY_FILES",
+        "CLASSIFY_MANAGED_FILES",
+        "CLASSIFY_AND_SUGGEST_RENAME",
+    }:
+        return ["classification", "receipt"]
+    if normalized in {
+        "READ_DOCUMENT_CLASSIFICATIONS",
+        "SUMMARIZE_CLASSIFICATIONS",
+    }:
+        return ["classification_summary", "receipt"]
+    return []
 
 
 def _allowed_observation_decisions(

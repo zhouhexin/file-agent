@@ -168,6 +168,7 @@ class EvidenceAnswerToolOutput(GenericToolOutput):
     kind: str = "evidence_answer"
     answer: str = ""
     references: list[dict[str, Any]] = Field(default_factory=list)
+    field_table: dict[str, Any] | None = None
 
 
 class ManagedFileCollectionToolOutput(GenericToolOutput):

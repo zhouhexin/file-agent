@@ -32,6 +32,7 @@ from app.modules.files.schemas import (
     SpreadsheetSheetSummary,
 )
 from app.modules.files.content_types import infer_content_type
+from app.modules.files.upload_paths import normalize_upload_relative_path
 
 
 class FileUploadService:
@@ -48,6 +49,7 @@ class FileUploadService:
         file: UploadFile,
         current_user: User,
         conversation_id: str | None = None,
+        relative_path: str | None = None,
     ) -> FileUploadResponse:
         """保存上传暂存，并在同一事务登记异步查重任务。
 
@@ -55,6 +57,10 @@ class FileUploadService:
         """
 
         filename = Path(file.filename or "uploaded-file").name
+        normalized_relative_path = normalize_upload_relative_path(
+            relative_path,
+            filename=filename,
+        )
         # 浏览器可能把合法图片上报为 application/octet-stream；统一推断可避免同一文件在
         # 上传、受管目录导入和工作副本导入三条链路中得到不同 MIME。
         content_type = infer_content_type(
@@ -112,6 +118,7 @@ class FileUploadService:
             job_id=job.id,
             archive_status=archive.status,
             review_status=review.status,
+            relative_path=normalized_relative_path,
         )
 
     def _to_upload_response(
@@ -123,6 +130,7 @@ class FileUploadService:
         job_id: str,
         archive_status: str,
         review_status: str,
+        relative_path: str | None,
     ) -> FileUploadResponse:
         """把 Document 转换为上传响应。"""
 
@@ -140,6 +148,7 @@ class FileUploadService:
             filesystem_job_id=job_id,
             archive_status=archive_status,
             duplicate_review_status=review_status,
+            relative_path=relative_path,
         )
 
     def delete(self, document_id: str, current_user: User) -> FileDeleteResponse:

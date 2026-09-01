@@ -41,10 +41,30 @@ class InitialOrganizationDecision:
         """转换为现有分类持久化和逐文件审计可消费的轻量结构。"""
 
         extraction = self.extraction_result or {}
+        proposed_filename = str(self.rename_metadata.get("proposed_filename") or "").strip()
+        rename_completed = bool(
+            self.rename_status == "READY"
+            and proposed_filename
+            and proposed_filename != self.filename
+        )
         return {
             "document_id": document_id,
             "document_version_id": document_version_id,
-            "filename": self.filename,
+            "filename": proposed_filename if rename_completed else self.filename,
+            "original_filename": self.filename,
+            "renamed_filename": proposed_filename if rename_completed else self.filename,
+            "rename_status": (
+                "COMPLETED"
+                if rename_completed
+                else "NO_CHANGE"
+                if self.rename_status == "NO_CHANGE"
+                else "NEEDS_REVIEW"
+            ),
+            "processing_status": (
+                "COMPLETED"
+                if extraction.get("status") == "COMPLETED"
+                else "FAILED"
+            ),
             "extraction_status": extraction.get("status") or "FAILED",
             "extraction_run_id": extraction.get("extraction_run_id"),
             "extractor": extraction.get("extractor"),
@@ -53,11 +73,8 @@ class InitialOrganizationDecision:
             "classification_summary_id": self.classification_summary_id,
             "summary_status": self.summary_status,
             "year": self.rename_metadata.get("year"),
-            # 建议名称只用于回执展示；它不是已执行的重命名结果。
-            "rename_suggestion": _user_visible_rename_suggestion(
-                current_filename=self.filename,
-                proposed_filename=self.rename_metadata.get("proposed_filename"),
-            ),
+            # 自动改名后的确定结果使用独立字段返回；兼容字段不再表达“尚未执行”。
+            "rename_suggestion": None,
             "document_type": self.summary_metadata.get("document_type"),
             "keywords": list(self.summary_metadata.get("keywords") or []),
             "entities": list(self.summary_metadata.get("entities") or []),
@@ -68,11 +85,10 @@ class InitialOrganizationDecision:
 
 
 class InitialWorkingCopyOrganizer:
-    """为已落位工作副本完成解析、双摘要、分类和命名建议。
+    """为首次工作副本发布生成解析、分类和标准化命名决策。
 
-    首次导入只负责创建可追溯的工作副本，不能把系统建议当成用户授权而直接改名。
-    无论建议质量如何，工作副本初始文件名都保持上传原名；用户后续明确提出改名时，
-    才由受控重命名流程创建并确认 OperationPlan。
+    本服务只生成结构化决策；文件系统发布仍由生命周期服务集中执行。可信名称会用于
+    上传后的首次工作副本发布，低可信名称保留原名并进入待复核。
     """
 
     def __init__(self, *, db: Session, user_id: str, settings: Settings | None = None) -> None:
@@ -89,11 +105,7 @@ class InitialWorkingCopyOrganizer:
         version: DocumentVersion,
         managed_file: ManagedFile,
     ) -> InitialOrganizationDecision:
-        """生成不改变物理路径的分类和命名分析结果。
-
-        分类目录只作为逻辑标签和查询证据；同步工作副本已按原始相对路径快速落位，
-        这里不得再次生成“待整理”目录或自动移动文件。
-        """
+        """生成不直接写文件系统的分类和命名分析结果。"""
 
         if not self.settings.initial_working_copy_organization_enabled:
             filename = FileLifecycleStorageService.sanitize_filename(managed_file.filename)
@@ -196,22 +208,6 @@ def _rename_metadata(suggestion: dict[str, Any]) -> dict[str, Any]:
         "warnings": list(suggestion.get("warnings") or []),
         "errors": list(suggestion.get("errors") or []),
     }
-
-
-def _user_visible_rename_suggestion(
-    *,
-    current_filename: str,
-    proposed_filename: Any,
-) -> dict[str, str] | None:
-    """将内部命名候选收敛为普通回执可展示的建议。
-
-    不返回解析器、风险评分或路径；更不能把建议包装成已发生的文件重命名。
-    """
-
-    proposed = str(proposed_filename or "").strip()
-    if not proposed or proposed == current_filename:
-        return None
-    return {"proposed_filename": proposed}
 
 
 def _summary_metadata(

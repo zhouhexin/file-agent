@@ -66,8 +66,11 @@ from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.repository import FilesystemJobRepository, ManagedFileRepository
 from app.modules.managed_files.scanner import ManagedFileScanner
 from app.modules.structured_extraction.worker import (
+    StructuredExtractionTaskTimeoutError,
     fail_structured_extraction_agent_run,
     process_structured_extraction_job,
+    process_structured_extraction_job_isolated,
+    reconcile_waiting_structured_extraction_runs,
 )
 from app.modules.managed_files.source_analysis import (
     ManagedFileRevisionService,
@@ -248,7 +251,24 @@ def process_next_filesystem_job(
             try:
                 heartbeat.start()
                 try:
-                    _process_job(db=db, job=job)
+                    if (
+                        job.job_type == "STRUCTURED_IMAGE_EXTRACTION"
+                        and session_factory is SessionLocal
+                    ):
+                        process_structured_extraction_job_isolated(
+                            job_id=job_id,
+                            execution_token=str(job.execution_token or ""),
+                            worker_id=worker_id,
+                            attempt_count=int(job.attempt_count or 0),
+                            timeout_seconds=get_settings().structured_extraction_task_timeout_seconds,
+                        )
+                        # 子进程已提交终态，父进程必须丢弃领取时的旧 ORM 快照。
+                        db.expire_all()
+                        job = db.get(FilesystemJob, job_id)
+                        if job is None or job.status != "COMPLETED":
+                            raise RuntimeError("结构化抽取子进程未提交完成状态")
+                    else:
+                        _process_job(db=db, job=job)
                     # 检索未命中后静默提升的导入/分析任务完成时，继续原 hybrid-search。
                     # 这一步只更新原 AgentRun，不生成新的用户消息或暴露队列细节。
                     _advance_waiting_search_runs(db=db, completed_job=job)
@@ -379,10 +399,27 @@ def run_filesystem_worker(
             # 完成事件与 AgentRun 落库之间发生进程重启或事务竞争时，单靠一次性
             # completion hook 可能遗漏续跑。队列空闲时按数据库终态补偿一次，
             # 使部署修复后既有的“正在处理”消息也能恢复，而不是只能修复新请求。
+            structured_reconciled = 0
+            if queue_names is None or "STRUCTURED_EXTRACTION" in queue_names:
+                try:
+                    structured_reconciled = reconcile_waiting_structured_extraction_runs(
+                        session_factory=session_factory,
+                    )
+                except Exception as exc:
+                    log_event(
+                        "structured_extraction.waiting_run.reconcile_failed",
+                        level="ERROR",
+                        status="FAILED",
+                        error_code=exc.__class__.__name__,
+                        exception_traceback=format_exception_traceback(exc),
+                        message="结构化抽取等待链补偿失败，worker 将继续轮询",
+                    )
+                    _print_worker_status(
+                        "结构化抽取等待补偿失败",
+                        message="请查看 JSONL 日志中的 structured_extraction.waiting_run.reconcile_failed",
+                    )
             try:
-                reconciled = reconcile_waiting_search_runs(
-                    session_factory=session_factory,
-                )
+                reconciled = reconcile_waiting_search_runs(session_factory=session_factory)
             except Exception as exc:
                 # 补偿扫描属于恢复能力，失败不能让文件 worker 整体退出；服务器日志
                 # 保留堆栈供运维定位，普通用户侧仍只看到原任务状态。
@@ -400,7 +437,7 @@ def run_filesystem_worker(
                 )
                 time.sleep(poll_seconds)
                 continue
-            if reconciled:
+            if structured_reconciled or reconciled:
                 continue
             # 正式分类图谱投影只能由 GRAPH worker 消费。队列隔离使 Neo4j 超时或
             # 维护不会占用扫描、导入、分析和文件操作 worker。
@@ -1894,6 +1931,8 @@ def _public_job_error_message(*, job: FilesystemJob, error: Exception) -> str:
     if job.job_type == "CLASSIFY_MANAGED_FILES":
         return "受管文件后台分类失败，请稍后重试或联系管理员。"
     if job.job_type == "STRUCTURED_IMAGE_EXTRACTION":
+        if isinstance(error, StructuredExtractionTaskTimeoutError):
+            return "图片结构化抽取处理超时，原始文件未修改；请缩小范围后重试或联系管理员。"
         return "图片结构化抽取失败，原始文件未修改；请稍后重试或联系管理员。"
     if job.job_type in {"RECONCILE_MANAGED_ROOT", "SCAN_MANAGED_ROOT"} and isinstance(
         error,

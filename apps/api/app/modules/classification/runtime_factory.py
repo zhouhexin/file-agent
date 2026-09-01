@@ -8,7 +8,10 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.logging import log_event
-from app.modules.classification.classifier_service import DocumentClassificationService
+from app.modules.classification.classifier_service import (
+    DocumentClassificationService,
+    build_classifier_version,
+)
 from app.modules.classification.llm_judge import LLMClassificationJudge
 from app.modules.knowledge_graph.classification_context import (
     build_graph_classification_context,
@@ -62,14 +65,10 @@ class ClassificationRuntimeFactory:
         """不构造外部依赖即可计算指定用户当前分类器版本。"""
 
         graph_mode = self.graph_mode_for_user(user_id=user_id)
-        summary_mode = (
-            "summary"
-            if self.settings.llm_classification_summary_enabled
-            else "fulltext"
-        )
-        return (
-            f"taxonomy-{summary_mode}-first-"
-            f"{self.settings.llm_classification_mode}-graph-{graph_mode}-v5"
+        return build_classifier_version(
+            mode=self.settings.llm_classification_mode,
+            graph_mode=graph_mode,
+            summary_enabled=self.settings.llm_classification_summary_enabled,
         )
 
     def _build_llm_judge(self) -> LLMClassificationJudge | None:

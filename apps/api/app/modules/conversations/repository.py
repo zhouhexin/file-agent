@@ -34,6 +34,7 @@ from app.modules.conversations.schemas import (
     ConversationDetailResponse,
     ConversationHistoryMessage,
     ConversationMessage,
+    ConversationMessageAttachment,
     ConversationPagination,
     MessageAttachment,
 )
@@ -270,11 +271,15 @@ class ConversationRepository:
         normalized_filename = _normalize_filename_identity(explicit_filename)
         candidates = (
             self.db.query(WorkingCopy)
+            .join(Document, Document.id == WorkingCopy.document_id)
             .filter(
                 WorkingCopy.workspace_id == shared_workspace_id,
                 WorkingCopy.status == "ACTIVE",
                 WorkingCopy.current_version_id.isnot(None),
-                func.lower(WorkingCopy.filename) == explicit_filename.casefold(),
+                or_(
+                    func.lower(WorkingCopy.filename) == explicit_filename.casefold(),
+                    func.lower(Document.original_filename) == explicit_filename.casefold(),
+                ),
             )
             .order_by(WorkingCopy.relative_path.asc(), WorkingCopy.id.asc())
             .all()
@@ -282,8 +287,13 @@ class ConversationRepository:
         return [
             MessageAttachment(document_id=working_copy.document_id)
             for working_copy in candidates
-            if _normalize_filename_identity(working_copy.filename)
-            == normalized_filename
+            if normalized_filename
+            in {
+                _normalize_filename_identity(working_copy.filename),
+                _normalize_filename_identity(
+                    self.db.get(Document, working_copy.document_id).original_filename
+                ),
+            }
         ]
 
     def get_latest_attachment_batch_references(
@@ -477,7 +487,7 @@ class ConversationRepository:
         availability_map = self._load_attachment_availability_map(document_map=document_map)
         task_receipts = {
             message_id: self._refresh_evidence_file_availability(
-                receipt=build_user_task_receipt(agent_result),
+                receipt=build_user_task_receipt(agent_result, db=self.db),
                 availability_map=availability_map,
             )
             for message_id, agent_result in agent_results.items()
@@ -907,6 +917,7 @@ class ConversationRepository:
             availability_message=availability.availability_message if availability else "工作副本状态不可用",
             can_open=availability.can_open if availability else False,
             can_restore=availability.can_restore if availability else False,
+            relative_path=item.get("relative_path"),
         )
 
     @staticmethod
@@ -920,7 +931,7 @@ class ConversationRepository:
             role=message.role,
             content=message.content,
             attachments=[
-                MessageAttachment.model_validate(item)
+                ConversationMessageAttachment.model_validate(item)
                 for item in _deduplicate_document_attachment_items(message.attachments_json)
             ],
         )

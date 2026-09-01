@@ -14,16 +14,20 @@ def test_default_taxonomy_loads_unified_school_file_classification():
     taxonomy = load_default_taxonomy()
 
     assert taxonomy.key == "unified_school_file_classification"
-    assert taxonomy.version == "2026-08-v6"
+    assert taxonomy.version == "2026-09-v8"
     assert taxonomy.categories[0].name == "学校"
     school, college = taxonomy.categories
     assert {"全校", "校属各单位"} <= set(school.positive_signals)
     assert {"计算机学院", "计算机科学与工程学院"} <= set(college.aliases)
     assert "全校" in college.negative_signals
+    assert taxonomy.fallback_policy is not None
+    assert "school.finance" in taxonomy.fallback_policy.department_category_ids
+    assert taxonomy.fallback_policy.issued.name == "发文"
+    assert taxonomy.fallback_policy.other.name == "其他"
 
 
-def test_default_taxonomy_all_61_candidates_have_physical_paths():
-    """全部候选分类都必须可解析物理目录，避免正确分类后退回中性路径。"""
+def test_default_taxonomy_all_candidates_have_physical_paths():
+    """业务与兜底候选分类都必须可解析物理目录，避免正式分类后无法落位。"""
 
     taxonomy = load_default_taxonomy()
     candidates = []
@@ -38,10 +42,12 @@ def test_default_taxonomy_all_61_candidates_have_physical_paths():
 
     walk(taxonomy.categories, depth=0)
 
-    assert len(candidates) == 61
+    assert len(candidates) == 114
     assert all(node.organization_path for node in candidates)
     union = next(node for node in candidates if node.id == "school.party.union")
     assert union.organization_path == ["学校", "党委相关", "工会"]
+    finance_other = next(node for node in candidates if node.id == "school.finance.other")
+    assert finance_other.organization_path == ["学校", "财务", "其他"]
 
 
 def test_flatten_category_paths_preserves_parent_path():
@@ -115,6 +121,7 @@ def test_default_taxonomy_enriches_every_college_candidate_from_workdata_samples
         item
         for item in flattened
         if item.category_id and item.category_id.startswith("college.")
+        and not item.category_id.endswith((".issued", ".other"))
     ]
     by_id = {item.category_id: item for item in college_candidates}
 

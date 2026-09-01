@@ -883,10 +883,6 @@ class WorkingCopyOperationService:
         working_copy.last_operation_plan_id = plan.id
         version.storage_path = after_storage_path
         version.filename = working_copy.filename
-        document = self.db.get(Document, working_copy.document_id)
-        if document is not None:
-            # Document 名称是工作副本当前展示名；内容版本和原始文件均保持不变。
-            document.original_filename = working_copy.filename
         file_object = self.db.query(FileObject).filter(FileObject.document_id == working_copy.document_id).first()
         if file_object is not None:
             file_object.storage_backend = "working_copy_local"

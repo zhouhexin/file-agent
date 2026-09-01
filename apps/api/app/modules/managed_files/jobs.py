@@ -6,6 +6,7 @@ P0 使用数据库表作为轻量队列；PostgreSQL 部署可扩展为 SKIP LOC
 from __future__ import annotations
 
 from datetime import timedelta
+from uuid import uuid4
 
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
@@ -66,6 +67,7 @@ class FilesystemJobQueue:
                     existing.max_attempts = bounded_max_attempts
                     existing.lease_owner = None
                     existing.lease_expires_at = None
+                    existing.execution_token = None
                     existing.updated_at = utcnow()
                     self.repository.create_event(
                         job_id=existing.id,
@@ -183,6 +185,8 @@ class FilesystemJobQueue:
         job.status = "RUNNING"
         job.attempt_count += 1
         job.lease_owner = worker_id
+        # 每次重新领取都生成新令牌；超时后被终止的旧执行即使迟到，也不能提交结果。
+        job.execution_token = str(uuid4())
         job.lease_expires_at = now + timedelta(seconds=get_settings().filesystem_job_lease_seconds)
         job.heartbeat_at = now
         job.locked_by = worker_id
@@ -201,6 +205,7 @@ class FilesystemJobQueue:
         job.finished_at = utcnow()
         job.lease_expires_at = None
         job.lease_owner = None
+        job.execution_token = None
         job.updated_at = job.finished_at
         self.repository.create_event(job_id=job.id, level="INFO", message="任务已完成", details=result)
         self.db.flush()
@@ -220,6 +225,7 @@ class FilesystemJobQueue:
         job.finished_at = utcnow()
         job.lease_expires_at = None
         job.lease_owner = None
+        job.execution_token = None
         job.updated_at = job.finished_at
         self.repository.create_event(
             job_id=job.id,
@@ -262,6 +268,7 @@ class FilesystemJobQueue:
         job.error_message = error_message
         job.available_at = now + timedelta(seconds=max(1, retry_after_seconds))
         job.lease_owner = None
+        job.execution_token = None
         job.lease_expires_at = None
         job.heartbeat_at = None
         job.updated_at = now

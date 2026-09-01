@@ -41,6 +41,7 @@ from app.modules.evidence_answer.service import (
     _strip_legacy_inline_reference_indexes,
 )
 from app.modules.evidence_answer.policy import EvidenceQuestionPolicy
+from app.modules.evidence_answer.schemas import EvidenceItem, StructuredAnswer
 from app.modules.agent.user_receipt import UserTaskReceipt
 from app.modules.conversations.repository import (
     AttachmentAvailabilityProjection,
@@ -100,6 +101,63 @@ class EchoEvidenceClient:
             "limitations": [],
             "status": "COMPLETED",
         }
+
+
+def test_field_table_validation_locks_requested_fields_and_rejects_extra_values():
+    """字段表格只能按后端 schema 输出，并要求字段值回到真实证据。"""
+
+    service = EvidenceAnswerService.__new__(EvidenceAnswerService)
+    answer = StructuredAnswer.model_validate(
+        {
+            "claims": [],
+            "field_values": [
+                {
+                    "field_key": "applicant",
+                    "value": "张三",
+                    "evidence_ids": ["evidence-1"],
+                    "status": "EXTRACTED",
+                },
+                {
+                    "field_key": "amount",
+                    "value": "5000元",
+                    "evidence_ids": ["evidence-1"],
+                    "status": "EXTRACTED",
+                },
+                {
+                    "field_key": "invented",
+                    "value": "不得展示",
+                    "evidence_ids": ["evidence-1"],
+                    "status": "EXTRACTED",
+                },
+            ],
+        }
+    )
+    evidence = EvidenceItem(
+        evidence_id="evidence-1",
+        document_id="doc-1",
+        document_version_id="version-1",
+        filename="申请表.jpg",
+        quote="申请人：张三；资助金额：5000元；使用情况登记：已用于购买资料。",
+        page_number=1,
+    )
+
+    table, used_ids, warnings = service._validate_field_values(
+        answer=answer,
+        items=[evidence],
+        fields=[
+            {"key": "applicant", "label": "申请人", "field_type": "person_name"},
+            {"key": "amount", "label": "资助金额", "field_type": "money"},
+            {"key": "usage", "label": "使用情况登记", "field_type": "string"},
+        ],
+    )
+
+    assert [item["key"] for item in table["fields"]] == ["applicant", "amount", "usage"]
+    assert table["fields"][0]["value"] == "张三"
+    assert table["fields"][1]["value"] == "5000元"
+    assert table["fields"][2]["status"] == "MISSING"
+    assert table["missing_count"] == 1
+    assert used_ids == ["evidence-1"]
+    assert warnings == []
 
 
 def _session():

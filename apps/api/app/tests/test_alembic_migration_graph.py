@@ -20,7 +20,7 @@ def test_database_migrations_have_one_current_head() -> None:
 
     scripts = _migration_scripts()
 
-    assert scripts.get_heads() == ["20260827_0001"]
+    assert scripts.get_heads() == ["20260901_0001"]
     merge_revision = scripts.get_revision("20260825_0001")
     assert merge_revision is not None
     assert set(merge_revision.down_revision) == {

@@ -10,9 +10,10 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, func, Index, Integer, JSON, String, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, event, func, Index, Integer, JSON, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm.attributes import NEVER_SET, NO_VALUE
 from sqlalchemy.types import UserDefinedType
 
 from app.db.base import Base
@@ -149,6 +150,20 @@ class Document(Base):
         back_populates="document",
         foreign_keys="DocumentVersion.document_id",
     )
+
+
+@event.listens_for(Document.original_filename, "set", retval=True, active_history=True)
+def _preserve_document_original_filename(
+    _target: Document,
+    value: str,
+    old_value: object,
+    _initiator: object,
+) -> str:
+    """只允许在创建 Document 时写入原始文件名，之后永久保持不变。"""
+
+    if old_value not in {NEVER_SET, NO_VALUE, None} and value != old_value:
+        raise ValueError("documents.original_filename is immutable after creation")
+    return value
 
 
 class FileObject(Base):
@@ -2162,6 +2177,7 @@ class FilesystemJob(Base):
     lease_owner: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    execution_token: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
     locked_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id"), nullable=True, index=True)

@@ -271,6 +271,7 @@ class Settings(BaseModel):
     structured_extraction_llm_api_key: str = ""
     structured_extraction_llm_model: str = ""
     structured_extraction_llm_timeout_seconds: int = 180
+    structured_extraction_task_timeout_seconds: int = 300
     structured_extraction_max_fields: int = DEFAULT_STRUCTURED_EXTRACTION_MAX_FIELDS
     structured_extraction_max_retry_fields: int = DEFAULT_STRUCTURED_EXTRACTION_MAX_RETRY_FIELDS
     structured_extraction_max_records: int = DEFAULT_STRUCTURED_EXTRACTION_MAX_RECORDS
@@ -950,6 +951,9 @@ def get_settings() -> Settings:
         ).strip(),
         structured_extraction_llm_timeout_seconds=_bounded_int_env(
             "STRUCTURED_EXTRACTION_LLM_TIMEOUT_SECONDS", 180, minimum=10, maximum=600
+        ),
+        structured_extraction_task_timeout_seconds=_bounded_int_env(
+            "STRUCTURED_EXTRACTION_TASK_TIMEOUT_SECONDS", 300, minimum=30, maximum=900
         ),
         structured_extraction_max_fields=_bounded_int_env(
             "STRUCTURED_EXTRACTION_MAX_FIELDS",

@@ -18,7 +18,11 @@ from app.db.models import (
 )
 from app.modules.classification.loader import load_default_taxonomy
 from app.modules.classification.managed_catalog import GlobalManagedCategoryCatalogService
-from app.modules.classification.matcher import DocumentFeatures, match_document_features
+from app.modules.classification.matcher import (
+    DocumentFeatures,
+    apply_unclassified_fallback,
+    match_document_features,
+)
 from app.modules.classification.summary_service import (
     DocumentSummaryService,
     resolve_document_version_id,
@@ -29,6 +33,19 @@ from app.modules.knowledge_graph.managed_path_profile import ManagedPathProfileR
 from app.modules.knowledge_graph.reranker import GraphClassificationReranker
 from app.modules.knowledge_graph.schemas import GraphClassificationResult, GraphSemanticResult
 from app.modules.knowledge_graph.semantic_context import NoOpSemanticClassificationContext
+
+
+CLASSIFIER_IMPLEMENTATION_VERSION = "v7"
+
+
+def build_classifier_version(*, mode: str, graph_mode: str, summary_enabled: bool) -> str:
+    """统一生成持久化分类运行与新鲜度检查使用的分类器身份。"""
+
+    summary_mode = "summary" if summary_enabled else "fulltext"
+    return (
+        f"taxonomy-{summary_mode}-first-{mode}-graph-{graph_mode}-"
+        f"{CLASSIFIER_IMPLEMENTATION_VERSION}"
+    )
 
 
 class DocumentClassificationService:
@@ -201,6 +218,14 @@ class DocumentClassificationService:
                 classification_text=full_text or fallback_text,
                 rule_categories=categories,
             )
+            categories = apply_unclassified_fallback(
+                document_features=DocumentFeatures(
+                    filename=filename,
+                    full_text=full_text or fallback_text,
+                ),
+                taxonomy=load_default_taxonomy(),
+                matches=categories,
+            )
             categories = [
                 self._attach_evidence_items(
                     category={
@@ -212,6 +237,26 @@ class DocumentClassificationService:
                 )
                 for category in categories
             ]
+            post_evidence_categories = apply_unclassified_fallback(
+                document_features=DocumentFeatures(
+                    filename=filename,
+                    full_text=full_text or fallback_text,
+                ),
+                taxonomy=load_default_taxonomy(),
+                matches=categories,
+            )
+            if post_evidence_categories != categories:
+                categories = [
+                    self._attach_evidence_items(
+                        category={
+                            **category,
+                            "classifier_version": self.classifier_version,
+                        },
+                        pages=pages,
+                        fallback_text=fallback_text,
+                    )
+                    for category in post_evidence_categories
+                ]
         except Exception as exc:
             log_event(
                 "classification.failed",
@@ -369,8 +414,11 @@ class DocumentClassificationService:
     def classifier_version(self) -> str:
         """返回会影响分类结果的受控实现版本。"""
 
-        summary_mode = "summary" if get_settings().llm_classification_summary_enabled else "fulltext"
-        return f"taxonomy-{summary_mode}-first-{self.mode}-graph-{self.graph_mode}-v5"
+        return build_classifier_version(
+            mode=self.mode,
+            graph_mode=self.graph_mode,
+            summary_enabled=get_settings().llm_classification_summary_enabled,
+        )
 
     def _taxonomy_identity(self) -> tuple[str, str]:
         """返回当前统一 taxonomy 身份，用于分类结果缓存隔离。"""
@@ -486,7 +534,7 @@ class DocumentClassificationService:
     ) -> dict[str, Any]:
         """为分类建议补充可定位原文证据。"""
 
-        if category.get("name") == "其他":
+        if list(category.get("category_path") or []) == ["其他"]:
             return {**category, "evidence_items": []}
         existing_items = [item for item in category.get("evidence_items", []) if isinstance(item, dict)]
         if existing_items:
@@ -527,7 +575,12 @@ class DocumentClassificationService:
         judged_categories = self.llm_judge.judge(
             filename=filename,
             document_text=classification_text,
-            candidates=[category for category in rule_categories if category.get("name") != "其他"],
+            candidates=[
+                category
+                for category in rule_categories
+                if list(category.get("category_path") or [])[-1:] != ["其他"]
+                and category.get("source") != "rule_fallback"
+            ],
         )
         return judged_categories or rule_categories
 

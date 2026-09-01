@@ -2046,6 +2046,11 @@ def _evidence_answer_handler(
             question=str(getattr(tool_input, "question")),
             document_ids=list(getattr(tool_input, "document_ids")),
             answer_mode=str(getattr(tool_input, "answer_mode")),
+            response_format=str(getattr(tool_input, "response_format", "TEXT")),
+            fields=[
+                item.model_dump() if hasattr(item, "model_dump") else dict(item)
+                for item in list(getattr(tool_input, "fields", []))
+            ],
             document_selection_clarification_id=getattr(
                 tool_input,
                 "document_selection_clarification_id",

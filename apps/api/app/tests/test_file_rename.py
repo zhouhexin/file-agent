@@ -1036,7 +1036,7 @@ def test_uploaded_attachment_rename_confirms_into_private_temporary_path(monkeyp
         source_object = db.query(FileObject).filter_by(document_id=source_document_id).one()
         target_object = db.query(FileObject).filter_by(document_id=target_document_id).one()
         assert source_document.original_filename == "共享源文件.txt"
-        assert target_document.original_filename == "2026_春季学生活动总结.txt"
+        assert target_document.original_filename == "扫描件.txt"
         assert source_object.storage_path != target_object.storage_path
         assert shared_path.exists()
         target_path = storage_root / target_object.storage_path

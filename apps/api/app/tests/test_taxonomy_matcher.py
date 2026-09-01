@@ -1,7 +1,14 @@
 """分类体系关键词匹配测试。"""
 
+import pytest
+
 from app.modules.classification.loader import load_default_taxonomy
-from app.modules.classification.matcher import DocumentFeatures, match_document_text, recall_category_candidates
+from app.modules.classification.matcher import (
+    DocumentFeatures,
+    apply_unclassified_fallback,
+    match_document_text,
+    recall_category_candidates,
+)
 
 
 def test_matcher_returns_specific_school_category_path():
@@ -14,7 +21,7 @@ def test_matcher_returns_specific_school_category_path():
     assert matches[0]["name"] == "学校/人事师资/职称"
     assert matches[0]["category_path"] == ["学校", "人事师资", "职称"]
     assert matches[0]["taxonomy_key"] == "unified_school_file_classification"
-    assert matches[0]["taxonomy_version"] == "2026-08-v6"
+    assert matches[0]["taxonomy_version"] == "2026-09-v8"
     assert "职称" in matches[0]["evidence"]
 
 
@@ -61,7 +68,7 @@ def test_matcher_returns_other_when_no_taxonomy_keywords_match():
             "status": "SUGGESTED",
             "evidence": [],
             "taxonomy_key": "unified_school_file_classification",
-            "taxonomy_version": "2026-08-v6",
+            "taxonomy_version": "2026-09-v8",
         }
     ]
 
@@ -336,3 +343,83 @@ def test_match_document_text_uses_recall_candidates_for_rule_only_output():
     assert matches[0]["category_path"] == ["学校", "人事师资", "考核聘任"]
     assert matches[0]["source"] == "rule"
     assert "聘期" in matches[0]["evidence"] or "续聘" in matches[0]["evidence"]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_id", "expected_path"),
+    [
+        ("校属各单位请知悉本项临时联络事项。", "school.other", ["学校", "其他"]),
+        (
+            "西安理工校发〔2026〕12号，校属各单位请知悉本项临时联络事项。",
+            "school.issued",
+            ["学校", "发文"],
+        ),
+        (
+            "财务处关于“两新”项目配套资金的工作通知。",
+            "school.finance.other",
+            ["学校", "财务", "其他"],
+        ),
+        (
+            "财务处〔2026〕8号，关于“两新”项目配套资金的工作通知。",
+            "school.finance.issued",
+            ["学校", "财务", "发文"],
+        ),
+        ("计算机科学与工程学院院内临时联络材料。", "college.other", ["学院", "其他"]),
+        (
+            "计算机学院〔2026〕3号，关于临时联络事项的说明。",
+            "college.issued",
+            ["学院", "发文"],
+        ),
+    ],
+)
+def test_unclassified_fallback_uses_scope_department_and_document_number(
+    text: str,
+    expected_id: str,
+    expected_path: list[str],
+):
+    """未命中具体业务分类时，应按组织、部门和文号组合落入发文或其他。"""
+
+    matches = match_document_text(text, load_default_taxonomy())
+
+    assert matches[0]["category_id"] == expected_id
+    assert matches[0]["category_path"] == expected_path
+    assert matches[0]["source"] == "rule_fallback"
+
+
+def test_unclassified_fallback_does_not_override_specific_business_category():
+    """已有具体业务分类时，即使存在部门和文号，也不得改写为发文兜底分类。"""
+
+    matches = match_document_text(
+        "西安理工人事〔2026〕8号，教师专业技术职务任职资格申报材料。",
+        load_default_taxonomy(),
+    )
+
+    category_ids = {item.get("category_id") for item in matches}
+    assert "school.hr.title-review" in category_ids
+    assert "school.hr.issued" not in category_ids
+
+
+def test_unclassified_fallback_uses_primary_root_after_evidence_review():
+    """最高排名具体候选缺少正文证据时，应按其学校分支回退到其他。"""
+
+    matches = apply_unclassified_fallback(
+        document_features=DocumentFeatures(filename="国际合作统计表.xls"),
+        taxonomy=load_default_taxonomy(),
+        matches=[
+            {
+                "category_id": "school.international-cooperation",
+                "category_path": ["学校", "国际合作交流"],
+                "status": "NEEDS_REVIEW",
+                "source": "rule",
+            },
+            {
+                "category_id": "school.hr.appointment-assessment",
+                "category_path": ["学校", "人事师资", "考核聘任"],
+                "status": "SUGGESTED",
+                "source": "rule",
+            },
+        ],
+    )
+
+    assert matches[0]["category_id"] == "school.other"
+    assert matches[0]["category_path"] == ["学校", "其他"]

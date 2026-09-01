@@ -25,6 +25,11 @@ def test_filesystem_job_queue_claims_pending_job():
         assert claimed.id == job.id
         assert claimed.status == "RUNNING"
         assert claimed.locked_by == "worker-1"
+        assert claimed.execution_token
+        first_token = claimed.execution_token
+        queue.mark_completed(job=claimed, result={})
+        assert claimed.execution_token is None
+        assert first_token != claimed.execution_token
         assert db.query(FilesystemJobEvent).filter(FilesystemJobEvent.job_id == job.id).count() >= 1
     finally:
         db.close()

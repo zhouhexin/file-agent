@@ -127,7 +127,10 @@ def is_missing_generated_output_feedback(message: str) -> bool:
 
 
 def is_structured_image_extraction_request(message: str) -> bool:
-    """识别明确要求从图片/扫描件抽取字段并结构化展示的请求。"""
+    """识别确实要求恢复表格结构或批量记录的重型图片抽取请求。
+
+    “以表格形式返回”只是展示要求，不能单独触发专用结构化 Worker。
+    """
 
     normalized = re.sub(r"\s+", "", str(message or ""))
     if not normalized:
@@ -139,19 +142,33 @@ def is_structured_image_extraction_request(message: str) -> bool:
     has_extraction_action = any(
         marker in normalized for marker in ("识别", "提取", "抽取", "读取")
     )
-    has_structured_output = any(
+    has_table_structure_goal = any(
         marker.lower() in normalized.lower()
-        for marker in ("表格", "字段", "JSON", "CSV", "Excel", "结构化")
+        for marker in (
+            "原表格", "原始表格", "还原表格", "恢复表格", "表格结构",
+            "行列结构", "合并单元格", "逐行", "每一行", "所有记录",
+            "全部记录", "多条记录", "保留版式", "保持版式", "按原表",
+            "导出CSV", "导出Excel", "生成CSV", "生成Excel",
+            "全部信息", "所有信息", "全部字段", "所有字段", "完整信息",
+        )
     )
-    return has_image_source and has_extraction_action and has_structured_output
+    # 用户同时点名父字段和“父字段中的子字段”并要求表格展示时，目标已经不是
+    # 单张表单的一组字段值，而是按每条记录投影派生列。该信号可以确定性地区分
+    # “三个字段整理成一行”与“登记表逐记录展示”，避免先执行轻量单记录问答后
+    # 又由 Adaptive Planner 追加结构化抽取，产生两套互相竞争的回执。
+    has_nested_record_projection = _has_nested_record_projection(normalized)
+    return (
+        has_image_source
+        and has_extraction_action
+        and (has_table_structure_goal or has_nested_record_projection)
+    )
 
 
 def _has_image_field_value_request(message: str) -> bool:
     """识别用户直接列出多个图片字段并要求返回字段值的自然表达。
 
-    用户不需要为了取得字段值额外说“字段”“表格”或“JSON”。显式要求结构化展示的
-    请求仍由 ``is_structured_image_extraction_request`` 和专用 Tool 处理；这里只保护
-    “识别图片中的申请人、金额和用途”这类应进入证据回答而不是普通 OCR 回执的请求。
+    用户不需要为了取得字段值额外说“字段”“表格”或“JSON”。只有明确要求恢复原表
+    结构或批量记录时才交给专用 Tool；普通字段表格进入证据回答。
     """
 
     normalized = re.sub(r"\s+", "", str(message or ""))
@@ -167,7 +184,7 @@ def _has_image_field_value_request(message: str) -> bool:
     if not (has_image_source and has_extraction_action):
         return False
     schema_mode, fields = _structured_field_schema(normalized)
-    return schema_mode == "AUTO_DISCOVER" or len(fields) >= 2
+    return schema_mode == "EXPLICIT_FIELDS" and len(fields) >= 2
 
 
 def has_explicit_attachment_classification_request(message: str) -> bool:
@@ -363,29 +380,36 @@ def _structured_field_schema(
     candidate = normalized[action_match.end() :]
     candidate = re.sub(
         r"^(?:从)?(?:这张|该张|该|上传的|附件中的)?"
-        r"(?:图片|图中|图里|图像|截图|扫描件|照片|影像)(?:中|里|中的|里的)?",
+        r"(?:图片|图中|图里|图像|截图|扫描件|照片|影像)(?:中的|里的|中|里)?",
         "",
         candidate,
     )
     candidate = re.split(
-        r"(?:，|,|；|;)(?:并|然后)?(?:以|用|按照).{0,16}?"
-        r"(?:表格|JSON|CSV|Excel|结构化|文本)(?:的形式|形式)?(?:展示|显示|输出|返回)?",
+        # 展示后缀必须是完整、靠近句尾的“并以表格形式展示”等短语。“以及”虽然
+        # 以“以”开头，但它是字段连接词，不能把其后的嵌套字段一起截掉。
+        r"(?:，|,|；|;)?(?:并|然后)?(?:以|用|按照)(?:一个|一份)?"
+        r"(?:表格|JSON|CSV|Excel|结构化文本)(?:的形式|形式)?"
+        r"(?:展示|显示|输出|返回)?$",
         candidate,
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0]
     candidate = re.split(
         r"(?:，|,)?(?:并)?(?:整理|展示|显示|输出|返回)(?:为|成)?"
-        r"(?:一个|一份)?(?:表格|JSON|CSV|Excel|结构化数据|文本)",
+        r"(?:一个|一份)?(?:表格|JSON|CSV|Excel|结构化数据|文本)$",
         candidate,
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0]
     candidate = re.sub(r"(?:等)?(?:字段|信息|内容)$", "", candidate)
+    # “使用情况登记”是一个完整业务字段，不能被“情况登记”误当展示动作；只在
+    # 明确的并列连接词处分隔，并清除字段末尾的普通助词。
     raw_labels = re.split(r"、|，|,|以及|和", candidate)
     labels: List[str] = []
     for raw_label in raw_labels:
-        label = raw_label.strip("：:；;。.!！?？")
+        label = re.sub(r"(?:等)?(?:字段|信息|内容)$", "", raw_label).strip(
+            "：:；;。.!！?？"
+        )
         if not label or len(label) > 80 or label in labels:
             continue
         labels.append(label)
@@ -411,6 +435,27 @@ def _structured_field_schema(
             )
         )
     return "EXPLICIT_FIELDS", fields
+
+
+def _has_nested_record_projection(message: str) -> bool:
+    """识别“父字段 + 父字段中的子字段”的按记录表格投影请求。
+
+    该判断只决定是否需要多记录结构化 Tool，不读取或猜测字段值。字段集合仍由
+    ``_structured_field_schema`` 锁定，实际值必须经过 OCR 单元格证据校验。
+    """
+
+    if _structured_presentation(message) != "TABLE":
+        return False
+    schema_mode, fields = _structured_field_schema(message)
+    if schema_mode != "EXPLICIT_FIELDS" or len(fields) < 2:
+        return False
+    labels = [str(field.label).strip() for field in fields if str(field.label).strip()]
+    return any(
+        parent != child
+        and f"{parent}中的" in child
+        for parent in labels
+        for child in labels
+    )
 
 
 def _structured_field_key(*, label: str, index: int) -> str:
@@ -913,6 +958,7 @@ class DeterministicPlanner:
         # 用户列出图片中的多个目标字段时，最终结果必须返回字段值。明确要求“重新”
         # 识别时先跳过缓存重建 OCR 页面，再基于新页面生成带证据的回答。
         if _has_image_field_value_request(message):
+            _schema_mode, requested_fields = _structured_field_schema(message)
             if _should_force_reprocess(message=message, lowered=lowered):
                 return _extract_then_evidence_answer_plan(
                     user_goal=message,
@@ -921,6 +967,12 @@ class DeterministicPlanner:
                     answer_mode="FOCUSED",
                     force_reprocess=True,
                     show_evidence=False,
+                    response_format=(
+                        "FIELD_TABLE" if _structured_presentation(message) == "TABLE" else "TEXT"
+                    ),
+                    fields=(
+                        requested_fields if _structured_presentation(message) == "TABLE" else []
+                    ),
                 )
             return _evidence_answer_plan(
                 user_goal=message,
@@ -928,6 +980,10 @@ class DeterministicPlanner:
                 document_ids=document_ids,
                 answer_mode="FOCUSED",
                 show_evidence=False,
+                response_format=(
+                    "FIELD_TABLE" if _structured_presentation(message) == "TABLE" else "TEXT"
+                ),
+                fields=requested_fields if _structured_presentation(message) == "TABLE" else [],
             )
 
         # 识别对已确定附件的总结请求；实际读取摘要还是正文由证据策略按用户深度要求决定。
@@ -1583,6 +1639,7 @@ def build_plan_from_user_intent(
     # LLM 可能同时正确要求 OCR 和 evidence-answer；后端必须保留“返回字段值”目标，
     # 不能因为文本抽取步骤先命中而只返回页数和字符数。
     if document_ids and _has_image_field_value_request(message):
+        _schema_mode, requested_fields = _structured_field_schema(message)
         if _should_force_reprocess(message=message, lowered=lowered):
             return _extract_then_evidence_answer_plan(
                 user_goal=intent_plan.user_goal or message,
@@ -1591,6 +1648,10 @@ def build_plan_from_user_intent(
                 answer_mode="FOCUSED",
                 force_reprocess=True,
                 show_evidence=False,
+                response_format=(
+                    "FIELD_TABLE" if _structured_presentation(message) == "TABLE" else "TEXT"
+                ),
+                fields=requested_fields if _structured_presentation(message) == "TABLE" else [],
                 response_style=intent_plan.response_style,
                 clarification_question=intent_plan.clarification_question,
                 llm_intent_plan=intent_plan.model_dump(),
@@ -1601,6 +1662,10 @@ def build_plan_from_user_intent(
             document_ids=document_ids,
             answer_mode="FOCUSED",
             show_evidence=False,
+            response_format=(
+                "FIELD_TABLE" if _structured_presentation(message) == "TABLE" else "TEXT"
+            ),
+            fields=requested_fields if _structured_presentation(message) == "TABLE" else [],
             response_style=intent_plan.response_style,
             clarification_question=intent_plan.clarification_question,
             llm_intent_plan=intent_plan.model_dump(),
@@ -2052,12 +2117,15 @@ def _evidence_answer_plan(
     document_ids: List[str],
     answer_mode: str,
     show_evidence: bool = True,
+    response_format: str = "TEXT",
+    fields: List[StructuredFieldSpec] | None = None,
     response_style: str = "concise",
     clarification_question: str | None = None,
     llm_intent_plan: Dict[str, Any] | None = None,
 ) -> PlannerOutput:
     """构造阶段五证据回答计划，正文只由受控 Tool 按活动版本读取。"""
 
+    locked_fields = list(fields or [])
     return PlannerOutput(
         intent="EVIDENCE_ANSWER",
         user_goal=user_goal,
@@ -2066,6 +2134,15 @@ def _evidence_answer_plan(
             "question": question,
             "answer_mode": answer_mode,
             "requested_outputs": ["answer", "references", "receipt"],
+            **(
+                {
+                    "extraction_mode": "FIELD_VALUES",
+                    "presentation": "TABLE",
+                    "field_schema": [field.model_dump() for field in locked_fields],
+                }
+                if response_format == "FIELD_TABLE"
+                else {}
+            ),
             # OCR 字段识别仍在内部保存引用用于校验，只控制普通用户界面是否重复
             # 展示原文片段；普通问答和总结继续沿用默认展示策略。
             **({"show_evidence": False} if not show_evidence else {}),
@@ -2083,6 +2160,14 @@ def _evidence_answer_plan(
                     "question": question,
                     "document_ids": document_ids,
                     "answer_mode": answer_mode,
+                    **(
+                        {
+                            "response_format": response_format,
+                            "fields": [field.model_dump() for field in locked_fields],
+                        }
+                        if response_format != "TEXT"
+                        else {}
+                    ),
                 },
                 "requires_confirmation": False,
                 "risk_level": "low",
@@ -2103,12 +2188,15 @@ def _extract_then_evidence_answer_plan(
     answer_mode: str,
     force_reprocess: bool,
     show_evidence: bool = True,
+    response_format: str = "TEXT",
+    fields: List[StructuredFieldSpec] | None = None,
     response_style: str = "concise",
     clarification_question: str | None = None,
     llm_intent_plan: Dict[str, Any] | None = None,
 ) -> PlannerOutput:
     """先重建附件正文，再用同一批已持久化页面回答用户明确要求的字段。"""
 
+    locked_fields = list(fields or [])
     extraction_steps = [
         _extract_document_text_step(
             document_id=document_id,
@@ -2126,6 +2214,15 @@ def _extract_then_evidence_answer_plan(
             "question": question,
             "answer_mode": answer_mode,
             "requested_outputs": ["answer", "references", "receipt"],
+            **(
+                {
+                    "extraction_mode": "FIELD_VALUES",
+                    "presentation": "TABLE",
+                    "field_schema": [field.model_dump() for field in locked_fields],
+                }
+                if response_format == "FIELD_TABLE"
+                else {}
+            ),
             # 重新 OCR 后的字段值依然必须由证据回答生成；这里只控制展示层，不能
             # 删除持久化引用或放宽 EvidenceAnswerService 的证据要求。
             **({"show_evidence": False} if not show_evidence else {}),
@@ -2144,6 +2241,14 @@ def _extract_then_evidence_answer_plan(
                     "question": question,
                     "document_ids": document_ids,
                     "answer_mode": answer_mode,
+                    **(
+                        {
+                            "response_format": response_format,
+                            "fields": [field.model_dump() for field in locked_fields],
+                        }
+                        if response_format != "TEXT"
+                        else {}
+                    ),
                 },
                 requires_confirmation=False,
                 risk_level="low",

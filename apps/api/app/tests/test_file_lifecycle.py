@@ -262,7 +262,9 @@ def test_default_upload_is_classified_then_first_published_to_taxonomy_path(monk
         managed_file = db.get(ManagedFile, working_copy.managed_file_id)
 
         assert working_copy.status == "ACTIVE"
-        assert working_copy.relative_path == f"学校/行政综合管理类/会议纪要/{filename}"
+        assert Path(working_copy.relative_path).parent.as_posix() == "学校/行政综合管理类/会议纪要"
+        assert working_copy.filename != filename
+        assert db.get(Document, working_copy.document_id).original_filename == filename
         assert version.storage_path.endswith(working_copy.relative_path)
         assert relation.status == "AUTO_APPLIED"
         assert relation.relation_role == "PRIMARY"
@@ -1731,6 +1733,10 @@ def test_low_confidence_initial_name_keeps_upload_name_and_audit_without_chat_no
     """低置信度命名保留原名和复核审计，但未请求改名时不进入聊天。"""
 
     _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_INITIAL_PLACEMENT_ENABLED", "true")
+    monkeypatch.setenv("AUTO_CLASSIFICATION_SHADOW_MODE", "false")
+    config.get_settings.cache_clear()
     original_suggest = UploadedRenameSuggestionService.suggest_for_initial_import
 
     def force_needs_review(self, *, document):
@@ -1787,10 +1793,14 @@ def test_low_confidence_initial_name_keeps_upload_name_and_audit_without_chat_no
         clear_overrides()
 
 
-def test_initial_ready_rename_is_only_suggestion_until_user_requests_rename(monkeypatch, tmp_path):
-    """首次导入即使命名建议可用，也必须保留上传名且不得自动改工作副本。"""
+def test_initial_ready_rename_is_applied_to_working_copy_on_upload(monkeypatch, tmp_path):
+    """首次导入应自动应用可信标准名称，同时永久保留 Document 原始文件名。"""
 
     _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_INITIAL_PLACEMENT_ENABLED", "true")
+    monkeypatch.setenv("AUTO_CLASSIFICATION_SHADOW_MODE", "false")
+    config.get_settings.cache_clear()
     original_suggest = UploadedRenameSuggestionService.suggest_for_initial_import
 
     def force_ready_suggestion(self, *, document):
@@ -1830,7 +1840,7 @@ def test_initial_ready_rename_is_only_suggestion_until_user_requests_rename(monk
     working_copy = client.get("/api/working-copies", headers=headers).json()[0]
     history = client.get("/api/conversations/rename-suggestion-conv", headers=headers).json()
 
-    assert working_copy["filename"] == "2024科研成果资助汇总表.txt"
+    assert working_copy["filename"] == "2026_研究成果资助汇总表.txt"
     assert history["messages"] == []
     db = SessionLocal()
     try:
@@ -1842,47 +1852,27 @@ def test_initial_ready_rename_is_only_suggestion_until_user_requests_rename(monk
         )
         assert background_run is not None
         audit_result = background_run.graph_state_json["document_results"][0]
-        assert audit_result["rename_suggestion"] == {
-            "proposed_filename": "2026_研究成果资助汇总表.txt"
-        }
-        assert audit_result["pending_decision"]["reason"] == "RENAME_SUGGESTION_AVAILABLE"
+        assert audit_result["rename_suggestion"] is None
+        assert audit_result["original_filename"] == "2024科研成果资助汇总表.txt"
+        assert audit_result["renamed_filename"] == "2026_研究成果资助汇总表.txt"
+        assert audit_result["rename_status"] == "COMPLETED"
+        assert audit_result["pending_decision"] is None
         audit_message = db.get(Message, background_run.message_id)
         assert audit_message.role == "SYSTEM_AUDIT"
 
-        # 兼容修复前已写成 assistant 的历史数据：即使旧角色仍在，
-        # 会话读取投影也不得再展示这张命名建议卡。
-        audit_message.role = "assistant"
-        db.commit()
     finally:
         db.close()
-    legacy_history = client.get(
-        "/api/conversations/rename-suggestion-conv",
-        headers=headers,
-    ).json()
-    assert legacy_history["messages"] == []
 
-    # 用户仅在后续明确提出改名时，才允许创建待确认计划；此刻仍不得改动工作副本。
-    rename_request = client.post(
-        "/api/conversations/rename-suggestion-conv/messages",
-        headers=headers,
-        json={"content": "改名", "attachments": []},
-    )
-    assert rename_request.status_code == 200
-    rename_receipt = rename_request.json()["task_result"]
-    assert rename_receipt["response_type"] == "operation_plan"
-    assert rename_receipt["operation_plan_id"]
-    assert client.get("/api/working-copies", headers=headers).json()[0]["filename"] == "2024科研成果资助汇总表.txt"
     db = SessionLocal()
     try:
         working_document = db.get(Document, working_copy["document_id"])
         original = db.query(ManagedFile).one()
         path_record = db.query(WorkingCopyPathRecord).filter_by(
             working_copy_id=working_copy["id"],
-            operation_type="INITIAL_IMPORT",
         ).one()
         assert working_document.original_filename == "2024科研成果资助汇总表.txt"
         assert original.filename == "2024科研成果资助汇总表.txt"
-        assert path_record.after_filename == "2024科研成果资助汇总表.txt"
+        assert path_record.after_filename == "2026_研究成果资助汇总表.txt"
         assert db.query(FileRenameReviewItem).filter_by(document_id=working_copy["document_id"]).count() == 0
     finally:
         db.close()
@@ -2394,7 +2384,7 @@ def test_rename_move_trash_and_restore_only_change_working_copy(monkeypatch, tmp
         records = db.query(WorkingCopyPathRecord).filter_by(working_copy_id=copy.id).all()
         work_document = db.get(Document, copy.document_id)
         assert copy.status == "ACTIVE"
-        assert work_document.original_filename == "2004级工程硕士开课通知.doc"
+        assert work_document.original_filename == "04级工程硕士开课通知.doc"
         assert db.query(DocumentVersion).filter_by(document_id=copy.document_id).count() == 1
         assert len(records) == 2
         rename_record = sorted(records, key=lambda item: item.sequence_number)[-1]

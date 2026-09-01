@@ -240,7 +240,6 @@ class ConfirmedUploadedRenameService:
                         prepared.source_path.rename(prepared.target_path)
                         action = "moved"
                 prepared.file_object.storage_path = prepared.target_storage_path
-                prepared.document.original_filename = prepared.after_filename
                 prepared.document.updated_at = utcnow()
                 prepared.plan_item["execution_status"] = "COMPLETED"
                 ChangeSetRepository(self.db).create_item(

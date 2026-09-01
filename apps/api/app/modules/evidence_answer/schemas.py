@@ -33,6 +33,8 @@ class EvidencePackage(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     question_type: str
     answer_mode: Literal["FOCUSED", "FULL_SUMMARY"]
+    response_format: Literal["TEXT", "FIELD_TABLE"] = "TEXT"
+    fields: list[dict[str, Any]] = Field(default_factory=list, max_length=40)
     scope: dict[str, Any] = Field(default_factory=dict)
     evidence_items: list[EvidenceItem] = Field(min_length=1)
     limitations: list[str] = Field(default_factory=list)
@@ -48,12 +50,24 @@ class AnswerClaim(BaseModel):
     evidence_ids: list[str] = Field(min_length=1, max_length=12)
 
 
+class AnswerFieldValue(BaseModel):
+    """模型针对后端锁定字段返回的候选值。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field_key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    value: str = Field(default="", max_length=4000)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=12)
+    status: Literal["EXTRACTED", "NOT_FOUND"] = "EXTRACTED"
+
+
 class StructuredAnswer(BaseModel):
     """模型必须返回的受控回答结构。"""
 
     model_config = ConfigDict(extra="forbid")
 
     claims: list[AnswerClaim] = Field(default_factory=list, max_length=80)
+    field_values: list[AnswerFieldValue] = Field(default_factory=list, max_length=40)
     limitations: list[
         Annotated[str, Field(min_length=1, max_length=500)]
     ] = Field(default_factory=list, max_length=12)

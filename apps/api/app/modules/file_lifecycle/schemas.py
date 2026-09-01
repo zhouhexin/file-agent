@@ -71,6 +71,10 @@ class ArchiveStatusResponse(BaseModel):
     status: str
     managed_file_id: str | None
     working_copy_id: str | None
+    working_copy_status: str | None = None
+    original_filename: str
+    renamed_filename: str | None = None
+    processing_status: str
     filesystem_job_id: str | None
     error_code: str | None
     error_message: str | None

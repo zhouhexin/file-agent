@@ -9,7 +9,15 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
+from app.db.models import (
+    Document,
+    DocumentVersion,
+    FileRenameReviewItem,
+    UploadArchiveRecord,
+    WorkingCopy,
+)
 from app.modules.agent.file_task_receipt import (
     FileTaskPresentation,
     compose_file_task_presentation,
@@ -44,6 +52,7 @@ class UserTaskReceipt(BaseModel):
         "classification_decision",
         "filename_conflict",
         "structured_extraction",
+        "field_table",
     ] = "text"
     display_mode: Literal["default", "classification_cards"] = "default"
     final_response: str | None = None
@@ -61,6 +70,7 @@ class UserTaskReceipt(BaseModel):
     classification_decision_result: dict[str, Any] | None = None
     filename_conflict_result: dict[str, Any] | None = None
     structured_extraction_result: dict[str, Any] | None = None
+    field_table_result: dict[str, Any] | None = None
     pending_job_ids: list[str] = Field(default_factory=list)
     operation_plan_id: str | None = None
     pending_decisions: list[dict[str, Any]] = Field(default_factory=list)
@@ -69,7 +79,11 @@ class UserTaskReceipt(BaseModel):
     presentation: FileTaskPresentation | None = None
 
 
-def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
+def build_user_task_receipt(
+    result: AgentRunResult,
+    *,
+    db: Session | None = None,
+) -> UserTaskReceipt:
     """从完整 AgentRun 审计结果生成普通用户投影。
 
     投影只读取已完成的内部结构，不让前端根据 Tool 名称解释任意 Tool 输出；新增 Tool 时如果没有
@@ -90,11 +104,18 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
     ) = _classification_decision_results(result)
     filename_conflict_result = _filename_conflict_result(result)
     structured_extraction_result = _structured_extraction_result(result)
+    field_table_result = _field_table_result(result)
     initial_organization_results = _initial_organization_results(result)
     document_results = _merge_document_results(
         initial_organization_results,
         [_safe_document_result(item) for item in result.document_results],
     )
+    if db is not None:
+        document_results = _attach_current_working_copy_names(
+            db=db,
+            document_results=document_results,
+            include_rename_review=_automatic_upload_receipt_requested(result),
+        )
     document_results = _project_document_results_for_intent(
         result=result,
         document_results=document_results,
@@ -112,6 +133,7 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         classification_decision_result=classification_decision_result,
         filename_conflict_result=filename_conflict_result,
         structured_extraction_result=structured_extraction_result,
+        field_table_result=field_table_result,
     )
     pending_decisions: list[dict[str, Any]] = []
     if result.operation_plan_id and not _has_executed_working_copy_result(result):
@@ -197,12 +219,7 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         response_type=response_type,
         display_mode=(
             "classification_cards"
-            if result.intent
-            in {
-                "CLASSIFY_FILES",
-                "CLASSIFY_MANAGED_FILES",
-                "CLASSIFY_AND_SUGGEST_RENAME",
-            }
+            if _classification_card_display_requested(result)
             else "default"
         ),
         final_response=result.final_response,
@@ -220,6 +237,7 @@ def build_user_task_receipt(result: AgentRunResult) -> UserTaskReceipt:
         classification_decision_result=classification_decision_result,
         filename_conflict_result=filename_conflict_result,
         structured_extraction_result=structured_extraction_result,
+        field_table_result=field_table_result,
         # 检索就绪任务属于内部依赖链，前端按同一 AgentRun 状态轮询即可；
         # 普通消息接口不能暴露其任务 ID、队列或“待准备”阶段。
         pending_job_ids=(
@@ -305,6 +323,10 @@ def _safe_document_result(value: dict[str, Any]) -> dict[str, Any]:
         "document_version_id",
         "working_copy_id",
         "filename",
+        "original_filename",
+        "renamed_filename",
+        "rename_status",
+        "processing_status",
         "organization_status",
         "search_status",
         "evidence_count",
@@ -403,20 +425,7 @@ def _project_document_results_for_intent(
     """
 
     intent = str(result.intent or "").upper()
-    slots = result.tool_plan.get("slots") if isinstance(result.tool_plan, dict) else {}
-    requested_outputs = {
-        str(item).lower()
-        for item in (
-            slots.get("requested_outputs", [])
-            if isinstance(slots, dict)
-            else []
-        )
-        if str(item)
-    }
-    classification_requested = (
-        "CLASSIF" in intent
-        or any(item.startswith("classification") for item in requested_outputs)
-    )
+    classification_requested = _classification_results_requested(result)
 
     projected: list[dict[str, Any]] = []
     for item in document_results:
@@ -434,6 +443,182 @@ def _project_document_results_for_intent(
                 safe_item.pop("pending_decision", None)
         projected.append(safe_item)
     return projected
+
+
+def _attach_current_working_copy_names(
+    *,
+    db: Session,
+    document_results: list[dict[str, Any]],
+    include_rename_review: bool,
+) -> list[dict[str, Any]]:
+    """把上传原名与当前工作副本名称投影到逐文件回执，不暴露物理路径。"""
+
+    projected: list[dict[str, Any]] = []
+    for item in document_results:
+        document_id = str(item.get("document_id") or "")
+        document = db.get(Document, document_id) if document_id else None
+        working_copy = (
+            db.query(WorkingCopy).filter(WorkingCopy.document_id == document_id).first()
+            if document_id
+            else None
+        )
+        if working_copy is None and document_id:
+            upload_version = (
+                db.query(DocumentVersion)
+                .filter(DocumentVersion.document_id == document_id)
+                .order_by(DocumentVersion.version_number.asc())
+                .first()
+            )
+            archive = (
+                db.query(UploadArchiveRecord)
+                .filter(
+                    UploadArchiveRecord.upload_document_version_id == upload_version.id
+                )
+                .first()
+                if upload_version is not None
+                else None
+            )
+            if archive is not None and archive.managed_file_id:
+                working_copy = (
+                    db.query(WorkingCopy)
+                    .filter(WorkingCopy.managed_file_id == archive.managed_file_id)
+                    .first()
+                )
+        if document is None or working_copy is None:
+            projected.append(item)
+            continue
+        original_filename = str(document.original_filename)
+        renamed_filename = str(working_copy.filename)
+        rename_review = (
+            db.query(FileRenameReviewItem)
+            .filter(
+                FileRenameReviewItem.document_id == working_copy.document_id,
+                FileRenameReviewItem.status == "NEEDS_REVIEW",
+            )
+            .order_by(FileRenameReviewItem.created_at.desc())
+            .first()
+            if include_rename_review
+            else None
+        )
+        pending_decision = None
+        if rename_review is not None:
+            review_context = dict(rename_review.review_context_json or {})
+            pending_decision = {
+                key: review_context.get(key)
+                for key in (
+                    "type",
+                    "reason",
+                    "filename",
+                    "proposed_filename",
+                    "message",
+                    "allowed_decisions",
+                )
+                if key in review_context
+            }
+        projected.append(
+            {
+                **item,
+                "working_copy_id": working_copy.id,
+                "filename": renamed_filename,
+                "original_filename": original_filename,
+                "renamed_filename": renamed_filename,
+                "rename_status": (
+                    "NEEDS_REVIEW"
+                    if rename_review is not None
+                    else "COMPLETED"
+                    if renamed_filename != original_filename
+                    else "NO_CHANGE"
+                ),
+                "processing_status": (
+                    "NEEDS_REVIEW"
+                    if rename_review is not None
+                    else "COMPLETED"
+                    if working_copy.status == "ACTIVE"
+                    else "PROCESSING"
+                ),
+                **(
+                    {"pending_decision": pending_decision}
+                    if pending_decision
+                    else {}
+                ),
+                "managed_original_unchanged": True,
+            }
+        )
+    return projected
+
+
+def _automatic_upload_receipt_requested(result: AgentRunResult) -> bool:
+    """只在上传端生成的默认整理任务中合并命名待复核状态。"""
+
+    tool_plan = result.tool_plan if isinstance(result.tool_plan, dict) else {}
+    user_goal = str(tool_plan.get("user_goal") or "")
+    return "系统已完成工作副本标准名称整理" in user_goal
+
+
+def _classification_results_requested(result: AgentRunResult) -> bool:
+    """只按规范化意图、输出契约或受控分类计划开放分类展示。"""
+
+    intent = str(result.intent or "").upper()
+    tool_plan = result.tool_plan if isinstance(result.tool_plan, dict) else {}
+    slots = tool_plan.get("slots", {})
+    requested_outputs = {
+        str(item).lower()
+        for item in (
+            slots.get("requested_outputs", [])
+            if isinstance(slots, dict)
+            else []
+        )
+        if str(item)
+    }
+    if (
+        "CLASSIF" in intent
+        or any(item.startswith("classification") for item in requested_outputs)
+    ):
+        return True
+
+    steps = tool_plan.get("steps", [])
+    for step in steps if isinstance(steps, list) else []:
+        if not isinstance(step, dict):
+            continue
+        skill = str(step.get("skill") or step.get("skill_id") or "")
+        tool_name = str(step.get("tool_name") or "")
+        if tool_name in {
+            "read-document-classifications",
+            "classify-managed-files",
+        }:
+            return True
+        if (
+            skill == "document-classification"
+            and tool_name == "extract-document-text"
+        ):
+            return True
+    return False
+
+
+def _classification_card_display_requested(result: AgentRunResult) -> bool:
+    """分类卡片只用于执行分类，不改变“读取已有分类”的展示模式。"""
+
+    if str(result.intent or "").upper() in {
+        "CLASSIFY_FILES",
+        "CLASSIFY_MANAGED_FILES",
+        "CLASSIFY_AND_SUGGEST_RENAME",
+    }:
+        return True
+    tool_plan = result.tool_plan if isinstance(result.tool_plan, dict) else {}
+    steps = tool_plan.get("steps", [])
+    for step in steps if isinstance(steps, list) else []:
+        if not isinstance(step, dict):
+            continue
+        skill = str(step.get("skill") or step.get("skill_id") or "")
+        tool_name = str(step.get("tool_name") or "")
+        if tool_name == "classify-managed-files":
+            return True
+        if (
+            skill == "document-classification"
+            and tool_name == "extract-document-text"
+        ):
+            return True
+    return False
 
 
 def _managed_file_result(result: AgentRunResult) -> dict[str, Any] | None:
@@ -556,6 +741,7 @@ def _response_type(
     classification_decision_result: dict[str, Any] | None,
     filename_conflict_result: dict[str, Any] | None,
     structured_extraction_result: dict[str, Any] | None,
+    field_table_result: dict[str, Any] | None,
 ) -> str:
     """把内部意图收敛为少量稳定的用户展示类型。"""
 
@@ -569,6 +755,8 @@ def _response_type(
         return "filename_conflict"
     if structured_extraction_result:
         return "structured_extraction"
+    if field_table_result:
+        return "field_table"
     if rename_plan_result:
         return "rename_plan"
     if trash_restore_result:
@@ -1038,6 +1226,48 @@ def _evidence_answer_result(result: AgentRunResult) -> dict[str, Any] | None:
             ],
             "files": references,
             "cached": bool(output.get("cached", False)),
+        }
+    return None
+
+
+def _field_table_result(result: AgentRunResult) -> dict[str, Any] | None:
+    """投影轻量字段提取表格；后台引用继续留在证据回答审计中。"""
+
+    for invocation in reversed(result.tool_invocations):
+        output = invocation.output_json
+        if (
+            invocation.tool_name != "evidence-answer"
+            or not isinstance(output, dict)
+            or output.get("kind") != "evidence_answer"
+            or not isinstance(output.get("field_table"), dict)
+        ):
+            continue
+        table = dict(output["field_table"])
+        fields = []
+        for item in list(table.get("fields") or [])[:40]:
+            if not isinstance(item, dict) or not item.get("key") or not item.get("label"):
+                continue
+            fields.append(
+                {
+                    "key": str(item["key"])[:64],
+                    "label": str(item["label"])[:80],
+                    "field_type": str(item.get("field_type") or "string")[:40],
+                    "value": _bounded_receipt_value(item.get("value")),
+                    "status": str(item.get("status") or "MISSING")[:40],
+                    "page_number": (
+                        item.get("page_number")
+                        if isinstance(item.get("page_number"), int)
+                        and item.get("page_number") > 0
+                        else None
+                    ),
+                }
+            )
+        return {
+            "presentation": "TABLE",
+            "record_count": 1 if fields else 0,
+            "fields": fields,
+            "missing_count": sum(item["status"] == "MISSING" for item in fields),
+            "original_unchanged": True,
         }
     return None
 

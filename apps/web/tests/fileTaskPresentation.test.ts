@@ -81,6 +81,10 @@ test('上传查重未完成或等待确认时禁止发送，确认完成后放�
     hasUnresolvedUploadReview([{ ...attachment, duplicate_review_status: 'RESOLVED' }]),
     false,
   );
+  assert.equal(
+    hasUnresolvedUploadReview([{ ...attachment, duplicate_review_status: 'FAILED' }]),
+    false,
+  );
   assert.equal(hasUnresolvedUploadReview([]), false);
   assert.equal(
     hasUnresolvedUploadReview([{

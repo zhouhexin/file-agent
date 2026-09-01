@@ -21,6 +21,7 @@ import { ClassificationTreeReceipt } from './ClassificationTreeReceipt';
 import { FilenameConflictCard } from './FilenameConflictCard';
 import { FileTaskReceiptShell } from './FileTaskReceiptShell';
 import { StructuredExtractionReceipt } from './StructuredExtractionReceipt';
+import { FieldTableReceipt } from './FieldTableReceipt';
 import type { ChatAttachment } from './presentation';
 import { findAttachmentByDocumentId, formatFileSize } from './presentation';
 
@@ -145,6 +146,7 @@ export function AgentRunReceipt({
     && !taskResult.file_search_result
     && !taskResult.evidence_answer_result
     && !taskResult.structured_extraction_result
+    && !taskResult.field_table_result
     && !taskResult.file_selection_result
   ) {
     // 异步任务刚入队时尚无最终回执；只展示通用处理状态，不暴露导入、索引或队列细节。
@@ -243,6 +245,12 @@ export function AgentRunReceipt({
         token={token}
       />
     );
+  }
+  if (
+    taskResult.response_type === 'field_table'
+    && taskResult.field_table_result
+  ) {
+    return wrapFileTask(<FieldTableReceipt result={taskResult.field_table_result} />);
   }
   if (
     taskResult.response_type === 'evidence_answer'

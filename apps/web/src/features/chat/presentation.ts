@@ -5,6 +5,7 @@ export type ChatAttachment = UploadedFile & {
   // 图片预览使用浏览器本地 object URL，发送后仍仅以 document_id 作为后端引用。
   preview_url?: string;
   deleting?: boolean;
+  upload_error?: string;
 };
 
 export type ChatTurn = {
@@ -44,7 +45,7 @@ export function deduplicateAttachmentsByDocumentId(
 export function hasUnresolvedUploadReview(attachments: ChatAttachment[]): boolean {
   return attachments.some(
     (attachment) => Boolean(attachment.upload_document_version_id)
-      && attachment.duplicate_review_status !== 'RESOLVED',
+      && !['RESOLVED', 'FAILED'].includes(attachment.duplicate_review_status || ''),
   );
 }
 

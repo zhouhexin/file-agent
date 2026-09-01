@@ -14,6 +14,7 @@ def _make_result(
     document_results: list[dict] | None = None,
     tool_invocations: list[ToolInvocationRecord] | None = None,
     search_context: dict | None = None,
+    tool_plan: dict | None = None,
     final_response: str = "任务完成",
 ) -> AgentRunResult:
     """构造不依赖数据库或外部模型的确定性 AgentRunResult。"""
@@ -26,7 +27,7 @@ def _make_result(
         intent=intent,
         status=status,
         selected_skills=[],
-        tool_plan={"slots": {"document_ids": ["document-1"]}},
+        tool_plan=tool_plan or {"slots": {"document_ids": ["document-1"]}},
         tool_results=[],
         tool_invocations=tool_invocations or [],
         document_results=document_results or [],
@@ -100,6 +101,40 @@ def test_classification_only_receipt_hides_background_rename_fields() -> None:
     assert receipt.document_results[0]["categories"][0]["name"] == "学校/审计"
     assert receipt.pending_decisions == []
     assert receipt.task_status == "completed"
+
+
+def test_free_text_classification_intent_uses_validated_plan_for_card_projection() -> None:
+    """历史自由文本意图只要带受控分类计划，也必须展示分类卡片和分类字段。"""
+
+    receipt = build_user_task_receipt(
+        _make_result(
+            intent="对上传文件进行分类",
+            tool_plan={
+                "slots": {"document_ids": ["document-1"]},
+                "steps": [
+                    {
+                        "skill": "document-classification",
+                        "tool_name": "extract-document-text",
+                    }
+                ],
+            },
+            document_results=[
+                {
+                    "document_id": "document-1",
+                    "filename": "财务通知.docx",
+                    "extraction_status": "COMPLETED",
+                    "categories": [
+                        {"name": "学校/财务", "confidence": 0.77}
+                    ],
+                }
+            ],
+        )
+    )
+
+    assert receipt.display_mode == "classification_cards"
+    assert receipt.document_results[0]["categories"] == [
+        {"name": "学校/财务", "confidence": 0.77}
+    ]
 
 
 def test_document_results_without_read_intent_do_not_infer_read_presentation() -> None:

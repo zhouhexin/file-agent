@@ -54,9 +54,12 @@ def test_missing_table_feedback_does_not_expand_to_workspace_file_search():
     assert plan.steps[0].tool_name == "intent-summary"
 
 
-def test_structured_image_request_detector_requires_source_action_and_output():
-    assert is_structured_image_extraction_request(
+def test_structured_image_request_detector_requires_table_structure_goal():
+    assert not is_structured_image_extraction_request(
         "识别图中申请人、资助金额和申请日期，并以表格形式展示"
+    )
+    assert is_structured_image_extraction_request(
+        "逐行识别图中所有记录，并保留原始表格的行列结构"
     )
     assert not is_structured_image_extraction_request("识别图片里的所有文字")
     assert not is_structured_image_extraction_request("查找工作总结表格")

@@ -307,11 +307,38 @@ class StructuredExtractionService:
         source_content_type = detect_structured_source_content_type(source_path)
         if source_content_type not in SUPPORTED_STRUCTURED_CONTENT_TYPES:
             raise RuntimeError("文件内容不是受支持的图片或 PDF，已停止结构化抽取。")
+        log_event(
+            "structured_extraction.source_resolved",
+            settings=self.settings,
+            agent_run_id=self.agent_run_id,
+            document_id=run.document_id,
+            status="COMPLETED",
+            provider=self.layout_provider.name,
+        )
         parser_config_hash = _layout_config_fingerprint(
             provider=self.layout_provider,
             settings=self.settings,
         )
+        layout_started = time.perf_counter()
+        log_event(
+            "structured_extraction.ocr_request_started",
+            settings=self.settings,
+            agent_run_id=self.agent_run_id,
+            document_id=run.document_id,
+            status="RUNNING",
+            provider=self.layout_provider.name,
+        )
         layout = self.layout_provider.parse(file_path=source_path)
+        log_event(
+            "structured_extraction.ocr_request_completed",
+            settings=self.settings,
+            agent_run_id=self.agent_run_id,
+            document_id=run.document_id,
+            status="COMPLETED",
+            provider=self.layout_provider.name,
+            page_count=len(layout.pages),
+            duration_ms=int((time.perf_counter() - layout_started) * 1000),
+        )
         if not layout.pages:
             raise RuntimeError("版面解析 Provider 未返回可用页面。")
         layout_run, elements = self.repository.create_layout_extraction(
@@ -327,6 +354,15 @@ class StructuredExtractionService:
             "elements": elements,
             "max_records": self.settings.structured_extraction_max_records,
         }
+        mapping_started = time.perf_counter()
+        log_event(
+            "structured_extraction.field_mapping_started",
+            settings=self.settings,
+            agent_run_id=self.agent_run_id,
+            document_id=run.document_id,
+            status="RUNNING",
+            field_count=len(fields),
+        )
         if run.retry_strategy == "VISION_CROP":
             if not self._vision_retry_available():
                 raise RuntimeError("当前部署未启用可用的视觉二次识别 Provider。")
@@ -372,6 +408,15 @@ class StructuredExtractionService:
                 run=run,
                 extraction_arguments=extraction_arguments,
             )
+        log_event(
+            "structured_extraction.field_mapping_completed",
+            settings=self.settings,
+            agent_run_id=self.agent_run_id,
+            document_id=run.document_id,
+            status="COMPLETED",
+            record_count=len(candidates.records),
+            duration_ms=int((time.perf_counter() - mapping_started) * 1000),
+        )
         if run.record_mode == "SINGLE_RECORD" and len(candidates.records) > 1:
             raise RuntimeError("结构化抽取模型返回了超出单记录模式的记录数量。")
         if run.schema_mode == "AUTO_DISCOVER":
@@ -387,6 +432,14 @@ class StructuredExtractionService:
             fields=fields,
             candidates=candidates,
             elements=elements,
+        )
+        persisting_started = time.perf_counter()
+        log_event(
+            "structured_extraction.persisting_started",
+            settings=self.settings,
+            agent_run_id=self.agent_run_id,
+            document_id=run.document_id,
+            status="RUNNING",
         )
         self.repository.complete_run(
             run=run,
@@ -418,6 +471,14 @@ class StructuredExtractionService:
             changeset_id=changeset_id,
             reused=False,
             export_artifact=export_artifact,
+        )
+        log_event(
+            "structured_extraction.persisting_completed",
+            settings=self.settings,
+            agent_run_id=self.agent_run_id,
+            document_id=run.document_id,
+            status="COMPLETED",
+            duration_ms=int((time.perf_counter() - persisting_started) * 1000),
         )
         log_event(
             "structured_extraction.completed",

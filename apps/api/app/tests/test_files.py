@@ -94,6 +94,41 @@ def test_upload_creates_version_review_and_persistent_job(monkeypatch, tmp_path)
         clear_overrides()
 
 
+def test_folder_upload_returns_validated_relative_path(monkeypatch, tmp_path):
+    """文件夹上传只保留安全相对路径元数据，底层原件仍由既有受控存储路径管理。"""
+
+    _configure_storage(monkeypatch, tmp_path)
+    client, _ = client_with_database()
+    headers = _auth_header(client, "folder-upload-user")
+    response = client.post(
+        "/api/files/upload",
+        headers=headers,
+        data={"relative_path": "财务处/2026/通知.txt"},
+        files={"file": ("通知.txt", b"folder upload", "text/plain")},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["relative_path"] == "财务处/2026/通知.txt"
+    clear_overrides()
+
+
+def test_folder_upload_rejects_relative_path_traversal(monkeypatch, tmp_path):
+    """客户端相对路径不得利用目录穿越影响服务器存储或回执展示。"""
+
+    _configure_storage(monkeypatch, tmp_path)
+    client, _ = client_with_database()
+    response = client.post(
+        "/api/files/upload",
+        headers=_auth_header(client, "folder-path-user"),
+        data={"relative_path": "资料/../通知.txt"},
+        files={"file": ("通知.txt", b"unsafe path", "text/plain")},
+    )
+
+    assert response.status_code == 400
+    assert "相对路径" in response.json()["error"]["message"]
+    clear_overrides()
+
+
 def test_upload_creates_owned_conversation_before_binding_duplicate_review(
     monkeypatch,
     tmp_path,
@@ -510,7 +545,7 @@ def test_shared_active_working_copy_preview_is_readable_by_other_user(
     assert upload.status_code == 202
     _drain_jobs(_SessionLocal)
     copies = client.get("/api/working-copies", headers=viewer).json()
-    shared = next(item for item in copies if item["filename"] == "共享通知.txt")
+    shared = copies[0]
 
     preview = client.get(
         f"/api/files/{shared['document_id']}/preview",
@@ -547,7 +582,7 @@ def test_shared_active_working_copy_cannot_use_private_upload_delete_api(
     assert upload.status_code == 202
     _drain_jobs(SessionLocal)
     copies = client.get("/api/working-copies", headers=viewer).json()
-    shared = next(item for item in copies if item["filename"] == "共享删除边界.txt")
+    shared = copies[0]
 
     cross_delete = client.delete(
         f"/api/files/{shared['document_id']}",
@@ -587,11 +622,7 @@ def test_trashed_shared_working_copy_content_is_not_readable_by_owner_or_viewer(
     )
     assert upload.status_code == 202
     _drain_jobs(SessionLocal)
-    shared = next(
-        item
-        for item in client.get("/api/working-copies", headers=viewer).json()
-        if item["filename"] == "已删除共享通知.txt"
-    )
+    shared = client.get("/api/working-copies", headers=viewer).json()[0]
     context = client.post(
         "/api/conversations/trashed-content-conv/messages",
         headers=owner,

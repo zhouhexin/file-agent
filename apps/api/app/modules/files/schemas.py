@@ -23,6 +23,7 @@ class FileUploadResponse(BaseModel):
     filesystem_job_id: str
     archive_status: str
     duplicate_review_status: str
+    relative_path: str | None = None
 
 
 class FileDeleteResponse(BaseModel):

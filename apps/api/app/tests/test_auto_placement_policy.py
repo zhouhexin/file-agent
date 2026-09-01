@@ -136,3 +136,27 @@ def test_policy_rejects_unlocated_evidence_and_parse_failure() -> None:
     assert result.accepted is False
     assert "PARSE_FAILED" in result.reason_codes
     assert "EVIDENCE_MISSING" in result.reason_codes
+
+
+def test_policy_accepts_scoped_other_without_text_quote() -> None:
+    """已确定学校、学院或部门范围的“其他”允许按兜底规则直接形成主分类。"""
+
+    result = AutoPlacementPolicy(_settings()).evaluate(
+        categories=[
+            _category(
+                name="学校/其他",
+                category_id="school.other",
+                category_path=["学校", "其他"],
+                confidence=0.52,
+                status="NEEDS_REVIEW",
+                source="rule_fallback",
+                matched_content_signals=[],
+                evidence_items=[],
+            )
+        ],
+        extraction_status="COMPLETED",
+        risk_passed=True,
+    )
+
+    assert result.accepted is True
+    assert result.reason_codes == ()

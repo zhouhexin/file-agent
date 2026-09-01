@@ -72,5 +72,5 @@ def send_message_to_agent(
     # 普通消息路由必须在后端完成显式投影，不能把内部 AgentRun 交给前端自行隐藏。
     return SendMessageResponse(
         message=execution.message,
-        task_result=build_user_task_receipt(execution.agent_run),
+        task_result=build_user_task_receipt(execution.agent_run, db=db),
     )

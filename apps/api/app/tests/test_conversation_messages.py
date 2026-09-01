@@ -870,8 +870,8 @@ def test_uploaded_message_attachments_share_batch_id():
         json={
             "content": "帮我读取并分类这批文件",
             "attachments": [
-                {"document_id": first_document_id},
-                {"document_id": second_document_id},
+                {"document_id": first_document_id, "relative_path": "财务处/批次-1.txt"},
+                {"document_id": second_document_id, "relative_path": "财务处/子目录/批次-2.txt"},
             ],
         },
     )
@@ -887,9 +887,21 @@ def test_uploaded_message_attachments_share_batch_id():
         assert message is not None
         sources = {item.get("source") for item in message.attachments_json}
         batch_ids = {item.get("batch_id") for item in message.attachments_json}
+        relative_paths = {item.get("relative_path") for item in message.attachments_json}
     assert sources == {"uploaded"}
     assert len(batch_ids) == 1
     assert None not in batch_ids
+    assert relative_paths == {"财务处/批次-1.txt", "财务处/子目录/批次-2.txt"}
+
+    detail_response = client.get(
+        "/api/conversations/batch-marker-chat",
+        headers=headers,
+    )
+    assert detail_response.status_code == 200
+    assert {
+        item["relative_path"]
+        for item in detail_response.json()["messages"][0]["attachments"]
+    } == relative_paths
     clear_overrides()
 
 

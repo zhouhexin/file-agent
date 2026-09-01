@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import csv
 import io
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,6 +31,7 @@ from app.db.models import (
     StructuredExtractionField,
     StructuredExtractionRun,
     ToolInvocation,
+    utcnow,
 )
 from app.modules.agent.state import AgentRunResult, ToolInvocationRecord
 from app.modules.agent.catalog import AgentCatalogService
@@ -38,9 +40,11 @@ from app.modules.agent.graph import (
     _structured_extraction_budget_error,
 )
 from app.modules.agent.planner import (
+    DeterministicPlanner,
     PlannerOutput,
     PlannerStep,
     build_structured_image_extraction_plan,
+    is_structured_image_extraction_request,
 )
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.agent.tool_schemas import StructuredFieldSpec, StructuredImageExtractionInput
@@ -70,6 +74,7 @@ from app.modules.structured_extraction.vision_provider import (
 )
 from app.modules.structured_extraction.worker import (
     _structured_graph_summary,
+    _structured_job_timed_out,
     _resume_agent_run,
     fail_structured_extraction_agent_run,
 )
@@ -138,6 +143,7 @@ def test_catalog_only_exposes_skill_when_deployment_enables_real_tool(monkeypatc
 
     monkeypatch.setenv("PP_STRUCTURE_ENABLED", "true")
     monkeypatch.setenv("STRUCTURED_EXTRACTION_ENABLED", "true")
+    monkeypatch.setenv("STRUCTURED_EXTRACTION_LAYOUT_PROVIDER", "pp_structure_v3")
     config.get_settings.cache_clear()
     enabled = AgentCatalogService(registry=ToolRegistry()).build_snapshot()
     assert "image-structured-extraction" in enabled["enabled_skill_ids"]
@@ -161,12 +167,66 @@ def test_catalog_only_exposes_skill_when_deployment_enables_real_tool(monkeypatc
     assert "extract-image-structured-data" in tencent_enabled["enabled_tool_names"]
 
 
+def test_table_presentation_with_explicit_fields_uses_light_evidence_route():
+    """表格只是展示样式时，不应启动重型结构化 Worker。"""
+
+    message = "重新识别图片中的申请人、资助金额和使用情况登记，以表格形式返回"
+    attachments = [
+        {
+            "document_id": "doc-image-1",
+            "filename": "申请表.jpg",
+            "content_type": "image/jpeg",
+        }
+    ]
+
+    assert is_structured_image_extraction_request(message) is False
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-1",
+        user_id="user-1",
+        message_id="message-1",
+        message=message,
+        attachments=attachments,
+    )
+
+    assert plan.intent == "EVIDENCE_ANSWER"
+    assert [step.tool_name for step in plan.steps] == [
+        "extract-document-text",
+        "evidence-answer",
+    ]
+    evidence_input = plan.steps[-1].input
+    assert evidence_input["response_format"] == "FIELD_TABLE"
+    assert [field["label"] for field in evidence_input["fields"]] == [
+        "申请人",
+        "资助金额",
+        "使用情况登记",
+    ]
+
+
+def test_original_table_structure_request_keeps_heavy_worker_route():
+    """明确要求恢复行列结构时仍保留专用结构化抽取能力。"""
+
+    message = "识别图片中的原始表格，保留行列结构和合并单元格"
+    assert is_structured_image_extraction_request(message) is True
+
+
+def test_structured_job_timeout_uses_started_at_not_heartbeat():
+    """持续心跳只能保护租约，不能无限延长任务业务总时限。"""
+
+    job = FilesystemJob(
+        job_type="STRUCTURED_IMAGE_EXTRACTION",
+        status="RUNNING",
+        started_at=utcnow() - timedelta(seconds=301),
+        heartbeat_at=utcnow(),
+    )
+    assert _structured_job_timed_out(job=job, timeout_seconds=300) is True
+
+
 def test_structured_goal_guard_rejects_basic_insight_substitution():
     """模型即使选择了合法 Tool，也不能用基础洞察冒充图片字段抽取。"""
 
     wrong_plan = PlannerOutput(
         intent="READ_DOCUMENT_INSIGHTS",
-        user_goal="识别图片中的申请人并以表格展示",
+        user_goal="逐行识别图片中的申请人并以表格展示",
         slots={"document_ids": ["doc-1"]},
         selected_skills=["document-insight-read"],
         steps=[
@@ -184,7 +244,7 @@ def test_structured_goal_guard_rejects_basic_insight_substitution():
         confirmation_policy={"operation_plan_required": False},
     )
     guarded, projection = _enforce_structured_extraction_goal(
-        state={"message": "识别图片中的申请人并以表格展示"},
+        state={"message": "逐行识别图片中的申请人并以表格展示"},
         plan=wrong_plan,
         user_intent_plan={"source": "adaptive_planner"},
         catalog_snapshot={"enabled_tool_names": ["extract-image-structured-data"]},
@@ -199,7 +259,7 @@ def test_structured_plan_preserves_requested_fields_and_table_presentation():
     """显式字段请求可被后端收敛为严格专用 Tool 输入。"""
 
     plan = build_structured_image_extraction_plan(
-        user_goal="识别图中申请人、资助金额以及使用登记情况中的申请日期，并以表格的形式展示",
+        user_goal="逐行识别图中申请人、资助金额以及使用登记情况中的申请日期，并以表格的形式展示",
         attachments=[{"document_id": "doc-1", "filename": "form.jpg"}],
     )
 
@@ -220,15 +280,44 @@ def test_structured_plan_preserves_requested_fields_and_table_presentation():
     ]
 
 
+def test_nested_field_table_request_keeps_all_columns_and_uses_one_structured_tool():
+    """父字段及其子字段的多记录投影不能被“以及”截断或先走单记录问答。"""
+
+    message = (
+        "识别图中申请人,资助金额，使用登记情况,以及使用登记情况中的申请日期,"
+        "并以表格的形式展示"
+    )
+    plan = build_structured_image_extraction_plan(
+        user_goal=message,
+        attachments=[{"document_id": "doc-1", "filename": "登记表.jpg"}],
+    )
+
+    assert plan is not None
+    assert [step.tool_name for step in plan.steps] == ["extract-image-structured-data"]
+    tool_input = StructuredImageExtractionInput.model_validate(plan.steps[0].input)
+    assert [field.label for field in tool_input.fields] == [
+        "申请人",
+        "资助金额",
+        "使用登记情况",
+        "使用登记情况中的申请日期",
+    ]
+    assert [field.field_type for field in tool_input.fields] == [
+        "person_name",
+        "money",
+        "string",
+        "date",
+    ]
+
+
 def test_structured_plan_supports_arbitrary_fields_and_rejects_non_image_scope():
     """未知业务字段使用安全动态 key，非图片/PDF 附件不进入专用 Tool。"""
 
     plan = build_structured_image_extraction_plan(
-        user_goal="提取图中报到地点、宿舍楼号以及材料齐全状态，并返回 JSON",
+        user_goal="逐行提取图中报到地点、宿舍楼号以及材料齐全状态，并返回 JSON",
         attachments=[{"document_id": "doc-1", "filename": "notice.png"}],
     )
     unsupported = build_structured_image_extraction_plan(
-        user_goal="提取图中报到地点并返回 JSON",
+        user_goal="逐行提取图中报到地点并返回 JSON",
         attachments=[{"document_id": "doc-2", "filename": "notice.docx"}],
     )
 
@@ -249,7 +338,7 @@ def test_structured_plan_preserves_five_custom_table_columns_in_requested_order(
 
     plan = build_structured_image_extraction_plan(
         user_goal=(
-            "识别图中申请人、资助金额、申请日期、使用情况摘要和备注，"
+            "逐行识别图中申请人、资助金额、申请日期、使用情况摘要和备注，"
             "并以表格形式展示"
         ),
         attachments=[{"document_id": "doc-1", "filename": "form.jpg"}],
@@ -273,7 +362,7 @@ def test_structured_goal_guard_repairs_wrong_tool_when_scope_is_authorized():
 
     wrong_plan = PlannerOutput(
         intent="READ_DOCUMENT_INSIGHTS",
-        user_goal="识别图中申请人并以表格展示",
+        user_goal="逐行识别图中申请人并以表格展示",
         slots={"document_ids": ["doc-1"]},
         selected_skills=["document-insight-read"],
         steps=[
@@ -288,7 +377,7 @@ def test_structured_goal_guard_repairs_wrong_tool_when_scope_is_authorized():
         confirmation_policy={"operation_plan_required": False},
     )
     guarded, projection = _enforce_structured_extraction_goal(
-        state={"message": "识别图中申请人并以表格展示"},
+        state={"message": "逐行识别图中申请人并以表格展示"},
         plan=wrong_plan,
         user_intent_plan={"source": "adaptive_planner"},
         catalog_snapshot={"enabled_tool_names": ["extract-image-structured-data"]},
@@ -304,10 +393,10 @@ def test_structured_goal_guard_replaces_incomplete_llm_field_schema():
     """LLM 选对 Tool 但漏字段时，后端必须恢复用户原文中的完整显式字段契约。"""
 
     incomplete = build_structured_image_extraction_plan(
-        user_goal="从图片中识别申请人、资助金额，并以表格形式展示",
+        user_goal="从图片中逐行识别申请人、资助金额，并以表格形式展示",
         attachments=[{"document_id": "doc-1", "filename": "form.jpg"}],
     )
-    message = "从图片中识别申请人、资助金额以及使用登记情况中的申请日期，并以表格形式展示"
+    message = "从图片中逐行识别申请人、资助金额以及使用登记情况中的申请日期，并以表格形式展示"
 
     guarded, projection = _enforce_structured_extraction_goal(
         state={"message": message},
@@ -741,6 +830,81 @@ def test_deterministic_fallback_reconstructs_bbox_table_by_headers_and_row_ancho
     assert result.records[2].fields["applicant"].confidence <= 0.65
     assert result.records[2].fields["amount"].raw_text == "3500.-"
     assert result.records[2].fields["amount"].confidence <= 0.45
+
+
+def test_deterministic_table_mapping_splits_compound_header_and_merges_continuation_row():
+    """跨列表头要按子列映射，空申请人记录保留，纯日期延续行并回上一记录。"""
+
+    def cell(element_id, text, row, column, column_end=None):
+        return EvidenceElement(
+            id=element_id,
+            document_id="doc-compound-table",
+            extraction_run_id="layout-compound-table",
+            text=text,
+            page_number=1,
+            bbox={"left": column * 100, "top": row * 40, "right": (column + 1) * 100, "bottom": (row + 1) * 40},
+            metadata={
+                "confidence": 0.96,
+                "table_id": "table-1",
+                "row_start": row,
+                "row_end": row + 1,
+                "column_start": column,
+                "column_end": column_end if column_end is not None else column + 1,
+            },
+        )
+
+    elements = [
+        cell("h-seq", "序号", 0, 1),
+        cell("h-applicant", "申请人", 0, 2),
+        cell("h-compound", "资助金额 使用情况登记", 0, 3, 5),
+        cell("r1-name", "金海燕", 1, 2),
+        cell("r1-amount", "10000", 1, 3),
+        cell("r1-usage", "会议注册+签证 2026.6.5", 1, 4),
+        cell("r2-name", "金海燕", 2, 2),
+        cell("r2-amount", "16500", 2, 3),
+        cell("r2-usage", "国际会议 2026.6.5", 2, 4),
+        # 第三条申请人为空，但有金额和用途，必须作为独立业务记录保留。
+        cell("r3-amount", "11500.-", 3, 3),
+        cell("r3-usage", "版面费、会议费", 3, 4),
+        cell("r4-name", "罗靖", 4, 2),
+        cell("r4-amount", "2505", 4, 3),
+        cell("r4-usage", "会议差旅 2026.6.6", 4, 4),
+        cell("r5-name", "肖照林", 5, 2),
+        cell("r5-amount", "3000", 5, 3),
+        cell("r5-usage", "国际会议 2026.6.9", 5, 4),
+        cell("r6-name", "刘兆丽", 6, 2),
+        cell("r6-amount", "10000", 6, 3),
+        cell("r6-usage", "论文版面费", 6, 4),
+        # 腾讯 OCR 可能把最右侧签名日期拆到下一物理行；该行没有身份或金额锚点。
+        cell("r6-continuation", "刘兆丽 2026.7.1", 7, 4),
+    ]
+    fields = [
+        StructuredFieldSpec(key="applicant", label="申请人", field_type="person_name"),
+        StructuredFieldSpec(key="funding_amount", label="资助金额", field_type="money"),
+        StructuredFieldSpec(key="usage", label="使用登记情况", field_type="string"),
+        StructuredFieldSpec(
+            key="application_date",
+            label="使用登记情况中的申请日期",
+            field_type="date",
+        ),
+    ]
+
+    result = DeterministicLayoutExtractionProvider().extract(
+        fields=fields,
+        schema_mode="EXPLICIT_FIELDS",
+        record_mode="AUTO",
+        elements=elements,
+        max_records=20,
+    )
+
+    assert len(result.records) == 6
+    assert result.records[0].fields["funding_amount"].raw_text == "10000"
+    assert result.records[0].fields["usage"].raw_text == "会议注册+签证 2026.6.5"
+    assert result.records[0].fields["application_date"].raw_text == "2026.6.5"
+    assert "applicant" not in result.records[2].fields
+    assert result.records[2].fields["funding_amount"].raw_text == "11500.-"
+    assert result.records[5].fields["application_date"].raw_text == "2026.7.1"
+    assert "刘兆丽 2026.7.1" in result.records[5].fields["usage"].raw_text
 
 
 @pytest.mark.parametrize(
@@ -1543,6 +1707,66 @@ def test_structured_worker_public_error_does_not_expose_exception_details():
     assert "api-key-value" not in message
 
 
+def test_user_receipt_projects_light_field_table_without_evidence_quotes():
+    """轻量字段表格只展示校验后的值，不把内部原文证据重复投影到前端。"""
+
+    result = AgentRunResult(
+        agent_run_id="run-field-table",
+        conversation_id="conv-field-table",
+        user_id="user-field-table",
+        message_id="message-field-table",
+        intent="EVIDENCE_ANSWER",
+        status="COMPLETED",
+        selected_skills=["evidence-answer"],
+        tool_plan={"slots": {"show_evidence": False}},
+        tool_results=[],
+        tool_invocations=[
+            ToolInvocationRecord(
+                tool_name="evidence-answer",
+                input_json={},
+                output_json={
+                    "kind": "evidence_answer",
+                    "ok": True,
+                    "status": "COMPLETED",
+                    "answer": "已识别 3 个字段。",
+                    "references": [
+                        {
+                            "document_id": "doc-1",
+                            "filename": "申请表.jpg",
+                            "evidence_items": [{"quote": "不应展示的原文"}],
+                        }
+                    ],
+                    "field_table": {
+                        "presentation": "TABLE",
+                        "fields": [
+                            {
+                                "key": "applicant",
+                                "label": "申请人",
+                                "field_type": "person_name",
+                                "value": "张三",
+                                "status": "EXTRACTED",
+                                "page_number": 1,
+                            }
+                        ],
+                        "missing_count": 0,
+                        "original_unchanged": True,
+                    },
+                },
+                status="COMPLETED",
+            )
+        ],
+        final_response="已完成",
+    )
+
+    receipt = build_user_task_receipt(result)
+
+    assert receipt.response_type == "field_table"
+    assert receipt.field_table_result is not None
+    assert receipt.field_table_result["fields"][0]["value"] == "张三"
+    assert receipt.evidence_answer_result is not None
+    assert receipt.evidence_answer_result["files"][0]["evidence_items"] == []
+
+
 def test_user_receipt_projects_dynamic_result_and_export_without_internal_paths():
     output = _tool_result(
         status="COMPLETED",
@@ -1662,6 +1886,69 @@ def test_user_receipt_preserves_custom_column_count_and_order():
         "usage",
         "remark",
     ]
+
+
+def test_user_receipt_prefers_completed_structured_records_over_earlier_field_table():
+    """同一运行存在历史轻量结果时，最终多记录事实必须成为唯一主回执。"""
+
+    structured_output = _tool_result(
+        status="COMPLETED",
+        quality_band="HIGH",
+        field_status="NORMALIZED",
+        confidence=0.96,
+    )
+    result = AgentRunResult(
+        agent_run_id="run-structured-precedence",
+        conversation_id="conv-structured-precedence",
+        user_id="user-1",
+        message_id="message-structured-precedence",
+        intent="EXTRACT_STRUCTURED_DATA",
+        status="COMPLETED",
+        selected_skills=["image-structured-extraction"],
+        tool_plan={},
+        tool_results=[],
+        tool_invocations=[
+            ToolInvocationRecord(
+                tool_name="evidence-answer",
+                input_json={},
+                output_json={
+                    "kind": "evidence_answer",
+                    "ok": True,
+                    "status": "COMPLETED",
+                    "field_table": {
+                        "presentation": "TABLE",
+                        "record_count": 1,
+                        "fields": [
+                            {
+                                "key": "applicant",
+                                "label": "申请人",
+                                "field_type": "person_name",
+                                "value": "第一条",
+                                "status": "EXTRACTED",
+                                "page_number": 1,
+                            }
+                        ],
+                        "missing_count": 0,
+                        "original_unchanged": True,
+                    },
+                },
+                status="COMPLETED",
+            ),
+            ToolInvocationRecord(
+                tool_name="extract-image-structured-data",
+                input_json={},
+                output_json=structured_output,
+                status="COMPLETED",
+            ),
+        ],
+        final_response="已完成",
+    )
+
+    receipt = build_user_task_receipt(result)
+
+    assert receipt.response_type == "structured_extraction"
+    assert receipt.structured_extraction_result is not None
+    assert receipt.field_table_result is not None
 
 
 def test_graph_summary_does_not_copy_structured_field_values():

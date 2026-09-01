@@ -531,6 +531,13 @@
   gap: 12px;
 }
 
+.upload-picker-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .file-picker {
   display: inline-flex;
   min-height: 36px;
@@ -554,6 +561,119 @@
 
 .file-picker input {
   display: none;
+}
+
+.folder-picker {
+  color: #315f94;
+}
+
+.upload-batch-progress {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #d7e3f3;
+  border-radius: 12px;
+  background: #f8fbff;
+  padding: 10px 12px;
+}
+
+.upload-batch-progress header,
+.upload-batch-summary,
+.upload-batch-title {
+  display: flex;
+  align-items: center;
+}
+
+.upload-batch-progress header {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.upload-batch-title,
+.upload-batch-summary {
+  gap: 7px;
+}
+
+.upload-batch-title {
+  min-width: 0;
+  color: #244d7c;
+}
+
+.upload-batch-title strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-batch-progress header > button {
+  display: inline-flex;
+  border: 0;
+  background: transparent;
+  color: #667789;
+  cursor: pointer;
+  padding: 2px;
+}
+
+.upload-batch-summary {
+  flex-wrap: wrap;
+  color: #52616f;
+  font-size: 12px;
+}
+
+.upload-batch-spinner {
+  animation: spin 1s linear infinite;
+}
+
+.upload-batch-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dce8f7;
+}
+
+.upload-batch-track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #2563eb;
+  transition: width 180ms ease;
+}
+
+.upload-batch-failures summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #a13c2f;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.upload-batch-failures ul {
+  display: grid;
+  gap: 5px;
+  max-height: 140px;
+  overflow: auto;
+  margin: 7px 0 0;
+  padding-left: 18px;
+}
+
+.upload-batch-failures li {
+  color: #6b3c34;
+  font-size: 12px;
+}
+
+.upload-batch-failures li strong,
+.upload-batch-failures li span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.file-card-relative-path {
+  overflow: hidden;
+  margin: 1px 0 0;
+  color: #7b8794;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .send-button {
@@ -1236,6 +1356,23 @@
 .evidence-answer-receipt {
   display: grid;
   gap: 12px;
+}
+
+.field-table-receipt {
+  display: grid;
+  gap: 12px;
+  width: min(760px, 100%);
+}
+
+.field-table-receipt > header {
+  display: grid;
+  gap: 4px;
+}
+
+.field-table-receipt > header small,
+.field-table-note {
+  color: var(--text-secondary);
+  font-size: 0.82rem;
 }
 
 .evidence-answer-text {

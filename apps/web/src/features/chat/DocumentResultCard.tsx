@@ -32,6 +32,8 @@ export function DocumentResultCard({
   // 每个文件单独成卡，避免把批量结果挤成一整段文本。
   const failed = result.extraction_status === 'FAILED';
   const filename = result.filename || attachment?.filename || result.document_id;
+  const originalFilename = result.original_filename || attachment?.filename || filename;
+  const renamedFilename = result.renamed_filename || filename;
   // 历史生命周期回执可能只记录处理状态和命名建议，没有分类数组。
   const categories = result.categories ?? [];
   const primaryCategory = categories[0];
@@ -69,6 +71,10 @@ export function DocumentResultCard({
             </div>
           </header>
           <div className="document-result-failure">
+            <p>文件原名：{originalFilename}</p>
+            <p>整理后名称：{renamedFilename}</p>
+            <p>分类结果：未完成</p>
+            <p>处理状态：失败</p>
             <p>失败原因：{getFailureMessage(result.errors)}</p>
           </div>
         </>
@@ -134,6 +140,26 @@ export function DocumentResultCard({
                   />
                 ))}
               </div>
+            </div>
+          ) : null}
+          {result.original_filename || result.renamed_filename || result.rename_status ? (
+            <div className="document-result-rename-suggestion">
+              <p>文件原名：{originalFilename}</p>
+              <p>重命名后：{renamedFilename}</p>
+              <p>
+                处理状态：{result.processing_status === 'NEEDS_REVIEW'
+                  ? '待复核'
+                  : result.processing_status === 'FAILED'
+                    ? '失败'
+                    : '已完成'}
+              </p>
+              <small>
+                {result.rename_status === 'NEEDS_REVIEW'
+                  ? '命名依据不足，已保留原名并等待复核。'
+                  : result.rename_status === 'NO_CHANGE'
+                    ? '标准名称与原名一致，无需改名。'
+                    : '工作副本已完成标准化命名；不可变原件未修改。'}
+              </small>
             </div>
           ) : null}
           {result.risk_warnings && result.risk_warnings.length > 0 ? (

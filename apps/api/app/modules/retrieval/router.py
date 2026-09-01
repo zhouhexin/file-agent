@@ -200,7 +200,7 @@ def answer_from_evidence(
     )
     return SendMessageResponse(
         message=execution.message,
-        task_result=build_user_task_receipt(execution.agent_run),
+        task_result=build_user_task_receipt(execution.agent_run, db=db),
     )
 
 
@@ -231,5 +231,5 @@ def resolve_file_search_clarification(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return SendMessageResponse(
         message=execution.message,
-        task_result=build_user_task_receipt(execution.agent_run),
+        task_result=build_user_task_receipt(execution.agent_run, db=db),
     )

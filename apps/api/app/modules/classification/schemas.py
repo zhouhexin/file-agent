@@ -54,6 +54,21 @@ class CategoryNode(BaseModel):
         return self
 
 
+class TaxonomyFallbackLeaf(BaseModel):
+    """无法命中具体业务分类时使用的稳定末级节点模板。"""
+
+    id_suffix: str = Field(pattern=r"^[a-z][a-z0-9-]*$")
+    name: str = Field(min_length=1, max_length=80)
+
+
+class TaxonomyFallbackPolicy(BaseModel):
+    """学校/学院、部门和文号驱动的确定性兜底分类策略。"""
+
+    department_category_ids: list[str] = Field(default_factory=list)
+    issued: TaxonomyFallbackLeaf
+    other: TaxonomyFallbackLeaf
+
+
 class Taxonomy(BaseModel):
     """一套可版本化的文件分类体系。"""
 
@@ -62,6 +77,7 @@ class Taxonomy(BaseModel):
     version: str
     source: str
     categories: list[CategoryNode]
+    fallback_policy: TaxonomyFallbackPolicy | None = None
 
     @model_validator(mode="after")
     def validate_unique_category_ids(self) -> "Taxonomy":
@@ -84,4 +100,13 @@ class Taxonomy(BaseModel):
             walk(category)
         if duplicate_ids:
             raise ValueError(f"分类 id 重复：{', '.join(sorted(duplicate_ids))}")
+        if self.fallback_policy is not None:
+            unknown_department_ids = sorted(
+                set(self.fallback_policy.department_category_ids) - seen_ids
+            )
+            if unknown_department_ids:
+                raise ValueError(
+                    "兜底策略引用未知部门分类："
+                    + ", ".join(unknown_department_ids)
+                )
         return self

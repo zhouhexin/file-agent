@@ -2905,6 +2905,40 @@ def test_background_classification_is_hidden_from_non_classification_response():
     assert visible[0]["categories"][0]["name"] == "学校/审计"
 
 
+def test_validated_classification_plan_projects_categories_for_free_text_intent():
+    """旧运行即使保存了自由文本意图，也应按受控分类计划展示逐文件分类。"""
+
+    document_results = [
+        {
+            "document_id": "document-1",
+            "filename": "财务通知.docx",
+            "classification_reused": False,
+            "categories": [{"name": "学校/财务", "confidence": 0.77}],
+        }
+    ]
+
+    visible = _document_results_for_response(
+        {
+            "intent": "对上传文件进行分类",
+            "slots": {"document_ids": ["document-1"]},
+            "tool_plan": {
+                "steps": [
+                    {
+                        "skill": "document-classification",
+                        "tool_name": "extract-document-text",
+                    }
+                ]
+            },
+        },
+        document_results,
+    )
+
+    assert visible[0]["categories"] == [
+        {"name": "学校/财务", "confidence": 0.77}
+    ]
+    assert visible[0]["classification_reused"] is False
+
+
 def test_document_results_response_hides_extra_low_confidence_categories():
     """分类建议过多时只展示前三个，避免对话回执过长。"""
 

@@ -274,11 +274,23 @@ class EvidenceAnswerInput(StrictToolInput):
     question: str = Field(min_length=1, max_length=4000)
     document_ids: List[str] = Field(default_factory=list, max_length=50)
     answer_mode: Literal["AUTO", "FOCUSED", "FULL_SUMMARY"] = "AUTO"
+    response_format: Literal["TEXT", "FIELD_TABLE"] = "TEXT"
+    fields: List[StructuredFieldSpec] = Field(default_factory=list, max_length=40)
     document_selection_clarification_id: str | None = Field(
         default=None,
         min_length=1,
         max_length=36,
     )
+
+    @model_validator(mode="after")
+    def validate_response_fields(self) -> "EvidenceAnswerInput":
+        """字段表格必须锁定用户明示字段，普通回答不得夹带字段 schema。"""
+
+        if self.response_format == "FIELD_TABLE" and not self.fields:
+            raise ValueError("FIELD_TABLE response requires explicit fields")
+        if self.response_format == "TEXT" and self.fields:
+            raise ValueError("TEXT response cannot include field schema")
+        return self
 
 
 class DocumentInsightsReadInput(StrictToolInput):

@@ -126,7 +126,11 @@ async def request_logging_middleware(request: Request, call_next):
 # 允许本地 Vite 前端跨端口调用 API；生产环境应改为正式域名白名单。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origins=[
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://10.102.8.176:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

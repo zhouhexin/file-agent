@@ -136,7 +136,8 @@ export type TaskResult = {
     | 'classification_clarification'
     | 'classification_decision'
     | 'filename_conflict'
-    | 'structured_extraction';
+    | 'structured_extraction'
+    | 'field_table';
   display_mode: 'default' | 'classification_cards';
   final_response: string | null;
   processed_count: number;
@@ -157,6 +158,7 @@ export type TaskResult = {
   classification_decision_result: ClassificationDecisionResult | null;
   filename_conflict_result: FilenameConflictResult | null;
   structured_extraction_result: StructuredExtractionResult | null;
+  field_table_result: FieldTableResult | null;
   pending_job_ids: string[];
   operation_plan_id: string | null;
   pending_decisions: Array<Record<string, unknown>>;
@@ -411,6 +413,21 @@ export type EvidenceAnswerResult = {
   cached: boolean;
 };
 
+export type FieldTableResult = {
+  presentation: 'TABLE';
+  record_count: number;
+  fields: Array<{
+    key: string;
+    label: string;
+    field_type: string;
+    value: unknown;
+    status: 'EXTRACTED' | 'MISSING' | string;
+    page_number: number | null;
+  }>;
+  missing_count: number;
+  original_unchanged: true;
+};
+
 export type StructuredExtractionField = {
   key: string;
   label: string;
@@ -564,10 +581,14 @@ export type UploadedFile = {
   duplicate_review_status?: string;
   working_copy_id?: string | null;
   working_copy_status?: string | null;
+  original_filename?: string;
+  renamed_filename?: string | null;
+  processing_status?: string;
   file_availability?: 'AVAILABLE' | 'TRASHED' | 'PROCESSING' | 'MISSING' | 'UNAVAILABLE' | string;
   availability_message?: string | null;
   can_open?: boolean;
   can_restore?: boolean;
+  relative_path?: string | null;
 };
 
 export type FilePreviewSection = {
@@ -656,6 +677,10 @@ export type UploadArchiveStatus = {
   status: string;
   managed_file_id: string | null;
   working_copy_id: string | null;
+  working_copy_status: string | null;
+  original_filename: string;
+  renamed_filename: string | null;
+  processing_status: string;
   filesystem_job_id: string | null;
   error_code: string | null;
   error_message: string | null;
@@ -781,6 +806,10 @@ export type DocumentResult = {
   document_version_id?: string;
   working_copy_id?: string;
   filename: string;
+  original_filename?: string;
+  renamed_filename?: string;
+  rename_status?: 'COMPLETED' | 'NO_CHANGE' | 'NEEDS_REVIEW' | string;
+  processing_status?: 'COMPLETED' | 'FAILED' | 'NEEDS_REVIEW' | string;
   organization_status?: 'READY' | 'NEEDS_REVIEW' | string;
   /** 用户可理解的原文检索准备状态，不暴露内部索引、Skill 或 Tool。 */
   search_status?: 'READY' | 'NEEDS_REVIEW' | string;

@@ -245,9 +245,6 @@ class WorkingCopyLayoutRepairService:
             FileObject.document_id == working_copy.document_id,
             FileObject.storage_backend == "working_copy_local",
         ).update({"storage_path": after_storage}, synchronize_session=False)
-        document = self.db.get(Document, working_copy.document_id)
-        if document is not None and restoring_source_path:
-            document.original_filename = managed_file.filename
         sequence = (
             self.db.query(func.max(WorkingCopyPathRecord.sequence_number))
             .filter(WorkingCopyPathRecord.working_copy_id == working_copy.id)

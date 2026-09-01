@@ -84,6 +84,81 @@ def test_adaptive_catalog_includes_mature_plan_tools_but_hides_confirmed_executi
     assert "confirmed-file-action" not in snapshot["enabled_tool_names"]
 
 
+def test_adaptive_classification_intent_is_normalized_for_receipt_projection():
+    """分类 ToolPlan 即使返回中文意图，也必须补齐应用枚举和展示输出。"""
+
+    registry = ToolRegistry()
+    snapshot = AgentCatalogService(registry=registry).build_snapshot()
+    decision = PlannerDecision(
+        decision_type="TOOL_PLAN",
+        intent="对上传文件进行分类",
+        user_goal="对刚刚上传的文件进行分类",
+        selected_skill_ids=["document-classification"],
+        scope=PlannerScope(
+            document_ids=["document-classification-1"],
+            source="current_message",
+        ),
+        tool_plan=ToolPlan(
+            plan_id="classification-plan",
+            steps=[
+                ToolStep(
+                    step_id="extract-for-classification",
+                    skill_id="document-classification",
+                    tool_name="extract-document-text",
+                    literal_input={"document_id": "document-classification-1"},
+                )
+            ],
+        ),
+    )
+
+    plan, intent_projection = validate_and_convert_decision(
+        decision=decision,
+        registry=registry,
+        catalog_snapshot=snapshot,
+        attachments=[{"document_id": "document-classification-1"}],
+        context_documents=[],
+    )
+
+    assert plan.intent == "CLASSIFY_FILES"
+    assert plan.slots == {
+        "document_ids": ["document-classification-1"],
+        "requested_outputs": ["classification", "receipt"],
+    }
+    assert intent_projection["original_intent"] == "对上传文件进行分类"
+    assert intent_projection["normalized_intent"] == "CLASSIFY_FILES"
+
+
+def test_adaptive_finish_preserves_prior_classification_intent_and_outputs():
+    """分类执行后的 FINISH 不得把上一轮规范化意图和分类回执输出清空。"""
+
+    registry = ToolRegistry()
+    snapshot = AgentCatalogService(registry=registry).build_snapshot()
+    decision = PlannerDecision(
+        decision_type="FINISH",
+        intent="已完成用户要求",
+        user_goal="对刚刚上传的文件进行分类",
+        selected_skill_ids=["document-classification"],
+        scope=PlannerScope(
+            document_ids=["document-classification-1"],
+            source="tool_observation",
+        ),
+    )
+
+    plan, _intent_projection = validate_and_convert_decision(
+        decision=decision,
+        registry=registry,
+        catalog_snapshot=snapshot,
+        attachments=[{"document_id": "document-classification-1"}],
+        context_documents=[],
+        has_tool_observation=True,
+        observation={"tool_name": "intent-summary"},
+        prior_intent="CLASSIFY_FILES",
+    )
+
+    assert plan.intent == "CLASSIFY_FILES"
+    assert plan.slots["requested_outputs"] == ["classification", "receipt"]
+
+
 def test_execution_observation_is_sanitized_for_plan_tool():
     """计划 Tool 的观察只能包含状态和计数，不能把路径、文件名或证据原文传给 LLM。"""
 
@@ -257,6 +332,84 @@ def test_read_only_tool_failure_can_replan_but_side_effect_failure_stops():
     ] == ["FINISH", "CLARIFY"]
 
 
+def test_backend_fixed_attachment_classification_does_not_replan_after_extract():
+    """明确附件分类完成正文抽取后直接汇总，不能再次依赖外部 Planner。"""
+
+    from app.modules.agent.graph import observe_tool_result
+
+    registry = ToolRegistry()
+    runtime = SimpleNamespace(context=SimpleNamespace(registry=registry))
+    result = observe_tool_result(
+        {
+            "planning_round": 1,
+            "tool_call_count": 1,
+            "adaptive_planner_mode": "enabled",
+            "last_dispatch_tool_name": "extract-document-text",
+            "last_dispatch_results": [
+                {
+                    "ok": True,
+                    "status": "COMPLETED",
+                    "document_id": "document-classification-1",
+                }
+            ],
+            "search_attempts": [],
+            "observed_document_ids": [],
+            "effective_conditions": [],
+            "message": "对文件分类",
+            "intent": "CLASSIFY_FILES",
+            "user_intent_plan": {"source": "deterministic_preflight"},
+        },
+        runtime,
+    )
+
+    assert result["replan_requested"] is False
+    assert result["status"] == "SUMMARIZING"
+
+
+def test_finish_after_observation_filters_legacy_skills_not_in_catalog():
+    """外部 Planner 失败后的 FINISH 必须过滤未迁移 Skill，保留既有分类结果。"""
+
+    from app.modules.agent.graph import _finish_after_observation_failure
+
+    registry = ToolRegistry()
+    snapshot = AgentCatalogService(registry=registry).build_snapshot()
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(
+            registry=registry,
+            catalog_snapshot=snapshot,
+        )
+    )
+    plan, intent_projection = _finish_after_observation_failure(
+        state={
+            "intent": "CLASSIFY_FILES",
+            "message": "对文件分类",
+            "selected_skills": [
+                "chat-intake",
+                "document-text-extract",
+                "document-classification",
+                "change-report",
+            ],
+            "slots": {
+                "document_ids": ["document-classification-1"],
+                "requested_outputs": ["classification", "receipt"],
+            },
+            "observed_document_ids": ["document-classification-1"],
+            "context_documents": [],
+            "observation": {},
+        },
+        runtime=runtime,
+        attachments=[{"document_id": "document-classification-1"}],
+        adaptive_error=LLMResponseError("测试超时"),
+    )
+
+    assert "document-text-extract" not in plan.selected_skills
+    assert plan.intent == "CLASSIFY_FILES"
+    assert plan.slots["requested_outputs"] == ["classification", "receipt"]
+    assert intent_projection["fallback_reason"] == (
+        "ADAPTIVE_REPLAN_FAILED_AFTER_TOOL"
+    )
+
+
 def test_enabled_adaptive_planner_keeps_exact_filename_as_backend_hard_scope(
     monkeypatch,
     tmp_path,
@@ -362,10 +515,13 @@ def test_enabled_adaptive_planner_keeps_explicit_attachment_classification(
 
             raise AssertionError("附件分类硬计划不得回退 Legacy LLM")
 
-    class ClassificationRegistry:
+    class ClassificationRegistry(ToolRegistry):
         """返回最小正文解析结果并记录真实 Tool。"""
 
         def __init__(self):
+            """保留生产观察策略，同时用确定性结果替代数据库副作用。"""
+
+            super().__init__()
             self.calls: list[str] = []
 
         def invoke(self, tool_name, input_json):

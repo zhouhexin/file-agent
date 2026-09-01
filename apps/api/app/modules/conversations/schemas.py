@@ -7,9 +7,10 @@ from __future__ import annotations
 
 from typing import Any, List
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.modules.agent.user_receipt import UserTaskReceipt
+from app.modules.files.upload_paths import normalize_upload_relative_path
 
 
 class MessageAttachment(BaseModel):
@@ -19,6 +20,14 @@ class MessageAttachment(BaseModel):
     """
 
     document_id: str = Field(min_length=1)
+    relative_path: str | None = Field(default=None, max_length=1024)
+
+    @field_validator("relative_path")
+    @classmethod
+    def validate_relative_path(cls, value: str | None) -> str | None:
+        """消息只能保存经过校验的展示路径，不能接受目录穿越或绝对路径。"""
+
+        return normalize_upload_relative_path(value)
 
 
 class SendMessageRequest(BaseModel):
@@ -26,6 +35,12 @@ class SendMessageRequest(BaseModel):
 
     content: str = Field(min_length=1)
     attachments: List[MessageAttachment] = Field(default_factory=list)
+
+
+class ConversationMessageAttachment(BaseModel):
+    """即时消息响应维持稳定的最小附件引用契约。"""
+
+    document_id: str
 
 
 class ConversationMessage(BaseModel):
@@ -39,7 +54,7 @@ class ConversationMessage(BaseModel):
     user_id: str
     role: str
     content: str
-    attachments: List[MessageAttachment]
+    attachments: List[ConversationMessageAttachment]
 
 
 class ConversationAttachmentSummary(BaseModel):
@@ -59,6 +74,7 @@ class ConversationAttachmentSummary(BaseModel):
     availability_message: str | None = None
     can_open: bool = False
     can_restore: bool = False
+    relative_path: str | None = None
 
 
 class ConversationHistoryMessage(BaseModel):

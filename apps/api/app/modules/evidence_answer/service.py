@@ -129,6 +129,8 @@ class EvidenceAnswerService:
         question: str,
         document_ids: list[str] | None = None,
         answer_mode: str = "AUTO",
+        response_format: str = "TEXT",
+        fields: list[dict[str, Any]] | None = None,
         document_selection_clarification_id: str | None = None,
     ) -> dict[str, Any]:
         """从当前活动版本检索证据、生成回答并持久化可验证引用。
@@ -138,6 +140,10 @@ class EvidenceAnswerService:
         """
 
         normalized_question = str(question or "").strip()
+        locked_fields = _normalize_requested_fields(fields or [])
+        normalized_response_format = (
+            "FIELD_TABLE" if response_format == "FIELD_TABLE" and locked_fields else "TEXT"
+        )
         started_at = time.perf_counter()
         requested_ids = list(
             dict.fromkeys(
@@ -261,6 +267,8 @@ class EvidenceAnswerService:
                 policy=policy,
                 source_rows=explicit_source_rows,
                 started_at=started_at,
+                response_format=normalized_response_format,
+                fields=locked_fields,
             )
         if exact_filename:
             log_event(
@@ -334,6 +342,8 @@ class EvidenceAnswerService:
                     policy=policy,
                     source_rows=source_rows,
                     started_at=started_at,
+                    response_format=normalized_response_format,
+                    fields=locked_fields,
                 )
             elif len(source_rows) > 1:
                 return self._no_evidence(
@@ -418,6 +428,8 @@ class EvidenceAnswerService:
                     policy=policy,
                     source_rows=explicit_source_rows,
                     started_at=started_at,
+                    response_format=normalized_response_format,
+                    fields=locked_fields,
                 )
             active_rows = self._recall_active_working_copies(normalized_question)
             active_rows = self._expand_same_name_rows(active_rows)
@@ -520,6 +532,8 @@ class EvidenceAnswerService:
             question=normalized_question,
             mode=mode,
             working_copy_rows=active_rows,
+            response_format=normalized_response_format,
+            fields=locked_fields,
         )
         evidence_fingerprint = self._evidence_fingerprint(items)
         cached = self._read_cache(
@@ -555,6 +569,8 @@ class EvidenceAnswerService:
                 question=_model_question(normalized_question, mode=mode),
                 question_type=policy.question_type,
                 answer_mode=mode,
+                response_format=normalized_response_format,
+                fields=locked_fields,
                 scope={
                     "mode": "explicit_documents" if explicit_ids else "conversation_then_workspace",
                     "document_ids": [version.document_id for _, version in active_rows],
@@ -594,6 +610,15 @@ class EvidenceAnswerService:
             items,
             answer_mode=mode,
         )
+        field_table: dict[str, Any] | None = None
+        field_used_ids: list[str] = []
+        if normalized_response_format == "FIELD_TABLE":
+            field_table, field_used_ids, field_warnings = self._validate_field_values(
+                answer=structured,
+                items=items,
+                fields=locked_fields,
+            )
+            validation_warnings.extend(field_warnings)
         if validation_warnings:
             log_event(
                 "evidence_answer.validation_failed",
@@ -606,7 +631,7 @@ class EvidenceAnswerService:
                 rejected_claim_count=len(validation_warnings),
                 message="部分模型结论未通过原文支持性校验",
             )
-        if not validated:
+        if normalized_response_format != "FIELD_TABLE" and not validated:
             return self._no_evidence(
                 question=normalized_question,
                 mode=mode,
@@ -621,7 +646,11 @@ class EvidenceAnswerService:
                 "回答生成期间文件状态发生变化，请重新查询。",
             )
 
-        answer_text, used_ids = self._render_answer(validated)
+        if field_table is not None:
+            answer_text = self._render_field_table_answer(field_table)
+            used_ids = field_used_ids
+        else:
+            answer_text, used_ids = self._render_answer(validated)
         # limitations 同样来自模型输出，不能未经校验原样进入普通聊天或检索轨迹。
         # 这里只投影后端定义的有限状态说明。
         limitations = list(validation_warnings)
@@ -630,7 +659,13 @@ class EvidenceAnswerService:
         elif structured.status == "PARTIAL" or structured.limitations:
             limitations.append("当前回答只保留了通过原文校验的部分结论。")
         limitations = list(dict.fromkeys(limitations))
-        status = "PARTIAL" if limitations or index_status == "PARTIAL_INDEX" else "COMPLETED"
+        status = (
+            "PARTIAL"
+            if limitations
+            or index_status == "PARTIAL_INDEX"
+            or (field_table is not None and field_table.get("missing_count", 0) > 0)
+            else "COMPLETED"
+        )
         record = self._persist(
             question=normalized_question,
             answer_text=answer_text,
@@ -644,6 +679,7 @@ class EvidenceAnswerService:
             limitations=limitations,
             usage=usage,
             question_type=policy.question_type,
+            field_table=field_table,
         )
         self._log_completed(
             event="evidence_answer.persisted",
@@ -1009,6 +1045,8 @@ class EvidenceAnswerService:
         policy: Any,
         source_rows: list[tuple[ManagedFileRevision, ManagedFile, ManagedRoot, DocumentVersion]],
         started_at: float,
+        response_format: str = "TEXT",
+        fields: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """用当前源修订的 EvidenceSpan 回答，且不触发原始文件物理读取。"""
 
@@ -1025,11 +1063,19 @@ class EvidenceAnswerService:
                 message="该原始文件尚未获得能够支持回答的正文证据。",
             )
         evidence_fingerprint = self._evidence_fingerprint(items)
-        request_fingerprint = self._source_request_fingerprint(question=question, mode=mode, source_rows=source_rows)
+        request_fingerprint = self._source_request_fingerprint(
+            question=question,
+            mode=mode,
+            source_rows=source_rows,
+            response_format=response_format,
+            fields=list(fields or []),
+        )
         package = EvidencePackage(
             question=_model_question(question, mode=mode),
             question_type=policy.question_type,
             answer_mode=mode,
+            response_format=response_format,
+            fields=list(fields or []),
             scope={"mode": "managed_source", "revision_ids": [row[0].id for row in source_rows]},
             evidence_items=items,
             limitations=[],
@@ -1043,7 +1089,16 @@ class EvidenceAnswerService:
             )
             usage = {"llm_calls": 0, "fallback_error": exc.__class__.__name__}
         validated, warnings = self._validate_claims(structured, items, answer_mode=mode)
-        if not validated:
+        field_table: dict[str, Any] | None = None
+        field_used_ids: list[str] = []
+        if response_format == "FIELD_TABLE":
+            field_table, field_used_ids, field_warnings = self._validate_field_values(
+                answer=structured,
+                items=items,
+                fields=list(fields or []),
+            )
+            warnings.extend(field_warnings)
+        if response_format != "FIELD_TABLE" and not validated:
             return self._no_evidence(
                 question=question,
                 mode=mode,
@@ -1052,12 +1107,20 @@ class EvidenceAnswerService:
             )
         if not self._source_revisions_are_still_current(items):
             return self._failure("SOURCE_CHANGED", "回答生成期间原始文件状态发生变化，请重新查询。")
-        answer_text, used_ids = self._render_answer(validated)
+        if field_table is not None:
+            answer_text = self._render_field_table_answer(field_table)
+            used_ids = field_used_ids
+        else:
+            answer_text, used_ids = self._render_answer(validated)
         record = self._persist(
             question=question,
             answer_text=answer_text,
             mode=mode,
-            status="PARTIAL" if warnings else "COMPLETED",
+            status=(
+                "PARTIAL"
+                if warnings or (field_table is not None and field_table.get("missing_count", 0) > 0)
+                else "COMPLETED"
+            ),
             request_fingerprint=request_fingerprint,
             evidence_fingerprint=evidence_fingerprint,
             items=items,
@@ -1066,6 +1129,7 @@ class EvidenceAnswerService:
             limitations=warnings,
             usage=usage,
             question_type=policy.question_type,
+            field_table=field_table,
         )
         # 回答已经保存后才入队。本轮涉及的全部源修订都由同一集合物化，单个
         # 物化失败不会影响本轮已经返回的证据结论。
@@ -1589,7 +1653,10 @@ class EvidenceAnswerService:
                 message="阶段五模型生成开始",
             )
             raw = self.client.complete_json(
-                system_prompt=self._system_prompt(answer_mode=package.answer_mode),
+                system_prompt=self._system_prompt(
+                    answer_mode=package.answer_mode,
+                    response_format=package.response_format,
+                ),
                 user_payload=payload,
             )
             calls += 1
@@ -1624,12 +1691,16 @@ class EvidenceAnswerService:
             }
 
         merged_claims = [claim.model_dump() for response in responses for claim in response.claims]
+        merged_field_values = [
+            field.model_dump() for response in responses for field in response.field_values
+        ]
         limitations = [value for response in responses for value in response.limitations]
         if len(batches) > len(responses):
             limitations.append("文档过长，当前回答只覆盖了已进入模型上下文的部分证据。")
         return (
             StructuredAnswer(
                 claims=merged_claims,
+                field_values=merged_field_values,
                 limitations=list(dict.fromkeys(limitations)),
                 status="PARTIAL" if limitations else "COMPLETED",
             ),
@@ -1656,7 +1727,10 @@ class EvidenceAnswerService:
                 raise LLMResponseError(f"证据回答结构校验失败：{exc}") from exc
             repaired = self.client.complete_json(
                 system_prompt=(
-                    self._system_prompt(answer_mode=str(payload.get("answer_mode") or "FOCUSED"))
+                    self._system_prompt(
+                        answer_mode=str(payload.get("answer_mode") or "FOCUSED"),
+                        response_format=str(payload.get("response_format") or "TEXT"),
+                    )
                     + "\n上一响应未通过 schema 校验。只返回合法 JSON，不得添加新事实。"
                 ),
                 user_payload={**payload, "validation_error": str(exc)[:1000], "invalid_response": raw},
@@ -1692,6 +1766,8 @@ class EvidenceAnswerService:
             "question": package.question,
             "question_type": package.question_type,
             "answer_mode": package.answer_mode,
+            "response_format": package.response_format,
+            "fields": package.fields,
             "evidence": [
                 {
                     "evidence_id": item.evidence_id,
@@ -1704,14 +1780,31 @@ class EvidenceAnswerService:
                 for item in items
             ],
             "required_output": {
-                "claims": [{"text": "结论", "evidence_ids": ["evidence-id"]}],
+                "claims": (
+                    []
+                    if package.response_format == "FIELD_TABLE"
+                    else [{"text": "结论", "evidence_ids": ["evidence-id"]}]
+                ),
+                "field_values": (
+                    [
+                        {
+                            "field_key": field["key"],
+                            "value": "字段原文值；未找到时为空字符串",
+                            "evidence_ids": ["evidence-id"],
+                            "status": "EXTRACTED 或 NOT_FOUND",
+                        }
+                        for field in package.fields
+                    ]
+                    if package.response_format == "FIELD_TABLE"
+                    else []
+                ),
                 "limitations": [],
                 "status": "COMPLETED",
             },
         }
 
     @staticmethod
-    def _system_prompt(*, answer_mode: str) -> str:
+    def _system_prompt(*, answer_mode: str, response_format: str = "TEXT") -> str:
         """返回准确性优先的阶段五提示词。"""
 
         base = (
@@ -1719,6 +1812,13 @@ class EvidenceAnswerService:
             "每条 claim 必须引用一个或多个真实 evidence_id。数字、日期、姓名必须逐字存在于引用证据；"
             "证据不足时放入 limitations 或返回 NO_EVIDENCE。只输出符合 required_output 的 JSON 对象。"
         )
+        if response_format == "FIELD_TABLE":
+            return (
+                base
+                + "当前任务只提取 fields 中由后端锁定的字段。field_key 必须逐字使用给定 key，"
+                "不得合并、改名或新增字段；每个字段恰好返回一次。未找到时返回 NOT_FOUND、"
+                "空 value 和空 evidence_ids。找到时 value 必须直接来自引用证据。"
+            )
         if answer_mode != "FULL_SUMMARY":
             return base
         return (
@@ -1790,6 +1890,87 @@ class EvidenceAnswerService:
             valid.append({"text": claim.text.strip(), "evidence_ids": [item.evidence_id for item in cited]})
         return valid, warnings
 
+    def _validate_field_values(
+        self,
+        *,
+        answer: StructuredAnswer,
+        items: list[EvidenceItem],
+        fields: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[str], list[str]]:
+        """按后端锁定 schema 校验字段值，不接受模型合并或新增字段。"""
+
+        item_map = {item.evidence_id: item for item in items}
+        candidates = {}
+        for candidate in answer.field_values:
+            candidates.setdefault(candidate.field_key, candidate)
+        result_fields: list[dict[str, Any]] = []
+        used_ids: list[str] = []
+        missing_count = 0
+        for field in fields:
+            key = str(field["key"])
+            candidate = candidates.get(key)
+            cited = [
+                item_map[evidence_id]
+                for evidence_id in list(dict.fromkeys(candidate.evidence_ids if candidate else []))
+                if evidence_id in item_map
+            ]
+            value = " ".join(str(candidate.value if candidate else "").split()).strip()
+            supported = bool(
+                candidate
+                and candidate.status == "EXTRACTED"
+                and value
+                and cited
+                and _field_value_is_supported(value=value, evidence_items=cited)
+            )
+            if not supported:
+                missing_count += 1
+                result_fields.append(
+                    {
+                        "key": key,
+                        "label": str(field["label"]),
+                        "field_type": str(field.get("field_type") or "string"),
+                        "value": None,
+                        "status": "MISSING",
+                        "page_number": None,
+                    }
+                )
+                continue
+            cited_ids = [item.evidence_id for item in cited]
+            for evidence_id in cited_ids:
+                if evidence_id not in used_ids:
+                    used_ids.append(evidence_id)
+            result_fields.append(
+                {
+                    "key": key,
+                    "label": str(field["label"]),
+                    "field_type": str(field.get("field_type") or "string"),
+                    "value": value,
+                    "status": "EXTRACTED",
+                    "page_number": cited[0].page_number,
+                }
+            )
+        return (
+            {
+                "presentation": "TABLE",
+                "record_count": 1,
+                "fields": result_fields,
+                "missing_count": missing_count,
+                "original_unchanged": True,
+            },
+            used_ids,
+            [],
+        )
+
+    @staticmethod
+    def _render_field_table_answer(field_table: dict[str, Any]) -> str:
+        """生成不承载字段事实的简短文本回执，具体值由结构化字段表展示。"""
+
+        total = len(list(field_table.get("fields") or []))
+        missing = int(field_table.get("missing_count") or 0)
+        if missing:
+            return f"已识别 {total - missing} 个字段，{missing} 个字段未取得足够证据。"
+        return f"已识别 {total} 个字段，结果已按表格展示。"
+
     @staticmethod
     def _deterministic_fallback(
         *,
@@ -1855,6 +2036,7 @@ class EvidenceAnswerService:
         limitations: list[str],
         usage: dict[str, Any],
         question_type: str,
+        field_table: dict[str, Any] | None = None,
     ) -> QAAnswer:
         """保存回答与稳定 EvidenceSpan 引用，不保存普通 UI 不需要的重复正文。"""
 
@@ -1878,6 +2060,7 @@ class EvidenceAnswerService:
                 "evidence_count": len(items),
                 "limitations": limitations,
                 "question_type": question_type,
+                **({"field_table": field_table} if field_table is not None else {}),
             },
         )
         self.db.add(record)
@@ -2065,6 +2248,7 @@ class EvidenceAnswerService:
             ),
             "limitations": limitations,
             "references": list(cards.values()),
+            "field_table": (record.retrieval_trace_json or {}).get("field_table"),
             "cached": cached,
         }
 
@@ -2074,6 +2258,8 @@ class EvidenceAnswerService:
         question: str,
         mode: str,
         working_copy_rows: list[tuple[WorkingCopy, DocumentVersion]],
+        response_format: str = "TEXT",
+        fields: list[dict[str, Any]] | None = None,
     ) -> str:
         """计算包含问题、回答模式和当前内容版本的请求指纹。"""
 
@@ -2085,6 +2271,11 @@ class EvidenceAnswerService:
                 else " ".join(question.split()).casefold()
             ),
             "mode": mode,
+            "response_format": response_format,
+            "fields": [
+                (field.get("key"), field.get("label"), field.get("field_type"))
+                for field in list(fields or [])
+            ],
             "versions": sorted(
                 (working_copy.id, version.id, version.sha256)
                 for working_copy, version in working_copy_rows
@@ -2101,12 +2292,19 @@ class EvidenceAnswerService:
         question: str,
         mode: str,
         source_rows: list[tuple[ManagedFileRevision, ManagedFile, ManagedRoot, DocumentVersion]],
+        response_format: str = "TEXT",
+        fields: list[dict[str, Any]] | None = None,
     ) -> str:
         """为源侧证据回答构造仅依赖当前修订的缓存失效指纹。"""
 
         payload = {
             "question": _FULL_SUMMARY_CACHE_KEY if mode == "FULL_SUMMARY" else " ".join(question.split()).casefold(),
             "mode": mode,
+            "response_format": response_format,
+            "fields": [
+                (field.get("key"), field.get("label"), field.get("field_type"))
+                for field in list(fields or [])
+            ],
             "revisions": sorted((revision.id, revision.content_sha256, version.id) for revision, _file, _root, version in source_rows),
             "prompt": self.settings.evidence_answer_prompt_version,
             "schema": self.settings.evidence_answer_schema_version,
@@ -2300,6 +2498,51 @@ def _normalize_number(value: str) -> str:
     """统一数字中的千分位，便于验证模型没有生成证据外数值。"""
 
     return str(value).replace(",", "")
+
+
+def _normalize_requested_fields(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """复制已经通过 Tool schema 的字段，并再次限制服务层可消费的键。"""
+
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in values[:40]:
+        if not isinstance(raw, dict):
+            continue
+        key = str(raw.get("key") or "").strip()
+        label = " ".join(str(raw.get("label") or "").split()).strip()
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key) or not label or key in seen:
+            continue
+        seen.add(key)
+        normalized.append(
+            {
+                "key": key,
+                "label": label[:80],
+                "field_type": str(raw.get("field_type") or "string")[:40],
+                "required": bool(raw.get("required", False)),
+            }
+        )
+    return normalized
+
+
+def _field_value_is_supported(*, value: str, evidence_items: list[EvidenceItem]) -> bool:
+    """要求字段值能够逐字或按数字规范化回到所引证据。"""
+
+    compact_value = re.sub(r"\s+", "", value)
+    evidence_text = "\n".join(item.quote for item in evidence_items)
+    compact_evidence = re.sub(r"\s+", "", evidence_text)
+    if compact_value and compact_value in compact_evidence:
+        return True
+    value_numbers = {_normalize_number(item) for item in _NUMERIC_PATTERN.findall(value)}
+    evidence_numbers = {
+        _normalize_number(item) for item in _NUMERIC_PATTERN.findall(evidence_text)
+    }
+    numeric_residual = _NUMERIC_PATTERN.sub("", value)
+    numeric_residual = re.sub(r"[\s￥¥元人民币,%％，。.]", "", numeric_residual)
+    return (
+        bool(value_numbers)
+        and not numeric_residual
+        and not (value_numbers - evidence_numbers)
+    )
 
 
 def _document_summary_evidence_quotes(summary: DocumentSummary) -> list[str]:

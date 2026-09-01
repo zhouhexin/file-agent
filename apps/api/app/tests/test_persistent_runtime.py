@@ -579,7 +579,7 @@ def test_document_classification_service_uses_unified_taxonomy_when_managed_cata
         )
 
         assert result["categories"][0]["taxonomy_key"] == "unified_school_file_classification"
-        assert result["categories"][0]["taxonomy_version"] == "2026-08-v6"
+        assert result["categories"][0]["taxonomy_version"] == "2026-09-v8"
         assert result["categories"][0]["source"] == "rule"
         assert "managed_global_catalog" not in {
             item["source"] for item in result["categories"]

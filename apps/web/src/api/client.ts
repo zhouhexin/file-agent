@@ -27,8 +27,11 @@ import type {
   User,
 } from '../types';
 
-// API 地址集中管理，后续部署时只需要调整 VITE_API_BASE_URL。
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000/api';
+// 开发模式固定走同源 /api，避免启动终端残留的绝对地址绕过 Vite 代理。
+// 生产构建仍允许显式配置；未配置时由 Caddy 代理同源 /api。
+const API_BASE_URL = import.meta.env.DEV
+  ? '/api'
+  : (import.meta.env.VITE_API_BASE_URL ?? '/api');
 
 type RequestOptions = {
   token?: string | null;
@@ -102,14 +105,14 @@ export async function sendAgentMessage(
   token: string,
   conversationId: string,
   content: string,
-  documentIds: string[] = [],
+  attachments: Array<{ document_id: string; relative_path?: string | null }> = [],
 ): Promise<SendMessageResponse> {
-  // 消息附件只传 document_id，真实文件内容已经通过上传接口持久化。
+  // 消息附件传稳定 document_id；文件夹相对路径只是经后端校验的批次展示元数据。
   return request<SendMessageResponse>(`/conversations/${conversationId}/messages`, {
     token,
     body: {
       content,
-      attachments: documentIds.map((documentId) => ({ document_id: documentId })),
+      attachments,
     },
   });
 }
@@ -354,11 +357,17 @@ export async function fetchWorkingCopyBlob(
   return response.blob();
 }
 
-export async function uploadFile(token: string, file: File, conversationId: string): Promise<UploadedFile> {
+export async function uploadFile(
+  token: string,
+  file: File,
+  conversationId: string,
+  relativePath?: string,
+): Promise<UploadedFile> {
   // 文件上传必须使用 FormData，不能复用 JSON 请求封装。
   const formData = new FormData();
   formData.append('file', file);
   formData.append('conversation_id', conversationId);
+  if (relativePath) formData.append('relative_path', relativePath);
 
   const response = await fetch(`${API_BASE_URL}/files/upload`, {
     method: 'POST',

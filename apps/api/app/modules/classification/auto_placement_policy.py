@@ -64,6 +64,7 @@ class AutoPlacementPolicy:
         )
         content_signals = _content_signals(primary)
         evidence_items = _located_evidence(primary)
+        scoped_other = _is_scoped_other(primary)
         negative_signals = _string_list(primary, "negative_signals")
         reasons: list[str] = []
 
@@ -78,7 +79,10 @@ class AutoPlacementPolicy:
                 reasons.append("OTHER_CATEGORY")
             if str(primary.get("source") or "") == "llm_free_path":
                 reasons.append("FREE_PATH_NOT_ALLOWED")
-            if str(primary.get("status") or "") == "NEEDS_REVIEW":
+            if (
+                str(primary.get("status") or "") == "NEEDS_REVIEW"
+                and not scoped_other
+            ):
                 reasons.append("EVIDENCE_MISSING")
             if not str(primary.get("category_id") or ""):
                 reasons.append("NO_TAXONOMY_CANDIDATE")
@@ -86,7 +90,7 @@ class AutoPlacementPolicy:
                 primary.get("taxonomy_version") or ""
             ):
                 reasons.append("POLICY_VERSION_UNAVAILABLE")
-            if not evidence_items:
+            if not evidence_items and not scoped_other:
                 reasons.append("EVIDENCE_MISSING")
             # Top-1 直接落位测试期间暂时停用以下软拒绝条件。保留原判断，后续完成
             # 人工标注评估和阈值校准后可按版本化策略恢复。
@@ -199,3 +203,12 @@ def _located_evidence(category: dict[str, Any] | None) -> list[dict[str, Any]]:
             continue
         result.append(item)
     return result
+
+
+def _is_scoped_other(category: dict[str, Any] | None) -> bool:
+    """组织或部门范围已经确定的“其他”允许没有正文引文。"""
+
+    if category is None or str(category.get("source") or "") != "rule_fallback":
+        return False
+    path = list(category.get("category_path") or [])
+    return len(path) > 1 and path[-1] == "其他"
