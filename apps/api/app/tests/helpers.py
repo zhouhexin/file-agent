@@ -40,6 +40,11 @@ def client_with_database() -> tuple[TestClient, sessionmaker]:
 
 
 def clear_overrides() -> None:
-    """清理 FastAPI dependency override，避免测试之间相互污染。"""
+    """清理 FastAPI 和配置缓存，避免测试之间相互污染。"""
 
     app.dependency_overrides.clear()
+    # 文件快照服务在构造时读取 FILE_STORAGE_ROOT；测试切换工作目录后若只清理
+    # FastAPI override，旧 Settings 会把快照写到上一个测试目录，导致隔离断言失效。
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()

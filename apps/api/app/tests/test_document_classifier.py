@@ -1,5 +1,7 @@
 """文件基础分类器测试。"""
 
+from types import SimpleNamespace
+
 from app.modules.agent.document_classifier import classify_document_text
 from app.core.config import get_settings
 from app.modules.classification.classifier_service import DocumentClassificationService
@@ -68,9 +70,45 @@ def test_classification_service_preserves_department_fallback_in_final_result(mo
     assert result["categories"][0]["evidence_items"]
 
 
+def test_managed_source_full_text_is_used_for_fallback_evidence(monkeypatch):
+    """受管源分析未传 fallback_text 时，完整页面正文仍应保留部门兜底证据。"""
+
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg2://test:test@localhost/test",
+    )
+    get_settings.cache_clear()
+    service = DocumentClassificationService(graph_mode="off")
+    service._load_pages = lambda extraction_run_id: [
+        SimpleNamespace(
+            text_content="财务处关于临时联络事项的工作通知。",
+            page_number=1,
+            sheet_name=None,
+        )
+    ]
+
+    try:
+        result = service.classify(
+            document_id="",
+            extraction_run_id="managed-source-run",
+            filename="临时联络事项.docx",
+        )
+    finally:
+        get_settings.cache_clear()
+
+    category = result["categories"][0]
+    assert category["category_id"] == "school.finance.other"
+    assert category["status"] == "SUGGESTED"
+    assert category["evidence_items"]
+
+
 def test_runtime_factory_classifier_identity_matches_created_service(monkeypatch):
     """新鲜度检查与实际分类运行必须共享完全相同的分类器版本。"""
 
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg2://test:test@localhost/test",
+    )
     monkeypatch.setenv("GRAPH_CLASSIFICATION_ENABLED", "false")
     get_settings.cache_clear()
     try:

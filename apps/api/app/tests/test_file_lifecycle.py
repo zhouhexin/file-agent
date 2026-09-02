@@ -239,7 +239,7 @@ def test_default_upload_is_classified_then_first_published_to_taxonomy_path(monk
     config.get_settings.cache_clear()
     client, SessionLocal = client_with_database()
     headers = _auth(client, "auto-placement-owner")
-    filename = "学校会议纪要研究决定议题.txt"
+    filename = "学校会议纪要研究决定议题.md"
     content = "学校会议纪要。会议围绕议题进行研究，研究决定通过有关事项。".encode()
     upload = _upload(client, headers, filename=filename, content=content)
 
@@ -264,6 +264,7 @@ def test_default_upload_is_classified_then_first_published_to_taxonomy_path(monk
         ).status_code == 404
     finally:
         db.close()
+
     processed.extend(_drain(SessionLocal))
 
     assert len(processed) == 4
@@ -313,6 +314,38 @@ def test_default_upload_is_classified_then_first_published_to_taxonomy_path(monk
         assert (tmp_path / "originals" / managed_file.relative_path).read_bytes() == content
     finally:
         db.close()
+
+
+def test_txt_upload_keeps_original_filename_during_initial_organization(monkeypatch, tmp_path):
+    """TXT 上传仍执行解析、分类和落位，但首次整理不得自动重命名。"""
+
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_INITIAL_PLACEMENT_ENABLED", "true")
+    monkeypatch.setenv("AUTO_CLASSIFICATION_SHADOW_MODE", "false")
+    config.get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "txt-upload-owner")
+    original_filename = "2024科研成果资助汇总表.txt"
+    upload = _upload(
+        client,
+        headers,
+        filename=original_filename,
+        content="2026年科研成果资助汇总表，学校科研处通知。".encode(),
+    )
+
+    _drain(SessionLocal)
+
+    status = client.get(
+        f"/api/uploads/{upload['upload_document_version_id']}/archive-status",
+        headers=headers,
+    ).json()
+    working_copy = client.get("/api/working-copies", headers=headers).json()[0]
+    assert status["rename_status"] == "NO_CHANGE"
+    assert status["renamed_filename"] == original_filename
+    assert working_copy["filename"] == original_filename
+    assert status["classification_status"] == "COMPLETED"
+    clear_overrides()
 
 
 def test_rejected_auto_classification_publishes_active_neutral_copy(monkeypatch, tmp_path):
@@ -419,7 +452,7 @@ def test_deferred_upload_rename_plan_executes_after_background_import(monkeypatc
     upload = _upload(
         client,
         headers,
-        filename="扫描通知.txt",
+        filename="扫描通知.md",
         content="2026年关于开展奖学金评审工作的通知\n请各学院按时报送。".encode("utf-8"),
     )
 
@@ -1859,7 +1892,7 @@ def test_initial_ready_rename_is_applied_to_working_copy_on_upload(monkeypatch, 
         return {
             **suggestion,
             "status": "READY",
-            "proposed_filename": "2026_研究成果资助汇总表.txt",
+            "proposed_filename": "2026_研究成果资助汇总表.md",
             "warnings": [],
             "errors": [],
         }, extraction
@@ -1877,7 +1910,7 @@ def test_initial_ready_rename_is_applied_to_working_copy_on_upload(monkeypatch, 
         data={"conversation_id": "rename-suggestion-conv"},
         files={
             "file": (
-                "2024科研成果资助汇总表.txt",
+                "2024科研成果资助汇总表.md",
                 b"research funding summary fixture",
                 "text/plain",
             )
@@ -1895,9 +1928,9 @@ def test_initial_ready_rename_is_applied_to_working_copy_on_upload(monkeypatch, 
         headers=headers,
     ).json()
 
-    assert working_copy["filename"] == "2026_研究成果资助汇总表.txt"
-    assert archive_status["original_filename"] == "2024科研成果资助汇总表.txt"
-    assert archive_status["renamed_filename"] == "2026_研究成果资助汇总表.txt"
+    assert working_copy["filename"] == "2026_研究成果资助汇总表.md"
+    assert archive_status["original_filename"] == "2024科研成果资助汇总表.md"
+    assert archive_status["renamed_filename"] == "2026_研究成果资助汇总表.md"
     assert archive_status["rename_status"] == "COMPLETED"
     assert history["messages"] == []
     db = SessionLocal()
@@ -1911,8 +1944,8 @@ def test_initial_ready_rename_is_applied_to_working_copy_on_upload(monkeypatch, 
         assert background_run is not None
         audit_result = background_run.graph_state_json["document_results"][0]
         assert audit_result["rename_suggestion"] is None
-        assert audit_result["original_filename"] == "2024科研成果资助汇总表.txt"
-        assert audit_result["renamed_filename"] == "2026_研究成果资助汇总表.txt"
+        assert audit_result["original_filename"] == "2024科研成果资助汇总表.md"
+        assert audit_result["renamed_filename"] == "2026_研究成果资助汇总表.md"
         assert audit_result["rename_status"] == "COMPLETED"
         assert audit_result["pending_decision"] is None
         audit_message = db.get(Message, background_run.message_id)
@@ -1929,9 +1962,9 @@ def test_initial_ready_rename_is_applied_to_working_copy_on_upload(monkeypatch, 
         path_record = db.query(WorkingCopyPathRecord).filter_by(
             working_copy_id=working_copy["id"],
         ).one()
-        assert working_document.original_filename == "2024科研成果资助汇总表.txt"
-        assert original.filename == "2024科研成果资助汇总表.txt"
-        assert path_record.after_filename == "2026_研究成果资助汇总表.txt"
+        assert working_document.original_filename == "2024科研成果资助汇总表.md"
+        assert original.filename == "2024科研成果资助汇总表.md"
+        assert path_record.after_filename == "2026_研究成果资助汇总表.md"
         assert db.query(FileRenameReviewItem).filter_by(document_id=working_copy["document_id"]).count() == 0
     finally:
         db.close()

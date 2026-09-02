@@ -378,6 +378,25 @@ class UploadedRenameSuggestionService:
                     },
                     extraction_result,
                 )
+            if Path(document.original_filename).suffix.lower() == ".txt":
+                # TXT 只参与正文解析、分类和索引；纯文本文件通常没有稳定的版式元数据，
+                # 自动改名会破坏用户已有命名语义。保留 extraction_result 供上传归档和
+                # 受管目录同步继续完成分类，不进入命名解析、LLM 校验或 OperationPlan。
+                return (
+                    {
+                        **base,
+                        "proposed_filename": document.original_filename,
+                        "document_date": empty_field.model_dump(mode="json"),
+                        "year": empty_field.model_dump(mode="json"),
+                        "document_number": empty_field.model_dump(mode="json"),
+                        "title": empty_field.model_dump(mode="json"),
+                        "template_key": None,
+                        "status": "NO_CHANGE",
+                        "warnings": ["TXT 文件按原名保留，不执行自动重命名。"],
+                        "errors": [],
+                    },
+                    extraction_result,
+                )
             source_repository = FileExtractionRepository(self.db, self.user_id)
             resolved_source = (
                 {"ok": False}

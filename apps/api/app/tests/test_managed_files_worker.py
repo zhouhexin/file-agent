@@ -595,11 +595,8 @@ def test_scan_waits_for_source_analysis_before_materializing_working_copy(
 
     original_suggest = UploadedRenameSuggestionService.suggest_for_initial_import
     rename_reuse_observations: list[dict[str, bool]] = []
-    expected_working_filename = (
-        "2026_受管目录会议纪要.txt"
-        if expected_decision == "AUTO_ORGANIZED"
-        else filename
-    )
+    # TXT 在受管目录同步时始终保留原名；该测试仍固定分类决策，只验证文件名不变。
+    expected_working_filename = filename
 
     def deterministic_initial_suggestion(
         service,
@@ -625,9 +622,7 @@ def test_scan_waits_for_source_analysis_before_materializing_working_copy(
         )
         return {
             **suggestion,
-            "status": (
-                "READY" if expected_decision == "AUTO_ORGANIZED" else "NO_CHANGE"
-            ),
+            "status": "NO_CHANGE",
             "proposed_filename": expected_working_filename,
             "warnings": [],
             "errors": [],
@@ -778,7 +773,8 @@ def test_scan_waits_for_source_analysis_before_materializing_working_copy(
                 {
                     "strict_reuse": True,
                     "reused": True,
-                    "used_persisted_pages": True,
+                    # TXT 跳过重命名解析，但仍复用同一批持久化正文完成分类。
+                    "used_persisted_pages": False,
                 }
             ]
             assert decision.decision == expected_decision

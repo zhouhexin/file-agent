@@ -503,6 +503,8 @@ def test_managed_file_read_document_tool_cleans_snapshot_after_unexpected_failur
     (managed_root / "正常.txt").write_text("正常正文", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MANAGED_ROOT_DOWNLOADS", str(managed_root))
+    # 明确覆盖默认上传存储根，保证断言检查本测试的隔离目录而不是项目默认路径。
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "storage"))
     original_extract = tool_registry_module.extract_document_text
 
     def fake_extract_document_text(*, file_path, filename, content_type):

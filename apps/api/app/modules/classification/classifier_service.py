@@ -35,7 +35,8 @@ from app.modules.knowledge_graph.schemas import GraphClassificationResult, Graph
 from app.modules.knowledge_graph.semantic_context import NoOpSemanticClassificationContext
 
 
-CLASSIFIER_IMPLEMENTATION_VERSION = "v7"
+# 证据兜底入口发生变化后必须递增版本，避免受管源分析复用旧的 NEEDS_REVIEW 缓存。
+CLASSIFIER_IMPLEMENTATION_VERSION = "v8"
 
 
 def build_classifier_version(*, mode: str, graph_mode: str, summary_enabled: bool) -> str:
@@ -233,7 +234,10 @@ class DocumentClassificationService:
                         "classifier_version": self.classifier_version,
                     },
                     pages=pages,
-                    fallback_text=fallback_text,
+                    # 受管目录源分析通常不传短 preview；已加载的完整正文必须作为
+                    # 上传链路同等的证据定位兜底，保证部门/文号 fallback 不因入口不同
+                    # 被误标成 NEEDS_REVIEW。
+                    fallback_text=full_text or fallback_text,
                 )
                 for category in categories
             ]
@@ -253,7 +257,7 @@ class DocumentClassificationService:
                             "classifier_version": self.classifier_version,
                         },
                         pages=pages,
-                        fallback_text=fallback_text,
+                        fallback_text=full_text or fallback_text,
                     )
                     for category in post_evidence_categories
                 ]

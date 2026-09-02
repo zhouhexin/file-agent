@@ -371,7 +371,7 @@ def test_post_message_rename_and_classify_returns_plan_before_copy_is_ready():
     document_id = _upload_document(
         client,
         headers,
-        filename="2026年奖学金通知.txt",
+        filename="2026年奖学金通知.md",
         content="2026年奖学金评审工作通知\n请各学院按要求报送材料。".encode("utf-8"),
     )
 
