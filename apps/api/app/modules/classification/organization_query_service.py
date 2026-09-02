@@ -13,6 +13,13 @@ from app.db.models import (
     WorkingCopy,
 )
 from app.modules.classification.loader import load_default_taxonomy
+from app.modules.classification.image_date_policy import (
+    IMAGE_DATE_CATEGORY_ROOT_ID,
+    IMAGE_DATE_RELATION_SOURCE,
+    image_date_from_category_path,
+    image_date_virtual_node_id,
+    parse_image_date_virtual_node_id,
+)
 from app.modules.classification.organization_schemas import (
     OrganizationFileItemResponse,
     OrganizationFilePageResponse,
@@ -52,8 +59,18 @@ class ClassificationOrganizationQueryService:
         active_ids = {item.id for item in active_copies}
         relations = self._active_primary_query().all()
         direct_ids: dict[str, set[str]] = defaultdict(set)
+        image_date_ids: dict[str, set[str]] = defaultdict(set)
         for relation, working_copy in relations:
-            direct_ids[relation.category_id].add(working_copy.id)
+            image_date = (
+                image_date_from_category_path(relation.category_path_json)
+                if relation.source == IMAGE_DATE_RELATION_SOURCE
+                and relation.category_id == IMAGE_DATE_CATEGORY_ROOT_ID
+                else None
+            )
+            if image_date:
+                image_date_ids[image_date].add(working_copy.id)
+            else:
+                direct_ids[relation.category_id].add(working_copy.id)
 
         classified_ids = {working_copy.id for _, working_copy in relations}
         review_ids = set(self._latest_review_decisions(active_ids))
@@ -68,6 +85,23 @@ class ClassificationOrganizationQueryService:
                 child_response, child_ids = build(child, path)
                 child_responses.append(child_response)
                 subtree_ids.update(child_ids)
+            if node.id == IMAGE_DATE_CATEGORY_ROOT_ID:
+                # 日期是上传组织维度，不写入静态 taxonomy；树接口按正式关系动态
+                # 投影虚拟节点，并把最近日期放在前面便于浏览。
+                for date_label in sorted(image_date_ids):
+                    date_ids = set(image_date_ids[date_label])
+                    child_responses.insert(
+                        0,
+                        OrganizationTreeNodeResponse(
+                            category_id=image_date_virtual_node_id(date_label),
+                            name=date_label,
+                            category_path=[*path, date_label],
+                            direct_file_count=len(date_ids),
+                            subtree_file_count=len(date_ids),
+                            is_virtual=True,
+                        ),
+                    )
+                    subtree_ids.update(date_ids)
             return (
                 OrganizationTreeNodeResponse(
                     category_id=node.id or "/".join(path),
@@ -115,9 +149,10 @@ class ClassificationOrganizationQueryService:
         effective_review = review_only or category_id == NEEDS_REVIEW_NODE_ID
         if category_id == NEEDS_REVIEW_NODE_ID:
             category_id = None
+        image_date = parse_image_date_virtual_node_id(category_id)
         if scope not in {"direct", "descendants"}:
             raise OrganizationQueryError("scope 只能是 direct 或 descendants")
-        if category_id and category_id not in self.nodes_by_id:
+        if category_id and image_date is None and category_id not in self.nodes_by_id:
             raise OrganizationQueryError("当前分类目录中不存在该 category_id")
 
         base_query = self._active_copy_query()
@@ -127,6 +162,14 @@ class ClassificationOrganizationQueryService:
             review_decisions = self._latest_review_decisions(active_ids)
             selected_ids = set(review_decisions)
             query = base_query.filter(WorkingCopy.id.in_(selected_ids)) if selected_ids else base_query.filter(False)
+        elif image_date is not None:
+            selected_ids = self._image_date_copy_ids(image_date)
+            query = (
+                base_query.filter(WorkingCopy.id.in_(selected_ids))
+                if selected_ids
+                else base_query.filter(False)
+            )
+            review_decisions = {}
         elif category_id:
             selected_categories = (
                 self._descendant_ids(category_id) if scope == "descendants" else {category_id}
@@ -144,6 +187,11 @@ class ClassificationOrganizationQueryService:
                 )
                 .distinct()
             )
+            if scope == "direct" and category_id == IMAGE_DATE_CATEGORY_ROOT_ID:
+                # 图片日期节点是学院根的虚拟子节点，direct 查询根节点时不能重复返回。
+                image_ids = self._image_date_copy_ids()
+                if image_ids:
+                    query = query.filter(~WorkingCopy.id.in_(image_ids))
             review_decisions = {}
         else:
             query = base_query
@@ -248,6 +296,22 @@ class ClassificationOrganizationQueryService:
             for working_copy_id, decision in review_decisions.items()
             if working_copy_id not in classified_ids
         }
+
+    def _image_date_copy_ids(self, date_label: str | None = None) -> set[str]:
+        """读取图片日期规则的活动副本 ID，日期匹配在后端受控投影上完成。"""
+
+        result: set[str] = set()
+        rows = self._active_primary_query().filter(
+            DocumentCategory.category_id == IMAGE_DATE_CATEGORY_ROOT_ID,
+            DocumentCategory.source == IMAGE_DATE_RELATION_SOURCE,
+        ).all()
+        for relation, working_copy in rows:
+            relation_date = image_date_from_category_path(
+                relation.category_path_json
+            )
+            if relation_date and (date_label is None or relation_date == date_label):
+                result.add(working_copy.id)
+        return result
 
     def _latest_decisions(
         self,

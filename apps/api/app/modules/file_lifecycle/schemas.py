@@ -64,6 +64,17 @@ class DuplicateDecisionResponse(BaseModel):
     selected_existing_document_id: str | None = None
 
 
+class UploadProcessingStartResponse(BaseModel):
+    """用户点击发送后启动单个暂存文件处理的幂等响应。"""
+
+    upload_document_version_id: str
+    document_id: str
+    duplicate_review_id: str
+    filesystem_job_id: str
+    archive_status: str
+    duplicate_review_status: str
+
+
 class ArchiveStatusResponse(BaseModel):
     """上传附件归档和后续导入状态。"""
 

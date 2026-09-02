@@ -21,6 +21,7 @@ from app.modules.classification.organization_query_service import (
     ClassificationOrganizationQueryService,
     NEEDS_REVIEW_NODE_ID,
 )
+from app.modules.classification.image_date_policy import image_date_virtual_node_id
 from app.modules.classification.organization_schemas import OrganizationTreeNodeResponse
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
@@ -118,6 +119,7 @@ def _add_primary(
     category_id: str,
     category_path: list[str],
     status: str,
+    source: str = "test",
 ) -> None:
     """为当前版本建立一条活动主分类关系。"""
 
@@ -133,6 +135,7 @@ def _add_primary(
             taxonomy_key="unified_school_file_classification",
             taxonomy_version="2026-08-v6",
             classifier_version="test",
+            source=source,
         )
     )
 
@@ -293,3 +296,46 @@ def test_files_support_direct_descendant_review_and_stable_pagination():
     assert first.total == 6
     assert first.total_pages == 3
     assert not ({item.working_copy_id for item in first.files} & {item.working_copy_id for item in second.files})
+
+
+def test_image_upload_dates_are_virtual_children_of_college_category():
+    """图片上传日期只投影为学院虚拟子节点，不要求把动态日期写入 taxonomy。"""
+
+    db = _session()
+    _seed_organization_data(db)
+    root = db.query(WorkingCopyRoot).one()
+    user = db.query(User).one()
+    image = _seed_copy(db, index=8, root=root, user=user)
+    image.relative_path = "学院/2026-09-03/现场照片.png"
+    image.filename = "现场照片.png"
+    image.extension = ".png"
+    _add_primary(
+        db,
+        image,
+        category_id="college",
+        category_path=["学院", "2026-09-03"],
+        status="AUTO_APPLIED",
+        source="image_upload_date_policy",
+    )
+    db.commit()
+
+    service = ClassificationOrganizationQueryService(db)
+    virtual_id = image_date_virtual_node_id("2026-09-03")
+    tree = service.tree()
+    date_node = _find_node(tree.nodes, virtual_id)
+
+    assert date_node.is_virtual is True
+    assert date_node.category_path == ["学院", "2026-09-03"]
+    assert date_node.direct_file_count == 1
+    assert _find_node(tree.nodes, "college").subtree_file_count == 1
+
+    page = service.files(
+        category_id=virtual_id,
+        scope="descendants",
+        review_only=False,
+        page=1,
+        page_size=20,
+    )
+    assert page.total == 1
+    assert page.files[0].working_copy_id == image.id
+    assert page.files[0].primary_category_path == ["学院", "2026-09-03"]

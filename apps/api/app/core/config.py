@@ -127,6 +127,19 @@ DEFAULT_UPLOAD_ALLOWED_EXTENSIONS = (
     ".tiff",
 )
 
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+
+
+def resolve_configured_path(value: str) -> str:
+    """Resolve local runtime paths independently from the process working directory."""
+
+    candidate = Path(str(value or "").strip()).expanduser()
+    if candidate.is_absolute():
+        return str(candidate.resolve())
+    dotenv_path = find_dotenv_file()
+    base_dir = dotenv_path.parent if dotenv_path is not None else PROJECT_ROOT
+    return str((base_dir / candidate).resolve())
+
 
 class Settings(BaseModel):
     """File Agent 后端运行配置。"""
@@ -472,7 +485,9 @@ def get_settings() -> Settings:
                 str(DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES),
             ),
         ),
-        file_storage_root=os.getenv("FILE_STORAGE_ROOT", DEFAULT_FILE_STORAGE_ROOT),
+        file_storage_root=resolve_configured_path(
+            os.getenv("FILE_STORAGE_ROOT", DEFAULT_FILE_STORAGE_ROOT)
+        ),
         llm_enabled=os.getenv("LLM_ENABLED", "false").lower() == "true",
         llm_provider=os.getenv("LLM_PROVIDER", "openai_compatible"),
         llm_api_key=os.getenv("LLM_API_KEY", ""),
@@ -805,7 +820,7 @@ def get_settings() -> Settings:
             allowed={"disabled", "openai_compatible", "local_service"},
             default="disabled",
         ),
-        log_dir=os.getenv("LOG_DIR", DEFAULT_LOG_DIR),
+        log_dir=resolve_configured_path(os.getenv("LOG_DIR", DEFAULT_LOG_DIR)),
         log_retention_days=int(os.getenv("LOG_RETENTION_DAYS", str(DEFAULT_LOG_RETENTION_DAYS))),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         ocr_enabled=os.getenv("OCR_ENABLED", "true").lower() == "true",
@@ -1208,10 +1223,18 @@ def get_settings() -> Settings:
             1,
             min(200, int(os.getenv("MANAGED_FILE_CLASSIFICATION_BATCH_SIZE", "20"))),
         ),
-        managed_root_archive_write_path=os.getenv("MANAGED_ROOT_ARCHIVE_WRITE_PATH", "").strip(),
+        managed_root_archive_write_path=(
+            resolve_configured_path(os.getenv("MANAGED_ROOT_ARCHIVE_WRITE_PATH", ""))
+            if os.getenv("MANAGED_ROOT_ARCHIVE_WRITE_PATH", "").strip()
+            else ""
+        ),
         managed_root_archive_enabled=os.getenv("MANAGED_ROOT_ARCHIVE_ENABLED", "true").lower() == "true",
-        working_copy_storage_root=os.getenv("WORKING_COPY_STORAGE_ROOT", "./storage/working-copies").strip(),
-        trash_storage_root=os.getenv("TRASH_STORAGE_ROOT", "./storage/trash").strip(),
+        working_copy_storage_root=resolve_configured_path(
+            os.getenv("WORKING_COPY_STORAGE_ROOT", "./storage/working-copies")
+        ),
+        trash_storage_root=resolve_configured_path(
+            os.getenv("TRASH_STORAGE_ROOT", "./storage/trash")
+        ),
         managed_root_watch_enabled=os.getenv("MANAGED_ROOT_WATCH_ENABLED", "true").lower() == "true",
         managed_root_reconcile_interval_seconds=max(
             30,

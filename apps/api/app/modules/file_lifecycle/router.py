@@ -18,6 +18,7 @@ from app.modules.file_lifecycle.schemas import (
     DuplicateDecisionRequest,
     DuplicateDecisionResponse,
     DuplicateReviewResponse,
+    UploadProcessingStartResponse,
     RestorePlanRequest,
     TrashEntryResponse,
     WorkingCopyLineageResponse,
@@ -31,6 +32,24 @@ from app.modules.operations.service import OperationPlanService
 
 
 router = APIRouter(tags=["file-lifecycle"])
+
+
+@router.post(
+    "/api/uploads/{upload_version_id}/process",
+    response_model=UploadProcessingStartResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def start_upload_processing(
+    upload_version_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> UploadProcessingStartResponse:
+    """仅在用户点击发送后，幂等启动暂存文件的查重与后续处理。"""
+
+    return UploadLifecycleService(db).start_processing(
+        upload_version_id=upload_version_id,
+        current_user=current_user,
+    )
 
 
 @router.get(

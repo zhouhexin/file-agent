@@ -10,6 +10,7 @@ from app.db.models import (
     AgentRun,
     ChangeSet,
     Conversation,
+    Document,
     DocumentCategory,
     DocumentCategorySuggestion,
     DocumentClassificationRun,
@@ -588,6 +589,56 @@ def test_scan_waits_for_source_analysis_before_materializing_working_copy(
 ):
     """源侧正文分类完成后才物化，并按统一门槛落入主分类或中性路径。"""
 
+    from app.modules.file_rename.uploaded_suggestion_service import (
+        UploadedRenameSuggestionService,
+    )
+
+    original_suggest = UploadedRenameSuggestionService.suggest_for_initial_import
+    rename_reuse_observations: list[dict[str, bool]] = []
+    expected_working_filename = (
+        "2026_受管目录会议纪要.txt"
+        if expected_decision == "AUTO_ORGANIZED"
+        else filename
+    )
+
+    def deterministic_initial_suggestion(
+        service,
+        *,
+        document,
+        reuse_persisted_extraction_only=False,
+    ):
+        """保留真实命名解析，只固定门禁结果以验证首次发布是否采用新名称。"""
+
+        suggestion, extraction = original_suggest(
+            service,
+            document=document,
+            reuse_persisted_extraction_only=reuse_persisted_extraction_only,
+        )
+        rename_reuse_observations.append(
+            {
+                "strict_reuse": reuse_persisted_extraction_only,
+                "reused": bool(extraction and extraction.get("reused")),
+                "used_persisted_pages": bool(
+                    suggestion.get("rename_candidate_parsers")
+                ),
+            }
+        )
+        return {
+            **suggestion,
+            "status": (
+                "READY" if expected_decision == "AUTO_ORGANIZED" else "NO_CHANGE"
+            ),
+            "proposed_filename": expected_working_filename,
+            "warnings": [],
+            "errors": [],
+        }, extraction
+
+    monkeypatch.setattr(
+        UploadedRenameSuggestionService,
+        "suggest_for_initial_import",
+        deterministic_initial_suggestion,
+    )
+
     managed_dir = tmp_path / "managed"
     managed_dir.mkdir()
     source = managed_dir / filename
@@ -721,17 +772,30 @@ def test_scan_waits_for_source_analysis_before_materializing_working_copy(
                 document_id=working_copy.document_id
             ).all()
             assert working_copy.status == "ACTIVE"
+            assert working_copy.filename == expected_working_filename
+            assert db.get(Document, working_copy.document_id).original_filename == filename
+            assert rename_reuse_observations == [
+                {
+                    "strict_reuse": True,
+                    "reused": True,
+                    "used_persisted_pages": True,
+                }
+            ]
             assert decision.decision == expected_decision
             if expected_decision == "AUTO_ORGANIZED":
                 relation = db.query(DocumentCategory).filter_by(
                     working_copy_id=working_copy.id
                 ).one()
-                assert working_copy.relative_path == f"学校/行政综合管理类/会议纪要/{filename}"
+                assert working_copy.relative_path == (
+                    f"学校/行政综合管理类/会议纪要/{expected_working_filename}"
+                )
                 assert relation.status == "AUTO_APPLIED"
                 assert relation.relation_role == "PRIMARY"
             else:
                 assert working_copy.relative_path.startswith(".internal/neutral/")
-                assert working_copy.relative_path.endswith(f"/{filename}")
+                assert working_copy.relative_path.endswith(
+                    f"/{expected_working_filename}"
+                )
                 assert db.query(DocumentCategory).filter_by(
                     working_copy_id=working_copy.id
                 ).count() == 0
@@ -956,9 +1020,12 @@ def test_stale_source_classification_refresh_reuses_extraction_before_materializ
         )
         with session_factory() as db:
             working_copy = db.query(WorkingCopy).one()
-            assert working_copy.relative_path == (
-                f"学校/行政综合管理类/会议纪要/{filename}"
+            assert working_copy.relative_path.startswith(
+                "学校/行政综合管理类/会议纪要/"
             )
+            assert working_copy.relative_path.endswith(f"/{working_copy.filename}")
+            assert db.get(Document, working_copy.document_id).original_filename == filename
+            assert source.read_text(encoding="utf-8").startswith("学校会议纪要")
             assert not working_copy.relative_path.startswith(".internal/neutral/")
     finally:
         get_settings.cache_clear()
@@ -1177,8 +1244,8 @@ def test_source_analysis_completion_automatically_queues_background_materializat
         clear_overrides()
 
 
-def test_reconciliation_requeues_completed_scan_for_reused_parent_job(tmp_path: Path):
-    """同一受管根在下一次启动对账时必须重新扫描，不能复用已完成子扫描后静默跳过。"""
+def test_reconciliation_creates_new_generation_after_completed_scan(tmp_path: Path):
+    """下一次协调必须创建新扫描代次，同时保留已完成任务的审计终态。"""
 
     _client, session_factory = client_with_database()
     db = session_factory()
@@ -1207,12 +1274,116 @@ def test_reconciliation_requeues_completed_scan_for_reused_parent_job(tmp_path: 
         parent.status = "RUNNING"
         db.flush()
 
-        # scheduler 重用父任务后，同一 child deduplication key 也必须被重置为待执行。
+        # scheduler 重用父任务后必须生成新代次，不能重置旧任务或丢失审计历史。
         assert processor.process(parent) is True
-        second_scan = db.get(FilesystemJob, first_scan_id)
+        second_scan_id = parent.result_json["scan_job_id"]
+        second_scan = db.get(FilesystemJob, second_scan_id)
         assert second_scan is not None
+        assert second_scan.id != first_scan_id
         assert second_scan.status == "PENDING"
         assert second_scan.queue_name == "SCAN"
+        assert second_scan.payload_json["scan_generation"] == 2
+        assert db.get(FilesystemJob, first_scan_id).status == "COMPLETED"
+        assert parent.result_json["scan_reused"] is False
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_reconciliation_creates_new_generation_after_failed_scan(tmp_path: Path):
+    """历史扫描失败后下一轮仍可继续，但不得重开或覆盖旧失败任务。"""
+
+    _client, session_factory = client_with_database()
+    db = session_factory()
+    try:
+        root_dir = tmp_path / "failed-scan-root"
+        root_dir.mkdir()
+        root = ManagedRoot(
+            root_key="failed_scan_root",
+            display_name="失败恢复目录",
+            container_path=str(root_dir),
+        )
+        db.add(root)
+        db.flush()
+        parent = FilesystemJob(
+            job_type="RECONCILE_MANAGED_ROOT",
+            root_id=root.id,
+            status="RUNNING",
+            payload_json={},
+            result_json={},
+        )
+        db.add(parent)
+        db.flush()
+
+        processor = FileLifecycleJobProcessor(db)
+        assert processor.process(parent) is True
+        first_scan_id = parent.result_json["scan_job_id"]
+        first_scan = db.get(FilesystemJob, first_scan_id)
+        first_scan.status = "FAILED"
+        first_scan.attempt_count = 3
+        first_scan.error_message = "确定性测试失败"
+        parent.status = "RUNNING"
+        db.flush()
+
+        assert processor.process(parent) is True
+        second_scan_id = parent.result_json["scan_job_id"]
+        second_scan = db.get(FilesystemJob, second_scan_id)
+        assert second_scan_id != first_scan_id
+        assert second_scan.status == "PENDING"
+        assert second_scan.payload_json["scan_generation"] == 2
+        preserved_failure = db.get(FilesystemJob, first_scan_id)
+        assert preserved_failure.status == "FAILED"
+        assert preserved_failure.attempt_count == 3
+        assert preserved_failure.error_message == "确定性测试失败"
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_reconciliation_reuses_active_scan_without_duplicate(tmp_path: Path):
+    """已有待执行扫描时协调只关联该任务，不能产生并发重复扫描。"""
+
+    _client, session_factory = client_with_database()
+    db = session_factory()
+    try:
+        root_dir = tmp_path / "active-scan-root"
+        root_dir.mkdir()
+        root = ManagedRoot(
+            root_key="active_scan_root",
+            display_name="单活扫描目录",
+            container_path=str(root_dir),
+        )
+        db.add(root)
+        db.flush()
+        parent = FilesystemJob(
+            job_type="RECONCILE_MANAGED_ROOT",
+            root_id=root.id,
+            status="RUNNING",
+            payload_json={},
+            result_json={},
+        )
+        db.add(parent)
+        db.flush()
+
+        processor = FileLifecycleJobProcessor(db)
+        assert processor.process(parent) is True
+        first_scan_id = parent.result_json["scan_job_id"]
+        parent.status = "RUNNING"
+        db.flush()
+
+        assert processor.process(parent) is True
+        assert parent.result_json["scan_job_id"] == first_scan_id
+        assert parent.result_json["scan_generation"] == 1
+        assert parent.result_json["scan_reused"] is True
+        assert (
+            db.query(FilesystemJob)
+            .filter(
+                FilesystemJob.root_id == root.id,
+                FilesystemJob.job_type == "SCAN_MANAGED_ROOT",
+            )
+            .count()
+            == 1
+        )
     finally:
         db.close()
         clear_overrides()

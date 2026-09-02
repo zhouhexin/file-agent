@@ -101,6 +101,38 @@ def test_graph_outbox_projects_formal_relation_idempotently():
         db.close()
 
 
+def test_image_date_relation_does_not_overwrite_taxonomy_category_path():
+    """图片日期是组织视图，图谱中的稳定学院节点不得被动态日期路径覆盖。"""
+
+    db = _feedback_session()
+    try:
+        user, suggestion = _seed_suggestion(db)
+        ClassificationFeedbackService(db).record(
+            suggestion_id=suggestion.id,
+            request=ClassificationFeedbackRequest(
+                action="ACCEPT",
+                agent_run_id="11111111-1111-4111-8111-111111111111",
+            ),
+            current_user=user,
+        )
+        relation = db.query(DocumentCategory).one()
+        relation.category_id = "college"
+        relation.category_path_json = ["学院", "2026-09-03"]
+        relation.source = "image_upload_date_policy"
+        repository = RecordingFormalGraphRepository()
+
+        ClassificationGraphOutboxService(
+            db,
+            settings=_settings(),
+            repository=repository,
+        ).process_next()
+
+        assert repository.categories[0].category_id == "college"
+        assert repository.categories[0].path == ["学院"]
+    finally:
+        db.close()
+
+
 def test_graph_failure_keeps_postgresql_fact_and_retries_outbox():
     """Neo4j 不可用不能撤销 PostgreSQL 正式分类。"""
 

@@ -20,6 +20,10 @@ from app.db.models import (
     utcnow,
 )
 from app.modules.classification.loader import load_default_taxonomy
+from app.modules.classification.image_date_policy import (
+    IMAGE_DATE_CATEGORY_ROOT_ID,
+    IMAGE_DATE_RELATION_SOURCE,
+)
 from app.modules.classification.schemas import CategoryNode
 from app.modules.knowledge_graph.classification_context import get_graph_repository
 from app.modules.knowledge_graph.projection_runs import GraphProjectionRunRepository
@@ -145,7 +149,13 @@ class ClassificationGraphOutboxService:
                             taxonomy_key=relation.taxonomy_key,
                             taxonomy_version=relation.taxonomy_version,
                             name=category.name,
-                            path=list(relation.category_path_json or []),
+                            path=(
+                                [category.name]
+                                if relation.source == IMAGE_DATE_RELATION_SOURCE
+                                and relation.category_id
+                                == IMAGE_DATE_CATEGORY_ROOT_ID
+                                else list(relation.category_path_json or [])
+                            ),
                             description=category.description,
                             aliases=list(category.aliases),
                         )

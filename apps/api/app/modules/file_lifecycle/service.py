@@ -25,6 +25,7 @@ from app.db.models import (
     ChangeSet,
     Conversation,
     Document,
+    DocumentCategory,
     DocumentExtractionRun,
     DocumentIndexRun,
     DocumentOrganizationDecision,
@@ -54,6 +55,7 @@ from app.modules.file_lifecycle.layout_repair import WorkingCopyLayoutRepairServ
 from app.modules.file_lifecycle.organizer import (
     InitialOrganizationDecision,
     InitialWorkingCopyOrganizer,
+    rename_metadata_for_initial_organization,
 )
 from app.modules.file_lifecycle.schemas import (
     ArchiveStatusResponse,
@@ -62,6 +64,7 @@ from app.modules.file_lifecycle.schemas import (
     DuplicateDecisionRequest,
     DuplicateDecisionResponse,
     DuplicateReviewResponse,
+    UploadProcessingStartResponse,
     WorkingCopyLineageResponse,
     WorkingCopyPathRecordResponse,
     WorkingCopyResponse,
@@ -72,7 +75,10 @@ from app.modules.file_lifecycle.risk import inspect_basic_file_risks
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.path_policy import resolve_managed_relative_path
 from app.modules.classification.service import persist_document_results_classifications
-from app.modules.classification.auto_placement_policy import AutoPlacementPolicy
+from app.modules.classification.auto_placement_policy import (
+    AutoPlacementPolicy,
+    AutoPlacementPolicyResult,
+)
 from app.modules.classification.evidence_reader import CurrentClassificationEvidenceReader
 from app.modules.classification.freshness import (
     ClassificationFreshness,
@@ -86,9 +92,17 @@ from app.modules.classification.organization_path import (
     CategoryOrganizationPathResolver,
 )
 from app.modules.classification.organization_repository import OrganizationDecisionRepository
+from app.modules.classification.image_date_policy import (
+    IMAGE_DATE_CATEGORY_ROOT_ID,
+    IMAGE_DATE_CLASSIFIER_VERSION,
+    IMAGE_DATE_RELATION_SOURCE,
+    image_date_category_path,
+    image_upload_date_label,
+)
+from app.modules.classification.loader import load_default_taxonomy
 from app.modules.chunks.service import DocumentIndexService, INDEX_VERSION
 from app.modules.files.extraction_repository import FileExtractionRepository
-from app.modules.files.content_types import infer_content_type
+from app.modules.files.content_types import detect_image_content_type, infer_content_type
 from app.modules.retrieval.search_profile import DocumentSearchProfileService
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
@@ -202,16 +216,12 @@ class UploadLifecycleService:
         document: Document,
         storage_path: str,
         conversation_id: str | None,
-    ) -> tuple[DocumentVersion, UploadArchiveRecord, UploadDuplicateReview, FilesystemJob]:
-        """登记上传版本并在同一事务创建查重任务。
+    ) -> tuple[DocumentVersion, UploadArchiveRecord, UploadDuplicateReview]:
+        """登记未发送的上传版本，不创建查重或其他处理任务。
 
-        生产环境禁止关闭查重后继续归档；配置异常必须显式失败，不能静默绕过确认。
+        处理任务只能由用户点击发送后调用 ``start_processing`` 创建。
         """
 
-        if not self.settings.filesystem_async_jobs_enabled:
-            raise RuntimeError("FILESYSTEM_ASYNC_JOBS_ENABLED 必须开启")
-        if not self.settings.upload_duplicate_check_enabled:
-            raise RuntimeError("UPLOAD_DUPLICATE_CHECK_ENABLED 必须开启")
         version = self.repository.create_upload_version(
             document=document,
             storage_path=storage_path,
@@ -223,23 +233,75 @@ class UploadLifecycleService:
             conversation_id=conversation_id,
             ttl_hours=self.settings.upload_duplicate_confirmation_ttl_hours,
         )
-        job = FilesystemJobQueue(self.db).create_job(
-            job_type="CHECK_UPLOAD_DUPLICATES",
-            queue_name="DUPLICATE_CHECK",
-            root_id=None,
-            created_by=document.user_id,
-            deduplication_key=f"upload-duplicate:{version.id}",
-            payload={
-                "upload_document_version_id": version.id,
-                "duplicate_review_id": review.id,
-                "user_id": document.user_id,
-                "workspace_id": document.workspace_id,
-            },
-        )
-        review.duplicate_check_job_id = job.id
-        archive.filesystem_job_id = job.id
         self.db.flush()
-        return version, archive, review, job
+        return version, archive, review
+
+    def start_processing(
+        self,
+        *,
+        upload_version_id: str,
+        current_user: User,
+    ) -> UploadProcessingStartResponse:
+        """幂等启动一个已发送暂存文件的查重任务。"""
+
+        if not self.settings.filesystem_async_jobs_enabled:
+            raise RuntimeError("FILESYSTEM_ASYNC_JOBS_ENABLED 必须开启")
+        if not self.settings.upload_duplicate_check_enabled:
+            raise RuntimeError("UPLOAD_DUPLICATE_CHECK_ENABLED 必须开启")
+        review = (
+            self.db.query(UploadDuplicateReview)
+            .filter(
+                UploadDuplicateReview.upload_document_version_id == upload_version_id,
+                UploadDuplicateReview.user_id == current_user.id,
+            )
+            .with_for_update()
+            .one_or_none()
+        )
+        if review is None:
+            raise HTTPException(status_code=404, detail="Upload version not found")
+        version = self.db.get(DocumentVersion, upload_version_id)
+        document = self.db.get(Document, version.document_id) if version else None
+        archive = (
+            self.db.query(UploadArchiveRecord)
+            .filter(UploadArchiveRecord.upload_document_version_id == upload_version_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if version is None or document is None or document.user_id != current_user.id or archive is None:
+            raise HTTPException(status_code=404, detail="Upload version not found")
+        if review.status == "STAGED" and archive.status == "STAGED":
+            job = FilesystemJobQueue(self.db).create_job(
+                job_type="CHECK_UPLOAD_DUPLICATES",
+                queue_name="DUPLICATE_CHECK",
+                root_id=None,
+                created_by=document.user_id,
+                deduplication_key=f"upload-duplicate:{version.id}",
+                payload={
+                    "upload_document_version_id": version.id,
+                    "duplicate_review_id": review.id,
+                    "user_id": document.user_id,
+                    "workspace_id": document.workspace_id,
+                },
+            )
+            review.duplicate_check_job_id = job.id
+            review.status = "CHECKING"
+            review.expires_at = utcnow() + timedelta(
+                hours=self.settings.upload_duplicate_confirmation_ttl_hours
+            )
+            archive.filesystem_job_id = job.id
+            archive.status = "DUPLICATE_CHECK_PENDING"
+            document.ingest_status = "DUPLICATE_CHECK_PENDING"
+            self.db.commit()
+        elif not review.duplicate_check_job_id or not archive.filesystem_job_id:
+            raise HTTPException(status_code=409, detail="Upload is not staged for processing")
+        return UploadProcessingStartResponse(
+            upload_document_version_id=upload_version_id,
+            document_id=document.id,
+            duplicate_review_id=review.id,
+            filesystem_job_id=str(review.duplicate_check_job_id),
+            archive_status=archive.status,
+            duplicate_review_status=review.status,
+        )
 
     def get_review(self, *, upload_version_id: str, current_user: User) -> DuplicateReviewResponse:
         """查询当前用户上传版本的重复确认卡。"""
@@ -474,6 +536,19 @@ class UploadLifecycleService:
             if working_copy is not None
             else None
         )
+        primary_relation = (
+            self.db.query(DocumentCategory)
+            .filter(
+                DocumentCategory.working_copy_id == working_copy.id,
+                DocumentCategory.document_version_id
+                == str(working_copy.current_version_id or ""),
+                DocumentCategory.relation_role == "PRIMARY",
+                DocumentCategory.status.in_(["AUTO_APPLIED", "CONFIRMED"]),
+            )
+            .one_or_none()
+            if working_copy is not None
+            else None
+        )
         rename_review = (
             self.db.query(FileRenameReviewItem)
             .filter(
@@ -496,6 +571,34 @@ class UploadLifecycleService:
             else "PROCESSING"
         )
         categories = self._upload_status_categories(classification)
+        if (
+            primary_relation is not None
+            and primary_relation.source == IMAGE_DATE_RELATION_SOURCE
+        ):
+            # 图片日期目录是用户明确指定的组织规则，不依赖 OCR 正文语义；批次回执
+            # 必须投影最终生效路径，不能继续展示后台候选分类或误报“缺少证据”。
+            category_path = list(primary_relation.category_path_json or [])
+            date_label = category_path[-1] if category_path else ""
+            categories = [
+                {
+                    "category_id": primary_relation.category_id,
+                    "name": date_label or "上传日期",
+                    "category_path": category_path,
+                    "confidence": 1.0,
+                    "status": primary_relation.status,
+                    "source": IMAGE_DATE_RELATION_SOURCE,
+                    "evidence_items": [
+                        {
+                            "type": "upload_metadata",
+                            "quote": "按图片上传日期自动归档",
+                            "source": IMAGE_DATE_RELATION_SOURCE,
+                            "upload_date": date_label,
+                        }
+                    ],
+                    "evidence": ["按图片上传日期自动归档"],
+                }
+            ]
+            classification_status = "COMPLETED"
         review_reasons = self._upload_status_review_reasons(
             archive=archive,
             decision=decision,
@@ -521,7 +624,22 @@ class UploadLifecycleService:
             if working_copy is not None and working_copy.status == "ACTIVE"
             else "PROCESSING"
         )
-        renamed_filename = working_copy.filename if working_copy else None
+        # ORGANIZING 阶段的工作副本仍使用暂存名称，不能把它投影成最终重命名结果。
+        working_copy_ready = working_copy is not None and working_copy.status == "ACTIVE"
+        renamed_filename = working_copy.filename if working_copy_ready else None
+        rename_status = (
+            "FAILED"
+            if archive.status == "FAILED"
+            else "NEEDS_REVIEW"
+            if archive.status == "NEEDS_REVIEW"
+            else "PROCESSING"
+            if not working_copy_ready
+            else "NEEDS_REVIEW"
+            if rename_review is not None
+            else "COMPLETED"
+            if renamed_filename != document.original_filename
+            else "NO_CHANGE"
+        )
         return ArchiveStatusResponse(
             upload_document_version_id=upload_version_id,
             document_id=working_copy.document_id if working_copy else document.id,
@@ -532,19 +650,7 @@ class UploadLifecycleService:
             original_filename=document.original_filename,
             renamed_filename=renamed_filename,
             processing_status=processing_status,
-            rename_status=(
-                "FAILED"
-                if archive.status == "FAILED"
-                else "NEEDS_REVIEW"
-                if rename_review is not None
-                or (archive.status == "NEEDS_REVIEW" and renamed_filename is None)
-                else "COMPLETED"
-                if renamed_filename is not None
-                and renamed_filename != document.original_filename
-                else "NO_CHANGE"
-                if renamed_filename is not None
-                else "PROCESSING"
-            ),
+            rename_status=rename_status,
             classification_status=(
                 "FAILED"
                 if archive.status == "FAILED"
@@ -862,7 +968,7 @@ class FileLifecycleJobProcessor:
             self.db.query(UploadArchiveRecord)
             .filter(
                 UploadArchiveRecord.status.in_(
-                    {"DUPLICATE_CHECK_PENDING", "PENDING", "RETRY_WAIT", "FAILED"}
+                    {"STAGED", "DUPLICATE_CHECK_PENDING", "PENDING", "RETRY_WAIT", "FAILED"}
                 )
             )
             .order_by(UploadArchiveRecord.updated_at.asc())
@@ -873,7 +979,37 @@ class FileLifecycleJobProcessor:
             review = self.repository.get_review_by_version(archive.upload_document_version_id)
             if review is None:
                 continue
-            if archive.status == "DUPLICATE_CHECK_PENDING":
+            current_job = (
+                self.db.get(FilesystemJob, archive.filesystem_job_id)
+                if archive.filesystem_job_id
+                else None
+            )
+            if archive.status == "STAGED":
+                expires_at = review.expires_at
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                if expires_at > utcnow():
+                    # 未发送且仍在有效暂存期内的文件绝不能被补偿任务自动处理。
+                    continue
+                review.status = "RESOLVED"
+                review.decision = "CANCEL_UPLOAD"
+                review.decided_at = utcnow()
+                archive.status = "CANCELLED"
+                version = self.db.get(DocumentVersion, archive.upload_document_version_id)
+                document = self.db.get(Document, version.document_id) if version else None
+                if document is not None:
+                    document.status = "UPLOAD_CANCELLED"
+                child = UploadLifecycleService(self.db, self.settings)._enqueue_cleanup(
+                    review=review
+                )
+            elif archive.status == "DUPLICATE_CHECK_PENDING":
+                if current_job is not None and current_job.status in {"PENDING", "RUNNING"}:
+                    continue
+                if current_job is not None and current_job.status == "FAILED":
+                    archive.status = "FAILED"
+                    review.status = "FAILED"
+                    archive.next_retry_at = None
+                    continue
                 child = FilesystemJobQueue(self.db).create_job(
                     job_type="CHECK_UPLOAD_DUPLICATES",
                     queue_name="DUPLICATE_CHECK",
@@ -893,7 +1029,23 @@ class FileLifecycleJobProcessor:
             elif review.decision != "CONTINUE_UPLOAD":
                 # 取消上传或使用已有文件是终态；补偿任务不得把它重新送入归档。
                 continue
+            elif archive.status == "FAILED":
+                # Terminal queue failures require an explicit retry. Reconciliation must not
+                # expose a PENDING business state when no runnable queue job exists.
+                continue
+            elif archive.status == "RETRY_WAIT":
+                if current_job is not None and current_job.status in {"PENDING", "RUNNING"}:
+                    continue
+                archive.status = "FAILED"
+                archive.next_retry_at = None
+                continue
             elif archive.next_retry_at and archive.next_retry_at > utcnow():
+                continue
+            elif current_job is not None and current_job.status in {"PENDING", "RUNNING"}:
+                continue
+            elif current_job is not None and current_job.status == "FAILED":
+                archive.status = "FAILED"
+                archive.next_retry_at = None
                 continue
             else:
                 archive.status = "PENDING"
@@ -913,20 +1065,53 @@ class FileLifecycleJobProcessor:
 
         if not job.root_id:
             raise RuntimeError("RECONCILE_MANAGED_ROOT 缺少 root_id")
-        child = FilesystemJobQueue(self.db).create_job(
-            job_type="SCAN_MANAGED_ROOT",
-            # 扫描与 IMPORT 使用独立队列；部署时由不同 worker 消费，避免大目录
-            # 扫描占住同一 worker 后让已发现文件迟迟无法进入工作副本。
-            queue_name="SCAN",
-            root_id=job.root_id,
-            created_by=job.created_by,
-            deduplication_key=f"managed-root-scan:{job.id}",
-            # 父对账任务会被 scheduler 复用并重置为 PENDING；子扫描任务也必须
-            # 同步重入队，否则第二次 API 启动只会复用已完成的 scan 而永不扫描新文件。
-            reuse_completed=True,
-            payload={"reconcile_job_id": job.id},
+        child = (
+            self.db.query(FilesystemJob)
+            .filter(
+                FilesystemJob.root_id == job.root_id,
+                FilesystemJob.job_type == "SCAN_MANAGED_ROOT",
+                FilesystemJob.status.in_({"PENDING", "RUNNING"}),
+            )
+            .order_by(FilesystemJob.created_at.desc())
+            .first()
         )
-        FilesystemJobQueue(self.db).mark_completed(job=job, result={"scan_job_id": child.id})
+        previous_result = dict(job.result_json or {})
+        try:
+            previous_generation = max(
+                0,
+                int(previous_result.get("scan_generation") or 0),
+            )
+        except (TypeError, ValueError):
+            previous_generation = 0
+        scan_generation = previous_generation
+        scan_reused = child is not None
+        if child is None:
+            scan_generation += 1
+            child = FilesystemJobQueue(self.db).create_job(
+                job_type="SCAN_MANAGED_ROOT",
+                # 扫描与 IMPORT 使用独立队列；部署时由不同 worker 消费，避免大目录
+                # 扫描占住同一 worker 后让已发现文件迟迟无法进入工作副本。
+                queue_name="SCAN",
+                root_id=job.root_id,
+                created_by=job.created_by,
+                # 每个协调周期使用独立代次。已完成或失败的历史扫描保持终态，
+                # 不会被重置，也不会阻断配置修复或服务重启后的下一轮扫描。
+                deduplication_key=(
+                    f"managed-root-scan:{job.root_id}:{scan_generation}"
+                ),
+                payload={
+                    "reconcile_job_id": job.id,
+                    "scan_generation": scan_generation,
+                },
+            )
+        FilesystemJobQueue(self.db).mark_completed(
+            job=job,
+            result={
+                "scan_job_id": child.id,
+                "scan_generation": scan_generation,
+                "scan_reused": scan_reused,
+            },
+        )
 
     def _repair_working_copy_layout(self, job: FilesystemJob) -> None:
         """迁移旧共享根和历史待整理路径，不触碰受管原始目录。"""
@@ -977,7 +1162,7 @@ class FileLifecycleJobProcessor:
         if archive.status == "ARCHIVED" and archive.managed_file_id:
             FilesystemJobQueue(self.db).mark_completed(job=job, result={"managed_file_id": archive.managed_file_id, "idempotent": True})
             return
-        if archive.status != "PENDING":
+        if archive.status not in {"PENDING", "RETRY_WAIT"}:
             raise RuntimeError(f"上传状态 {archive.status} 不允许归档")
         if not self.settings.upload_archive_enabled or not self.settings.managed_root_archive_enabled:
             raise RuntimeError("上传归档未启用")
@@ -1743,7 +1928,10 @@ class FileLifecycleJobProcessor:
             target_version.source_managed_file_revision_id = revision.id
             target_version.source_analysis_run_id = self._latest_source_analysis_run_id(revision.id)
             self.db.flush()
-            return organization_decision
+            return self._reuse_persisted_rename_into_initial_decision(
+                document=target_document,
+                decision=organization_decision,
+            )
         source_run = (
             self.db.query(DocumentExtractionRun)
             .filter(
@@ -1856,7 +2044,35 @@ class FileLifecycleJobProcessor:
         target_document.ingest_status = "INDEXED"
         self.db.flush()
         DocumentSearchProfileService(db=self.db).upsert_current_profile(target_copy.id)
-        return organization_decision
+        return self._reuse_persisted_rename_into_initial_decision(
+            document=target_document,
+            decision=organization_decision,
+        )
+
+    def _reuse_persisted_rename_into_initial_decision(
+        self,
+        *,
+        document: Document,
+        decision: InitialOrganizationDecision,
+    ) -> InitialOrganizationDecision:
+        """复用工作副本已克隆正文生成首次命名建议，不触发第二次文件解析。"""
+
+        # 延迟导入保持文件生命周期与重命名 OperationPlan 模块之间的既有边界。
+        from app.modules.file_rename.uploaded_suggestion_service import (
+            UploadedRenameSuggestionService,
+        )
+
+        suggestion, extraction_result = UploadedRenameSuggestionService(
+            db=self.db,
+            user_id=document.user_id,
+        ).suggest_for_initial_import(
+            document=document,
+            reuse_persisted_extraction_only=True,
+        )
+        decision.extraction_result = extraction_result or decision.extraction_result
+        decision.rename_status = str(suggestion.get("status") or "FAILED")
+        decision.rename_metadata = rename_metadata_for_initial_organization(suggestion)
+        return decision
 
     def _reuse_source_classification_into_working_copy(
         self,
@@ -2217,11 +2433,40 @@ class FileLifecycleJobProcessor:
             managed_file,
             version=version,
         )
-        policy_result = AutoPlacementPolicy(self.settings).evaluate(
-            categories=categories,
-            extraction_status=extraction_status,
-            risk_passed=risk_status in {"PASS", "WARNING"},
+        image_date_label = self._uploaded_image_date_label(
+            managed_file=managed_file,
         )
+        image_date_rule_applied = bool(
+            image_date_label and risk_status in {"PASS", "WARNING"}
+        )
+        if image_date_rule_applied:
+            category_path = image_date_category_path(str(image_date_label))
+            policy_result = AutoPlacementPolicyResult(
+                accepted=True,
+                primary_category={
+                    "category_id": IMAGE_DATE_CATEGORY_ROOT_ID,
+                    "category_path": category_path,
+                    "name": str(image_date_label),
+                    "source": IMAGE_DATE_RELATION_SOURCE,
+                },
+                reason_codes=(),
+                calibrated_confidence=1.0,
+                required_threshold=0.0,
+                top_margin=1.0,
+                required_margin=0.0,
+                feature_snapshot={
+                    "placement_rule": IMAGE_DATE_RELATION_SOURCE,
+                    "upload_date": image_date_label,
+                    "content_rule": "verified_image_container",
+                    "semantic_college_detection_skipped": True,
+                },
+            )
+        else:
+            policy_result = AutoPlacementPolicy(self.settings).evaluate(
+                categories=categories,
+                extraction_status=extraction_status,
+                risk_passed=risk_status in {"PASS", "WARNING"},
+            )
         repository = OrganizationDecisionRepository(self.db)
         classification_run, primary_suggestion = repository.latest_classification(
             agent_run_id=changeset.agent_run_id,
@@ -2233,7 +2478,19 @@ class FileLifecycleJobProcessor:
         if working_root is None:
             raise RuntimeError("首次分类整理缺少工作副本根")
 
-        if policy_result.accepted and classification_run is not None and primary_suggestion is not None:
+        if image_date_rule_applied:
+            target_filename = self._initial_organization_filename(
+                decision=organization_decision,
+                fallback=working_copy.filename,
+            )
+            target_relative_path = self._available_initial_image_relative_path(
+                working_copy=working_copy,
+                working_root=working_root,
+                version=version,
+                date_label=str(image_date_label),
+                target_filename=target_filename,
+            )
+        elif policy_result.accepted and classification_run is not None and primary_suggestion is not None:
             try:
                 target = CategoryOrganizationPathResolver(self.storage).resolve_category(
                     category_id=primary_suggestion.category_id,
@@ -2267,10 +2524,13 @@ class FileLifecycleJobProcessor:
         reasons = list(dict.fromkeys(reasons))
         evaluated_decision = "AUTO_ORGANIZED" if not reasons else "NEEDS_REVIEW"
         if shadow_only:
+            taxonomy = load_default_taxonomy() if image_date_rule_applied else None
             return repository.create_or_update_decision(
                 working_copy=working_copy,
                 classification_run=classification_run,
-                primary_suggestion=primary_suggestion,
+                primary_suggestion=(
+                    None if image_date_rule_applied else primary_suggestion
+                ),
                 policy_result=policy_result,
                 policy_version=self.settings.auto_classification_policy_version,
                 calibration_version=self.settings.auto_classification_calibration_version,
@@ -2278,11 +2538,30 @@ class FileLifecycleJobProcessor:
                 reason_codes=reasons,
                 target_relative_path=target_relative_path if not reasons else None,
                 shadow_only=True,
+                decision_scope=(
+                    "initial-image-date-organization"
+                    if image_date_rule_applied
+                    else "initial-organization"
+                ),
+                category_id_override=(
+                    IMAGE_DATE_CATEGORY_ROOT_ID if image_date_rule_applied else None
+                ),
+                taxonomy_key_override=taxonomy.key if taxonomy is not None else None,
+                taxonomy_version_override=(
+                    taxonomy.version if taxonomy is not None else None
+                ),
+                classifier_version_override=(
+                    IMAGE_DATE_CLASSIFIER_VERSION if image_date_rule_applied else None
+                ),
             )
 
         if not reasons and target_relative_path:
             final_relative_path = target_relative_path
-            operation_type = "INITIAL_AUTO_PLACEMENT"
+            operation_type = (
+                "INITIAL_IMAGE_DATE_PLACEMENT"
+                if image_date_rule_applied
+                else "INITIAL_AUTO_PLACEMENT"
+            )
         else:
             neutral = self._neutral_initial_path_resolution(
                 working_root=working_root,
@@ -2346,10 +2625,11 @@ class FileLifecycleJobProcessor:
         self.db.add(path_record)
         self.db.flush()
 
+        taxonomy = load_default_taxonomy() if image_date_rule_applied else None
         decision_row = repository.create_or_update_decision(
             working_copy=working_copy,
             classification_run=classification_run,
-            primary_suggestion=primary_suggestion,
+            primary_suggestion=(None if image_date_rule_applied else primary_suggestion),
             policy_result=policy_result,
             policy_version=self.settings.auto_classification_policy_version,
             calibration_version=self.settings.auto_classification_calibration_version,
@@ -2357,31 +2637,77 @@ class FileLifecycleJobProcessor:
             reason_codes=reasons,
             target_relative_path=final_relative_path,
             shadow_only=False,
+            decision_scope=(
+                "initial-image-date-organization"
+                if image_date_rule_applied
+                else "initial-organization"
+            ),
+            category_id_override=(
+                IMAGE_DATE_CATEGORY_ROOT_ID if image_date_rule_applied else None
+            ),
+            taxonomy_key_override=taxonomy.key if taxonomy is not None else None,
+            taxonomy_version_override=(taxonomy.version if taxonomy is not None else None),
+            classifier_version_override=(
+                IMAGE_DATE_CLASSIFIER_VERSION if image_date_rule_applied else None
+            ),
         )
         decision_row.path_record_id = path_record.id
 
-        if evaluated_decision == "AUTO_ORGANIZED" and classification_run and primary_suggestion:
-            repository.create_auto_applied_primary(
+        applied_relation = None
+        if evaluated_decision == "AUTO_ORGANIZED" and image_date_rule_applied and taxonomy:
+            applied_relation = repository.create_system_primary(
+                working_copy=working_copy,
+                category_id=IMAGE_DATE_CATEGORY_ROOT_ID,
+                category_path=image_date_category_path(str(image_date_label)),
+                taxonomy_key=taxonomy.key,
+                taxonomy_version=taxonomy.version,
+                classifier_version=IMAGE_DATE_CLASSIFIER_VERSION,
+                source=IMAGE_DATE_RELATION_SOURCE,
+                evidence=[
+                    {
+                        "type": "upload_metadata",
+                        "source": IMAGE_DATE_RELATION_SOURCE,
+                        "upload_date": image_date_label,
+                        "quote": "按图片上传日期自动归档",
+                    }
+                ],
+            )
+        elif (
+            evaluated_decision == "AUTO_ORGANIZED"
+            and classification_run
+            and primary_suggestion
+        ):
+            applied_relation = repository.create_auto_applied_primary(
                 working_copy=working_copy,
                 classification_run=classification_run,
                 suggestion=primary_suggestion,
             )
+        if applied_relation is not None:
             self.db.add(
                 ChangeItem(
                     changeset_id=changeset.id,
                     target_type="document_category",
-                    target_id=primary_suggestion.category_id,
+                    target_id=applied_relation.category_id,
                     target_document_id=document.id,
                     change_type="CATEGORY_AUTO_APPLIED",
                     before_value_json={},
                     after_value_json={
                         "working_copy_id": working_copy.id,
-                        "category_id": primary_suggestion.category_id,
+                        "category_id": applied_relation.category_id,
+                        "category_path": list(
+                            applied_relation.category_path_json or []
+                        ),
                         "status": "AUTO_APPLIED",
                     },
-                    source="auto_placement_policy",
+                    source=(
+                        IMAGE_DATE_RELATION_SOURCE
+                        if image_date_rule_applied
+                        else "auto_placement_policy"
+                    ),
                     confidence=policy_result.calibrated_confidence,
-                    evidence_json={"items": list(primary_suggestion.evidence_json or [])},
+                    evidence_json={
+                        "items": list(applied_relation.evidence_json or [])
+                    },
                     execution_status="COMPLETED",
                 )
             )
@@ -2426,7 +2752,11 @@ class FileLifecycleJobProcessor:
                     "organization_decision": evaluated_decision,
                     "managed_original_unchanged": True,
                 },
-                source="auto_placement_policy",
+                source=(
+                    IMAGE_DATE_RELATION_SOURCE
+                    if image_date_rule_applied
+                    else "auto_placement_policy"
+                ),
                 confidence=policy_result.calibrated_confidence,
                 evidence_json={"reason_codes": reasons},
                 execution_status="COMPLETED",
@@ -2434,6 +2764,83 @@ class FileLifecycleJobProcessor:
         )
         DocumentSearchProfileService(db=self.db).upsert_current_profile(working_copy.id)
         return decision_row
+
+    def _uploaded_image_date_label(
+        self,
+        *,
+        managed_file: ManagedFile,
+    ) -> str | None:
+        """验证不可变归档中的真实图片容器，并返回原上传版本的本地日期。
+
+        不能只信任浏览器 MIME 或扩展名；伪装成图片的文件仍走普通分类与风险复核。
+        外部受管目录图片也不属于“上传图片”规则，避免后台扫描静默移动历史文件。
+        """
+
+        upload_version_id = str(managed_file.source_upload_version_id or "")
+        if not upload_version_id:
+            return None
+        upload_version = self.db.get(DocumentVersion, upload_version_id)
+        if upload_version is None:
+            return None
+        archived_path = self.storage.archive_path(managed_file.relative_path)
+        if detect_image_content_type(archived_path) is None:
+            return None
+        return image_upload_date_label(upload_version.created_at)
+
+    def _available_initial_image_relative_path(
+        self,
+        *,
+        working_copy: WorkingCopy,
+        working_root: WorkingCopyRoot,
+        version: DocumentVersion,
+        date_label: str,
+        target_filename: str,
+    ) -> str:
+        """在同一日期目录内分配不覆盖既有副本的首次发布路径。
+
+        文件夹上传可能包含多个同名图片；确定性版本后缀保证单个冲突不会把图片
+        放回中性目录。该分配只用于首次发布，活动副本后续改名仍须走 OperationPlan。
+        """
+
+        parent = Path(*image_date_category_path(date_label))
+        sanitized = self.storage.sanitize_filename(target_filename)
+        suffix = Path(sanitized).suffix
+        stem = sanitized[: -len(suffix)] if suffix else sanitized
+        staged_path = self.storage.working_copy_path(version.storage_path)
+        for ordinal in range(1, 1000):
+            version_marker = f"_第{ordinal}版"
+            filename = (
+                sanitized
+                if ordinal == 1
+                else f"{stem[: max(1, 240 - len(version_marker) - len(suffix))]}"
+                f"{version_marker}{suffix}"
+            )
+            relative_path = (parent / filename).as_posix()
+            indexed_conflict = (
+                self.db.query(WorkingCopy.id)
+                .filter(
+                    WorkingCopy.working_copy_root_id == working_root.id,
+                    WorkingCopy.relative_path == relative_path,
+                    WorkingCopy.id != working_copy.id,
+                    WorkingCopy.status.in_(["ACTIVE", "ORGANIZING", "IMPORTING"]),
+                )
+                .first()
+                is not None
+            )
+            target_path = self.storage.working_copy_path(
+                f"{working_root.relative_storage_path}/{relative_path}"
+            )
+            if not indexed_conflict and not target_path.exists():
+                return relative_path
+            if (
+                not indexed_conflict
+                and not staged_path.exists()
+                and target_path.is_file()
+                and self.storage.sha256_file(target_path) == version.sha256
+            ):
+                # 文件系统发布成功、数据库事务尚未提交时，重试必须复用原目标。
+                return relative_path
+        raise RuntimeError("图片日期目录无法分配可用文件名")
 
     def _initial_organization_filename(
         self,

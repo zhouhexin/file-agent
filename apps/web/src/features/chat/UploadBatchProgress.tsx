@@ -1,4 +1,4 @@
-import { AlertCircle, CheckCircle2, FolderUp, Loader2, X } from 'lucide-react';
+import { AlertCircle, CheckCircle2, FolderUp, Loader2 } from 'lucide-react';
 
 import type { UploadBatchProgressState } from './batchUpload';
 import { ClassificationTreeReceipt } from './ClassificationTreeReceipt';
@@ -7,7 +7,6 @@ import type { ChatAttachment } from './presentation';
 type UploadBatchProgressProps = {
   batch: UploadBatchProgressState;
   token: string;
-  onDismiss: () => void;
   onOpenAttachment: (file: ChatAttachment) => void;
   onOpenDocument: (documentId: string, filename: string) => void;
 };
@@ -15,14 +14,15 @@ type UploadBatchProgressProps = {
 export function UploadBatchProgress({
   batch,
   token,
-  onDismiss,
   onOpenAttachment,
   onOpenDocument,
 }: UploadBatchProgressProps) {
-  // 上传批次直接消费归档状态，不再依赖前端伪造聊天任务来取得树形回执。
-  const percent = batch.total > 0
-    ? Math.round(((batch.completed + batch.processed) / (batch.total * 2)) * 100)
-    : 0;
+  // 上传批次是智能体的正式回答，直接消费归档状态并永久保留在当前页面主体中。
+  const percent = batch.total <= 0
+    ? 0
+    : batch.status === 'uploading' || batch.status === 'staged'
+      ? Math.round((batch.completed / batch.total) * 100)
+      : Math.round(((batch.completed + batch.processed) / (batch.total * 2)) * 100);
   const active = ['uploading', 'processing'].includes(batch.status);
   const settledResults = batch.files
     .map((file) => file.result)
@@ -30,6 +30,8 @@ export function UploadBatchProgress({
   const attachments = batch.files.flatMap((file) => file.attachment ? [file.attachment] : []);
   const statusText = batch.status === 'uploading'
     ? `正在上传 ${batch.completed}/${batch.total}`
+    : batch.status === 'staged'
+      ? `已暂存 ${batch.completed} 个文件，点击发送后开始处理`
     : batch.status === 'processing'
       ? '正在查重并自动执行解析、分类和标准化命名'
       : batch.status === 'failed'
@@ -41,13 +43,8 @@ export function UploadBatchProgress({
       <header>
         <span className="upload-batch-title">
           <FolderUp size={17} />
-          <strong>{batch.mode === 'folder' ? batch.folderName : '批量文件上传'}</strong>
+          <strong>本次附件</strong>
         </span>
-        {!active ? (
-          <button type="button" onClick={onDismiss} aria-label="关闭批量上传进度">
-            <X size={15} />
-          </button>
-        ) : null}
       </header>
       <div className="upload-batch-summary">
         {active ? <Loader2 className="upload-batch-spinner" size={15} /> : <CheckCircle2 size={15} />}

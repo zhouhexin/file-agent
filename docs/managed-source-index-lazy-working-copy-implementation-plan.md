@@ -411,7 +411,15 @@ active_managed_file_count
 5. 搜索或源侧证据回答会固化本轮全部最终相关文件到 `RelevantFileSet`，并为其中每一个未物化
    源修订创建幂等 `MATERIALIZE_WORKING_COPY` 任务；分页不会截断该集合。
 6. 物化任务复用源侧已持久化页面、元素、摘要与索引，避免同一 `.doc`/`.xls` 再次启动 LibreOffice。
+   首次发布工作副本时，标准文件名也复用同一批已克隆的 `document_pages` 和现有命名建议服务；
+   该分支禁止因命名解析指纹差异重新读取或解析文件。命名建议达到现有 `READY` 门槛时作为首次
+   发布名称，证据不足则保留原名并待复核。此规则不作用于受管原件，也不改变活动工作副本后续
+   改名仍须经过 OperationPlan 确认的边界。
    原始文件发生新修订时，已有工作副本会标记 `ORIGINAL_CHANGED`，不会被自动覆盖。
+7. 周期性 `RECONCILE_MANAGED_ROOT` 必须为每轮终态扫描创建新的 `scan_generation`；历史
+   `COMPLETED` / `FAILED` 扫描保持不可变审计记录，不得被重置。若同一受管根已有
+   `PENDING` 或 `RUNNING` 扫描，则当前协调只复用该活动任务，保证单根最多一个活动扫描。
+   因此一次配置或 taxonomy 错误不会永久阻断修复后的后续扫描，也不会产生并发重复遍历。
 
 部署前必须执行数据库迁移，并启动 `SOURCE_ANALYSIS` 与 `MATERIALIZE,IMPORT` worker；具体命令见
 `docs/runbook.md`。`MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY=1` 的默认部署含义是只启动一个

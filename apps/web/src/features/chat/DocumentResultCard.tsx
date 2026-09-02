@@ -33,7 +33,16 @@ export function DocumentResultCard({
   const failed = result.extraction_status === 'FAILED';
   const filename = result.filename || attachment?.filename || result.document_id;
   const originalFilename = result.original_filename || attachment?.filename || filename;
-  const renamedFilename = result.renamed_filename || filename;
+  const renamedFilename = result.renamed_filename || null;
+  const renamedFilenameText = result.rename_status === 'PROCESSING'
+    ? '处理中'
+    : result.rename_status === 'NEEDS_REVIEW'
+      ? '尚未重命名（待复核）'
+      : result.rename_status === 'FAILED'
+        ? '未能完成重命名'
+        : result.rename_status === 'NO_CHANGE'
+          ? '无需改名（保持原名）'
+          : renamedFilename || '尚未生成';
   // 历史生命周期回执可能只记录处理状态和命名建议，没有分类数组。
   const categories = result.categories ?? [];
   const primaryCategory = categories[0];
@@ -150,7 +159,7 @@ export function DocumentResultCard({
           {result.original_filename || result.renamed_filename || result.rename_status ? (
             <div className="document-result-rename-suggestion">
               <p>文件原名：{originalFilename}</p>
-              <p>重命名后：{renamedFilename}</p>
+              <p>重命名后：{renamedFilenameText}</p>
               <p>
                 处理状态：{result.processing_status === 'NEEDS_REVIEW'
                   ? '待复核'

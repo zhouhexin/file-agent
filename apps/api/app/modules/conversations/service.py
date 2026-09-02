@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.logging import log_event
-from app.db.models import AgentRun, FileRenameReviewItem, Message
+from app.db.models import AgentRun, DocumentVersion, FileRenameReviewItem, Message, User
 from app.modules.agent.repository import AgentRunRepository
 from app.modules.agent.planner import FileScopeClarificationPlanner
 from app.modules.agent.service import AgentRuntimeService
@@ -23,12 +23,14 @@ from app.modules.conversations.schemas import (
     ClearConversationResponse,
     ConversationDetailResponse,
     ConversationMessage,
+    MessageAttachment,
     SendMessageRequest,
 )
 from app.modules.file_lifecycle.shared_access import (
     CanonicalWorkingFileError,
     CanonicalWorkingFileResolver,
 )
+from app.modules.file_lifecycle.service import UploadLifecycleService
 from app.modules.files.repository import FileRepository
 from app.modules.retrieval.clarification_planner import (
     FileSearchClarificationPlanner,
@@ -73,6 +75,10 @@ class ConversationMessageService:
         HTTP 调用必须传入认证用户 ID；默认值只保留给不经过 HTTP 的最小服务测试。
         """
 
+        self._start_explicit_staged_attachments(
+            attachments=list(request.attachments),
+            user_id=user_id,
+        )
         selection = None
         if not request.attachments:
             selection = FileSearchClarificationService(self.db).resolve_from_text(
@@ -86,6 +92,55 @@ class ConversationMessageService:
             user_id=user_id,
             clarification_selection=selection,
         )
+
+    def _start_explicit_staged_attachments(
+        self,
+        *,
+        attachments: list[MessageAttachment],
+        user_id: str,
+    ) -> None:
+        """消息发送本身也是显式启动信号，兼容不经过 Web 前端的 API 客户端。"""
+
+        document_ids = list(
+            dict.fromkeys(
+                str(attachment.document_id)
+                for attachment in attachments
+                if str(attachment.document_id)
+            )
+        )
+        if not document_ids:
+            return
+        versions = (
+            self.db.query(DocumentVersion)
+            .filter(
+                DocumentVersion.document_id.in_(document_ids),
+                DocumentVersion.storage_tier == "UPLOAD",
+            )
+            .order_by(DocumentVersion.version_number.desc())
+            .all()
+        )
+        started_document_ids: set[str] = set()
+        lifecycle = UploadLifecycleService(self.db)
+        current_user = self.db.get(User, user_id)
+        if current_user is None:
+            return
+        for version in versions:
+            if version.document_id in started_document_ids:
+                continue
+            review = lifecycle.repository.get_review_by_version(version.id)
+            archive = lifecycle.repository.get_archive_by_version(version.id)
+            if (
+                review is None
+                or archive is None
+                or review.status != "STAGED"
+                or archive.status != "STAGED"
+            ):
+                continue
+            lifecycle.start_processing(
+                upload_version_id=version.id,
+                current_user=current_user,
+            )
+            started_document_ids.add(version.document_id)
 
     def resolve_file_search_clarification(
         self,

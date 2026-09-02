@@ -62,6 +62,43 @@ def test_settings_loads_dotenv_from_parent_directory(monkeypatch, tmp_path):
     assert settings.auto_create_tables is False
 
 
+def test_relative_runtime_paths_are_resolved_from_dotenv_directory(monkeypatch, tmp_path):
+    """API and workers must resolve relative storage paths to the same directory."""
+
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "\n".join(
+            [
+                "DATABASE_URL=postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent",
+                "FILE_STORAGE_ROOT=./runtime/uploads",
+                "WORKING_COPY_STORAGE_ROOT=./runtime/working",
+                "TRASH_STORAGE_ROOT=./runtime/trash",
+                "LOG_DIR=./runtime/logs",
+            ],
+        ),
+        encoding="utf-8",
+    )
+    nested_dir = tmp_path / "apps" / "api"
+    nested_dir.mkdir(parents=True)
+    monkeypatch.chdir(nested_dir)
+    for name in (
+        "DATABASE_URL",
+        "FILE_STORAGE_ROOT",
+        "WORKING_COPY_STORAGE_ROOT",
+        "TRASH_STORAGE_ROOT",
+        "LOG_DIR",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.file_storage_root == str((tmp_path / "runtime" / "uploads").resolve())
+    assert settings.working_copy_storage_root == str((tmp_path / "runtime" / "working").resolve())
+    assert settings.trash_storage_root == str((tmp_path / "runtime" / "trash").resolve())
+    assert settings.log_dir == str((tmp_path / "runtime" / "logs").resolve())
+
+
 def test_dotenv_managed_root_overrides_stale_process_env(monkeypatch, tmp_path):
     """受管目录配置必须允许 `.env` 覆盖旧进程值，适配本地 reload 后的目录变更。"""
 

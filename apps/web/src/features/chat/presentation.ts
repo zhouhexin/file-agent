@@ -45,7 +45,9 @@ export function deduplicateAttachmentsByDocumentId(
 export function hasUnresolvedUploadReview(attachments: ChatAttachment[]): boolean {
   return attachments.some(
     (attachment) => Boolean(attachment.upload_document_version_id)
-      && !['RESOLVED', 'FAILED'].includes(attachment.duplicate_review_status || ''),
+      && ['CHECKING', 'WAITING_CONFIRMATION'].includes(
+        attachment.duplicate_review_status || '',
+      ),
   );
 }
 

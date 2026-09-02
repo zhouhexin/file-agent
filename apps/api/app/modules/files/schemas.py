@@ -20,7 +20,7 @@ class FileUploadResponse(BaseModel):
     deduplicated: bool = False
     upload_document_version_id: str
     duplicate_review_id: str
-    filesystem_job_id: str
+    filesystem_job_id: str | None = None
     archive_status: str
     duplicate_review_status: str
     relative_path: str | None = None

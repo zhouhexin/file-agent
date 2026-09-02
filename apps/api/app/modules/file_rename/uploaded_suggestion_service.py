@@ -245,6 +245,7 @@ class UploadedRenameSuggestionService:
         self,
         *,
         document: Document,
+        reuse_persisted_extraction_only: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """为尚未发布的工作副本生成首次命名建议，不创建 OperationPlan。
 
@@ -254,6 +255,12 @@ class UploadedRenameSuggestionService:
 
         if document.user_id != self.user_id:
             return _error("DOCUMENT_NOT_FOUND", "文件不存在或不属于当前用户。"), None
+        if reuse_persisted_extraction_only:
+            return self._suggest_one(
+                document=document,
+                reuse_persisted_extraction_only=True,
+            )
+        # 默认上传流程保持既有调用形态，避免扩大本次受管目录改动的影响面。
         return self._suggest_one(document=document)
 
     def _resolve_working_copy(self, *, source_document: Document) -> WorkingCopy | None:
@@ -304,7 +311,12 @@ class UploadedRenameSuggestionService:
             .one_or_none()
         )
 
-    def _suggest_one(self, *, document: Document) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    def _suggest_one(
+        self,
+        *,
+        document: Document,
+        reuse_persisted_extraction_only: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """为一个工作副本 Document 生成建议；单文件失败不会扩大到其他文件。"""
 
         empty_field = RenameFieldResult(status=RenameFieldStatus.MISSING)
@@ -342,7 +354,10 @@ class UploadedRenameSuggestionService:
             )
 
         try:
-            extraction_result, pages, elements = self._extract_document(document=document)
+            extraction_result, pages, elements = self._extract_document(
+                document=document,
+                reuse_persisted_extraction_only=reuse_persisted_extraction_only,
+            )
             if extraction_result.get("status") != "COMPLETED":
                 error = extraction_result.get("error") or {}
                 return (
@@ -364,7 +379,11 @@ class UploadedRenameSuggestionService:
                     extraction_result,
                 )
             source_repository = FileExtractionRepository(self.db, self.user_id)
-            resolved_source = source_repository.resolve_original_file_for_document(document)
+            resolved_source = (
+                {"ok": False}
+                if reuse_persisted_extraction_only
+                else source_repository.resolve_original_file_for_document(document)
+            )
             document_version = source_repository.get_current_document_version(document=document)
             readable_source = (
                 self.readable_source_resolver.resolve(
@@ -376,11 +395,27 @@ class UploadedRenameSuggestionService:
                 if resolved_source.get("ok")
                 else None
             )
+            primary_result = extraction_result
+            if reuse_persisted_extraction_only:
+                # 统一解析器会记录具体实现名（如 plain-text、openpyxl、pymupdf）。
+                # 命名仲裁只区分 Docling 与原生解析族，需在内存中归一化来源名称，
+                # 才能直接消费克隆页面而不为了补候选再次读取文件。
+                persisted_parser = str(extraction_result.get("parser_name") or "").lower()
+                persisted_extractor = str(extraction_result.get("extractor") or "").lower()
+                primary_result = {
+                    **extraction_result,
+                    "parser_name": (
+                        "docling"
+                        if persisted_parser.startswith("docling")
+                        or persisted_extractor.startswith("docling")
+                        else "native"
+                    ),
+                }
             metadata_resolution = self.metadata_resolution_service.resolve(
                 file_path=readable_source.parse_path if readable_source is not None else None,
                 filename=readable_source.parse_filename if readable_source is not None else document.original_filename,
                 content_type=readable_source.parse_content_type if readable_source is not None else document.content_type,
-                primary_result=extraction_result,
+                primary_result=primary_result,
                 primary_pages=pages,
                 primary_elements=elements,
             )
@@ -494,6 +529,7 @@ class UploadedRenameSuggestionService:
         self,
         *,
         document: Document,
+        reuse_persisted_extraction_only: bool = False,
     ) -> tuple[dict[str, Any], list[Any], list[Any]]:
         """生成或复用 document_pages，并只把轻量摘要返回给 Graph State。"""
 
@@ -507,9 +543,19 @@ class UploadedRenameSuggestionService:
         reusable = repository.get_latest_successful_extraction(
             document_id=document.id,
             document_version_id=document_version.id if document_version else None,
-            parser_config_hash=parser_config_hash,
+            # 受管目录物化已经克隆了受控正文。该分支必须直接复用它，不能因为
+            # 重命名解析模式的指纹不同而重新打开工作副本或再次运行解析器。
+            parser_config_hash=(None if reuse_persisted_extraction_only else parser_config_hash),
         )
         reused = reusable is not None
+        if reusable is None and reuse_persisted_extraction_only:
+            return _failed_extraction_result(
+                document=document,
+                error={
+                    "code": "PERSISTED_EXTRACTION_REQUIRED",
+                    "message": "受管目录工作副本缺少可复用解析结果，已保留原名等待复核。",
+                },
+            ), [], []
         if reusable is None:
             resolved = repository.resolve_original_file_for_document(document)
             if not resolved.get("ok"):

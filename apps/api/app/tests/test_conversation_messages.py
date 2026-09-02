@@ -921,6 +921,21 @@ def test_archived_upload_is_canonicalized_to_working_copy_before_agent_run(
         content="工资津贴补贴发放情况专项监督检查和自查工作。".encode("utf-8"),
     )
 
+    with session_factory() as db:
+        upload_version_id = (
+            db.query(DocumentVersion.id)
+            .filter(
+                DocumentVersion.document_id == upload_document_id,
+                DocumentVersion.storage_tier == "UPLOAD",
+            )
+            .scalar()
+        )
+    started = client.post(
+        f"/api/uploads/{upload_version_id}/process",
+        headers=headers,
+    )
+    assert started.status_code == 202
+
     for _ in range(30):
         if process_next_filesystem_job(
             session_factory=session_factory,

@@ -531,11 +531,8 @@
   gap: 12px;
 }
 
-.upload-picker-group {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
+.upload-picker-menu {
+  position: relative;
 }
 
 .file-picker {
@@ -559,12 +556,38 @@
   border-color: #b7c7dc;
 }
 
-.file-picker input {
+.upload-picker-input {
   display: none;
 }
 
-.folder-picker {
+.upload-picker-options {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 8px);
+  left: 0;
+  display: grid;
+  min-width: 150px;
+  overflow: hidden;
+  border: 1px solid #d8e2ee;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 12px 28px rgb(31 41 51 / 0.16);
+}
+
+.upload-picker-options button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
   color: #315f94;
+  cursor: pointer;
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.upload-picker-options button:hover {
+  background: #eef4ff;
 }
 
 .upload-batch-progress {
@@ -574,6 +597,15 @@
   border-radius: 12px;
   background: #f8fbff;
   padding: 10px 12px;
+}
+
+.submitted-upload-batch {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  max-height: min(56vh, 46rem);
+  overflow-y: auto;
+  padding: 0 2px 12px;
 }
 
 .upload-batch-progress header,
@@ -602,15 +634,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.upload-batch-progress header > button {
-  display: inline-flex;
-  border: 0;
-  background: transparent;
-  color: #667789;
-  cursor: pointer;
-  padding: 2px;
 }
 
 .upload-batch-summary {

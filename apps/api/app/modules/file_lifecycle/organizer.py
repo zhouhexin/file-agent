@@ -162,7 +162,7 @@ class InitialWorkingCopyOrganizer:
             classification_summary_id=classification_result.get("classification_summary_id"),
             summary_status=str(classification_result.get("summary_status") or "FULL_TEXT_FALLBACK"),
             rename_status=str(rename_suggestion.get("status") or "FAILED"),
-            rename_metadata=_rename_metadata(rename_suggestion),
+            rename_metadata=rename_metadata_for_initial_organization(rename_suggestion),
             summary_metadata=_summary_metadata(
                 db=self.db,
                 classification_summary_id=classification_result.get("classification_summary_id"),
@@ -190,7 +190,7 @@ def _select_primary_category(
     return None
 
 
-def _rename_metadata(suggestion: dict[str, Any]) -> dict[str, Any]:
+def rename_metadata_for_initial_organization(suggestion: dict[str, Any]) -> dict[str, Any]:
     """提取用户回执需要的命名依据，文种不参与文件名模板。"""
 
     def field_value(key: str) -> str | None:

@@ -40,6 +40,7 @@ export function AttachmentRail({
 
       {showExpandButton && (
         <button
+          type="button"
           onClick={() => setExpanded((v) => !v)}
           className="expand-button"
         >

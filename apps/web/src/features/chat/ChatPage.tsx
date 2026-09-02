@@ -14,6 +14,7 @@ import {
   getConversationDetail,
   getFilesystemJob,
   sendAgentMessage,
+  startUploadProcessing,
   uploadFile,
 } from '../../api/client';
 import { formatError } from '../../api/errors';
@@ -31,8 +32,8 @@ import { AttachmentRail } from './AttachmentRail';
 import {
   archiveStatusToDocumentResult,
   createPendingUploadResult,
-  getSelectedFileRelativePath,
-  inferSelectedFolderName,
+  partitionUploadFiles,
+  SUPPORTED_UPLOAD_ACCEPT,
 } from './batchUpload';
 import type { UploadBatchProgressState } from './batchUpload';
 import { ChatTurnView } from './ChatTurnView';
@@ -42,7 +43,6 @@ import {
   canPreviewFileInfo,
   canPreviewInBrowser,
   deduplicateAttachmentsByDocumentId,
-  hasUnresolvedUploadReview,
   isVisibleConversationHistoryMessage,
 } from './presentation';
 import type { ChatAttachment, ChatTurn } from './presentation';
@@ -72,6 +72,13 @@ function createClientId(): string {
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
   return `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function unsupportedUploadNotice(files: readonly File[]): string {
+  const visibleNames = files.slice(0, 5).map((file) => `“${file.name}”`);
+  const remaining = files.length - visibleNames.length;
+  const remainingText = remaining > 0 ? `等 ${files.length} 个文件` : '';
+  return `暂不支持上传${visibleNames.join('、')}${remainingText}，已跳过这些文件。`;
 }
 
 function isSettledBatchResult(status: string | undefined): boolean {
@@ -129,6 +136,11 @@ type ChatPageProps = {
   initialDraft?: string;
 };
 
+type PendingSentTask = {
+  batchId: string;
+  content: string;
+};
+
 const HISTORY_PAGE_SIZE = 10;
 
 function historyMessagesToTurns(messages: ConversationHistoryMessage[]): ChatTurn[] {
@@ -181,6 +193,8 @@ export function ChatPage({
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadBatch, setUploadBatch] = useState<UploadBatchProgressState | null>(null);
+  const [pendingSentTask, setPendingSentTask] = useState<PendingSentTask | null>(null);
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [loadingMoreHistory, setLoadingMoreHistory] = useState(false);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
@@ -189,11 +203,11 @@ export function ChatPage({
   const pollingAgentRunsRef = useRef<Set<string>>(new Set());
   const pollingUploadReviewsRef = useRef<Set<string>>(new Set());
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const hasTurns = chatTurns.length > 0;
-  const waitingForDuplicateResolution = hasUnresolvedUploadReview(draftAttachments)
-    || Object.keys(duplicateReviews).length > 0;
   const uploadBatchActive = uploadBatch?.status === 'uploading' || uploadBatch?.status === 'processing';
+  const submittedUploadBatch = uploadBatch?.submitted ? uploadBatch : null;
   const primaryConversationId = getWebConversationId(user.id);
   const [conversationId, setConversationId] = useState(primaryConversationId);
 
@@ -209,6 +223,8 @@ export function ChatPage({
       setDraftAttachments([]);
       setDuplicateReviews({});
       setUploadBatch(null);
+      setPendingSentTask(null);
+      setAttachmentMenuOpen(false);
       setHasMoreHistory(false);
       setMessage('');
     } catch (err) {
@@ -325,6 +341,33 @@ export function ChatPage({
     });
   }, [chatTurns]);
 
+  useEffect(() => {
+    if (
+      !pendingSentTask
+      || !uploadBatch
+      || pendingSentTask.batchId !== uploadBatch.id
+      || !['completed', 'failed'].includes(uploadBatch.status)
+      || submitting
+    ) {
+      return;
+    }
+    setPendingSentTask(null);
+    if (!pendingSentTask.content) {
+      return;
+    }
+    const attachmentsForTurn = deduplicateAttachmentsByDocumentId(
+      uploadBatch.files
+        .filter((file) => file.result.processing_status !== 'FAILED')
+        .flatMap((file) => file.attachment ? [file.attachment] : []),
+    );
+    void sendTask(
+      pendingSentTask.content,
+      attachmentsForTurn,
+      new Set(attachmentsForTurn.map((file) => file.document_id)),
+      false,
+    );
+  }, [pendingSentTask, submitting, uploadBatch]);
+
   const loadOlderHistory = useCallback(async () => {
     const beforeMessageId = chatTurns[0]?.id;
     const messageList = messageListRef.current;
@@ -375,22 +418,81 @@ export function ChatPage({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (submitting || uploading || historyLoading || waitingForDuplicateResolution || uploadBatchActive) {
-      if (waitingForDuplicateResolution) {
-        setError('请先完成附件的重复文件确认，再发送任务。');
-      } else if (uploadBatchActive) {
-        setError('请等待本批文件自动处理完成后再发送新任务。');
-      }
+    if (submitting || uploading || historyLoading) {
       return;
     }
     const currentMessage = message.trim();
-    if (!currentMessage) {
+    const stagedBatch = uploadBatch?.status === 'staged' ? uploadBatch : null;
+    if (!currentMessage && !stagedBatch) {
+      return;
+    }
+    if (stagedBatch) {
+      setMessage('');
+      setPendingSentTask(
+        currentMessage ? { batchId: stagedBatch.id, content: currentMessage } : null,
+      );
+      await startStagedBatchProcessing(stagedBatch);
       return;
     }
     // 发送前再次按 document_id 收敛，防止重复上传确认把新卡片替换成已有文件后，
     // 同一文件在请求和聊天流中出现两次。
     const attachmentsForTurn = deduplicateAttachmentsByDocumentId(draftAttachments);
     await sendTask(currentMessage, attachmentsForTurn, new Set(attachmentsForTurn.map((file) => file.document_id)));
+  }
+
+  async function startStagedBatchProcessing(batch: UploadBatchProgressState) {
+    // 点击发送是暂存与处理的唯一边界；每个文件独立启动，单项失败不影响同批其他文件。
+    setError('');
+    setUploadBatch((current) => current?.id === batch.id ? {
+      ...current,
+      submitted: true,
+      status: 'processing',
+    } : current);
+    const submittedVersionIds = new Set(
+      batch.files.flatMap((file) => file.uploadVersionId ? [file.uploadVersionId] : []),
+    );
+    setDraftAttachments((current) => current.filter(
+      (file) => !file.upload_document_version_id
+        || !submittedVersionIds.has(file.upload_document_version_id),
+    ));
+    for (const batchFile of batch.files) {
+      const uploadVersionId = batchFile.uploadVersionId;
+      if (
+        !uploadVersionId
+        || !batchFile.attachment
+        || isSettledBatchResult(batchFile.result.processing_status)
+      ) {
+        continue;
+      }
+      try {
+        const started = await startUploadProcessing(token, uploadVersionId);
+        const attachment: ChatAttachment = {
+          ...batchFile.attachment,
+          filesystem_job_id: started.filesystem_job_id,
+          archive_status: started.archive_status,
+          duplicate_review_status: started.duplicate_review_status,
+          ingest_status: 'DUPLICATE_CHECK_PENDING',
+        };
+        setDraftAttachments((current) => current.map((file) => (
+          file.upload_document_version_id === uploadVersionId ? attachment : file
+        )));
+        setUploadBatch((current) => current?.id === batch.id ? {
+          ...current,
+          files: current.files.map((file) => file.id === batchFile.id ? {
+            ...file,
+            attachment,
+          } : file),
+        } : current);
+        void pollUploadDuplicateReview(attachment, batch.id, batchFile.id);
+      } catch (err) {
+        markBatchFileFailed(
+          batch.id,
+          batchFile.id,
+          batchFile.relativePath,
+          formatError(err),
+        );
+      }
+    }
   }
 
   async function sendTask(
@@ -512,8 +614,6 @@ export function ChatPage({
       submitting
       || uploading
       || historyLoading
-      || waitingForDuplicateResolution
-      || uploadBatchActive
       || !message.trim()
     ) {
       return;
@@ -521,48 +621,57 @@ export function ChatPage({
     event.currentTarget.form?.requestSubmit();
   }
 
-  async function handleFileChange(
-    event: ChangeEvent<HTMLInputElement>,
-    mode: 'files' | 'folder' = 'files',
-  ) {
-    // 批量选择仍逐个复用单文件上传服务；单项失败被隔离，不中断同批其余文件。
-    const files = Array.from(event.target.files ?? []);
-    if (files.length === 0) {
+  async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+    // 文件和文件夹共用同一暂存流程；浏览器目录相对路径不得提交到后端。
+    const selectedFiles = Array.from(event.target.files ?? []);
+    event.target.value = '';
+    if (selectedFiles.length === 0) {
       return;
     }
 
-    const batchId = createClientId();
-    const folderName = mode === 'folder' ? inferSelectedFolderName(files) : undefined;
+    setAttachmentMenuOpen(false);
+    const { supported: files, unsupported } = partitionUploadFiles(selectedFiles);
+    const notices = unsupported.length > 0 ? [unsupportedUploadNotice(unsupported)] : [];
+    if (files.length === 0) {
+      setError(notices.join(' '));
+      return;
+    }
+    const existingBatch = uploadBatch?.status === 'staged' ? uploadBatch : null;
+    const batchId = existingBatch?.id || createClientId();
+    const pendingFiles = files.map((file) => {
+      const id = `${batchId}:${createClientId()}`;
+      return {
+        id,
+        relativePath: file.name,
+        result: createPendingUploadResult(id, file.name),
+      };
+    });
     setError('');
     setUploading(true);
-    setUploadBatch({
-      id: batchId,
-      mode,
-      folderName,
-      total: files.length,
-      completed: 0,
-      processed: 0,
-      succeeded: 0,
-      needsReview: 0,
-      failed: 0,
-      failures: [],
-      files: files.map((file, index) => {
-        const relativePath = mode === 'folder' ? getSelectedFileRelativePath(file) : file.name;
-        const id = `${batchId}:${index}`;
-        return {
-          id,
-          relativePath,
-          result: createPendingUploadResult(id, file.name),
-        };
-      }),
-      status: 'uploading',
+    setUploadBatch((current) => current?.id === batchId && current.status === 'staged'
+      ? {
+          ...current,
+          total: current.total + files.length,
+          files: [...current.files, ...pendingFiles],
+          status: 'uploading',
+        }
+      : {
+          id: batchId,
+          submitted: false,
+          total: files.length,
+          completed: 0,
+          processed: 0,
+          succeeded: 0,
+          needsReview: 0,
+          failed: 0,
+          failures: [],
+          files: pendingFiles,
+          status: 'uploading',
     });
-    let uploadedCount = 0;
     for (const [fileIndex, file] of files.entries()) {
-      const batchFileId = `${batchId}:${fileIndex}`;
-      const relativePath = mode === 'folder' ? getSelectedFileRelativePath(file) : file.name;
+      const batchFileId = pendingFiles[fileIndex].id;
       try {
-        const uploadedFile = await uploadFile(token, file, conversationId, relativePath);
+        const uploadedFile = await uploadFile(token, file, conversationId);
         const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined;
         if (previewUrl) {
           previewUrls.current.add(previewUrl);
@@ -571,8 +680,7 @@ export function ChatPage({
           ...uploadedFile,
           preview_url: previewUrl,
         };
-        uploadedCount += 1;
-        // 先把单文件加入状态再启动轮询，避免小文件查重瞬间完成时回写不到附件。
+        // 这里只记录暂存附件；点击发送前不得轮询或启动任何后台处理。
         setDraftAttachments((current) => deduplicateAttachmentsByDocumentId([...current, attachment]));
         setUploadBatch((current) => current?.id === batchId ? {
           ...current,
@@ -586,28 +694,39 @@ export function ChatPage({
               document_id: uploadedFile.document_id,
               filename: uploadedFile.filename,
               original_filename: uploadedFile.filename,
-              renamed_filename: uploadedFile.filename,
+              renamed_filename: null,
               processing_status: 'PROCESSING',
               extraction_status: 'PROCESSING',
             },
           } : batchFile),
         } : current);
-        if (uploadedFile.filesystem_job_id && uploadedFile.upload_document_version_id) {
-          void pollUploadDuplicateReview(attachment, batchId, batchFileId);
-        }
       } catch (err) {
         const failureMessage = formatError(err);
-        markBatchUploadFailed(batchId, batchFileId, relativePath, failureMessage);
+        notices.push(`文件“${file.name}”上传失败：${failureMessage}`);
+        markBatchUploadFailed(batchId, batchFileId, file.name, failureMessage);
       }
     }
     setUploading(false);
-    event.target.value = '';
-    setUploadBatch((current) => current?.id === batchId ? {
-      ...current,
-      status: current.processed >= current.total
-        ? current.failed > 0 ? 'failed' : 'completed'
-        : uploadedCount > 0 ? 'processing' : 'failed',
-    } : current);
+    setUploadBatch((current) => {
+      if (!current || current.id !== batchId) return current;
+      const uploadedFiles = current.files.filter((file) => Boolean(file.uploadVersionId));
+      if (uploadedFiles.length === 0) return null;
+      return {
+        ...current,
+        total: uploadedFiles.length,
+        completed: uploadedFiles.length,
+        processed: 0,
+        succeeded: 0,
+        needsReview: 0,
+        failed: 0,
+        failures: [],
+        files: uploadedFiles,
+        status: 'staged',
+      };
+    });
+    if (notices.length > 0) {
+      setError(notices.join(' '));
+    }
   }
 
   async function pollUploadDuplicateReview(
@@ -769,6 +888,14 @@ export function ChatPage({
       const selectedCandidate = review.candidates.find(
         (candidate) => candidate.existing_document_id === result.selected_existing_document_id,
       );
+      const resolvedAttachment: ChatAttachment | undefined = batchFile?.attachment ? {
+        ...batchFile.attachment,
+        document_id: result.selected_existing_document_id,
+        filename: String(selectedCandidate?.summary.filename ?? batchFile.attachment.filename),
+        status: 'WORKING_COPY',
+        archive_status: result.archive_status,
+        duplicate_review_status: 'RESOLVED',
+      } : undefined;
       setDraftAttachments((current) => deduplicateAttachmentsByDocumentId(
         current.map((item) => (
           item.upload_document_version_id === review.upload_document_version_id
@@ -783,6 +910,15 @@ export function ChatPage({
             : item
         )),
       ));
+      if (resolvedAttachment) {
+        setUploadBatch((current) => current?.id === batchId ? {
+          ...current,
+          files: current.files.map((file) => file.id === batchFileId ? {
+            ...file,
+            attachment: resolvedAttachment,
+          } : file),
+        } : current);
+      }
       void pollUploadArchiveStatus(
         review.upload_document_version_id,
         review.filename,
@@ -897,6 +1033,7 @@ export function ChatPage({
 
   async function removeDraftAttachment(documentId: string) {
     // 发送前删除会同步删除后端文件；发送后的附件不走这个入口。
+    const targetAttachment = draftAttachments.find((file) => file.document_id === documentId);
     setError('');
     setDraftAttachments((current) => current.map((file) => (
       file.document_id === documentId ? { ...file, deleting: true } : file
@@ -912,6 +1049,24 @@ export function ChatPage({
         }
         return current.filter((file) => file.document_id !== documentId);
       });
+      if (targetAttachment?.upload_document_version_id) {
+        setUploadBatch((current) => {
+          if (!current || current.status !== 'staged') return current;
+          const nextFiles = current.files.filter(
+            (file) => file.uploadVersionId !== targetAttachment.upload_document_version_id,
+          );
+          if (nextFiles.length === 0) return null;
+          return {
+            ...current,
+            total: Math.max(0, current.total - 1),
+            completed: Math.max(0, current.completed - 1),
+            files: nextFiles,
+            status: nextFiles.some((file) => Boolean(file.uploadVersionId))
+              ? 'staged'
+              : 'failed',
+          };
+        });
+      }
       setDuplicateReviews((current) => Object.fromEntries(
         Object.entries(current).filter(([, review]) => review.document_id !== documentId),
       ));
@@ -1168,7 +1323,7 @@ export function ChatPage({
           ) : !hasTurns ? (
             <div className="empty-chat-heading">
               <h2>有什么我能帮你的吗？</h2>
-              <p>可以只上传文件，系统会自动完成分类和标准化命名；也可以输入其他文件任务。</p>
+              <p>添加文件或文件夹后点击发送，系统会开始分类和标准化命名；也可以同时输入其他文件任务。</p>
             </div>
           ) : (
             <div
@@ -1221,30 +1376,33 @@ export function ChatPage({
             </div>
           )}
 
+          {submittedUploadBatch ? (
+            <section className="submitted-upload-batch" aria-label="已提交文件处理进度">
+              <UploadBatchProgress
+                batch={submittedUploadBatch}
+                token={token}
+                onOpenAttachment={openAttachment}
+                onOpenDocument={openSearchDocument}
+              />
+              {Object.values(duplicateReviews).map((review) => (
+                <DuplicateUploadReviewCard
+                  key={review.id}
+                  token={token}
+                  review={review}
+                  onResolved={resolveDuplicateReview}
+                />
+              ))}
+            </section>
+          ) : null}
+
           <form className={hasTurns ? 'composer docked-composer' : 'composer center-composer'} onSubmit={submit}>
             <AttachmentRail
               attachments={draftAttachments}
               layout="rail"
+              locked={uploading || uploadBatch?.status === 'processing'}
               onOpen={openAttachment}
               onRemove={removeDraftAttachment}
             />
-            {uploadBatch ? (
-              <UploadBatchProgress
-                batch={uploadBatch}
-                token={token}
-                onDismiss={() => setUploadBatch(null)}
-                onOpenAttachment={openAttachment}
-                onOpenDocument={openSearchDocument}
-              />
-            ) : null}
-            {Object.values(duplicateReviews).map((review) => (
-              <DuplicateUploadReviewCard
-                key={review.id}
-                token={token}
-                review={review}
-                onResolved={resolveDuplicateReview}
-              />
-            ))}
             <textarea
               value={message}
               onChange={(event) => setMessage(event.target.value)}
@@ -1252,33 +1410,46 @@ export function ChatPage({
               disabled={historyLoading}
               placeholder={historyLoading ? '正在加载对话...' : ''}
               rows={1}
-              required
             />
             <div className="composer-actions">
-              <div className="upload-picker-group">
-                <label className="file-picker">
+              <div className="upload-picker-menu">
+                <button
+                  className="file-picker"
+                  disabled={uploading || submitting || uploadBatchActive}
+                  type="button"
+                  onClick={() => setAttachmentMenuOpen((current) => !current)}
+                >
                   <Paperclip size={18} />
-                  <span>{uploading ? '上传中...' : '选择文件'}</span>
-                  <input
-                    accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.md,.csv"
-                    disabled={uploading || submitting || uploadBatchActive}
-                    multiple
-                    type="file"
-                    onChange={(event) => void handleFileChange(event, 'files')}
-                  />
-                </label>
-                <label className="file-picker folder-picker">
-                  <FolderTree size={18} />
-                  <span>{uploading ? '上传中...' : '上传文件夹'}</span>
-                  <input
-                    ref={folderInputRef}
-                    accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.md,.csv"
-                    disabled={uploading || submitting || uploadBatchActive}
-                    multiple
-                    type="file"
-                    onChange={(event) => void handleFileChange(event, 'folder')}
-                  />
-                </label>
+                  <span>{uploading ? '暂存中...' : '添加附件'}</span>
+                </button>
+                {attachmentMenuOpen ? (
+                  <div className="upload-picker-options">
+                    <button type="button" onClick={() => fileInputRef.current?.click()}>
+                      <Paperclip size={16} />选择文件
+                    </button>
+                    <button type="button" onClick={() => folderInputRef.current?.click()}>
+                      <FolderTree size={16} />选择文件夹
+                    </button>
+                  </div>
+                ) : null}
+                <input
+                  ref={fileInputRef}
+                  className="upload-picker-input"
+                  accept={SUPPORTED_UPLOAD_ACCEPT}
+                  disabled={uploading || submitting || uploadBatchActive}
+                  multiple
+                  type="file"
+                  onChange={(event) => void handleFileChange(event)}
+                />
+                <input
+                  ref={folderInputRef}
+                  className="upload-picker-input"
+                  accept={SUPPORTED_UPLOAD_ACCEPT}
+                  disabled={uploading || submitting || uploadBatchActive}
+                  multiple
+                  type="file"
+                  onChange={(event) => void handleFileChange(event)}
+                />
               </div>
               <button
                 className="primary-button send-button"
@@ -1286,8 +1457,7 @@ export function ChatPage({
                   submitting
                   || uploading
                   || historyLoading
-                  || waitingForDuplicateResolution
-                  || uploadBatchActive
+                  || (!message.trim() && draftAttachments.length === 0)
                 }
                 type="submit"
               >
@@ -1296,10 +1466,8 @@ export function ChatPage({
                   ? '发送中...'
                   : historyLoading
                     ? '加载中...'
-                    : waitingForDuplicateResolution
-                      ? '请先确认重复文件'
-                      : uploadBatchActive
-                        ? '文件处理中'
+                    : uploadBatch?.status === 'staged'
+                      ? '发送并处理'
                       : '发送'}
               </button>
             </div>

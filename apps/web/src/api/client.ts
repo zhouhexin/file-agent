@@ -15,6 +15,7 @@ import type {
   SpreadsheetPreviewResponse,
   FailedFileJob,
   UploadArchiveStatus,
+  UploadProcessingStart,
   FilesystemJobResponse,
   OperationConfirmResponse,
   OperationPlanResponse,
@@ -361,13 +362,11 @@ export async function uploadFile(
   token: string,
   file: File,
   conversationId: string,
-  relativePath?: string,
 ): Promise<UploadedFile> {
   // 文件上传必须使用 FormData，不能复用 JSON 请求封装。
   const formData = new FormData();
   formData.append('file', file);
   formData.append('conversation_id', conversationId);
-  if (relativePath) formData.append('relative_path', relativePath);
 
   const response = await fetch(`${API_BASE_URL}/files/upload`, {
     method: 'POST',
@@ -382,6 +381,17 @@ export async function uploadFile(
   }
   const data = await response.json();
   return data as UploadedFile;
+}
+
+export async function startUploadProcessing(
+  token: string,
+  uploadVersionId: string,
+): Promise<UploadProcessingStart> {
+  // 只有用户点击发送后才调用；接口按上传版本幂等启动查重和后续处理。
+  return request<UploadProcessingStart>(`/uploads/${uploadVersionId}/process`, {
+    token,
+    method: 'POST',
+  });
 }
 
 export async function getDuplicateReview(

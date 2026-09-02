@@ -71,8 +71,16 @@ class OrganizationDecisionRepository:
         target_relative_path: str | None = None,
         shadow_only: bool = False,
         decision_scope: str = "initial-organization",
+        category_id_override: str | None = None,
+        taxonomy_key_override: str | None = None,
+        taxonomy_version_override: str | None = None,
+        classifier_version_override: str | None = None,
     ) -> DocumentOrganizationDecision:
-        """按文件版本和策略版本幂等写入组织决策快照。"""
+        """按文件版本和策略版本幂等写入组织决策快照。
+
+        override 只供不依赖正文语义的后端确定性组织规则使用，调用方仍必须提交
+        taxonomy 中真实存在的稳定根分类 ID，不能接受浏览器或 LLM 自由路径。
+        """
 
         raw_idempotency_key = (
             f"{decision_scope}:{working_copy.id}:{working_copy.current_version_id}:"
@@ -102,12 +110,18 @@ class OrganizationDecisionRepository:
             self.db.add(row)
         row.classification_run_id = classification_run.id if classification_run else None
         row.primary_suggestion_id = primary_suggestion.id if primary_suggestion else None
-        row.category_id = (
+        row.category_id = category_id_override or (
             primary_suggestion.category_id if primary_suggestion and primary_suggestion.category_id else None
         )
-        row.taxonomy_key = classification_run.taxonomy_key if classification_run else ""
-        row.taxonomy_version = classification_run.taxonomy_version if classification_run else ""
-        row.classifier_version = classification_run.classifier_version if classification_run else ""
+        row.taxonomy_key = taxonomy_key_override or (
+            classification_run.taxonomy_key if classification_run else ""
+        )
+        row.taxonomy_version = taxonomy_version_override or (
+            classification_run.taxonomy_version if classification_run else ""
+        )
+        row.classifier_version = classifier_version_override or (
+            classification_run.classifier_version if classification_run else ""
+        )
         row.calibration_version = calibration_version
         row.decision = decision
         row.calibrated_confidence = policy_result.calibrated_confidence
@@ -124,6 +138,61 @@ class OrganizationDecisionRepository:
         row.completed_at = utcnow()
         self.db.flush()
         return row
+
+    def create_system_primary(
+        self,
+        *,
+        working_copy: WorkingCopy,
+        category_id: str,
+        category_path: list[str],
+        taxonomy_key: str,
+        taxonomy_version: str,
+        classifier_version: str,
+        source: str,
+        evidence: list[dict[str, object]],
+    ) -> DocumentCategory:
+        """为后端确定性组织规则创建唯一自动主分类并写入图谱 Outbox。"""
+
+        existing = (
+            self.db.query(DocumentCategory)
+            .filter(
+                DocumentCategory.working_copy_id == working_copy.id,
+                DocumentCategory.document_version_id == working_copy.current_version_id,
+                DocumentCategory.relation_role == "PRIMARY",
+                DocumentCategory.status.in_(["AUTO_APPLIED", "CONFIRMED"]),
+            )
+            .one_or_none()
+        )
+        if existing is not None:
+            return existing
+        relation = DocumentCategory(
+            working_copy_id=working_copy.id,
+            document_id=working_copy.document_id,
+            document_version_id=str(working_copy.current_version_id or ""),
+            category_id=category_id,
+            category_path_json=list(category_path),
+            relation_role="PRIMARY",
+            status="AUTO_APPLIED",
+            taxonomy_key=taxonomy_key,
+            taxonomy_version=taxonomy_version,
+            classifier_version=classifier_version,
+            source=source,
+            evidence_json=list(evidence),
+        )
+        self.db.add(relation)
+        self.db.flush()
+        self.db.add(
+            ClassificationGraphOutbox(
+                document_category_id=relation.id,
+                working_copy_id=relation.working_copy_id,
+                document_version_id=relation.document_version_id,
+                expected_status="AUTO_APPLIED",
+                state_version=1,
+                deduplication_key=f"{relation.id}:1:AUTO_APPLIED:{source}",
+                status="PENDING",
+            )
+        )
+        return relation
 
     def create_auto_applied_primary(
         self,

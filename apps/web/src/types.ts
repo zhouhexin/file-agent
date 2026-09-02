@@ -576,7 +576,7 @@ export type UploadedFile = {
   deduplicated: boolean;
   upload_document_version_id?: string;
   duplicate_review_id?: string;
-  filesystem_job_id?: string;
+  filesystem_job_id?: string | null;
   archive_status?: string;
   duplicate_review_status?: string;
   working_copy_id?: string | null;
@@ -691,6 +691,15 @@ export type UploadArchiveStatus = {
   filesystem_job_id: string | null;
   error_code: string | null;
   error_message: string | null;
+};
+
+export type UploadProcessingStart = {
+  upload_document_version_id: string;
+  document_id: string;
+  duplicate_review_id: string;
+  filesystem_job_id: string;
+  archive_status: string;
+  duplicate_review_status: string;
 };
 
 export type ConversationHistoryMessage = {
@@ -814,7 +823,8 @@ export type DocumentResult = {
   working_copy_id?: string;
   filename: string;
   original_filename?: string;
-  renamed_filename?: string;
+  /** 仅在实际改名完成或明确判定无需改名后返回；处理中、失败和待复核为 null。 */
+  renamed_filename?: string | null;
   rename_status?: 'COMPLETED' | 'NO_CHANGE' | 'NEEDS_REVIEW' | string;
   processing_status?: 'COMPLETED' | 'FAILED' | 'NEEDS_REVIEW' | string;
   organization_status?: 'READY' | 'NEEDS_REVIEW' | string;

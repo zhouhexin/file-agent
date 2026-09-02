@@ -1682,11 +1682,15 @@ external model use for file content must be explicit
 
 ## 19. Three-tier File Lifecycle APIs
 
-上传接口返回 `202 Accepted`，并包含 `upload_document_version_id`、`duplicate_review_id`、`filesystem_job_id`、`archive_status` 和 `duplicate_review_status`。请求线程只落暂存和创建任务。
+上传接口返回 `202 Accepted`，并包含 `upload_document_version_id`、`duplicate_review_id`、
+`archive_status=STAGED` 和 `duplicate_review_status=STAGED`；`filesystem_job_id` 此时为 `null`。
+选择附件只落暂存，不得创建查重、归档、解析、分类或重命名任务。文件夹是前端选取方式，
+浏览器提供的目录相对路径不提交也不保存到后端。
 
 ```text
 GET  /api/uploads/{upload_version_id}/duplicate-review
 POST /api/uploads/{upload_version_id}/duplicate-review/decision
+POST /api/uploads/{upload_version_id}/process
 GET  /api/uploads/{upload_version_id}/archive-status
 GET  /api/jobs/{job_id}
 GET  /api/jobs/{job_id}/events
@@ -1709,9 +1713,17 @@ POST /api/trash-entries/{trash_entry_id}/restore-plan
 `evidence_items` 和现有分类卡使用的 `evidence` 摘要。终态为 `COMPLETED`、`NEEDS_REVIEW` 或
 `FAILED`；处于终态时，分类或命名子状态不得继续返回 `PROCESSING`。
 
-单文件、多文件和文件夹上传均由前端按本次选择建立批次，并用每个文件返回的
-`upload_document_version_id` 轮询上述接口。上传本身不创建或发送隐式聊天任务消息；批次进度、
-逐文件原名、重命名后名称、分类、状态及失败/待复核原因直接由状态响应汇总展示。
+单文件、多文件和文件夹上传均由前端按本次选择建立同一种暂存批次。只有用户点击发送后，前端才
+逐文件调用幂等的 `POST /api/uploads/{upload_version_id}/process`；单项启动失败不影响同批其他
+文件。取得 `filesystem_job_id` 后再开始轮询查重和归档状态。空文字发送只启动默认处理并展示
+批次回执；存在用户文字时，必须在附件查重及默认处理结束后再提交原始用户任务，避免提前锁定上传
+文档而破坏重复文件决策边界。上传本身不创建或发送隐式聊天任务消息。
+
+真实容器校验通过的上传图片采用固定首次组织规则：单张和批量图片都不识别具体学院，直接按
+`学院/{YYYY-MM-DD}` 发布工作副本；日期按 `Asia/Shanghai` 的原上传自然日计算。同一天的图片
+复用同一日期目录，同名图片由后端在该目录内分配版本后缀，禁止覆盖。该规则只改变工作副本和
+活动主分类投影，不修改不可变归档原件及 `documents.original_filename`；非图片继续使用正文证据
+分类规则。
 
 普通文件检索只读取 `ACTIVE` 工作副本。只有用户消息明确包含带扩展名的完整文件名，且不存在
 同名活动副本时，消息接口才可以返回 `response_type=trash_restore_selection`。对应
@@ -1761,6 +1773,10 @@ GET /api/classification/organization/files?category_id={stable_id}&scope=descend
 `category_id=__needs_review__` 的虚拟“待复核”节点。计数和清单只包含共享工作区的 `ACTIVE`
 工作副本；活动主分类只认当前版本的 `PRIMARY + AUTO_APPLIED/CONFIRMED` 关系。建议分类、
 已拒绝关系、`ORGANIZING` 文件和 Shadow 组织决策不得参与计数。
+
+图片日期目录不会动态写回 taxonomy。`tree` 在“学院”节点下根据活动主分类关系投影
+`category_id=__image_upload_date__:{YYYY-MM-DD}` 的虚拟日期节点；`files` 接受该后端签发 ID，
+只返回对应自然日的上传图片。日期节点属于组织视图，不表示系统从图片正文识别了具体学院。
 
 `files` 支持 `scope=direct|descendants` 和服务端分页。传入 `__needs_review__` 等价于读取当前版本
 最新的非 Shadow `NEEDS_REVIEW` 组织决策。响应只包含稳定业务 ID、逻辑相对路径、分类状态、

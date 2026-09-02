@@ -13,6 +13,7 @@ from app.db.models import (
     UploadArchiveRecord,
     UploadDuplicateReview,
 )
+from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.worker import process_next_filesystem_job
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.tests.helpers import clear_overrides, client_with_database
@@ -54,8 +55,19 @@ def _drain_jobs(SessionLocal, *, maximum: int = 20) -> list[str]:
     return processed
 
 
-def test_upload_creates_version_review_and_persistent_job(monkeypatch, tmp_path):
-    """上传请求只保存暂存和创建任务，不得同步归档或导入。"""
+def _start_processing(client, headers: dict[str, str], upload: dict) -> dict:
+    """模拟用户点击发送，启动单个暂存附件处理。"""
+
+    response = client.post(
+        f"/api/uploads/{upload['upload_document_version_id']}/process",
+        headers=headers,
+    )
+    assert response.status_code == 202
+    return response.json()
+
+
+def test_upload_only_creates_staged_version_without_processing_job(monkeypatch, tmp_path):
+    """选择附件只保存暂存；点击发送前不得创建任何处理任务。"""
 
     _configure_storage(monkeypatch, tmp_path)
     client, SessionLocal = client_with_database()
@@ -68,11 +80,11 @@ def test_upload_creates_version_review_and_persistent_job(monkeypatch, tmp_path)
     assert response.status_code == 202
     data = response.json()
     assert data["status"] == "UPLOADED"
-    assert data["ingest_status"] == "DUPLICATE_CHECK_PENDING"
+    assert data["ingest_status"] == "STAGED"
     assert data["deduplicated"] is False
     assert data["upload_document_version_id"]
     assert data["duplicate_review_id"]
-    assert data["filesystem_job_id"]
+    assert data["filesystem_job_id"] is None
 
     db = SessionLocal()
     try:
@@ -80,12 +92,11 @@ def test_upload_creates_version_review_and_persistent_job(monkeypatch, tmp_path)
         version = db.get(DocumentVersion, data["upload_document_version_id"])
         review = db.get(UploadDuplicateReview, data["duplicate_review_id"])
         archive = db.query(UploadArchiveRecord).filter_by(upload_document_version_id=version.id).one()
-        job = db.get(FilesystemJob, data["filesystem_job_id"])
         file_object = db.query(FileObject).filter_by(document_id=document.id).one()
         assert version.storage_tier == "UPLOAD"
-        assert review.status == "CHECKING"
-        assert archive.status == "DUPLICATE_CHECK_PENDING"
-        assert job.status == "PENDING"
+        assert review.status == "STAGED"
+        assert archive.status == "STAGED"
+        assert db.query(FilesystemJob).count() == 0
         assert (tmp_path / "uploads" / file_object.storage_path).read_bytes() == b"student-file-content"
         assert not (tmp_path / "originals").exists()
         assert not (tmp_path / "working").exists()
@@ -94,8 +105,8 @@ def test_upload_creates_version_review_and_persistent_job(monkeypatch, tmp_path)
         clear_overrides()
 
 
-def test_folder_upload_returns_validated_relative_path(monkeypatch, tmp_path):
-    """文件夹上传只保留安全相对路径元数据，底层原件仍由既有受控存储路径管理。"""
+def test_folder_relative_path_is_not_retained_by_upload_api(monkeypatch, tmp_path):
+    """目录选择路径只是浏览器选取信息，不进入上传响应或后端生命周期数据。"""
 
     _configure_storage(monkeypatch, tmp_path)
     client, _ = client_with_database()
@@ -108,25 +119,73 @@ def test_folder_upload_returns_validated_relative_path(monkeypatch, tmp_path):
     )
 
     assert response.status_code == 202
-    assert response.json()["relative_path"] == "财务处/2026/通知.txt"
+    assert response.json()["relative_path"] is None
     clear_overrides()
 
 
-def test_folder_upload_rejects_relative_path_traversal(monkeypatch, tmp_path):
-    """客户端相对路径不得利用目录穿越影响服务器存储或回执展示。"""
+def test_send_action_starts_duplicate_job_idempotently(monkeypatch, tmp_path):
+    """只有显式开始处理接口创建任务，重复调用必须复用同一个查重任务。"""
 
     _configure_storage(monkeypatch, tmp_path)
-    client, _ = client_with_database()
-    response = client.post(
+    client, SessionLocal = client_with_database()
+    headers = _auth_header(client, "start-staged-upload-user")
+    upload = client.post(
         "/api/files/upload",
-        headers=_auth_header(client, "folder-path-user"),
-        data={"relative_path": "资料/../通知.txt"},
-        files={"file": ("通知.txt", b"unsafe path", "text/plain")},
-    )
+        headers=headers,
+        files={"file": ("通知.txt", b"staged upload", "text/plain")},
+    ).json()
 
-    assert response.status_code == 400
-    assert "相对路径" in response.json()["error"]["message"]
-    clear_overrides()
+    first = _start_processing(client, headers, upload)
+    second = _start_processing(client, headers, upload)
+
+    assert first["filesystem_job_id"] == second["filesystem_job_id"]
+    assert first["archive_status"] == "DUPLICATE_CHECK_PENDING"
+    assert first["duplicate_review_status"] == "CHECKING"
+    db = SessionLocal()
+    try:
+        assert db.query(FilesystemJob).count() == 1
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_reconcile_does_not_process_unexpired_staged_upload(monkeypatch, tmp_path):
+    """后台补偿任务不得绕过发送按钮处理仍在有效期内的暂存附件。"""
+
+    _configure_storage(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth_header(client, "staged-reconcile-user")
+    upload = client.post(
+        "/api/files/upload",
+        headers=headers,
+        files={"file": ("暂存通知.txt", b"staged reconcile", "text/plain")},
+    ).json()
+    db = SessionLocal()
+    try:
+        document = db.get(Document, upload["document_id"])
+        FilesystemJobQueue(db).create_job(
+            job_type="RECONCILE_UPLOAD_ARCHIVES",
+            root_id=None,
+            created_by=document.user_id,
+            payload={},
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    assert len(_drain_jobs(SessionLocal)) == 1
+    db = SessionLocal()
+    try:
+        archive = db.query(UploadArchiveRecord).filter_by(
+            upload_document_version_id=upload["upload_document_version_id"]
+        ).one()
+        review = db.get(UploadDuplicateReview, upload["duplicate_review_id"])
+        assert archive.status == "STAGED"
+        assert review.status == "STAGED"
+        assert review.duplicate_check_job_id is None
+    finally:
+        db.close()
+        clear_overrides()
 
 
 def test_upload_creates_owned_conversation_before_binding_duplicate_review(
@@ -543,6 +602,7 @@ def test_shared_active_working_copy_preview_is_readable_by_other_user(
         files={"file": ("共享通知.txt", "共享正文内容".encode(), "text/plain")},
     )
     assert upload.status_code == 202
+    _start_processing(client, owner, upload.json())
     _drain_jobs(_SessionLocal)
     copies = client.get("/api/working-copies", headers=viewer).json()
     shared = copies[0]
@@ -580,6 +640,7 @@ def test_shared_active_working_copy_cannot_use_private_upload_delete_api(
         files={"file": ("共享删除边界.txt", "受保护正文".encode(), "text/plain")},
     )
     assert upload.status_code == 202
+    _start_processing(client, owner, upload.json())
     _drain_jobs(SessionLocal)
     copies = client.get("/api/working-copies", headers=viewer).json()
     shared = copies[0]
@@ -621,6 +682,7 @@ def test_trashed_shared_working_copy_content_is_not_readable_by_owner_or_viewer(
         files={"file": ("已删除共享通知.txt", "不可继续读取".encode(), "text/plain")},
     )
     assert upload.status_code == 202
+    _start_processing(client, owner, upload.json())
     _drain_jobs(SessionLocal)
     shared = client.get("/api/working-copies", headers=viewer).json()[0]
     context = client.post(

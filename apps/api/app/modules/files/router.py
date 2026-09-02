@@ -28,7 +28,6 @@ router = APIRouter(prefix="/api/files", tags=["files"])
 async def upload_file(
     file: UploadFile = File(...),
     conversation_id: str | None = Form(default=None),
-    relative_path: str | None = Form(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> FileUploadResponse:
@@ -38,7 +37,6 @@ async def upload_file(
         file=file,
         current_user=current_user,
         conversation_id=conversation_id,
-        relative_path=relative_path,
     )
 
 

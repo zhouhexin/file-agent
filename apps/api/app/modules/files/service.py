@@ -32,7 +32,6 @@ from app.modules.files.schemas import (
     SpreadsheetSheetSummary,
 )
 from app.modules.files.content_types import infer_content_type
-from app.modules.files.upload_paths import normalize_upload_relative_path
 
 
 class FileUploadService:
@@ -49,18 +48,14 @@ class FileUploadService:
         file: UploadFile,
         current_user: User,
         conversation_id: str | None = None,
-        relative_path: str | None = None,
     ) -> FileUploadResponse:
-        """保存上传暂存，并在同一事务登记异步查重任务。
+        """只保存上传暂存；用户发送请求前不得创建任何处理任务。
 
-        上传请求不得同步执行归档、导入或分类，也不能因为哈希相同直接复用其他 Document。
+        上传请求不得执行或排队查重、归档、导入或分类，也不能因为哈希相同直接复用其他
+        Document。文件夹选择只是一种浏览器选取方式，目录相对路径不进入后端数据。
         """
 
         filename = Path(file.filename or "uploaded-file").name
-        normalized_relative_path = normalize_upload_relative_path(
-            relative_path,
-            filename=filename,
-        )
         # 浏览器可能把合法图片上报为 application/octet-stream；统一推断可避免同一文件在
         # 上传、受管目录导入和工作副本导入三条链路中得到不同 MIME。
         content_type = infer_content_type(
@@ -97,12 +92,12 @@ class FileUploadService:
                 size_bytes=size_bytes,
                 sha256=sha256,
             )
-            version, archive, review, job = UploadLifecycleService(self.db).register_upload(
+            version, archive, review = UploadLifecycleService(self.db).register_upload(
                 document=document,
                 storage_path=relative_path,
                 conversation_id=conversation_id,
             )
-            document.ingest_status = "DUPLICATE_CHECK_PENDING"
+            document.ingest_status = "STAGED"
             self.db.commit()
         except Exception:
             self.db.rollback()
@@ -115,10 +110,10 @@ class FileUploadService:
             document=document,
             version_id=version.id,
             review_id=review.id,
-            job_id=job.id,
+            job_id=None,
             archive_status=archive.status,
             review_status=review.status,
-            relative_path=normalized_relative_path,
+            relative_path=None,
         )
 
     def _to_upload_response(
@@ -127,7 +122,7 @@ class FileUploadService:
         document: Document,
         version_id: str,
         review_id: str,
-        job_id: str,
+        job_id: str | None,
         archive_status: str,
         review_status: str,
         relative_path: str | None,

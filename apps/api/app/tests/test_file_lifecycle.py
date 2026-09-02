@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from app.core import config
 from app.db.models import (
@@ -89,8 +92,18 @@ def _auth(client, username: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _start_upload(client, headers, upload: dict) -> None:
+    """模拟用户点击发送，启动暂存附件处理。"""
+
+    response = client.post(
+        f"/api/uploads/{upload['upload_document_version_id']}/process",
+        headers=headers,
+    )
+    assert response.status_code == 202
+
+
 def _upload(client, headers, filename: str = "2024年度通知.txt", content: bytes = b"annual notice") -> dict:
-    """上传一个测试附件。"""
+    """上传测试附件并模拟点击发送。"""
 
     response = client.post(
         "/api/files/upload",
@@ -98,7 +111,9 @@ def _upload(client, headers, filename: str = "2024年度通知.txt", content: by
         files={"file": (filename, content, "text/plain")},
     )
     assert response.status_code == 202
-    return response.json()
+    upload = response.json()
+    _start_upload(client, headers, upload)
+    return upload
 
 
 def _drain(SessionLocal, maximum: int = 30) -> list[str]:
@@ -111,6 +126,14 @@ def _drain(SessionLocal, maximum: int = 30) -> list[str]:
             break
         job_ids.append(job_id)
     return job_ids
+
+
+def _png_bytes(color: str) -> bytes:
+    """生成可由后端真实容器校验识别的测试 PNG，不能只伪造 MIME。"""
+
+    buffer = BytesIO()
+    Image.new("RGB", (32, 24), color=color).save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def _trash_working_copy(client, headers: dict[str, str], working_copy_id: str, conversation_id: str) -> None:
@@ -1675,6 +1698,7 @@ def test_duplicate_upload_decision_is_audited_but_hidden_from_chat(monkeypatch, 
     )
     assert second_response.status_code == 202
     second = second_response.json()
+    _start_upload(client, headers, second)
 
     process_next_filesystem_job(session_factory=SessionLocal, worker_id="duplicate-chat-test")
     review_response = client.get(
@@ -1787,6 +1811,8 @@ def test_low_confidence_initial_name_keeps_upload_name_and_audit_without_chat_no
         files={"file": ("原上传名称.txt", b"2026 annual scholarship material", "text/plain")},
     ).json()
 
+    _start_upload(client, headers, upload)
+
     _drain(SessionLocal)
     working_copy = client.get("/api/working-copies", headers=headers).json()[0]
     history = client.get("/api/conversations/low-confidence-conv", headers=headers).json()
@@ -1858,12 +1884,21 @@ def test_initial_ready_rename_is_applied_to_working_copy_on_upload(monkeypatch, 
         },
     )
     assert upload.status_code == 202
+    upload_payload = upload.json()
+    _start_upload(client, headers, upload_payload)
 
     _drain(SessionLocal)
     working_copy = client.get("/api/working-copies", headers=headers).json()[0]
     history = client.get("/api/conversations/rename-suggestion-conv", headers=headers).json()
+    archive_status = client.get(
+        f"/api/uploads/{upload_payload['upload_document_version_id']}/archive-status",
+        headers=headers,
+    ).json()
 
     assert working_copy["filename"] == "2026_研究成果资助汇总表.txt"
+    assert archive_status["original_filename"] == "2024科研成果资助汇总表.txt"
+    assert archive_status["renamed_filename"] == "2026_研究成果资助汇总表.txt"
+    assert archive_status["rename_status"] == "COMPLETED"
     assert history["messages"] == []
     db = SessionLocal()
     try:
@@ -1886,6 +1921,7 @@ def test_initial_ready_rename_is_applied_to_working_copy_on_upload(monkeypatch, 
     finally:
         db.close()
 
+
     db = SessionLocal()
     try:
         working_document = db.get(Document, working_copy["document_id"])
@@ -1900,6 +1936,167 @@ def test_initial_ready_rename_is_applied_to_working_copy_on_upload(monkeypatch, 
     finally:
         db.close()
         clear_overrides()
+
+
+def test_archive_job_resumes_from_retry_wait(monkeypatch, tmp_path):
+    """A queued archive retry must resume instead of failing on its own retry state."""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "archive-retry-owner")
+    upload = _upload(client, headers, "retry.txt", b"retryable upload")
+
+    assert process_next_filesystem_job(
+        session_factory=SessionLocal,
+        worker_id="archive-retry-duplicate-check",
+        queue_names={"DUPLICATE_CHECK"},
+    ) is not None
+    with SessionLocal() as db:
+        archive = db.query(UploadArchiveRecord).filter_by(
+            upload_document_version_id=upload["upload_document_version_id"]
+        ).one()
+        archive.status = "RETRY_WAIT"
+        db.commit()
+
+    assert process_next_filesystem_job(
+        session_factory=SessionLocal,
+        worker_id="archive-retry-worker",
+        queue_names={"ARCHIVE"},
+    ) is not None
+    with SessionLocal() as db:
+        archive = db.query(UploadArchiveRecord).filter_by(
+            upload_document_version_id=upload["upload_document_version_id"]
+        ).one()
+        assert archive.status == "ARCHIVED"
+        assert archive.managed_file_id
+    clear_overrides()
+
+
+def test_archive_status_does_not_publish_staged_name_as_rename_result(monkeypatch, tmp_path):
+    """首次整理完成前，暂存工作副本名不能冒充最终重命名结果。"""
+
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_INITIAL_PLACEMENT_ENABLED", "true")
+    monkeypatch.setenv("AUTO_CLASSIFICATION_SHADOW_MODE", "false")
+    config.get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "rename-processing-owner")
+    upload = client.post(
+        "/api/files/upload",
+        headers=headers,
+        files={"file": ("原始名称.txt", b"2026 scholarship notice", "text/plain")},
+    ).json()
+    _start_upload(client, headers, upload)
+
+    for queue_name in ("DUPLICATE_CHECK", "ARCHIVE", "IMPORT"):
+        assert process_next_filesystem_job(
+            session_factory=SessionLocal,
+            worker_id=f"rename-processing-{queue_name.lower()}",
+            queue_names={queue_name},
+        ) is not None
+
+    status = client.get(
+        f"/api/uploads/{upload['upload_document_version_id']}/archive-status",
+        headers=headers,
+    ).json()
+    assert status["working_copy_status"] == "ORGANIZING"
+    assert status["processing_status"] == "PROCESSING"
+    assert status["rename_status"] == "PROCESSING"
+    assert status["renamed_filename"] is None
+    clear_overrides()
+
+
+def test_single_and_multiple_uploaded_images_share_college_upload_date_directory(
+    monkeypatch,
+    tmp_path,
+):
+    """单张与多张图片均跳过学院识别，按中国本地上传日归入同一学院日期目录。"""
+
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_INITIAL_PLACEMENT_ENABLED", "true")
+    monkeypatch.setenv("AUTO_CLASSIFICATION_SHADOW_MODE", "false")
+    config.get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "image-date-placement-owner")
+
+    uploads = []
+    for color in ("red", "blue"):
+        response = client.post(
+            "/api/files/upload",
+            headers=headers,
+            files={"file": ("现场照片.png", _png_bytes(color), "image/png")},
+        )
+        assert response.status_code == 202
+        uploads.append(response.json())
+
+    with SessionLocal() as db:
+        for upload in uploads:
+            version = db.get(
+                DocumentVersion,
+                upload["upload_document_version_id"],
+            )
+            # UTC 16:30 在中国时区已经是次日，保护日期目录的时区边界。
+            version.created_at = datetime(
+                2026,
+                9,
+                2,
+                16,
+                30,
+                tzinfo=timezone.utc,
+            )
+        db.commit()
+
+    for upload in uploads:
+        _start_upload(client, headers, upload)
+    assert len(_drain(SessionLocal)) == 8
+
+    statuses = [
+        client.get(
+            f"/api/uploads/{upload['upload_document_version_id']}/archive-status",
+            headers=headers,
+        ).json()
+        for upload in uploads
+    ]
+    assert all(item["processing_status"] == "COMPLETED" for item in statuses)
+    assert all(item["organization_status"] == "AUTO_ORGANIZED" for item in statuses)
+    assert all(
+        item["categories"][0]["category_path"] == ["学院", "2026-09-03"]
+        for item in statuses
+    )
+
+    with SessionLocal() as db:
+        working_copies = [
+            db.get(WorkingCopy, item["working_copy_id"])
+            for item in statuses
+        ]
+        assert all(
+            Path(item.relative_path).parent.as_posix() == "学院/2026-09-03"
+            for item in working_copies
+        )
+        # 文件夹中出现同名图片时必须全部保留，不得覆盖或退回中性目录。
+        assert len({item.filename for item in working_copies}) == 2
+        relations = (
+            db.query(DocumentCategory)
+            .filter(
+                DocumentCategory.working_copy_id.in_(
+                    [item.id for item in working_copies]
+                )
+            )
+            .all()
+        )
+        assert len(relations) == 2
+        assert all(item.category_id == "college" for item in relations)
+        assert all(
+            item.category_path_json == ["学院", "2026-09-03"]
+            for item in relations
+        )
+        assert all(item.source == "image_upload_date_policy" for item in relations)
+        for upload in uploads:
+            source_document = db.get(Document, upload["document_id"])
+            assert source_document.original_filename == "现场照片.png"
+    clear_overrides()
 
 
 def test_same_filename_upload_prompts_before_both_files_are_normally_imported(monkeypatch, tmp_path):
@@ -2230,6 +2427,8 @@ def test_encrypted_pdf_archives_original_but_stops_before_working_copy(monkeypat
         data={"conversation_id": "encrypted-file-conv"},
         files={"file": ("加密材料.pdf", encrypted_bytes, "application/pdf")},
     ).json()
+
+    _start_upload(client, headers, upload)
 
     processed = _drain(SessionLocal)
 

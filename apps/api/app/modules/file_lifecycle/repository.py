@@ -67,21 +67,21 @@ class FileLifecycleRepository:
         conversation_id: str | None,
         ttl_hours: int,
     ) -> tuple[UploadArchiveRecord, UploadDuplicateReview]:
-        """在同一事务中创建归档状态和重复确认记录。"""
+        """创建未发送的暂存生命周期；此阶段绝不创建后台处理任务。"""
 
         if not document.workspace_id:
             raise ValueError("上传 Document 缺少 workspace_id")
         archive = UploadArchiveRecord(
             upload_document_version_id=version.id,
             content_sha256=version.sha256,
-            status="DUPLICATE_CHECK_PENDING",
+            status="STAGED",
         )
         review = UploadDuplicateReview(
             upload_document_version_id=version.id,
             conversation_id=conversation_id,
             workspace_id=document.workspace_id,
             user_id=document.user_id,
-            status="CHECKING",
+            status="STAGED",
             expires_at=utcnow() + timedelta(hours=ttl_hours),
         )
         self.db.add_all([archive, review])
