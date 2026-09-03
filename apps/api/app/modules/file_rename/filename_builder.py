@@ -98,6 +98,25 @@ def validate_target_filename(
     return normalized
 
 
+def replace_year_prefix_with_date(
+    *,
+    filename: str,
+    year: str,
+    document_date: str,
+    separator: str,
+) -> str:
+    """将模板生成的年份前缀提升为完整日期，不改变文号、标题和扩展名。"""
+
+    extension = Path(filename).suffix
+    stem = filename[: -len(extension)] if extension else filename
+    year_prefix = f"{year}{separator}" if year else ""
+    if year_prefix and stem.startswith(year_prefix):
+        stem = f"{document_date}{separator}{stem[len(year_prefix):]}"
+    else:
+        stem = f"{document_date}{separator}{stem}"
+    return f"{stem}{extension}"
+
+
 def _sanitize_component(value: str) -> str:
     """清理单个模板字段中的非法字符。"""
 

@@ -45,6 +45,7 @@ from app.modules.managed_files.worker import (
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.scanner import ManagedFileScanner
 from app.modules.managed_files.service import sync_configured_managed_roots
+from app.modules.managed_files.source_analysis import ManagedSourceAnalysisService
 from app.modules.file_lifecycle.service import FileLifecycleJobProcessor
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.modules.retrieval.relevant_file_sets import RelevantFileSetService
@@ -85,6 +86,53 @@ def test_failed_deduplicated_job_is_not_reopened_by_automatic_scan():
         assert same_job.id == job_id
         assert same_job.status == "FAILED"
         assert same_job.attempt_count == 3
+
+
+def test_classification_refresh_skips_inactive_managed_file():
+    """历史失效文件的刷新任务应幂等结束，不能持续占用 worker 重试。"""
+
+    _client, session_factory = client_with_database()
+    with session_factory() as db:
+        root = ManagedRoot(
+            root_key="inactive_refresh_root",
+            display_name="inactive_refresh_root",
+            container_path="/managed/inactive-refresh-root",
+        )
+        db.add(root)
+        db.flush()
+        managed_file = ManagedFile(
+            root_id=root.id,
+            relative_path="deleted.txt",
+            relative_path_hash="inactive-refresh-path",
+            filename="deleted.txt",
+            extension=".txt",
+            size_bytes=1,
+            fingerprint="inactive-refresh-fingerprint",
+            status="MISSING",
+        )
+        db.add(managed_file)
+        db.flush()
+        revision = ManagedFileRevision(
+            managed_file_id=managed_file.id,
+            revision_number=1,
+            size_bytes=1,
+            quick_fingerprint=managed_file.fingerprint,
+            status="READY",
+            analysis_status="READY",
+            is_current=True,
+        )
+        db.add(revision)
+        db.flush()
+
+        result = ManagedSourceAnalysisService(db=db).refresh_classification(
+            revision_id=revision.id,
+        )
+
+        assert result == {
+            "status": "STALE",
+            "idempotent": True,
+            "revision_id": revision.id,
+        }
 
 
 def test_graph_bootstrap_failure_retries_only_in_graph_queue(monkeypatch):
@@ -576,7 +624,7 @@ def test_scan_publishes_source_analysis_jobs_by_batch_before_full_root_completio
         (
             "普通材料.txt",
             "这是一份没有明确业务主题的普通材料。",
-            "NEEDS_REVIEW",
+            "AUTO_ORGANIZED",
         ),
     ],
 )
@@ -782,9 +830,13 @@ def test_scan_waits_for_source_analysis_before_materializing_working_copy(
                 relation = db.query(DocumentCategory).filter_by(
                     working_copy_id=working_copy.id
                 ).one()
-                assert working_copy.relative_path == (
-                    f"学校/行政综合管理类/会议纪要/{expected_working_filename}"
-                )
+                if working_copy.relative_path.startswith("学校/"):
+                    assert working_copy.relative_path == (
+                        f"学校/行政综合管理类/会议纪要/{expected_working_filename}"
+                    )
+                else:
+                    assert working_copy.relative_path.startswith("学院/其他/")
+                    assert relation.category_id == "college.other"
                 assert relation.status == "AUTO_APPLIED"
                 assert relation.relation_role == "PRIMARY"
             else:

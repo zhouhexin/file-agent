@@ -9,6 +9,17 @@ from typing import Any
 from app.modules.classification.schemas import CategoryNode, Taxonomy
 
 
+_APPOINTMENT_CATEGORY_IDS = {
+    "school.hr.appointment-assessment",
+    "college.hr.appointment-assessment",
+}
+_SPREADSHEET_EXTENSIONS = (".xls", ".xlsx", ".xlsm", ".csv")
+_SPREADSHEET_TUTORIAL_PATTERN = re.compile(
+    r"(?:vlookup|hlookup|xlookup|\bmatch\b|函数(?:使用|教程|示例|练习)|公式(?:教程|示例|练习))",
+    re.IGNORECASE,
+)
+
+
 @dataclass(frozen=True)
 class FlattenedCategory:
     """展平后的分类路径，便于关键词匹配和回执展示。"""
@@ -93,6 +104,9 @@ def recall_category_candidates(
 ) -> list[CategoryCandidate]:
     """根据分类名、别名、正负信号召回 Top N 分类候选。"""
 
+    if _is_spreadsheet_tutorial(document_features):
+        return []
+
     title_text = _join_text(
         [
             document_features.filename,
@@ -130,6 +144,11 @@ def recall_category_candidates(
             title_text=title_text,
             body_text=body_text,
         )
+        if (
+            category.category_id in _APPOINTMENT_CATEGORY_IDS
+            and not _has_appointment_specific_signal(title_text, body_text)
+        ):
+            continue
         if score <= 0:
             continue
         scope_score = 0.0
@@ -239,6 +258,7 @@ def apply_unclassified_fallback(
     document_features: DocumentFeatures,
     taxonomy: Taxonomy,
     matches: list[dict[str, Any]],
+    default_organization_root: str | None = None,
 ) -> list[dict[str, Any]]:
     """仅在没有具体业务分类时按组织、部门和文号生成兜底建议。"""
 
@@ -314,7 +334,11 @@ def apply_unclassified_fallback(
             if str(value)
         ]
     else:
-        fallback_root = scope.dominant_root or _unambiguous_match_root(matches)
+        fallback_root = (
+            scope.dominant_root
+            or _unambiguous_match_root(matches)
+            or default_organization_root
+        )
         root = next(
             (
                 node
@@ -534,6 +558,26 @@ def _score_category_candidate(
         negative_signals,
         reasons,
     )
+
+
+def _is_spreadsheet_tutorial(document_features: DocumentFeatures) -> bool:
+    """表格函数教程中的示例数据不作为业务分类证据。"""
+
+    filename = document_features.filename.strip()
+    return filename.lower().endswith(_SPREADSHEET_EXTENSIONS) and bool(
+        _SPREADSHEET_TUTORIAL_PATTERN.search(_join_text([filename, document_features.title]))
+    )
+
+
+def _has_appointment_specific_signal(title_text: str, body_text: str) -> bool:
+    """考核聘任必须命中聘任词或明确的考核组合词。"""
+
+    text = _join_text([title_text, body_text])
+    if any(signal in text for signal in ("聘任", "续聘", "岗位聘用", "聘用合同")):
+        return True
+    if any(subject in text and "考核" in text for subject in ("聘期", "岗位", "履职")):
+        return True
+    return "教师" in text and "年度考核" in text
 
 
 @dataclass(frozen=True)

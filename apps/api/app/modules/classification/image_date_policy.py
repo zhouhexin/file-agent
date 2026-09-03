@@ -15,6 +15,14 @@ IMAGE_DATE_CATEGORY_ROOT_ID = "college"
 IMAGE_DATE_CATEGORY_ROOT_NAME = "学院"
 IMAGE_DATE_RELATION_SOURCE = "image_upload_date_policy"
 IMAGE_DATE_CLASSIFIER_VERSION = "image-upload-date-v1"
+MANAGED_SOURCE_MODIFIED_DATE_RELATION_SOURCE = "managed_source_modified_date_policy"
+MANAGED_SOURCE_MODIFIED_DATE_CLASSIFIER_VERSION = "managed-source-modified-date-v1"
+IMAGE_DATE_RELATION_SOURCES = frozenset(
+    {
+        IMAGE_DATE_RELATION_SOURCE,
+        MANAGED_SOURCE_MODIFIED_DATE_RELATION_SOURCE,
+    }
+)
 IMAGE_DATE_VIRTUAL_NODE_PREFIX = "__image_upload_date__:"
 IMAGE_DATE_TIMEZONE = ZoneInfo("Asia/Shanghai")
 

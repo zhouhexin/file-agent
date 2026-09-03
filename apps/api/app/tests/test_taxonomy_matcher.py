@@ -6,6 +6,7 @@ from app.modules.classification.loader import load_default_taxonomy
 from app.modules.classification.matcher import (
     DocumentFeatures,
     apply_unclassified_fallback,
+    match_document_features,
     match_document_text,
     recall_category_candidates,
 )
@@ -90,6 +91,47 @@ def test_recall_candidates_uses_aliases_and_positive_signals_for_implicit_topic(
     assert {"教师", "岗位", "聘期", "考核", "续聘"} & set(candidates[0].matched_signals)
     assert candidates[0].rule_score > 0
     assert "标题" in candidates[0].candidate_reason or "正文" in candidates[0].candidate_reason
+
+
+def test_teacher_signal_alone_does_not_recall_appointment_assessment():
+    """“教师”只能作为人事师资弱信号，不能单独命中考核聘任。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename="教师信息表.xlsx",
+            full_text="姓名 工号 所属部门 教师类别",
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert all(
+        candidate.category_id not in {
+            "school.hr.appointment-assessment",
+            "college.hr.appointment-assessment",
+        }
+        for candidate in candidates
+    )
+
+
+def test_spreadsheet_function_tutorial_uses_default_organization_fallback():
+    """函数教程中的示例人员表不得按样例正文落入业务分类。"""
+
+    taxonomy = load_default_taxonomy()
+    features = DocumentFeatures(
+        filename="vlookup+match 函数使用.xlsx",
+        full_text="姓名 工号 职称时间（聘任时间） 岗位分级 教师六级",
+    )
+    matches = match_document_features(features, taxonomy)
+    matches = apply_unclassified_fallback(
+        document_features=features,
+        taxonomy=taxonomy,
+        matches=matches,
+        default_organization_root="学院",
+    )
+
+    assert matches[0]["category_id"] == "college.other"
+    assert matches[0]["category_path"] == ["学院", "其他"]
 
 
 def test_matcher_uses_document_number_department_as_parent_category_signal():

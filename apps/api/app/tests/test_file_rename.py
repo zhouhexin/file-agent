@@ -21,8 +21,10 @@ from app.modules.agent.planner import DeterministicPlanner, build_plan_from_user
 from app.modules.file_rename.filename_builder import FilenameBuilder
 from app.modules.file_rename.metadata_extractor import FilenameMetadataExtractor
 from app.modules.file_rename.native_executor import NativeRenameExecutor
+from app.modules.file_rename.ocr_quality_policy import assess_ocr_rename_quality
 from app.modules.file_rename.policy_loader import load_rename_policy
 from app.modules.file_rename.schemas import FilenameMetadataResult, RenameFieldResult, RenameFieldStatus
+from app.modules.file_rename.title_quality import assess_narrative_filename_preservation
 from app.modules.llm.schemas import UserIntentPlan
 from app.tests.helpers import clear_overrides, client_with_database
 
@@ -85,6 +87,74 @@ def _configure_test_managed_root(monkeypatch, managed_root: Path) -> None:
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("MANAGED_ROOT_SCHOOL_FILES", str(managed_root))
     monkeypatch.setenv("MANAGED_ROOT_SCHOOL_FILES_ALLOW_RENAME", "true")
+
+
+def test_ocr_rename_quality_rejects_low_score_and_unverified_image_title():
+    """上传和受管目录共用的 OCR 门禁必须阻止不可靠图片标题自动改名。"""
+
+    low_score = assess_ocr_rename_quality(
+        filename="现场照片.jpg",
+        pages=[{"metadata": {"ocr_fallback": True, "ocr_quality_score": 0.5}}],
+        elements=[{"label": "title", "text": "活动现场", "page_number": 1}],
+        minimum_quality_score=0.68,
+    )
+    unverified_title = assess_ocr_rename_quality(
+        filename="核酸截图.png",
+        pages=[{"metadata": {"ocr_fallback": True, "ocr_quality_score": 0.99}}],
+        elements=[],
+        minimum_quality_score=0.68,
+    )
+
+    assert low_score["reason_code"] == "OCR_QUALITY_LOW"
+    assert unverified_title["reason_code"] == "OCR_TITLE_STRUCTURE_UNVERIFIED"
+
+
+def test_ocr_rename_quality_allows_high_quality_structured_title_and_native_pdf():
+    """高质量且有标题层级的 OCR，以及原生文本 PDF，不应被图片门禁误伤。"""
+
+    accepted_image = assess_ocr_rename_quality(
+        filename="扫描通知.jpg",
+        pages=[{"metadata": {"ocr_fallback": True, "ocr_quality_score": 0.95}}],
+        elements=[{"label": "title", "text": "关于召开会议的通知", "page_number": 1}],
+        minimum_quality_score=0.68,
+    )
+    native_pdf = assess_ocr_rename_quality(
+        filename="会议通知.pdf",
+        pages=[{"metadata": {"read_quality": "GOOD"}}],
+        elements=[],
+        minimum_quality_score=0.68,
+    )
+
+    assert accepted_image is None
+    assert native_pdf is None
+
+
+def test_narrative_document_with_meaningful_filename_keeps_original_name():
+    """没有标题格式的时间叙事记录不得使用其中一段正文自动改名。"""
+
+    pages = [
+        {
+            "text": (
+                "下午4点多，师德工作小组会后，杨书记向办公室通报了有关情况。\n"
+                "大约20分钟后，王映辉老师怀抱一摞试卷来到院办公室，询问参会人员名单后随即走出院办公室。\n"
+                "大约5点，办公室人员听到楼道有争执声音，随即出门查看。"
+            )
+        }
+    ]
+
+    result = assess_narrative_filename_preservation(
+        filename="楼道撕扯过程.docx",
+        pages=pages,
+        elements=[],
+    )
+    generic_name = assess_narrative_filename_preservation(
+        filename="扫描件1.docx",
+        pages=pages,
+        elements=[],
+    )
+
+    assert result == {"reason_code": "NARRATIVE_BODY_WITHOUT_EXPLICIT_TITLE"}
+    assert generic_name is None
 
 
 def test_filename_metadata_extractor_reads_official_document_fields():
@@ -351,6 +421,49 @@ def test_filename_metadata_extractor_ignores_institution_masthead_before_documen
     assert result.title.value == "关于崔杰等21位同志任职资格的通知"
 
 
+def test_filename_metadata_extractor_selects_title_after_leadership_group_document_number():
+    """领导小组版头不得覆盖其文号下方的正式公文标题。"""
+
+    result = FilenameMetadataExtractor().extract(
+        filename="疫情防控文件.pdf",
+        pages=[
+            {
+                "page_number": 1,
+                "text": (
+                    "西安理工大学新型冠状病毒感染的肺炎疫情防控工作领导小组\n"
+                    "西安理工疫控组发〔2021〕8号\n"
+                    "关于印发《西安理工大学新冠肺炎疫情应急预案》的通知\n"
+                    "各基层党委、党总支、直属党支部，校属各单位："
+                ),
+            }
+        ],
+        elements=[
+            {
+                "element_index": 0,
+                "label": "title",
+                "text": "西安理工大学新型冠状病毒感染的肺炎疫情防控工作领导小组",
+                "page_number": 1,
+            },
+            {
+                "element_index": 1,
+                "label": "text",
+                "text": "西安理工疫控组发〔2021〕8号",
+                "page_number": 1,
+            },
+            {
+                "element_index": 2,
+                "label": "title",
+                "text": "关于印发《西安理工大学新冠肺炎疫情应急预案》的通知",
+                "page_number": 1,
+            },
+        ],
+        parser_name="docling",
+    )
+
+    assert result.document_number.value == "西安理工疫控组发〔2021〕8号"
+    assert result.title.value == "关于印发《西安理工大学新冠肺炎疫情应急预案》的通知"
+
+
 def test_filename_metadata_extractor_rejects_personnel_group_as_document_title():
     """职称人员分组和后续姓名、单位不得被拼成文件标题。"""
 
@@ -594,6 +707,72 @@ def test_filename_metadata_extractor_merges_five_structured_title_elements():
 
     assert result.title.value == "关于进一步规范学校印章使用管理的通知"
     assert result.title.evidence_items[0].parser_name == "docling"
+
+
+def test_filename_metadata_extractor_prefers_first_title_over_unrelated_schedule_lines():
+    result = FilenameMetadataExtractor().extract(
+        filename="source.docx",
+        pages=[
+            {
+                "page_number": 1,
+                "text": "Conference schedule\n09:00 Welcome\n09:30 Keynote",
+            }
+        ],
+        elements=[
+            {
+                "element_index": 0,
+                "label": "title",
+                "text": "Conference schedule",
+                "page_number": 1,
+                "content_layer": "body",
+                "parent_ref": "#/body/0",
+                "metadata": {"hierarchy_level": 1, "max_font_size": 18},
+            },
+            {
+                "element_index": 1,
+                "label": "section_header",
+                "text": "09:00 Welcome",
+                "page_number": 1,
+                "content_layer": "body",
+                "parent_ref": "#/body/0",
+                "metadata": {"hierarchy_level": 1, "max_font_size": 18},
+            },
+            {
+                "element_index": 2,
+                "label": "section_header",
+                "text": "09:30 Keynote",
+                "page_number": 1,
+                "content_layer": "body",
+                "parent_ref": "#/body/0",
+                "metadata": {"hierarchy_level": 1, "max_font_size": 18},
+            },
+        ],
+        parser_name="docling",
+    )
+
+    assert result.title.value == "Conference schedule"
+
+
+def test_filename_metadata_extractor_merges_coherent_same_size_title_lines():
+    result = FilenameMetadataExtractor().extract(
+        filename="source.docx",
+        pages=[{"page_number": 1, "text": "Student scholarship\napplication notice"}],
+        elements=[
+            {
+                "element_index": index,
+                "label": "title" if index == 0 else "section_header",
+                "text": value,
+                "page_number": 1,
+                "content_layer": "body",
+                "parent_ref": "#/body/0",
+                "metadata": {"hierarchy_level": 1, "max_font_size": 18},
+            }
+            for index, value in enumerate(("Student scholarship", "application notice"))
+        ],
+        parser_name="docling",
+    )
+
+    assert result.title.value == "Student scholarshipapplication notice"
 
 
 def test_filename_metadata_extractor_ignores_table_date_after_issue_date():

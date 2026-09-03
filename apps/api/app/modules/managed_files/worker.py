@@ -1788,6 +1788,7 @@ def _process_managed_file_classification_job(*, db: Session, job: FilesystemJob)
                     context_documents=[],
                     classification_service=classification_service,
                     include_categories=True,
+                    default_organization_root="学院",
                 )
         except Exception as exc:
             item_results = [

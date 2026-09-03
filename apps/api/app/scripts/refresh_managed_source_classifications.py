@@ -76,6 +76,7 @@ def inspect_and_enqueue(*, root_key: str, enqueue: bool) -> dict[str, object]:
                     identity=identity,
                 ),
                 reuse_completed=True,
+                retry_failed=True,
                 payload={
                     "managed_file_revision_id": revision.id,
                     "user_id": user_id,

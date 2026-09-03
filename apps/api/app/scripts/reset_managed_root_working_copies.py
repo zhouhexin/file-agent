@@ -207,7 +207,10 @@ def reset_working_copy_materializations(
     revisions = (
         db.query(ManagedFileRevision)
         .join(ManagedFile, ManagedFile.id == ManagedFileRevision.managed_file_id)
-        .filter(ManagedFile.root_id == managed_root.id)
+        .filter(
+            ManagedFile.root_id == managed_root.id,
+            ManagedFile.status == "ACTIVE",
+        )
         .all()
     )
     revision_ids = [row.id for row in revisions]
@@ -504,6 +507,7 @@ def reset_working_copy_materializations(
                 identity=classification_identity,
             ),
             reuse_completed=True,
+            retry_failed=True,
             payload={
                 "managed_file_revision_id": revision.id,
                 "user_id": classification_user_id,

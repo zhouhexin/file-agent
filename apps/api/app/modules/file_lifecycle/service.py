@@ -57,6 +57,7 @@ from app.modules.file_lifecycle.organizer import (
     InitialWorkingCopyOrganizer,
     rename_metadata_for_initial_organization,
 )
+from app.modules.file_rename.filename_builder import replace_year_prefix_with_date
 from app.modules.file_lifecycle.schemas import (
     ArchiveStatusResponse,
     DocumentVersionResponse,
@@ -96,6 +97,8 @@ from app.modules.classification.image_date_policy import (
     IMAGE_DATE_CATEGORY_ROOT_ID,
     IMAGE_DATE_CLASSIFIER_VERSION,
     IMAGE_DATE_RELATION_SOURCE,
+    MANAGED_SOURCE_MODIFIED_DATE_CLASSIFIER_VERSION,
+    MANAGED_SOURCE_MODIFIED_DATE_RELATION_SOURCE,
     image_date_category_path,
     image_upload_date_label,
 )
@@ -2436,9 +2439,42 @@ class FileLifecycleJobProcessor:
         image_date_label = self._uploaded_image_date_label(
             managed_file=managed_file,
         )
+        managed_source_image_date_label = self._managed_source_image_date_label(
+            managed_file=managed_file,
+            version=version,
+        )
         image_date_rule_applied = bool(
             image_date_label and risk_status in {"PASS", "WARNING"}
         )
+        image_date_source = IMAGE_DATE_RELATION_SOURCE
+        image_date_classifier_version = IMAGE_DATE_CLASSIFIER_VERSION
+        image_date_metadata_type = "upload_metadata"
+        image_date_metadata_key = "upload_date"
+        image_date_evidence_quote = "按图片上传日期自动归档"
+        policy_result = None
+        if not image_date_rule_applied:
+            policy_result = AutoPlacementPolicy(self.settings).evaluate(
+                categories=categories,
+                extraction_status=extraction_status,
+                risk_passed=risk_status in {"PASS", "WARNING"},
+            )
+            if (
+                managed_source_image_date_label
+                and risk_status in {"PASS", "WARNING"}
+                and self._managed_source_image_date_fallback_needed(
+                    categories=categories,
+                    policy_result=policy_result,
+                )
+            ):
+                image_date_label = managed_source_image_date_label
+                image_date_rule_applied = True
+                image_date_source = MANAGED_SOURCE_MODIFIED_DATE_RELATION_SOURCE
+                image_date_classifier_version = (
+                    MANAGED_SOURCE_MODIFIED_DATE_CLASSIFIER_VERSION
+                )
+                image_date_metadata_type = "managed_source_metadata"
+                image_date_metadata_key = "modified_date"
+                image_date_evidence_quote = "按受管源文件修改日期自动归档"
         if image_date_rule_applied:
             category_path = image_date_category_path(str(image_date_label))
             policy_result = AutoPlacementPolicyResult(
@@ -2447,7 +2483,7 @@ class FileLifecycleJobProcessor:
                     "category_id": IMAGE_DATE_CATEGORY_ROOT_ID,
                     "category_path": category_path,
                     "name": str(image_date_label),
-                    "source": IMAGE_DATE_RELATION_SOURCE,
+                    "source": image_date_source,
                 },
                 reason_codes=(),
                 calibrated_confidence=1.0,
@@ -2455,18 +2491,14 @@ class FileLifecycleJobProcessor:
                 top_margin=1.0,
                 required_margin=0.0,
                 feature_snapshot={
-                    "placement_rule": IMAGE_DATE_RELATION_SOURCE,
-                    "upload_date": image_date_label,
+                    "placement_rule": image_date_source,
+                    image_date_metadata_key: image_date_label,
                     "content_rule": "verified_image_container",
                     "semantic_college_detection_skipped": True,
                 },
             )
         else:
-            policy_result = AutoPlacementPolicy(self.settings).evaluate(
-                categories=categories,
-                extraction_status=extraction_status,
-                risk_passed=risk_status in {"PASS", "WARNING"},
-            )
+            assert policy_result is not None
         repository = OrganizationDecisionRepository(self.db)
         classification_run, primary_suggestion = repository.latest_classification(
             agent_run_id=changeset.agent_run_id,
@@ -2515,7 +2547,32 @@ class FileLifecycleJobProcessor:
                     and self.storage.sha256_file(target_path) == version.sha256
                 )
                 if target_path.exists() and not retry_after_publish:
-                    reasons.append("TARGET_NAME_CONFLICT")
+                    dated_filename = self._full_date_collision_filename(
+                        decision=organization_decision,
+                        filename=target_filename,
+                    )
+                    if dated_filename:
+                        dated_relative_path = (
+                            Path(target.target_relative_path).parent / dated_filename
+                        ).as_posix()
+                        dated_storage_path = (
+                            f"{working_root.relative_storage_path}/{dated_relative_path}"
+                        )
+                        dated_path = self.storage.working_copy_path(dated_storage_path)
+                        retry_after_dated_publish = (
+                            not staged_path.exists()
+                            and dated_path.is_file()
+                            and self.storage.sha256_file(dated_path) == version.sha256
+                        )
+                        if not dated_path.exists() or retry_after_dated_publish:
+                            target_filename = dated_filename
+                            target_relative_path = dated_relative_path
+                            if organization_decision is not None:
+                                organization_decision.rename_metadata["proposed_filename"] = dated_filename
+                        else:
+                            reasons.append("TARGET_NAME_CONFLICT")
+                    else:
+                        reasons.append("TARGET_NAME_CONFLICT")
             except CategoryOrganizationPathError:
                 reasons.append("TARGET_PATH_UNAVAILABLE")
         elif policy_result.accepted:
@@ -2551,7 +2608,7 @@ class FileLifecycleJobProcessor:
                     taxonomy.version if taxonomy is not None else None
                 ),
                 classifier_version_override=(
-                    IMAGE_DATE_CLASSIFIER_VERSION if image_date_rule_applied else None
+                    image_date_classifier_version if image_date_rule_applied else None
                 ),
             )
 
@@ -2648,7 +2705,7 @@ class FileLifecycleJobProcessor:
             taxonomy_key_override=taxonomy.key if taxonomy is not None else None,
             taxonomy_version_override=(taxonomy.version if taxonomy is not None else None),
             classifier_version_override=(
-                IMAGE_DATE_CLASSIFIER_VERSION if image_date_rule_applied else None
+                image_date_classifier_version if image_date_rule_applied else None
             ),
         )
         decision_row.path_record_id = path_record.id
@@ -2661,14 +2718,14 @@ class FileLifecycleJobProcessor:
                 category_path=image_date_category_path(str(image_date_label)),
                 taxonomy_key=taxonomy.key,
                 taxonomy_version=taxonomy.version,
-                classifier_version=IMAGE_DATE_CLASSIFIER_VERSION,
-                source=IMAGE_DATE_RELATION_SOURCE,
+                classifier_version=image_date_classifier_version,
+                source=image_date_source,
                 evidence=[
                     {
-                        "type": "upload_metadata",
-                        "source": IMAGE_DATE_RELATION_SOURCE,
-                        "upload_date": image_date_label,
-                        "quote": "按图片上传日期自动归档",
+                        "type": image_date_metadata_type,
+                        "source": image_date_source,
+                        image_date_metadata_key: image_date_label,
+                        "quote": image_date_evidence_quote,
                     }
                 ],
             )
@@ -2700,7 +2757,7 @@ class FileLifecycleJobProcessor:
                         "status": "AUTO_APPLIED",
                     },
                     source=(
-                        IMAGE_DATE_RELATION_SOURCE
+                        image_date_source
                         if image_date_rule_applied
                         else "auto_placement_policy"
                     ),
@@ -2753,7 +2810,7 @@ class FileLifecycleJobProcessor:
                     "managed_original_unchanged": True,
                 },
                 source=(
-                    IMAGE_DATE_RELATION_SOURCE
+                    image_date_source
                     if image_date_rule_applied
                     else "auto_placement_policy"
                 ),
@@ -2786,6 +2843,34 @@ class FileLifecycleJobProcessor:
         if detect_image_content_type(archived_path) is None:
             return None
         return image_upload_date_label(upload_version.created_at)
+
+    def _managed_source_image_date_label(
+        self,
+        *,
+        managed_file: ManagedFile,
+        version: DocumentVersion,
+    ) -> str | None:
+        """返回受管源图片的源文件修改日期，不把上传或复制时间当作分类依据。"""
+
+        if managed_file.source_upload_version_id or managed_file.modified_at is None:
+            return None
+        staged_path = self.storage.working_copy_path(version.storage_path)
+        if detect_image_content_type(staged_path) is None:
+            return None
+        return image_upload_date_label(managed_file.modified_at)
+
+    @staticmethod
+    def _managed_source_image_date_fallback_needed(
+        *,
+        categories: list[dict[str, Any]],
+        policy_result: AutoPlacementPolicyResult,
+    ) -> bool:
+        """分类未命中具体业务节点时，让受管图片按源修改日期落位。"""
+
+        return not policy_result.accepted or bool(categories) and all(
+            str(category.get("source") or "") == "rule_fallback"
+            for category in categories
+        )
 
     def _available_initial_image_relative_path(
         self,
@@ -2859,6 +2944,29 @@ class FileLifecycleJobProcessor:
         if Path(sanitized).suffix.lower() != Path(fallback).suffix.lower():
             return self.storage.sanitize_filename(fallback)
         return sanitized
+
+    @staticmethod
+    def _full_date_collision_filename(
+        *,
+        decision: InitialOrganizationDecision | None,
+        filename: str,
+    ) -> str | None:
+        """年份标准名冲突且完整日期可靠时，升级为年月日标准名。"""
+
+        if decision is None or decision.rename_status != "READY":
+            return None
+        document_date = str(decision.rename_metadata.get("document_date") or "")
+        year = str(decision.rename_metadata.get("year") or "")
+        if len(document_date) != 8 or not document_date.isdigit():
+            return None
+        if not year or not filename.startswith(f"{year}_"):
+            return None
+        return replace_year_prefix_with_date(
+            filename=filename,
+            year=year,
+            document_date=document_date,
+            separator="_",
+        )
 
     def _initial_organization_risk_status(
         self,

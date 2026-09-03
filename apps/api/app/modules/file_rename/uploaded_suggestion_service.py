@@ -27,9 +27,11 @@ from app.modules.file_lifecycle.operations import (
 )
 from app.modules.file_rename.filename_builder import FilenameBuildError, FilenameBuilder
 from app.modules.file_rename.metadata_resolution_service import RenameMetadataResolutionService
+from app.modules.file_rename.ocr_quality_policy import assess_ocr_rename_quality
 from app.modules.file_rename.parsing_service import extract_rename_primary
 from app.modules.file_rename.policy_loader import load_rename_policy
 from app.modules.file_rename.schemas import RenameFieldResult, RenameFieldStatus
+from app.modules.file_rename.title_quality import assess_narrative_filename_preservation
 from app.modules.file_rename.validation_service import RenameValidationService
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.readable_source import ReadableDocumentSourceResolver, apply_readable_source_metadata
@@ -393,6 +395,53 @@ class UploadedRenameSuggestionService:
                         "template_key": None,
                         "status": "NO_CHANGE",
                         "warnings": ["TXT 文件按原名保留，不执行自动重命名。"],
+                        "errors": [],
+                    },
+                    extraction_result,
+                )
+            narrative_preservation = assess_narrative_filename_preservation(
+                filename=document.original_filename,
+                pages=pages,
+                elements=elements,
+            )
+            if narrative_preservation is not None:
+                extraction_result["rename_title_quality"] = narrative_preservation
+                return (
+                    {
+                        **base,
+                        "proposed_filename": document.original_filename,
+                        "document_date": empty_field.model_dump(mode="json"),
+                        "year": empty_field.model_dump(mode="json"),
+                        "document_number": empty_field.model_dump(mode="json"),
+                        "title": empty_field.model_dump(mode="json"),
+                        "template_key": None,
+                        "status": "NO_CHANGE",
+                        "warnings": ["文件仅包含时间叙事正文且没有明确标题，已保留原文件名。"],
+                        "rename_title_quality": narrative_preservation,
+                        "errors": [],
+                    },
+                    extraction_result,
+                )
+            ocr_quality = assess_ocr_rename_quality(
+                filename=document.original_filename,
+                pages=pages,
+                elements=elements,
+                minimum_quality_score=self.validation_service.settings.ocr_llm_fallback_quality_threshold,
+            )
+            if ocr_quality is not None:
+                extraction_result["rename_ocr_quality"] = ocr_quality
+                return (
+                    {
+                        **base,
+                        "proposed_filename": document.original_filename,
+                        "document_date": empty_field.model_dump(mode="json"),
+                        "year": empty_field.model_dump(mode="json"),
+                        "document_number": empty_field.model_dump(mode="json"),
+                        "title": empty_field.model_dump(mode="json"),
+                        "template_key": None,
+                        "status": "NO_CHANGE",
+                        "warnings": ["OCR 质量或标题结构不足，已保留原文件名。"],
+                        "rename_ocr_quality": ocr_quality,
                         "errors": [],
                     },
                     extraction_result,

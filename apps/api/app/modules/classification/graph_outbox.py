@@ -22,7 +22,7 @@ from app.db.models import (
 from app.modules.classification.loader import load_default_taxonomy
 from app.modules.classification.image_date_policy import (
     IMAGE_DATE_CATEGORY_ROOT_ID,
-    IMAGE_DATE_RELATION_SOURCE,
+    IMAGE_DATE_RELATION_SOURCES,
 )
 from app.modules.classification.schemas import CategoryNode
 from app.modules.knowledge_graph.classification_context import get_graph_repository
@@ -151,7 +151,7 @@ class ClassificationGraphOutboxService:
                             name=category.name,
                             path=(
                                 [category.name]
-                                if relation.source == IMAGE_DATE_RELATION_SOURCE
+                                if relation.source in IMAGE_DATE_RELATION_SOURCES
                                 and relation.category_id
                                 == IMAGE_DATE_CATEGORY_ROOT_ID
                                 else list(relation.category_path_json or [])

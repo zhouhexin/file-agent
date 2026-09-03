@@ -10,12 +10,18 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Document, ManagedFile, ManagedRoot, User
 from app.modules.file_rename.batch_service import RenameBatchService
-from app.modules.file_rename.filename_builder import FilenameBuildError, FilenameBuilder
+from app.modules.file_rename.filename_builder import (
+    FilenameBuildError,
+    FilenameBuilder,
+    replace_year_prefix_with_date,
+)
 from app.modules.file_rename.metadata_resolution_service import RenameMetadataResolutionService
+from app.modules.file_rename.ocr_quality_policy import assess_ocr_rename_quality
 from app.modules.file_rename.parsing_service import extract_rename_primary
 from app.modules.file_rename.policy_loader import load_rename_policy
 from app.modules.file_rename.review_service import RenameReviewService
 from app.modules.file_rename.schemas import RenameFieldResult, RenameFieldStatus, RenameSuggestion
+from app.modules.file_rename.title_quality import assess_narrative_filename_preservation
 from app.modules.file_rename.validation_service import RenameValidationService
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.readable_source import ReadableDocumentSourceResolver, apply_readable_source_metadata
@@ -328,6 +334,61 @@ class RenameSuggestionService:
                             "code": str(error.get("code") or "EXTRACTION_FAILED"),
                             "message": str(error.get("message") or "文件正文解析失败。"),
                         }],
+                    ),
+                    extraction_result,
+                )
+            narrative_preservation = assess_narrative_filename_preservation(
+                filename=managed_file.filename,
+                pages=pages,
+                elements=elements,
+            )
+            if narrative_preservation is not None:
+                extraction_result["rename_title_quality"] = narrative_preservation
+                return (
+                    RenameSuggestion(
+                        managed_file_id=managed_file.id,
+                        document_id=document_id,
+                        root_key=root.root_key,
+                        relative_path=managed_file.relative_path,
+                        filename=managed_file.filename,
+                        proposed_relative_path=managed_file.relative_path,
+                        proposed_filename=managed_file.filename,
+                        source_sha256=source_sha256,
+                        year=empty_field,
+                        document_number=empty_field,
+                        title=empty_field,
+                        policy_key=self.policy.policy_key,
+                        policy_version=self.policy.version,
+                        status="NO_CHANGE",
+                        warnings=["文件仅包含时间叙事正文且没有明确标题，已保留原文件名。"],
+                    ),
+                    extraction_result,
+                )
+            ocr_quality = assess_ocr_rename_quality(
+                filename=managed_file.filename,
+                pages=pages,
+                elements=elements,
+                minimum_quality_score=self.validation_service.settings.ocr_llm_fallback_quality_threshold,
+            )
+            if ocr_quality is not None:
+                extraction_result["rename_ocr_quality"] = ocr_quality
+                return (
+                    RenameSuggestion(
+                        managed_file_id=managed_file.id,
+                        document_id=document_id,
+                        root_key=root.root_key,
+                        relative_path=managed_file.relative_path,
+                        filename=managed_file.filename,
+                        proposed_relative_path=managed_file.relative_path,
+                        proposed_filename=managed_file.filename,
+                        source_sha256=source_sha256,
+                        year=empty_field,
+                        document_number=empty_field,
+                        title=empty_field,
+                        policy_key=self.policy.policy_key,
+                        policy_version=self.policy.version,
+                        status="NO_CHANGE",
+                        warnings=["OCR 质量或标题结构不足，已保留原文件名。"],
                     ),
                     extraction_result,
                 )
@@ -703,7 +764,7 @@ class RenameSuggestionService:
                 suggestion, managed_file, root = updated[index]
                 document_date = str(suggestion.document_date.value)
                 target = Path(str(suggestion.proposed_relative_path))
-                dated_filename = _replace_year_prefix_with_date(
+                dated_filename = replace_year_prefix_with_date(
                     filename=target.name,
                     year=str(suggestion.year.value or ""),
                     document_date=document_date,
@@ -777,25 +838,6 @@ def _resolved_full_date(field: RenameFieldResult) -> bool:
         and len(str(field.value)) == 8
         and str(field.value).isdigit()
     )
-
-
-def _replace_year_prefix_with_date(
-    *,
-    filename: str,
-    year: str,
-    document_date: str,
-    separator: str,
-) -> str:
-    """将模板生成的年份前缀提升为完整日期，不改变标题和扩展名。"""
-
-    extension = Path(filename).suffix
-    stem = filename[: -len(extension)] if extension else filename
-    year_prefix = f"{year}{separator}" if year else ""
-    if year_prefix and stem.startswith(year_prefix):
-        stem = f"{document_date}{separator}{stem[len(year_prefix):]}"
-    else:
-        stem = f"{document_date}{separator}{stem}"
-    return f"{stem}{extension}"
 
 
 def _logical_target_path(relative_path: str) -> str:

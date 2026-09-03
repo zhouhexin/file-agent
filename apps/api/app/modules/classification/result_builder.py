@@ -11,6 +11,7 @@ def build_document_results_from_extraction_results(
     context_documents: list[dict[str, Any]],
     classification_service,
     include_categories: bool,
+    default_organization_root: str | None = None,
 ) -> list[dict[str, Any]]:
     """构造同步 Graph 和异步 Worker 共用的 document_results。"""
 
@@ -40,6 +41,7 @@ def build_document_results_from_extraction_results(
                 ),
                 fallback_text=text_preview,
                 force_reprocess=bool(result.get("classification_force_reprocess", False)),
+                default_organization_root=default_organization_root,
             )
             if result.get("status") == "COMPLETED"
             else {}

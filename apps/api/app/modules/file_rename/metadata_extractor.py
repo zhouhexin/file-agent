@@ -117,6 +117,11 @@ class FilenameMetadataExtractor:
             _extract_structured_title(
                 elements=normalized_elements,
                 document_number=document_number.value,
+                document_number_element_index=(
+                    document_number.evidence_items[0].element_index
+                    if document_number.evidence_items
+                    else None
+                ),
                 year=year.value,
             )
             or _extract_title(
@@ -290,6 +295,7 @@ def _extract_structured_title(
     *,
     elements: list[dict[str, Any]],
     document_number: str | None,
+    document_number_element_index: int | None,
     year: str | None,
 ) -> RenameFieldResult | None:
     """优先从 Docling title/section_header 元素提取完整标题。"""
@@ -301,16 +307,30 @@ def _extract_structured_title(
         if _is_body_element(element)
         and int(element.get("page_number") or 1) == 1
         and element["label"] in {"title", "section_header"}
+        and (
+            document_number_element_index is None
+            or int(element.get("element_index") or 0) > document_number_element_index
+        )
     ]
+    first_title_index: int | None = None
     for index, element in enumerate(title_elements):
+        if first_title_index is not None:
+            break
         element_title = _clean_title(element["text"], document_number=document_number, year=year)
         if _INSTITUTION_DOCUMENT_MASTHEAD_PATTERN.fullmatch(element_title):
             # 版头与正文标题之间通常夹有文号，不能参与后续多块标题拼接。
             continue
+        if not _is_title_candidate(element_title, raw_line=element["text"]):
+            continue
+        first_title_index = index
         variants = [(element["text"], element["text"], 1)]
         for count in (2, 3, 4, 5):
             segment = title_elements[index : index + count]
-            if len(segment) != count or not _is_contiguous_title_segment(segment):
+            if (
+                len(segment) != count
+                or not _is_contiguous_title_segment(segment)
+                or not _is_semantically_coherent_title_segment(segment)
+            ):
                 continue
             variants.append(("".join(item["text"] for item in segment), "\n".join(item["text"] for item in segment), count))
         for value, quote, count in variants:
@@ -359,6 +379,59 @@ def _is_contiguous_title_segment(segment: list[dict[str, Any]]) -> bool:
         if (item.get("metadata") or {}).get("hierarchy_level") is not None
     }
     return len(hierarchy_levels) <= 1
+
+
+def _is_semantically_coherent_title_segment(segment: list[dict[str, Any]]) -> bool:
+    """判断连续标题元素是否更像拆行标题，而不是独立日程或正文行。"""
+
+    for left, right in zip(segment, segment[1:]):
+        if left["label"] not in {"title", "section_header"} or right["label"] not in {
+            "title",
+            "section_header",
+        }:
+            return False
+        left_font_size = _element_font_size(left)
+        right_font_size = _element_font_size(right)
+        if (
+            left_font_size is not None
+            and right_font_size is not None
+            and left_font_size != right_font_size
+        ):
+            return False
+        if _is_schedule_line(left["text"]) or _is_schedule_line(right["text"]):
+            return False
+        combined = _clean_title(
+            f"{left['text']}{right['text']}",
+            document_number=None,
+            year=None,
+        )
+        if looks_like_body_sentence(combined):
+            return False
+        if left["text"].rstrip().endswith(_DOCUMENT_TYPE_TERMS + _TABLE_TITLE_TERMS):
+            return False
+    return True
+
+
+def _element_font_size(element: dict[str, Any]) -> float | None:
+    metadata = element.get("metadata") or {}
+    for key in ("max_font_size", "font_size", "font_size_pt"):
+        value = metadata.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _is_schedule_line(value: str) -> bool:
+    return bool(
+        re.match(
+            r"^\s*(?:[01]?\d|2[0-3])\s*(?:(?::|\uFF1A|[.\uFF0E])\s*|\s+)\d{2}(?=\D|$)",
+            value,
+        )
+    )
 
 
 def _extract_document_number(
@@ -536,6 +609,16 @@ def _extract_year(
     return _missing_field()
 
 
+def _is_semantically_coherent_text_segment(segment: list[str]) -> bool:
+    for left, right in zip(segment, segment[1:]):
+        if _is_schedule_line(left) or _is_schedule_line(right):
+            return False
+        combined = _clean_title(f"{left}{right}", document_number=None, year=None)
+        if looks_like_body_sentence(combined):
+            return False
+    return True
+
+
 def _extract_title(
     *,
     filename: str,
@@ -561,6 +644,10 @@ def _extract_title(
             for line in page["text"].splitlines()[:50]
             if line.strip() and not _is_page_number_marker(line)
         ]
+        if page_number == first_page_number and document_number:
+            document_number_index = _document_number_line_index(raw_lines)
+            if document_number_index is not None:
+                raw_lines = raw_lines[document_number_index + 1 :]
         personnel_group_index = next(
             (
                 index
@@ -579,7 +666,7 @@ def _extract_title(
             # Word/PDF 转文本后标题经常被拆成两至三行，需要作为一个标题候选共同评分。
             for line_count in (2, 3):
                 segment = raw_lines[line_index : line_index + line_count]
-                if len(segment) == line_count:
+                if len(segment) == line_count and _is_semantically_coherent_text_segment(segment):
                     variants.append(("".join(segment), "\n".join(segment), line_count))
             for raw_value, evidence_quote, line_count in variants:
                 line = _clean_title(raw_value, document_number=document_number, year=year)
@@ -603,6 +690,8 @@ def _extract_title(
         # 首页存在有效候选时，不允许后页章节标题或模板示例凭关键词分数覆盖首页标题。
         first_page_candidates = [item for item in candidates if item[0] == first_page_number]
         selection_pool = first_page_candidates or candidates
+        first_position = max(item[2] for item in selection_pool)
+        selection_pool = [item for item in selection_pool if item[2] == first_position]
         _, _, _, value, page, quote = max(selection_pool, key=lambda item: (item[1], item[2]))
         return RenameFieldResult(
             value=value,
@@ -625,6 +714,16 @@ def _extract_title(
             evidence_items=[RenameEvidenceItem(quote=Path(filename).stem, source="filename")],
         )
     return _missing_field()
+
+
+def _document_number_line_index(lines: list[str]) -> int | None:
+    """返回首页规范文号所在行，供标题搜索跳过机构版头。"""
+
+    for index, raw_line in enumerate(lines):
+        candidate_line = raw_line.strip(" （()）")
+        if any(pattern.fullmatch(candidate_line) for pattern in _DOCUMENT_NUMBER_PATTERNS):
+            return index
+    return None
 
 
 def _spreadsheet_filename_title(stem: str) -> str:

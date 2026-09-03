@@ -47,9 +47,16 @@ from app.db.models import (
 from app.modules.classification.loader import load_default_taxonomy
 from app.modules.agent.tool_registry import ToolRegistry
 from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
+from app.modules.file_lifecycle.organizer import (
+    InitialOrganizationDecision,
+    rename_metadata_for_initial_organization,
+)
 from app.modules.file_lifecycle.risk import inspect_basic_file_risks
 from app.modules.file_lifecycle.layout_repair import WorkingCopyLayoutRepairService
-from app.modules.file_lifecycle.service import working_copy_search_artifact_status
+from app.modules.file_lifecycle.service import (
+    FileLifecycleJobProcessor,
+    working_copy_search_artifact_status,
+)
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.managed_files.jobs import FilesystemJobQueue
@@ -126,6 +133,68 @@ def _drain(SessionLocal, maximum: int = 30) -> list[str]:
             break
         job_ids.append(job_id)
     return job_ids
+
+
+@pytest.mark.parametrize(
+    ("year_filename", "expected_filename"),
+    [
+        (
+            "2022_西安理工疫控组发〔2022〕2号_疫情防控工作会议纪要.pdf",
+            "20220115_西安理工疫控组发〔2022〕2号_疫情防控工作会议纪要.pdf",
+        ),
+        (
+            "2022_西安理工大学新冠肺炎疫情防控工作会议纪要.pdf",
+            "20220115_西安理工大学新冠肺炎疫情防控工作会议纪要.pdf",
+        ),
+    ],
+)
+def test_initial_organization_year_collision_uses_full_date(
+    year_filename: str,
+    expected_filename: str,
+):
+    """受管目录首次落位发生年份名称冲突时，应保留文号和标题并升级完整日期。"""
+
+    rename_metadata = rename_metadata_for_initial_organization(
+        {
+            "document_date": {"value": "20220115"},
+            "year": {"value": "2022"},
+            "document_number": {"value": None},
+            "title": {"value": "疫情防控工作会议纪要"},
+            "proposed_filename": year_filename,
+        }
+    )
+    decision = InitialOrganizationDecision(
+        filename="原文件.pdf",
+        extraction_result={"status": "COMPLETED"},
+        categories=[],
+        primary_category=None,
+        document_summary_id=None,
+        classification_summary_id=None,
+        summary_status="REUSED",
+        rename_status="READY",
+        rename_metadata=rename_metadata,
+        summary_metadata={},
+    )
+
+    assert FileLifecycleJobProcessor._full_date_collision_filename(
+        decision=decision,
+        filename=year_filename,
+    ) == expected_filename
+
+
+def test_managed_source_image_date_overrides_scoped_other_fallback():
+    """学院/其他只是拒识兜底，受管图片仍应按源文件修改日期归档。"""
+
+    assert FileLifecycleJobProcessor._managed_source_image_date_fallback_needed(
+        categories=[
+            {
+                "category_id": "college.other",
+                "category_path": ["学院", "其他"],
+                "source": "rule_fallback",
+            }
+        ],
+        policy_result=type("PolicyResult", (), {"accepted": True})(),
+    )
 
 
 def _png_bytes(color: str) -> bytes:

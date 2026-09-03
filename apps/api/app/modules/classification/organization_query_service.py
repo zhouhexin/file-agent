@@ -15,7 +15,7 @@ from app.db.models import (
 from app.modules.classification.loader import load_default_taxonomy
 from app.modules.classification.image_date_policy import (
     IMAGE_DATE_CATEGORY_ROOT_ID,
-    IMAGE_DATE_RELATION_SOURCE,
+    IMAGE_DATE_RELATION_SOURCES,
     image_date_from_category_path,
     image_date_virtual_node_id,
     parse_image_date_virtual_node_id,
@@ -63,7 +63,7 @@ class ClassificationOrganizationQueryService:
         for relation, working_copy in relations:
             image_date = (
                 image_date_from_category_path(relation.category_path_json)
-                if relation.source == IMAGE_DATE_RELATION_SOURCE
+                if relation.source in IMAGE_DATE_RELATION_SOURCES
                 and relation.category_id == IMAGE_DATE_CATEGORY_ROOT_ID
                 else None
             )
@@ -303,7 +303,7 @@ class ClassificationOrganizationQueryService:
         result: set[str] = set()
         rows = self._active_primary_query().filter(
             DocumentCategory.category_id == IMAGE_DATE_CATEGORY_ROOT_ID,
-            DocumentCategory.source == IMAGE_DATE_RELATION_SOURCE,
+            DocumentCategory.source.in_(IMAGE_DATE_RELATION_SOURCES),
         ).all()
         for relation, working_copy in rows:
             relation_date = image_date_from_category_path(

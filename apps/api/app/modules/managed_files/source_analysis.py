@@ -345,6 +345,7 @@ class ManagedSourceAnalysisService:
                     document_version_id=version.id,
                     extraction_run_id=run.id,
                     filename=managed_file.filename,
+                    default_organization_root="学院",
                 )
                 index_result = DocumentIndexService(db=self.db, settings=self.settings).build(
                     document_id=document.id,
@@ -452,7 +453,7 @@ class ManagedSourceAnalysisService:
         managed_file = self.db.get(ManagedFile, revision.managed_file_id)
         root = self.db.get(ManagedRoot, managed_file.root_id) if managed_file else None
         if managed_file is None or root is None or managed_file.status != "ACTIVE":
-            raise RuntimeError("源分类刷新缺少有效受管文件或目录")
+            return {"status": "STALE", "idempotent": True, "revision_id": revision_id}
         if not revision.analysis_document_id or not revision.analysis_document_version_id:
             raise RuntimeError("源分类刷新缺少已持久化分析文档")
         path = resolve_managed_relative_path(
@@ -513,6 +514,7 @@ class ManagedSourceAnalysisService:
             extraction_run_id=extraction_run.id,
             filename=managed_file.filename,
             force_reprocess=True,
+            default_organization_root="学院",
         )
         self._persist_source_classification(
             owner_id=str(owner_id),

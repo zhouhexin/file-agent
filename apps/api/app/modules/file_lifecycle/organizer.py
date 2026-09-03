@@ -201,6 +201,7 @@ def rename_metadata_for_initial_organization(suggestion: dict[str, Any]) -> dict
         return resolved or None
 
     return {
+        "document_date": field_value("document_date"),
         "year": field_value("year"),
         "document_number": field_value("document_number"),
         "title": field_value("title"),

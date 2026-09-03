@@ -35,8 +35,8 @@ from app.modules.knowledge_graph.schemas import GraphClassificationResult, Graph
 from app.modules.knowledge_graph.semantic_context import NoOpSemanticClassificationContext
 
 
-# 证据兜底入口发生变化后必须递增版本，避免受管源分析复用旧的 NEEDS_REVIEW 缓存。
-CLASSIFIER_IMPLEMENTATION_VERSION = "v8"
+# 分类判定规则发生变化后必须递增版本，避免复用旧分类缓存。
+CLASSIFIER_IMPLEMENTATION_VERSION = "v10"
 
 
 def build_classifier_version(*, mode: str, graph_mode: str, summary_enabled: bool) -> str:
@@ -88,6 +88,7 @@ class DocumentClassificationService:
         fallback_text: str = "",
         force_reprocess: bool = False,
         document_version_id: str = "",
+        default_organization_root: str | None = None,
     ) -> dict[str, Any]:
         """读取完整页面正文并返回分类结果。
 
@@ -226,6 +227,7 @@ class DocumentClassificationService:
                 ),
                 taxonomy=load_default_taxonomy(),
                 matches=categories,
+                default_organization_root=default_organization_root,
             )
             categories = [
                 self._attach_evidence_items(
@@ -248,6 +250,7 @@ class DocumentClassificationService:
                 ),
                 taxonomy=load_default_taxonomy(),
                 matches=categories,
+                default_organization_root=default_organization_root,
             )
             if post_evidence_categories != categories:
                 categories = [
