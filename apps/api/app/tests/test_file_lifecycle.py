@@ -197,6 +197,84 @@ def test_managed_source_image_date_overrides_scoped_other_fallback():
     )
 
 
+def test_managed_source_container_path_excludes_uploaded_archives():
+    """仅外部受管源保留原父目录，上传归档不能带入 uploads 容器。"""
+
+    assert FileLifecycleJobProcessor._managed_source_container_path(
+        ManagedFile(relative_path="外来应聘/2026/张三/个人简历.pdf")
+    ) == Path("外来应聘/2026/张三")
+    assert FileLifecycleJobProcessor._managed_source_container_path(
+        ManagedFile(
+            relative_path="uploads/2026/09/个人简历.pdf",
+            source_upload_version_id="upload-version",
+        )
+    ) == Path()
+
+
+def test_personal_resume_initial_organization_template_is_explicit():
+    """只有简历专用模板才能启用首次落位的自动版本后缀。"""
+
+    decision = InitialOrganizationDecision(
+        filename="王青龙.doc",
+        extraction_result={"status": "COMPLETED"},
+        categories=[],
+        primary_category=None,
+        document_summary_id=None,
+        classification_summary_id=None,
+        summary_status="REUSED",
+        rename_status="READY",
+        rename_metadata={
+            "template_key": "personal_resume",
+            "proposed_filename": "王青龙_个人简历.doc",
+        },
+        summary_metadata={},
+    )
+
+    assert FileLifecycleJobProcessor._is_personal_resume_rename(decision) is True
+    decision.rename_metadata["template_key"] = "title_only"
+    assert FileLifecycleJobProcessor._is_personal_resume_rename(decision) is False
+
+
+def test_personal_resume_initial_collision_uses_second_version(monkeypatch, tmp_path):
+    """同一最终目录已有个人简历时自动分配第二版，不覆盖也不进入待复核。"""
+
+    _configure(monkeypatch, tmp_path)
+    _client, session_factory = client_with_database()
+    db = session_factory()
+    try:
+        processor = FileLifecycleJobProcessor(db)
+        working_root = WorkingCopyRoot(
+            id="resume-working-root",
+            relative_storage_path="shared/resume-test",
+        )
+        working_copy = WorkingCopy(id="pending-resume-copy")
+        version = DocumentVersion(
+            storage_path="staging/pending-resume.doc",
+            sha256="a" * 64,
+        )
+        target_parent = Path("学院/人事师资/师资招聘/2015/王青龙")
+        base_path = processor.storage.working_copy_path(
+            f"{working_root.relative_storage_path}/"
+            f"{target_parent.as_posix()}/王青龙_个人简历.doc"
+        )
+        base_path.parent.mkdir(parents=True, exist_ok=True)
+        base_path.write_bytes(b"existing resume")
+
+        relative_path = processor._available_initial_resume_relative_path(
+            working_copy=working_copy,
+            working_root=working_root,
+            version=version,
+            target_parent=target_parent,
+            target_filename="王青龙_个人简历.doc",
+        )
+
+        assert relative_path.endswith("/王青龙_个人简历_第二版.doc")
+        assert base_path.read_bytes() == b"existing resume"
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def _png_bytes(color: str) -> bytes:
     """生成可由后端真实容器校验识别的测试 PNG，不能只伪造 MIME。"""
 

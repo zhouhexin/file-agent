@@ -16,6 +16,8 @@ from app.db.models import (
     AgentRun,
     Document,
     DocumentVersion,
+    ManagedFile,
+    ManagedFileRevision,
     ManagedFileSnapshot,
     UploadArchiveRecord,
     User,
@@ -25,12 +27,21 @@ from app.modules.file_lifecycle.operations import (
     DEFERRED_UPLOAD_RENAME_OPERATION,
     WorkingCopyOperationService,
 )
-from app.modules.file_rename.filename_builder import FilenameBuildError, FilenameBuilder
+from app.modules.file_rename.filename_builder import (
+    FilenameBuildError,
+    FilenameBuilder,
+    validate_target_filename,
+)
 from app.modules.file_rename.metadata_resolution_service import RenameMetadataResolutionService
 from app.modules.file_rename.ocr_quality_policy import assess_ocr_rename_quality
 from app.modules.file_rename.parsing_service import extract_rename_primary
 from app.modules.file_rename.policy_loader import load_rename_policy
-from app.modules.file_rename.schemas import RenameFieldResult, RenameFieldStatus
+from app.modules.file_rename.resume_naming import suggest_resume_filename
+from app.modules.file_rename.schemas import (
+    RenameEvidenceItem,
+    RenameFieldResult,
+    RenameFieldStatus,
+)
 from app.modules.file_rename.title_quality import assess_narrative_filename_preservation
 from app.modules.file_rename.validation_service import RenameValidationService
 from app.modules.files.extraction_repository import FileExtractionRepository
@@ -380,6 +391,74 @@ class UploadedRenameSuggestionService:
                     },
                     extraction_result,
                 )
+            ocr_quality = assess_ocr_rename_quality(
+                filename=document.original_filename,
+                pages=pages,
+                elements=elements,
+                minimum_quality_score=self.validation_service.settings.ocr_llm_fallback_quality_threshold,
+            )
+            if ocr_quality is not None:
+                extraction_result["rename_ocr_quality"] = ocr_quality
+                return (
+                    {
+                        **base,
+                        "proposed_filename": document.original_filename,
+                        "document_date": empty_field.model_dump(mode="json"),
+                        "year": empty_field.model_dump(mode="json"),
+                        "document_number": empty_field.model_dump(mode="json"),
+                        "title": empty_field.model_dump(mode="json"),
+                        "template_key": None,
+                        "status": "NO_CHANGE",
+                        "warnings": ["OCR 质量或标题结构不足，已保留原文件名。"],
+                        "rename_ocr_quality": ocr_quality,
+                        "errors": [],
+                    },
+                    extraction_result,
+                )
+            resume = suggest_resume_filename(
+                original_filename=document.original_filename,
+                pages=pages,
+                source_relative_path=self._managed_source_relative_path(document),
+            )
+            if resume is not None:
+                proposed_filename = validate_target_filename(
+                    original_filename=document.original_filename,
+                    target_filename=resume.filename,
+                )
+                title = RenameFieldResult(
+                    value="个人简历",
+                    status=RenameFieldStatus.RESOLVED,
+                    source="resume_naming_rule",
+                    confidence=1.0,
+                    evidence_items=[
+                        RenameEvidenceItem(
+                            quote=resume.evidence_quote,
+                            source=resume.evidence_source,
+                        )
+                    ],
+                )
+                no_change = proposed_filename == document.original_filename
+                return (
+                    {
+                        **base,
+                        "proposed_filename": proposed_filename,
+                        "document_date": empty_field.model_dump(mode="json"),
+                        "year": empty_field.model_dump(mode="json"),
+                        "document_number": empty_field.model_dump(mode="json"),
+                        "title": title.model_dump(mode="json"),
+                        "resume_name": resume.person_name,
+                        "template_key": "personal_resume",
+                        "status": "NO_CHANGE" if no_change else "READY",
+                        "warnings": (
+                            ["文件名已经符合个人简历规则，无需重命名。"]
+                            if no_change
+                            else []
+                        ),
+                        "rename_validation": None,
+                        "errors": [],
+                    },
+                    extraction_result,
+                )
             if Path(document.original_filename).suffix.lower() == ".txt":
                 # TXT 只参与正文解析、分类和索引；纯文本文件通常没有稳定的版式元数据，
                 # 自动改名会破坏用户已有命名语义。保留 extraction_result 供上传归档和
@@ -418,30 +497,6 @@ class UploadedRenameSuggestionService:
                         "status": "NO_CHANGE",
                         "warnings": ["文件仅包含时间叙事正文且没有明确标题，已保留原文件名。"],
                         "rename_title_quality": narrative_preservation,
-                        "errors": [],
-                    },
-                    extraction_result,
-                )
-            ocr_quality = assess_ocr_rename_quality(
-                filename=document.original_filename,
-                pages=pages,
-                elements=elements,
-                minimum_quality_score=self.validation_service.settings.ocr_llm_fallback_quality_threshold,
-            )
-            if ocr_quality is not None:
-                extraction_result["rename_ocr_quality"] = ocr_quality
-                return (
-                    {
-                        **base,
-                        "proposed_filename": document.original_filename,
-                        "document_date": empty_field.model_dump(mode="json"),
-                        "year": empty_field.model_dump(mode="json"),
-                        "document_number": empty_field.model_dump(mode="json"),
-                        "title": empty_field.model_dump(mode="json"),
-                        "template_key": None,
-                        "status": "NO_CHANGE",
-                        "warnings": ["OCR 质量或标题结构不足，已保留原文件名。"],
-                        "rename_ocr_quality": ocr_quality,
                         "errors": [],
                     },
                     extraction_result,
@@ -592,6 +647,24 @@ class UploadedRenameSuggestionService:
         if needs_llm and allow_llm:
             self._llm_validation_calls += 1
         return result
+
+    def _managed_source_relative_path(self, document: Document) -> str:
+        """返回工作副本关联的受管源相对路径；普通上传没有该上下文。"""
+
+        version = FileExtractionRepository(
+            self.db,
+            self.user_id,
+        ).get_current_document_version(document=document)
+        revision_id = str(
+            version.source_managed_file_revision_id if version is not None else ""
+        )
+        revision = self.db.get(ManagedFileRevision, revision_id) if revision_id else None
+        managed_file = (
+            self.db.get(ManagedFile, revision.managed_file_id)
+            if revision is not None
+            else None
+        )
+        return str(managed_file.relative_path or "") if managed_file is not None else ""
 
     def _extract_document(
         self,

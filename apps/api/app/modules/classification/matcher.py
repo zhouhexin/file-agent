@@ -13,6 +13,72 @@ _APPOINTMENT_CATEGORY_IDS = {
     "school.hr.appointment-assessment",
     "college.hr.appointment-assessment",
 }
+_FACULTY_RECRUITMENT_CATEGORY_ID = "college.hr.faculty-recruitment"
+_RESUME_SIGNALS = (
+    "个人简历",
+    "求职简历",
+    "应聘简历",
+    "个人履历",
+    "求职履历",
+    "求职个人简介",
+    "简历",
+)
+_RESUME_FLEXIBLE_SIGNALS = (
+    "个人简历",
+    "求职简历",
+    "应聘简历",
+    "个人履历",
+    "履历表",
+    "简历",
+)
+_RESUME_STRUCTURE_SIGNAL_GROUPS = (
+    ("个人信息", "基本信息", "基本资料", "基本資料", "姓名", "性别", "出生年月", "出生日期", "生日"),
+    ("教育经历", "教育背景", "学习经历", "毕业院校", "学历", "学位"),
+    (
+        "工作经历",
+        "工作经验",
+        "主要经历",
+        "求职意向",
+        "任教学校",
+        "任教學校",
+        "现任职级",
+        "現任職級",
+        "现职聘任",
+        "現職聘任",
+    ),
+    ("联系方式", "手机", "电话", "邮箱", "通信地址"),
+    ("科研经历", "项目经历", "发表论文", "发表文章", "学术成果", "代表著作", "著作表列"),
+)
+_RESUME_STRUCTURE_ENGLISH_SIGNAL_GROUPS = (
+    ("name", "birth", "personal information"),
+    ("education", "academic background"),
+    ("experience", "employment", "work experience"),
+    ("contact", "phone", "email", "address"),
+    ("publications", "research experience", "projects"),
+)
+_RESEARCH_STATEMENT_SIGNALS = (
+    "Statement of Research Interest",
+    "Research Interest Statement",
+    "Research Statement",
+    "研究兴趣陈述",
+    "研究陈述",
+)
+_RECRUITMENT_CONTEXT_SIGNALS = (
+    "外来应聘",
+    "应聘人员",
+    "应聘材料",
+    "应聘教师",
+    "应聘",
+    "求职",
+    "师资招聘",
+    "教师招聘",
+    "招聘",
+    "面试人员",
+    "面试材料",
+    "面试",
+    "试讲",
+    "拟聘",
+)
 _SPREADSHEET_EXTENSIONS = (".xls", ".xlsx", ".xlsm", ".csv")
 _SPREADSHEET_TUTORIAL_PATTERN = re.compile(
     r"(?:vlookup|hlookup|xlookup|\bmatch\b|函数(?:使用|教程|示例|练习)|公式(?:教程|示例|练习))",
@@ -44,6 +110,7 @@ class DocumentFeatures:
     full_text: str = ""
     headings: list[str] | None = None
     sheet_names: list[str] | None = None
+    source_context: str = ""
 
 
 @dataclass(frozen=True)
@@ -116,6 +183,14 @@ def recall_category_candidates(
         ]
     )
     body_text = document_features.full_text or ""
+    recruitment_resume = _recruitment_resume_candidate(
+        document_features=document_features,
+        taxonomy=taxonomy,
+        title_text=title_text,
+        body_text=body_text,
+    )
+    if recruitment_resume is not None:
+        return [recruitment_resume]
     organization_scope = _detect_organization_scope(
         taxonomy=taxonomy,
         title_text=title_text,
@@ -209,6 +284,179 @@ def recall_category_candidates(
     candidates = _dedupe_candidates_and_remove_shorter_embedded_matches(candidates)
     candidates.sort(key=lambda item: (-item.rule_score, item.order))
     return candidates[:max(0, min(limit, 8))]
+
+
+def _recruitment_resume_candidate(
+    *,
+    document_features: DocumentFeatures,
+    taxonomy: Taxonomy,
+    title_text: str,
+    body_text: str,
+) -> CategoryCandidate | None:
+    """应聘场景中的简历按文档用途优先归入学院师资招聘。"""
+
+    resume_title_signals = _resume_signals(title_text)
+    resume_body_signals = _resume_signals(body_text)
+    structure_signals, structure_group_count = _resume_structure_signals(body_text)
+    research_statement_title_signals = _matched_case_insensitive_signals(
+        title_text,
+        _RESEARCH_STATEMENT_SIGNALS,
+        word_boundary=False,
+    )
+    research_statement_body_signals = _matched_case_insensitive_signals(
+        body_text,
+        _RESEARCH_STATEMENT_SIGNALS,
+        word_boundary=False,
+    )
+    if (
+        not resume_title_signals
+        and not resume_body_signals
+        and structure_group_count < 3
+        and not research_statement_title_signals
+        and not research_statement_body_signals
+    ):
+        return None
+
+    source_context = document_features.source_context or ""
+    title_context_signals = _matched_signals(title_text, _RECRUITMENT_CONTEXT_SIGNALS)
+    body_context_signals = _matched_signals(body_text, _RECRUITMENT_CONTEXT_SIGNALS)
+    source_context_signals = _matched_signals(
+        source_context,
+        _RECRUITMENT_CONTEXT_SIGNALS,
+    )
+    if not title_context_signals and not body_context_signals and not source_context_signals:
+        return None
+
+    category = next(
+        (
+            item
+            for item in flatten_category_paths(taxonomy)
+            if item.category_id == _FACULTY_RECRUITMENT_CATEGORY_ID
+        ),
+        None,
+    )
+    if category is None:
+        return None
+
+    matched_content_signals = _unique_signals(
+        [
+            *resume_body_signals,
+            *research_statement_body_signals,
+            *body_context_signals,
+            *structure_signals,
+        ]
+    )
+    matched_title_signals = _unique_signals(
+        [
+            *resume_title_signals,
+            *research_statement_title_signals,
+            *title_context_signals,
+        ]
+    )
+    matched_signals = _unique_signals(
+        [
+            *matched_content_signals,
+            *matched_title_signals,
+            *source_context_signals,
+        ]
+    )
+    context_reason = (
+        f"受管源目录命中：{'、'.join(source_context_signals[:3])}"
+        if source_context_signals
+        else f"文件语义命中：{'、'.join(_unique_signals([*title_context_signals, *body_context_signals])[:3])}"
+    )
+    return CategoryCandidate(
+        category_id=category.category_id,
+        category_path=category.path,
+        name="/".join(category.path),
+        rule_score=1.0,
+        matched_signals=matched_signals,
+        matched_title_signals=matched_title_signals,
+        matched_content_signals=matched_content_signals,
+        negative_signals=[],
+        organization_scope="学院",
+        organization_score=0.45,
+        candidate_reason=f"简历文档用途优先；{context_reason}",
+        taxonomy_key=taxonomy.key,
+        taxonomy_version=taxonomy.version,
+        order=category.order,
+    )
+
+
+def _resume_signals(text: str) -> list[str]:
+    """识别中文简历词和独立的 CV/resume 英文表达。"""
+
+    matched = _unique_signals(
+        [
+            *_matched_signals(text, _RESUME_SIGNALS),
+            *[
+                value
+                for signal in _RESUME_FLEXIBLE_SIGNALS
+                if (value := _match_flexible_chinese_signal(text, signal))
+            ],
+        ]
+    )
+    lowered = text.lower()
+    if re.search(r"(?:^|[^a-z])resume(?:[^a-z]|$)", lowered):
+        matched.append("resume")
+    if re.search(r"(?:^|[^a-z])cv(?:[^a-z]|$)", lowered):
+        matched.append("CV")
+    if "curriculum vitae" in lowered:
+        matched.append("curriculum vitae")
+    return _unique_signals(matched)
+
+
+def _resume_structure_signals(text: str) -> tuple[list[str], int]:
+    """识别无简历标题文件中的个人、教育、工作、联系和成果结构。"""
+
+    matched: list[str] = []
+    matched_group_count = 0
+    for group in _RESUME_STRUCTURE_SIGNAL_GROUPS:
+        group_matches = [
+            value
+            for signal in group
+            if (value := _match_flexible_chinese_signal(text, signal))
+        ]
+        if group_matches:
+            matched_group_count += 1
+            matched.extend(group_matches)
+    for group in _RESUME_STRUCTURE_ENGLISH_SIGNAL_GROUPS:
+        group_matches = _matched_case_insensitive_signals(text, group)
+        if group_matches:
+            matched_group_count += 1
+            matched.extend(group_matches)
+    return _unique_signals(matched), matched_group_count
+
+
+def _match_flexible_chinese_signal(text: str, signal: str) -> str:
+    """允许中文表格标题字符间出现空格，但不跨行匹配。"""
+
+    pattern = r"[ \t\u3000]*".join(re.escape(character) for character in signal)
+    result = re.search(pattern, text)
+    return result.group(0) if result is not None else ""
+
+
+def _matched_signals(text: str, signals: tuple[str, ...]) -> list[str]:
+    """按配置顺序返回文本中实际出现的信号。"""
+
+    return [signal for signal in signals if signal and signal in text]
+
+
+def _matched_case_insensitive_signals(
+    text: str,
+    signals: tuple[str, ...],
+    *,
+    word_boundary: bool = True,
+) -> list[str]:
+    """返回英文文本中实际出现的原始大小写信号，供证据定位。"""
+
+    matched: list[str] = []
+    for signal in signals:
+        pattern = rf"\b{re.escape(signal)}\b" if word_boundary else re.escape(signal)
+        result = re.search(pattern, text, re.IGNORECASE)
+        if result is not None:
+            matched.append(result.group(0))
+    return matched
 
 
 def match_document_text(text: str, taxonomy: Taxonomy) -> list[dict[str, Any]]:

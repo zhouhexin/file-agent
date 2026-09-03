@@ -42,6 +42,9 @@ from app.db.models import (
 from app.modules.chunks.service import DocumentIndexService, INDEX_VERSION
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
 from app.modules.classification.runtime_factory import ClassificationRuntimeFactory
+from app.modules.classification.classifier_service import (
+    is_managed_source_recruitment_package,
+)
 from app.modules.classification.freshness import (
     ClassificationFreshness,
     current_classification_identity,
@@ -316,7 +319,8 @@ class ManagedSourceAnalysisService:
                 elements=list(extraction.get("elements") or []),
             )
             metadata_only = bool(extraction.get("metadata_only"))
-            if metadata_only:
+            source_context = f"{Path(root.container_path).name}/{managed_file.relative_path}"
+            if metadata_only and not is_managed_source_recruitment_package(source_context):
                 identity = current_classification_identity(
                     db=self.db,
                     settings=self.settings,
@@ -346,18 +350,26 @@ class ManagedSourceAnalysisService:
                     extraction_run_id=run.id,
                     filename=managed_file.filename,
                     default_organization_root="学院",
+                    source_context=source_context,
                 )
-                index_result = DocumentIndexService(db=self.db, settings=self.settings).build(
-                    document_id=document.id,
-                    document_version_id=version.id,
-                    extraction_run_id=run.id,
-                )
-                if not index_result.get("ok"):
-                    error = dict(index_result.get("error") or {})
-                    raise SourceAnalysisBusinessError(
-                        str(error.get("code") or "SOURCE_INDEX_FAILED"),
-                        str(error.get("message") or "原始文件索引失败"),
+                if metadata_only:
+                    index_result = {
+                        "ok": True,
+                        "status": "SKIPPED_METADATA_ONLY",
+                        "index_run_id": None,
+                    }
+                else:
+                    index_result = DocumentIndexService(db=self.db, settings=self.settings).build(
+                        document_id=document.id,
+                        document_version_id=version.id,
+                        extraction_run_id=run.id,
                     )
+                    if not index_result.get("ok"):
+                        error = dict(index_result.get("error") or {})
+                        raise SourceAnalysisBusinessError(
+                            str(error.get("code") or "SOURCE_INDEX_FAILED"),
+                            str(error.get("message") or "原始文件索引失败"),
+                        )
             after = path.stat()
             if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                 raise SourceAnalysisBusinessError("SOURCE_CHANGED_DURING_ANALYSIS", "原始文件在只读分析期间发生变化")
@@ -515,6 +527,9 @@ class ManagedSourceAnalysisService:
             filename=managed_file.filename,
             force_reprocess=True,
             default_organization_root="学院",
+            source_context=(
+                f"{Path(root.container_path).name}/{managed_file.relative_path}"
+            ),
         )
         self._persist_source_classification(
             owner_id=str(owner_id),

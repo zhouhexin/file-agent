@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
@@ -2518,6 +2519,7 @@ class FileLifecycleJobProcessor:
             target_relative_path = self._available_initial_image_relative_path(
                 working_copy=working_copy,
                 working_root=working_root,
+                managed_file=managed_file,
                 version=version,
                 date_label=str(image_date_label),
                 target_filename=target_filename,
@@ -2535,9 +2537,22 @@ class FileLifecycleJobProcessor:
                     decision=organization_decision,
                     fallback=working_copy.filename,
                 )
-                target_relative_path = (
-                    Path(target.target_relative_path).parent / target_filename
-                ).as_posix()
+                target_parent = (
+                    Path(target.target_relative_path).parent
+                    / self._managed_source_container_path(managed_file)
+                )
+                if self._is_personal_resume_rename(organization_decision):
+                    target_relative_path = self._available_initial_resume_relative_path(
+                        working_copy=working_copy,
+                        working_root=working_root,
+                        version=version,
+                        target_parent=target_parent,
+                        target_filename=target_filename,
+                    )
+                    target_filename = Path(target_relative_path).name
+                    organization_decision.rename_metadata["proposed_filename"] = target_filename
+                else:
+                    target_relative_path = (target_parent / target_filename).as_posix()
                 target_storage_path = f"{working_root.relative_storage_path}/{target_relative_path}"
                 target_path = self.storage.working_copy_path(target_storage_path)
                 staged_path = self.storage.working_copy_path(version.storage_path)
@@ -2546,14 +2561,18 @@ class FileLifecycleJobProcessor:
                     and target_path.is_file()
                     and self.storage.sha256_file(target_path) == version.sha256
                 )
-                if target_path.exists() and not retry_after_publish:
+                if (
+                    not self._is_personal_resume_rename(organization_decision)
+                    and target_path.exists()
+                    and not retry_after_publish
+                ):
                     dated_filename = self._full_date_collision_filename(
                         decision=organization_decision,
                         filename=target_filename,
                     )
                     if dated_filename:
                         dated_relative_path = (
-                            Path(target.target_relative_path).parent / dated_filename
+                            target_parent / dated_filename
                         ).as_posix()
                         dated_storage_path = (
                             f"{working_root.relative_storage_path}/{dated_relative_path}"
@@ -2877,6 +2896,7 @@ class FileLifecycleJobProcessor:
         *,
         working_copy: WorkingCopy,
         working_root: WorkingCopyRoot,
+        managed_file: ManagedFile,
         version: DocumentVersion,
         date_label: str,
         target_filename: str,
@@ -2887,7 +2907,10 @@ class FileLifecycleJobProcessor:
         放回中性目录。该分配只用于首次发布，活动副本后续改名仍须走 OperationPlan。
         """
 
-        parent = Path(*image_date_category_path(date_label))
+        parent = (
+            Path(*image_date_category_path(date_label))
+            / self._managed_source_container_path(managed_file)
+        )
         sanitized = self.storage.sanitize_filename(target_filename)
         suffix = Path(sanitized).suffix
         stem = sanitized[: -len(suffix)] if suffix else sanitized
@@ -2927,6 +2950,18 @@ class FileLifecycleJobProcessor:
                 return relative_path
         raise RuntimeError("图片日期目录无法分配可用文件名")
 
+    @staticmethod
+    def _managed_source_container_path(managed_file: ManagedFile) -> Path:
+        """仅为外部受管源保留源文件在受管根下的父目录。"""
+
+        if managed_file.source_upload_version_id:
+            return Path()
+        relative_path = Path(str(managed_file.relative_path or "").replace("\\", "/"))
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            return Path()
+        parent = relative_path.parent
+        return Path() if parent == Path(".") else parent
+
     def _initial_organization_filename(
         self,
         *,
@@ -2944,6 +2979,86 @@ class FileLifecycleJobProcessor:
         if Path(sanitized).suffix.lower() != Path(fallback).suffix.lower():
             return self.storage.sanitize_filename(fallback)
         return sanitized
+
+    @staticmethod
+    def _is_personal_resume_rename(
+        decision: InitialOrganizationDecision | None,
+    ) -> bool:
+        """仅识别共享命名服务生成的个人简历专用建议。"""
+
+        return bool(
+            decision is not None
+            and decision.rename_status == "READY"
+            and decision.rename_metadata.get("template_key") == "personal_resume"
+        )
+
+    def _available_initial_resume_relative_path(
+        self,
+        *,
+        working_copy: WorkingCopy,
+        working_root: WorkingCopyRoot,
+        version: DocumentVersion,
+        target_parent: Path,
+        target_filename: str,
+    ) -> str:
+        """同一最终目录中的个人简历重名时分配稳定版本后缀，绝不覆盖。"""
+
+        suffix = Path(target_filename).suffix
+        stem = target_filename[: -len(suffix)] if suffix else target_filename
+        labels = {
+            2: "二",
+            3: "三",
+            4: "四",
+            5: "五",
+            6: "六",
+            7: "七",
+            8: "八",
+            9: "九",
+            10: "十",
+        }
+        if self.db.get_bind().dialect.name == "postgresql":
+            self.db.execute(
+                text(
+                    "SELECT pg_advisory_xact_lock("
+                    "hashtext(:target_parent), hashtext(:target_filename)"
+                    ")"
+                ),
+                {
+                    "target_parent": (
+                        f"{working_root.id}:{target_parent.as_posix()}"
+                    ),
+                    "target_filename": target_filename.casefold(),
+                },
+            )
+        staged_path = self.storage.working_copy_path(version.storage_path)
+        for ordinal in range(1, 1000):
+            label = labels.get(ordinal, str(ordinal))
+            filename = target_filename if ordinal == 1 else f"{stem}_第{label}版{suffix}"
+            relative_path = (target_parent / filename).as_posix()
+            indexed = (
+                self.db.query(WorkingCopy.id)
+                .filter(
+                    WorkingCopy.working_copy_root_id == working_root.id,
+                    WorkingCopy.relative_path == relative_path,
+                    WorkingCopy.id != working_copy.id,
+                    WorkingCopy.status.in_(["ACTIVE", "ORGANIZING", "IMPORTING"]),
+                )
+                .first()
+                is not None
+            )
+            target_path = self.storage.working_copy_path(
+                f"{working_root.relative_storage_path}/{relative_path}"
+            )
+            if not indexed and not target_path.exists():
+                return relative_path
+            if (
+                not indexed
+                and not staged_path.exists()
+                and target_path.is_file()
+                and self.storage.sha256_file(target_path) == version.sha256
+            ):
+                return relative_path
+        raise RuntimeError("个人简历目录无法分配可用文件名")
 
     @staticmethod
     def _full_date_collision_filename(

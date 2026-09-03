@@ -36,7 +36,9 @@ from app.modules.knowledge_graph.semantic_context import NoOpSemanticClassificat
 
 
 # 分类判定规则发生变化后必须递增版本，避免复用旧分类缓存。
-CLASSIFIER_IMPLEMENTATION_VERSION = "v10"
+CLASSIFIER_IMPLEMENTATION_VERSION = "v13"
+_FACULTY_RECRUITMENT_CATEGORY_ID = "college.hr.faculty-recruitment"
+_MANAGED_SOURCE_RECRUITMENT_PACKAGE_SOURCE = "managed_source_recruitment_package"
 
 
 def build_classifier_version(*, mode: str, graph_mode: str, summary_enabled: bool) -> str:
@@ -89,6 +91,7 @@ class DocumentClassificationService:
         force_reprocess: bool = False,
         document_version_id: str = "",
         default_organization_root: str | None = None,
+        source_context: str = "",
     ) -> dict[str, Any]:
         """读取完整页面正文并返回分类结果。
 
@@ -162,13 +165,18 @@ class DocumentClassificationService:
             base_categories = self._classify_with_unified_taxonomy(
                 filename=filename,
                 classification_text=classification_text,
+                source_context=source_context,
             )
             full_text_categories = self._classify_with_unified_taxonomy(
                 filename=filename,
                 classification_text=full_text or fallback_text,
+                source_context=source_context,
             )
             full_text_primary_id = _primary_category_id(full_text_categories)
             summary_primary_id = _primary_category_id(base_categories)
+            if full_text_primary_id == _FACULTY_RECRUITMENT_CATEGORY_ID:
+                base_categories = full_text_categories
+                summary_primary_id = full_text_primary_id
             base_categories = [
                 {
                     **category,
@@ -220,10 +228,18 @@ class DocumentClassificationService:
                 classification_text=full_text or fallback_text,
                 rule_categories=categories,
             )
+            package_category = _managed_source_recruitment_package_category(
+                source_context=source_context,
+                taxonomy_key=taxonomy_key,
+                taxonomy_version=taxonomy_version,
+            )
+            if package_category is not None:
+                categories = [package_category]
             categories = apply_unclassified_fallback(
                 document_features=DocumentFeatures(
                     filename=filename,
                     full_text=full_text or fallback_text,
+                    source_context=source_context,
                 ),
                 taxonomy=load_default_taxonomy(),
                 matches=categories,
@@ -247,6 +263,7 @@ class DocumentClassificationService:
                 document_features=DocumentFeatures(
                     filename=filename,
                     full_text=full_text or fallback_text,
+                    source_context=source_context,
                 ),
                 taxonomy=load_default_taxonomy(),
                 matches=categories,
@@ -408,12 +425,17 @@ class DocumentClassificationService:
         *,
         filename: str,
         classification_text: str,
+        source_context: str = "",
     ) -> list[dict[str, Any]]:
         """统一使用构建后的单一 taxonomy，受管目录只作为离线构建证据。"""
 
         taxonomy = load_default_taxonomy()
         return match_document_features(
-            DocumentFeatures(filename=filename, full_text=classification_text),
+            DocumentFeatures(
+                filename=filename,
+                full_text=classification_text,
+                source_context=source_context,
+            ),
             taxonomy,
         )
 
@@ -590,6 +612,63 @@ class DocumentClassificationService:
             ],
         )
         return judged_categories or rule_categories
+
+
+def is_managed_source_recruitment_package(source_context: str) -> bool:
+    """判断受管源文件是否位于应聘材料容器内，根目录散文件不继承容器分类。"""
+
+    parts = [
+        part.strip()
+        for part in str(source_context or "").replace("\\", "/").split("/")
+        if part.strip() and part.strip() != "."
+    ]
+    if len(parts) < 3 or ".." in parts:
+        return False
+    recruitment_context = "/".join(parts[:-1]).lower()
+    return any(
+        signal in recruitment_context
+        for signal in ("应聘", "师资招聘", "教师招聘", "recruitment", "applicant")
+    )
+
+
+def _managed_source_recruitment_package_category(
+    *,
+    source_context: str,
+    taxonomy_key: str,
+    taxonomy_version: str,
+) -> dict[str, Any] | None:
+    """让应聘材料包统一继承师资招聘用途分类，并保留可审计的源容器证据。"""
+
+    if not is_managed_source_recruitment_package(source_context):
+        return None
+    container = str(source_context).replace("\\", "/").rsplit("/", 1)[0]
+    evidence = {
+        "type": "managed_source_container",
+        "page_number": None,
+        "sheet_name": None,
+        "quote": container,
+        "signals": ["应聘材料包"],
+        "source": _MANAGED_SOURCE_RECRUITMENT_PACKAGE_SOURCE,
+    }
+    return {
+        "name": "学院/人事师资/师资招聘",
+        "category_id": _FACULTY_RECRUITMENT_CATEGORY_ID,
+        "category_path": ["学院", "人事师资", "师资招聘"],
+        "confidence": 1.0,
+        "status": "SUGGESTED",
+        "source": _MANAGED_SOURCE_RECRUITMENT_PACKAGE_SOURCE,
+        "evidence": ["应聘材料包"],
+        "evidence_items": [evidence],
+        "matched_title_signals": [],
+        "matched_content_signals": [],
+        "negative_signals": [],
+        "candidate_scores": {
+            "ranking_score": 1.0,
+            "managed_source_package": True,
+        },
+        "taxonomy_key": taxonomy_key,
+        "taxonomy_version": taxonomy_version,
+    }
 
 
 def _find_text_quote(

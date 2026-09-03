@@ -206,6 +206,8 @@ def rename_metadata_for_initial_organization(suggestion: dict[str, Any]) -> dict
         "document_number": field_value("document_number"),
         "title": field_value("title"),
         "proposed_filename": suggestion.get("proposed_filename"),
+        "template_key": suggestion.get("template_key"),
+        "resume_name": suggestion.get("resume_name"),
         "warnings": list(suggestion.get("warnings") or []),
         "errors": list(suggestion.get("errors") or []),
     }

@@ -375,6 +375,181 @@ def test_recall_candidates_recognizes_added_college_hr_categories():
         assert candidates[0].category_id == expected_category_id, filename
 
 
+def test_recruitment_resume_context_overrides_incidental_experience_topics():
+    """应聘目录中的简历应按文档用途归类，不能被经历字段拆散。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename="李小和简历.doc",
+            full_text=(
+                "个人简历\n姓名：李小和\n教育经历：博士后。"
+                "参加科研项目，论文研究目标如下。"
+            ),
+            source_context="外来应聘/2015/李小和简历.doc",
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert [item.category_id for item in candidates] == [
+        "college.hr.faculty-recruitment"
+    ]
+    incidental_categories = {
+        "school.research",
+        "school.hr.postdoc",
+        "school.admin.development-planning",
+    }
+    assert incidental_categories.isdisjoint(
+        {item.category_id for item in candidates}
+    )
+    assert "受管源目录命中" in candidates[0].candidate_reason
+
+
+def test_recruitment_resume_semantics_work_without_managed_source_context():
+    """文件自身同时表达简历和应聘语义时，也应识别为师资招聘材料。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename="应聘教师CV.pdf",
+            full_text="个人信息：姓名张三。教育背景和工作经历如下。",
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert candidates[0].category_id == "college.hr.faculty-recruitment"
+
+
+def test_plain_academic_resume_does_not_force_faculty_recruitment():
+    """没有应聘目录或应聘语义的学术简历不能被强制归入师资招聘。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename="专家学术简历.doc",
+            full_text="个人简历，主要介绍科研项目、论文和博士后研究经历。",
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert all(
+        item.category_id != "college.hr.faculty-recruitment"
+        for item in candidates
+    )
+
+
+def test_managed_english_cv_keeps_locatable_resume_evidence():
+    """应聘目录中的英文 CV 应使用英文结构字段形成可定位证据。"""
+
+    matches = match_document_features(
+        DocumentFeatures(
+            filename="resume_wenbo.pdf",
+            full_text="Name: Wen Bo\nEducation\nExperience\nPublications",
+            source_context="外来应聘/2013应聘人员/resume_wenbo.pdf",
+        ),
+        load_default_taxonomy(),
+    )
+
+    assert matches[0]["category_id"] == "college.hr.faculty-recruitment"
+    assert {"Name", "Education", "Experience"} & set(matches[0]["evidence"])
+
+
+@pytest.mark.parametrize(
+    ("filename", "full_text"),
+    [
+        (
+            "_卫凡-东京工业大学.doc",
+            "个人基本信息\n姓  名\n出生年月\n联系方式\n教育经历\n研究工作简介与论文发表",
+        ),
+        (
+            "_尹毅峰1_.doc",
+            "个  人  简  历\n个人信息\n教育经历\n工作经验\n学术成果",
+        ),
+        (
+            "刘汉强-西安电子科技大学-博士研究生.doc",
+            "姓名 刘汉强\n出生年月\n手机\n教育经历\n发表文章",
+        ),
+        (
+            "温苗利.doc",
+            "基本信息\n出生年月\n手机\n求职意向\n教育背景\n学术论文",
+        ),
+        (
+            "王青龙.doc",
+            "性别 男\n生日\n手机\n教育背景\n工作经历\n发表论文",
+        ),
+        (
+            "西北工业大学-航空宇航制造工程-洪歧[1].doc",
+            "简  历\n个人信息\n出生年月\n移动电话\n主要经历\n论文",
+        ),
+        (
+            "洪明辉-台湾.pdf",
+            "基本資料\n姓名\n出生年月日\n任教學校\n現任職級\n代表著作",
+        ),
+    ],
+)
+def test_managed_recruitment_resume_structure_overrides_generic_filename(
+    filename,
+    full_text,
+):
+    """应聘根中的结构化简历即使文件名只有姓名，也应进入师资招聘。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename=filename,
+            full_text=full_text,
+            source_context=f"外来应聘/{filename}",
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert candidates[0].category_id == "college.hr.faculty-recruitment"
+
+
+def test_managed_research_statement_is_faculty_recruitment_material():
+    """应聘根中的研究陈述属于候选人提交材料，不应进入其他。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename="Statement of Research Interest.pdf",
+            full_text="Statement of Research Interest\nQian Zhang\nPresent Research",
+            source_context="外来应聘/Statement of Research Interest.pdf",
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert candidates[0].category_id == "college.hr.faculty-recruitment"
+    assert "Statement of Research Interest" in candidates[0].matched_signals
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "CVPR_2020_Wang_Deep_Spatial_Gradient.pdf",
+        "CVPRW2020.pdf",
+        "2014_CVPR_paper.pdf",
+    ],
+)
+def test_cvpr_paper_is_not_treated_as_resume(filename):
+    """CVPR 论文文件名不能因为以 CV 开头而被误判为简历。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename=filename,
+            full_text="Computer Vision and Pattern Recognition paper abstract.",
+            source_context=f"外来应聘/论文全文/{filename}",
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert all(
+        item.category_id != "college.hr.faculty-recruitment"
+        for item in candidates
+    )
+
+
 def test_match_document_text_uses_recall_candidates_for_rule_only_output():
     """兼容入口应基于候选召回生成 rule-only 分类建议。"""
 

@@ -160,3 +160,34 @@ def test_policy_accepts_scoped_other_without_text_quote() -> None:
 
     assert result.accepted is True
     assert result.reason_codes == ()
+
+
+def test_policy_accepts_trusted_managed_recruitment_container_evidence() -> None:
+    """用户定义的受管应聘材料包可用容器证据直接形成师资招聘主分类。"""
+
+    result = AutoPlacementPolicy(_settings()).evaluate(
+        categories=[
+            _category(
+                name="学院/人事师资/师资招聘",
+                category_id="college.hr.faculty-recruitment",
+                category_path=["学院", "人事师资", "师资招聘"],
+                source="managed_source_recruitment_package",
+                matched_content_signals=[],
+                evidence_items=[
+                    {
+                        "type": "managed_source_container",
+                        "page_number": None,
+                        "sheet_name": None,
+                        "quote": "外来应聘/2014/张三",
+                        "signals": ["应聘材料包"],
+                        "source": "managed_source_recruitment_package",
+                    }
+                ],
+            )
+        ],
+        extraction_status="COMPLETED",
+        risk_passed=True,
+    )
+
+    assert result.accepted is True
+    assert result.reason_codes == ()

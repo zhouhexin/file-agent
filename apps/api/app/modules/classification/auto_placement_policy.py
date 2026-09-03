@@ -199,6 +199,12 @@ def _located_evidence(category: dict[str, Any] | None) -> list[dict[str, Any]]:
     for item in category.get("evidence_items", []):
         if not isinstance(item, dict) or not str(item.get("quote") or "").strip():
             continue
+        if (
+            item.get("type") == "managed_source_container"
+            and item.get("source") == "managed_source_recruitment_package"
+        ):
+            result.append(item)
+            continue
         if item.get("page_number") is None and not item.get("sheet_name"):
             continue
         result.append(item)

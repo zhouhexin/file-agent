@@ -683,8 +683,9 @@ def test_scan_waits_for_source_analysis_before_materializing_working_copy(
     )
 
     managed_dir = tmp_path / "managed"
-    managed_dir.mkdir()
-    source = managed_dir / filename
+    source_parent = Path("2026") / "张三"
+    (managed_dir / source_parent).mkdir(parents=True)
+    source = managed_dir / source_parent / filename
     source.write_text(content, encoding="utf-8")
     working_dir = tmp_path / "working"
     monkeypatch.setenv("WORKING_COPY_STORAGE_ROOT", str(working_dir))
@@ -832,10 +833,13 @@ def test_scan_waits_for_source_analysis_before_materializing_working_copy(
                 ).one()
                 if working_copy.relative_path.startswith("学校/"):
                     assert working_copy.relative_path == (
-                        f"学校/行政综合管理类/会议纪要/{expected_working_filename}"
+                        "学校/行政综合管理类/会议纪要/"
+                        f"{source_parent.as_posix()}/{expected_working_filename}"
                     )
                 else:
-                    assert working_copy.relative_path.startswith("学院/其他/")
+                    assert working_copy.relative_path.startswith(
+                        f"学院/其他/{source_parent.as_posix()}/"
+                    )
                     assert relation.category_id == "college.other"
                 assert relation.status == "AUTO_APPLIED"
                 assert relation.relation_role == "PRIMARY"
@@ -1086,8 +1090,8 @@ def test_metadata_only_image_analysis_materializes_searchable_working_copy(
 ):
     """OCR 技术失败图片仍应完成源索引、工作副本物化和目录元数据投影。"""
 
-    managed_dir = tmp_path / "managed"
-    event_dir = managed_dir / "20170606大数据联合实验室授牌" / "照片"
+    managed_dir = tmp_path / "外来应聘"
+    event_dir = managed_dir / "2014应聘人员" / "张三" / "照片"
     event_dir.mkdir(parents=True)
     source = event_dir / "IMG_0198.JPG"
     source.write_bytes(b"image-without-ocr-runtime")
@@ -1160,11 +1164,24 @@ def test_metadata_only_image_analysis_materializes_searchable_working_copy(
             revision = db.query(ManagedFileRevision).one()
             assert revision.status == "READY"
             source_profile = db.query(ManagedFileSearchProfile).one()
-            assert "授牌" in source_profile.search_text
+            assert "应聘" in source_profile.search_text
             working_copy = db.query(WorkingCopy).one()
             working_profile = db.query(DocumentSearchProfile).one()
             assert working_profile.working_copy_id == working_copy.id
-            assert "授牌" in str(working_profile.metadata_search_text)
+            assert "应聘" in str(working_profile.metadata_search_text)
+            suggestions = db.query(DocumentCategorySuggestion).all()
+            assert suggestions
+            assert all(
+                suggestion.category_id == "college.hr.faculty-recruitment"
+                for suggestion in suggestions
+            )
+            assert any(
+                suggestion.source == "managed_source_recruitment_package"
+                for suggestion in suggestions
+            )
+            assert working_copy.relative_path.startswith(
+                "学院/人事师资/师资招聘/2014应聘人员/张三/照片/"
+            )
             pages = db.query(DocumentPage).filter(
                 DocumentPage.document_id == working_copy.document_id
             ).all()

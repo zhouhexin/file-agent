@@ -102,6 +102,103 @@ def test_managed_source_full_text_is_used_for_fallback_evidence(monkeypatch):
     assert category["evidence_items"]
 
 
+def test_managed_recruitment_resume_uses_source_context_and_body_evidence(monkeypatch):
+    """受管源应聘目录中的简历应进入学院师资招聘并保留正文证据。"""
+
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg2://test:test@localhost/test",
+    )
+    get_settings.cache_clear()
+    service = DocumentClassificationService(graph_mode="off")
+    service._load_pages = lambda extraction_run_id: [
+        SimpleNamespace(
+            text_content=(
+                "个人简历\n姓名：李小和\n教育经历：博士后。"
+                "参加科研项目，论文研究目标如下。"
+            ),
+            page_number=1,
+            sheet_name=None,
+        )
+    ]
+
+    try:
+        result = service.classify(
+            document_id="",
+            extraction_run_id="managed-resume-run",
+            filename="李小和简历.doc",
+            default_organization_root="学院",
+            source_context="外来应聘/李小和简历.doc",
+        )
+    finally:
+        get_settings.cache_clear()
+
+    category = result["categories"][0]
+    assert category["category_id"] == "college.hr.faculty-recruitment"
+    assert category["category_path"] == ["学院", "人事师资", "师资招聘"]
+    assert category["status"] == "SUGGESTED"
+    assert category["evidence_items"][0]["page_number"] == 1
+
+
+def test_managed_recruitment_package_overrides_intrinsic_document_topic(monkeypatch):
+    """应聘材料包中的论文、证书等附件应统一继承师资招聘业务用途。"""
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://test:test@localhost/test")
+    get_settings.cache_clear()
+    service = DocumentClassificationService(graph_mode="off")
+    service._load_pages = lambda extraction_run_id: [
+        SimpleNamespace(
+            text_content="国家自然科学基金项目研究成果及代表性论文。",
+            page_number=1,
+            sheet_name=None,
+        )
+    ]
+
+    try:
+        result = service.classify(
+            document_id="",
+            extraction_run_id="managed-package-run",
+            filename="代表性论文.pdf",
+            default_organization_root="学院",
+            source_context="外来应聘/2014/张三/代表性论文.pdf",
+        )
+    finally:
+        get_settings.cache_clear()
+
+    category = result["categories"][0]
+    assert category["category_id"] == "college.hr.faculty-recruitment"
+    assert category["source"] == "managed_source_recruitment_package"
+    assert category["evidence_items"][0]["type"] == "managed_source_container"
+
+
+def test_managed_recruitment_root_loose_file_still_uses_document_content(monkeypatch):
+    """应聘根目录散文件没有原容器层级时，仍按文件内容分类。"""
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://test:test@localhost/test")
+    get_settings.cache_clear()
+    service = DocumentClassificationService(graph_mode="off")
+    service._load_pages = lambda extraction_run_id: [
+        SimpleNamespace(
+            text_content="国家自然科学基金项目研究成果及代表性论文。",
+            page_number=1,
+            sheet_name=None,
+        )
+    ]
+
+    try:
+        result = service.classify(
+            document_id="",
+            extraction_run_id="managed-loose-file-run",
+            filename="代表性论文.pdf",
+            default_organization_root="学院",
+            source_context="外来应聘/代表性论文.pdf",
+        )
+    finally:
+        get_settings.cache_clear()
+
+    assert result["categories"][0]["source"] != "managed_source_recruitment_package"
+
+
 def test_runtime_factory_classifier_identity_matches_created_service(monkeypatch):
     """新鲜度检查与实际分类运行必须共享完全相同的分类器版本。"""
 
