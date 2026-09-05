@@ -3153,3 +3153,370 @@
 .structured-extraction-export-note { margin: 14px 18px; }
 .structured-extraction-review ul { margin: 8px 0 0; padding-left: 20px; }
 .structured-extraction-review li + li { margin-top: 6px; }
+
+/* WorkBuddy 风格统一层：以白色文档画布承载对话，用 File Agent 状态色标记风险与完成度。 */
+.app-shell {
+  background: #fff;
+}
+
+.workspace {
+  background: #fff;
+}
+
+.chat-column {
+  width: min(100%, 980px);
+}
+
+.message-list {
+  gap: 42px;
+  padding: 18px 0 34px;
+}
+
+.chat-turn {
+  gap: 27px;
+}
+
+.message-row-assistant {
+  border-top: 1px solid #edf1f6;
+  padding-top: 20px;
+}
+
+.message-content {
+  width: 100%;
+  max-width: 980px;
+  gap: 12px;
+}
+
+.message-content-user {
+  width: min(420px, 100%);
+}
+
+.message-row-assistant > .avatar {
+  display: none;
+}
+
+.assistant-identity {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 28px;
+  color: #1d2e6e;
+}
+
+.assistant-identity-avatar {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 50%;
+  background: #3449a4;
+  box-shadow: 0 0 0 3px #eef1ff;
+  color: #fff;
+}
+
+.assistant-identity strong {
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.assistant-identity-status {
+  color: #8a93a6;
+  font-size: 12px;
+}
+
+.assistant-identity-status::before {
+  content: '·';
+  margin-right: 7px;
+  color: #a9b3c4;
+}
+
+.assistant-identity-status--completed { color: #23733d; }
+.assistant-identity-status--processing { color: #8a5a00; }
+.assistant-identity-status--failed { color: #b42318; }
+
+.user-message-bubble {
+  border: 1px solid #d7e4ff;
+  border-radius: 15px 15px 3px 15px;
+  background: #e6efff;
+  color: #1e3a8a;
+  padding: 9px 14px;
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.agent-run-receipt,
+.file-task-receipt-shell,
+.search-results-receipt,
+.operation-plan-card,
+.rename-suggestion-card,
+.classification-tree-receipt {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
+}
+
+.agent-run-receipt,
+.file-task-receipt-shell {
+  gap: 18px;
+}
+
+.file-task-receipt-header {
+  padding-bottom: 12px;
+  border-bottom: 1px solid #dbe3ef;
+}
+
+.file-task-receipt-header strong {
+  font-size: 17px;
+}
+
+.file-task-request,
+.file-task-outcome,
+.file-task-details,
+.file-task-change-impact,
+.file-task-next-actions {
+  border-radius: 0;
+}
+
+.file-task-request {
+  border: 0;
+  border-left: 2px solid #9ab4f2;
+  background: #f7faff;
+  padding: 10px 12px;
+}
+
+.file-task-outcome {
+  border-left-width: 3px;
+  background: transparent;
+  padding: 5px 0 12px 12px;
+}
+
+.file-task-details {
+  gap: 12px;
+  padding-top: 6px;
+}
+
+.file-task-details > h4 {
+  color: #1e293b;
+  font-size: 16px;
+  letter-spacing: 0;
+}
+
+.file-task-change-impact {
+  border: 0;
+  border-left: 2px solid #86c69b;
+  background: #f4fbf5;
+  padding: 10px 12px;
+}
+
+.file-task-notice {
+  border-radius: 0;
+  border-left: 2px solid #9ab4f2;
+  background: #f7faff;
+}
+
+.file-task-notice--warning {
+  border-left-color: #e7c27f;
+  background: #fffaf2;
+}
+
+.file-task-notice--error {
+  border-left-color: #efb4b4;
+  background: #fff8f8;
+}
+
+.classification-tree-receipt {
+  overflow: visible;
+}
+
+.classification-tree-header {
+  padding: 0 0 10px;
+  border-bottom: 1px solid #dbe3ef;
+  color: #1e293b;
+  font-size: 17px;
+}
+
+.classification-tree-body {
+  gap: 10px;
+  padding: 14px 0 0;
+}
+
+.classification-tree-node {
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid #dbe3ef;
+  border-radius: 5px;
+  background: #fbfdff;
+  color: #1e3a8a;
+}
+
+.classification-tree-folder { color: #2563eb; }
+
+.classification-tree-node small {
+  margin-left: auto;
+  background: #eef4ff;
+  color: #1d4ed8;
+}
+
+.classification-tree-children {
+  margin-left: 12px;
+  padding: 8px 0 2px 18px;
+  border-left: 2px solid #dbe6ff;
+}
+
+.classification-tree-files .document-result-card {
+  max-width: none;
+}
+
+.document-result-card {
+  border-radius: 4px;
+  border-color: #e5eaf2;
+  padding: 9px 10px;
+}
+
+.document-result-card--failed {
+  border-color: #efb4b4;
+  background: #fff8f8;
+}
+
+.document-result-title { color: #273a78; }
+
+.document-result-rename-suggestion {
+  margin-top: 8px;
+  border-left: 2px solid #c4d5f5;
+  background: #f7faff;
+  padding: 7px 9px;
+}
+
+.search-results-empty--inline {
+  margin: 2px 0 0;
+  color: #475569;
+  line-height: 1.75;
+}
+
+.search-results-receipt {
+  gap: 14px;
+}
+
+.search-result-card {
+  border-radius: 4px;
+  box-shadow: none;
+}
+
+.evidence-reference-item {
+  border-radius: 0 5px 5px 0;
+}
+
+.structured-extraction-card,
+.duplicate-review-card,
+.trash-restore-card,
+.file-search-clarification-card,
+.managed-file-tree-card {
+  border-radius: 0;
+  border-color: #dbe3ef;
+  box-shadow: none;
+}
+
+.structured-extraction-card {
+  overflow: visible;
+}
+
+.structured-extraction-card > header,
+.structured-extraction-heading {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.structured-extraction-card > header {
+  padding-top: 0;
+}
+
+.structured-extraction-table-wrap {
+  border-top: 1px solid #dbe3ef;
+  border-bottom: 1px solid #dbe3ef;
+}
+
+.file-search-clarification-card > header,
+.file-search-clarification-card > footer {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.file-search-clarification-card > header {
+  border-bottom-color: #dbe3ef;
+}
+
+.file-search-clarification-options {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.file-search-clarification-option {
+  border-radius: 4px;
+}
+
+.duplicate-review-card,
+.trash-restore-card {
+  background: transparent;
+  padding: 0;
+}
+
+.duplicate-review-card header,
+.duplicate-review-card footer,
+.trash-restore-card header,
+.trash-restore-card footer {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.duplicate-review-card article,
+.trash-restore-choice {
+  border-radius: 4px;
+}
+
+.trash-restore-card--completed {
+  padding: 10px 0;
+  color: #23733d;
+}
+
+.docked-composer,
+.composer-dock {
+  width: min(980px, 100%);
+  margin: 0 auto;
+  border-color: #e4e6ea;
+  border-radius: 24px;
+  box-shadow: 0 5px 18px rgb(31 36 48 / 0.05);
+}
+
+.composer {
+  border-radius: 24px;
+  box-shadow: 0 5px 18px rgb(31 36 48 / 0.05);
+}
+
+.composer textarea {
+  min-height: 47px;
+}
+
+.file-picker {
+  border-color: #e4e6ea;
+  background: transparent;
+}
+
+.send-button {
+  min-width: 34px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+@media (max-width: 640px) {
+  .message-list { gap: 30px; }
+  .message-row-assistant { padding-top: 16px; }
+  .classification-tree-children { margin-left: 4px; padding-left: 12px; }
+  .docked-composer,
+  .composer-dock,
+  .composer { border-radius: 18px; }
+}
