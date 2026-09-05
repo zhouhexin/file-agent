@@ -834,11 +834,12 @@ def test_scan_waits_for_source_analysis_before_materializing_working_copy(
                 if working_copy.relative_path.startswith("学校/"):
                     assert working_copy.relative_path == (
                         "学校/行政综合管理类/会议纪要/"
-                        f"{source_parent.as_posix()}/{expected_working_filename}"
+                        f"{expected_working_filename}"
                     )
+                    assert relation.category_id == "school.admin.meeting-minutes"
                 else:
-                    assert working_copy.relative_path.startswith(
-                        f"学院/其他/{source_parent.as_posix()}/"
+                    assert working_copy.relative_path == (
+                        f"学院/其他/{expected_working_filename}"
                     )
                     assert relation.category_id == "college.other"
                 assert relation.status == "AUTO_APPLIED"

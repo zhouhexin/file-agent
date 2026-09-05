@@ -132,6 +132,7 @@ class OcrService:
         fallback_quality_threshold: float = 0.68,
         fallback_on_low_quality: bool = True,
         fallback_on_non_retryable_failure: bool = True,
+        fallback_error_codes: set[str] | None = None,
     ) -> None:
         """保存 Provider 与 LLM 兜底阈值。"""
 
@@ -140,6 +141,7 @@ class OcrService:
         self.fallback_quality_threshold = fallback_quality_threshold
         self.fallback_on_low_quality = fallback_on_low_quality
         self.fallback_on_non_retryable_failure = fallback_on_non_retryable_failure
+        self.fallback_error_codes = frozenset(fallback_error_codes or set())
 
     def extract_image(self, *, image_path: Path, page_number: int = 1) -> dict[str, Any]:
         """执行单页 OCR，必要时按质量阈值调用 LLM 兜底。"""
@@ -147,10 +149,12 @@ class OcrService:
         primary_result = self.primary_provider.extract_image(image_path=image_path, page_number=page_number)
         if self.fallback_provider is None:
             return primary_result
+        error = primary_result.get("error") or {}
         if (
             not primary_result.get("ok")
             and not self.fallback_on_non_retryable_failure
-            and not bool((primary_result.get("error") or {}).get("retryable"))
+            and not bool(error.get("retryable"))
+            and str(error.get("code") or "") not in self.fallback_error_codes
         ):
             return primary_result
         if primary_result.get("ok") and (
@@ -204,6 +208,11 @@ def build_default_ocr_service() -> OcrService:
         fallback_quality_threshold=settings.ocr_llm_fallback_quality_threshold,
         fallback_on_low_quality=settings.ocr_provider != "tencent_cloud",
         fallback_on_non_retryable_failure=settings.ocr_provider != "tencent_cloud",
+        fallback_error_codes=(
+            {"OCR_PROVIDER_BILLING_UNAVAILABLE"}
+            if settings.ocr_provider == "tencent_cloud"
+            else set()
+        ),
     )
 
 

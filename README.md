@@ -30,7 +30,7 @@ File Agent 不是传统网盘，也不是只会问答的知识库系统。用户
 - `docs/runbook.md`：本地启动、验证和当前可用接口。
 - `docs/file-agent-manual-smoke-test.md`：整项目真实文件系统手工烟测步骤、通过标准和记录模板。
 - `docs/windows11-full-cpu-docker-deployment-plan.md`：Windows 11、6 核/32GB、全图片能力 CPU 容器部署方案。
-- `deploy/README.md`：联网构建、完整离线镜像导出/导入和生产运维命令。
+- `deploy/README.md`：基础镜像与代码镜像分层构建、完整离线镜像导出/导入和生产运维命令。
 
 ## 本地运行
 

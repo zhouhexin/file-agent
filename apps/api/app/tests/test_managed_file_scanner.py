@@ -37,6 +37,97 @@ def test_scanner_records_file_metadata_and_marks_missing(tmp_path):
         clear_overrides()
 
 
+def test_scanner_ignores_non_business_installers_and_system_files(tmp_path):
+    """硬编码策略必须过滤安装包、驱动、测试目录和系统垃圾文件。"""
+
+    inbox = tmp_path / "workdata"
+    (inbox / "外来应聘" / "2025" / "张三").mkdir(parents=True)
+    (inbox / "外来应聘" / "2025" / "张三" / "个人简历.pdf").write_bytes(b"resume")
+    (inbox / "外来应聘" / "2025" / "张三" / "install").mkdir()
+    (inbox / "外来应聘" / "2025" / "张三" / "install" / "setup.exe").write_bytes(
+        b"installer"
+    )
+    (inbox / "信息化处" / "install" / "driver").mkdir(parents=True)
+    (inbox / "信息化处" / "install" / "driver" / "device.dll").write_bytes(b"driver")
+    (inbox / "人事处").mkdir()
+    (inbox / "人事处" / "通知.docx").write_bytes(b"document")
+    (inbox / "人事处" / "Thumbs.db").write_bytes(b"cache")
+    (inbox / "test1").mkdir()
+    (inbox / "test1" / "测试文件.pdf").write_bytes(b"test")
+
+    _client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        root = ManagedRoot(
+            root_key="workdata",
+            display_name="业务资料",
+            container_path=str(inbox),
+        )
+        db.add(root)
+        db.commit()
+
+        scan_run = ManagedFileScanner(db).scan_root(root)
+
+        stored_paths = {
+            item.relative_path for item in db.query(ManagedFile).order_by(ManagedFile.relative_path)
+        }
+        assert scan_run.files_discovered == 2
+        assert stored_paths == {
+            "人事处/通知.docx",
+            "外来应聘/2025/张三/个人简历.pdf",
+        }
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_scanner_marks_previously_indexed_noise_as_ignored_not_missing(tmp_path):
+    """策略上线前的安装包索引必须退出业务范围，但不能误报原件缺失。"""
+
+    inbox = tmp_path / "workdata"
+    installer = inbox / "信息化处" / "install" / "setup.exe"
+    installer.parent.mkdir(parents=True)
+    installer.write_bytes(b"installer")
+
+    _client, SessionLocal = client_with_database()
+    db = SessionLocal()
+    try:
+        root = ManagedRoot(
+            root_key="workdata",
+            display_name="业务资料",
+            container_path=str(inbox),
+        )
+        db.add(root)
+        db.flush()
+        indexed = ManagedFile(
+            root_id=root.id,
+            relative_path="信息化处/install/setup.exe",
+            filename="setup.exe",
+            extension=".exe",
+            fingerprint="f" * 64,
+            status="ACTIVE",
+        )
+        db.add(indexed)
+        db.commit()
+
+        first_run = ManagedFileScanner(db).scan_root(root)
+        db.refresh(indexed)
+
+        assert first_run.files_discovered == 0
+        assert first_run.files_missing == 0
+        assert indexed.status == "IGNORED"
+
+        installer.unlink()
+        second_run = ManagedFileScanner(db).scan_root(root)
+        db.refresh(indexed)
+
+        assert second_run.files_missing == 1
+        assert indexed.status == "MISSING"
+    finally:
+        db.close()
+        clear_overrides()
+
+
 def test_scanner_reuses_stable_record_after_source_file_is_renamed(tmp_path):
     """原件改名后的重复初始化扫描必须复用稳定记录，不能因路径集合未初始化而失败。"""
 

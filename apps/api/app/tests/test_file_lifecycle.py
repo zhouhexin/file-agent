@@ -197,20 +197,6 @@ def test_managed_source_image_date_overrides_scoped_other_fallback():
     )
 
 
-def test_managed_source_container_path_excludes_uploaded_archives():
-    """仅外部受管源保留原父目录，上传归档不能带入 uploads 容器。"""
-
-    assert FileLifecycleJobProcessor._managed_source_container_path(
-        ManagedFile(relative_path="外来应聘/2026/张三/个人简历.pdf")
-    ) == Path("外来应聘/2026/张三")
-    assert FileLifecycleJobProcessor._managed_source_container_path(
-        ManagedFile(
-            relative_path="uploads/2026/09/个人简历.pdf",
-            source_upload_version_id="upload-version",
-        )
-    ) == Path()
-
-
 def test_personal_resume_initial_organization_template_is_explicit():
     """只有简历专用模板才能启用首次落位的自动版本后缀。"""
 

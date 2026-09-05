@@ -4,16 +4,7 @@ x-api-build: &api-build
   context: ..
   dockerfile: deploy/Dockerfile.api
   args:
-    MODEL_PRELOAD: ${MODEL_PRELOAD:-true}
-    APT_DEBIAN_MIRROR: ${APT_DEBIAN_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/debian}
-    APT_SECURITY_MIRROR: ${APT_SECURITY_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/debian-security}
-    NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
-    PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
-    HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
-    DOCLING_MODEL_GIT_BASE: ${DOCLING_MODEL_GIT_BASE:-https://hf-mirror.com}
-    GRAPH_EMBEDDING_BUILD_MODEL: ${GRAPH_EMBEDDING_BUILD_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
-  additional_contexts:
-    local-model-cache: ${LOCAL_MODEL_CACHE_CONTEXT:-./empty-model-cache}
+    API_RUNTIME_BASE_IMAGE: file-agent-api-runtime-base:${FILE_AGENT_BASE_IMAGE_TAG:-20260904-v1}
 
 x-common-environment: &common-environment
   DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}

@@ -67,13 +67,15 @@ PaddleOCR/PP-StructureV3/PaddleOCR-VL 完成。填写后重新运行同一条命
 
 首次完整构建需要下载系统包、Python 包和多个 CPU 模型，可能需要数小时并占用大量磁盘。构建成功后，
 容器通过 `model-manifest.json` 校验所有模型，缺少任一必要模型就拒绝启动，避免生产任务临时联网下载。
-默认构建源为清华 Debian/PyPI、npmmirror、hf-mirror.com 和百度 BOS；这些地址均可在 `deploy/.env`
-覆盖。若 Docker Hub 基础镜像拉取失败，还需在 Docker Desktop 的 Docker Engine 配置中填写单位批准的
-registry mirror。镜像源属于供应链边界，正式上线前应由管理员确认。
+默认构建源为阿里云 Debian/PyPI、npmmirror、hf-mirror.com 和百度 BOS；这些地址均可在 `deploy/.env`
+覆盖。APT 更新会重试三次，并在任一索引下载失败时立即终止；pip 下载会重试十次并使用 120 秒超时，
+避免短时网络抖动被误报为软件包不存在。若 Docker Hub 基础镜像拉取失败，还需在 Docker Desktop 的
+Docker Engine 配置中填写单位批准的 registry mirror。镜像源属于供应链边界，正式上线前应由管理员确认。
 
 Docling 使用固定 commit 的 Git LFS 下载，不使用容易被国内镜像 HEAD 元数据阻断的
-`snapshot_download()`。每类模型独立成层，失败重建会复用已经完成的模型层。最终清单包含全部模型内容
-SHA-256，任何 Git LFS 指针或依赖版本漂移都会让构建失败。
+`snapshot_download()`。模型下载写入持久 BuildKit 缓存，最终只在一个镜像层固化一次，避免 PaddleX
+模型跨层复制使镜像虚增；失败重建会复用已完成的下载缓存。最终清单包含全部模型内容 SHA-256，任何
+Git LFS 指针或依赖版本漂移都会让构建失败。
 
 域名 HTTPS 部署示例：
 
@@ -105,7 +107,44 @@ MATERIALIZE_WORKING_COPY_PRIORITY=20
 保持只读。要执行受管文件改名等写操作，必须同时改为 `rw`、显式开启对应
 `MANAGED_ROOT_<KEY>_ALLOW_RENAME=true`，并仍然经过 OperationPlan 确认。
 
+## 分层构建与快速代码更新
+
+API 镜像分为 `file-agent-api-runtime-base` 基础镜像和 `file-agent-api-full-cpu` 代码镜像。基础镜像保存
+系统包、Python 依赖和全部本地模型；代码镜像通过 BuildKit `COPY --link` 只生成独立源码层，避免重新
+导出大型父镜像内容。执行同一条命令时，如果本机已经存在指定
+基础镜像标签，脚本会跳过所有重量级步骤：
+
+```powershell
+.\deploy\build-layered-images.ps1 `
+  -ImageTag "20260904-code1" `
+  -BaseImageTag "20260904-v1" `
+  -LocalModelCacheContext ".\data\build-model-cache"
+```
+
+`SeedApiImage` 可以指向包含完整依赖和模型清单的已验证旧镜像。转换使用多阶段构建：先删除旧 `/app`、
+`/data`、临时缓存和可能的凭据文件，再通过 `FROM scratch` 复制清理后的合并文件系统；因此旧业务数据
+不会像普通 whiteout 那样残留在父层和离线归档中。转换后脚本还会检查基础镜像的 `/app`、`/data` 不含
+文件。若本地同时存在同标签旧 Web 镜像，脚本会用本机已有 `node_modules` 编译最新前端，再复用旧镜像
+中的 Caddy 运行时生成新 Web 镜像，不查询或下载 Node/Caddy 基础镜像；也可用 `-SeedWebImage` 显式指定。
+日常代码更新只修改 `ImageTag`，保持 `BaseImageTag` 不变。只有
+`requirements*.txt`、系统包、模型版本或
+`preload_models.py` 发生变化时，才递增 `BaseImageTag`；也可以显式传入 `-RebuildBase` 强制重建。
+不要对普通代码更新使用 `-RebuildBase`，也不要执行 Docker builder/system prune。
+
+`deploy.ps1` 和 `update.ps1` 已调用同一分层构建脚本。现有 `deploy/.env` 如果没有该字段，可以补充：
+
+```dotenv
+FILE_AGENT_BASE_IMAGE_TAG=20260904-v1
+# 可填写已通过运行时及模型清单校验的完整 API 镜像；转换过程会平铺清理业务数据。
+FILE_AGENT_BASE_SEED_IMAGE=
+# 可填写已有 Web 镜像；留空时按照 API 种子镜像的标签自动推导。
+FILE_AGENT_WEB_SEED_IMAGE=
+```
+
 ## 制作与使用完整离线镜像包
+
+Windows 新服务器从镜像导出、密钥初始化到验收、更新和备份的端到端步骤见
+[`docs/windows-offline-docker-deployment-guide.md`](../docs/windows-offline-docker-deployment-guide.md)。
 
 在能访问中国大陆互联网的同架构 Windows 机器上执行：
 
@@ -130,12 +169,15 @@ PP-StructureV3 和 PaddleOCR-VL 的下载目录使用持久 BuildKit 缓存；�
 `PP-Chart2Table_safetensors` 与 `PaddleOCR-VL-1.6` 实际目录会在镜像内转换为运行时兼容布局，
 不需要手工改名或重复下载。
 
-脚本会构建包含全部模型的 API/worker 镜像，拉取 PostgreSQL/pgvector 和 Neo4j，生成一个 Docker
-归档、SHA-256 文件和清单。将整个输出目录复制到目标服务器，然后执行：
+脚本会先复用或构建基础镜像，再生成最新代码镜像，并与 PostgreSQL/pgvector、Neo4j 一起生成 Docker
+归档、SHA-256 文件和清单。归档同时保存基础镜像标签，目标服务器导入一次后也能在本地快速构建后续
+代码更新。将整个输出目录复制到目标服务器，然后执行：
 
 ```powershell
 .\deploy\import-offline-images.ps1 `
-  -ArchivePath C:\packages\file-agent-full-cpu-20260826.tar
+  -ArchivePath C:\packages\file-agent-full-cpu-20260826.tar `
+  -ImageTag "20260826" `
+  -BaseImageTag "20260904-v1"
 .\deploy\deploy.ps1 -SiteAddress :80 -OpenFirewall -UsePrebuiltImages
 ```
 
@@ -162,8 +204,9 @@ PP-StructureV3 和 PaddleOCR-VL 的下载目录使用持久 BuildKit 缓存；�
 .\deploy\update.ps1 -PackageZip C:\packages\file-agent-update.zip -UsePrebuiltImages
 ```
 
-更新脚本保留 `deploy/.env` 与 `data/`，并强制重新创建一次性 `migrate` 容器。仅有源码 zip、没有包含
-新依赖和新模型的对应镜像时，不能完成断网更新。
+更新脚本保留 `deploy/.env` 与 `data/`，并强制重新创建一次性 `migrate` 容器。基础镜像已经导入且依赖、
+模型没有变化时，可以在目标服务器从源码 zip 快速重建代码镜像；如果依赖或模型发生变化，则必须同时
+提供新基础镜像。
 
 ## 运维命令
 

@@ -1,0 +1,49 @@
+# 将已经验证过的完整 API 镜像平铺为干净的运行时基础镜像，不下载依赖或模型。
+
+ARG SEED_API_IMAGE=file-agent-api-full-cpu:20260826
+FROM ${SEED_API_IMAGE} AS sanitized-seed
+
+USER root
+WORKDIR /
+
+# 最终阶段只复制清理后的合并文件系统，因此旧代码、上传文件和日志不会残留在父层。
+RUN rm -rf \
+        /app \
+        /data \
+        /root/.cache \
+        /root/.config/huggingface \
+        /root/.gitconfig \
+        /root/.npmrc \
+        /root/.pypirc \
+        /tmp/* \
+        /var/tmp/* \
+    && mkdir -p /app /data
+
+FROM scratch
+COPY --from=sanitized-seed / /
+
+USER root
+WORKDIR /app
+
+ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LANG=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/apps/api \
+    FILE_STORAGE_ROOT=/data/uploads \
+    LOG_DIR=/data/logs \
+    FILE_AGENT_MODEL_ROOT=/opt/file-agent/models \
+    DOCLING_ARTIFACTS_PATH=/opt/file-agent/models/docling \
+    GRAPH_EMBEDDING_MODEL_PATH=/opt/file-agent/models/document-embedding \
+    PADDLE_PDX_CACHE_HOME=/opt/file-agent/models/paddlex \
+    PADDLE_PDX_MODEL_SOURCE=BOS \
+    PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=False \
+    PADDLE_PDX_CPU_NUM_THREADS=4 \
+    OMP_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    HF_HOME=/opt/file-agent/models/huggingface \
+    REQUIRE_PRELOADED_MODELS=true \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True

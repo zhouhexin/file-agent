@@ -3,6 +3,7 @@ param(
     [string]$OutputDirectory = ".\data\build-model-cache",
     [string]$PaddleXCacheRoot = "$env:USERPROFILE\.paddlex",
     [string]$HuggingFaceCacheRoot = "$env:USERPROFILE\.cache\huggingface",
+    [string]$RapidOcrPath,
     [string]$DocumentEmbeddingPath
 )
 
@@ -63,6 +64,18 @@ if (Test-Path -LiteralPath $HfSource -PathType Container) {
         Copy-Item -LiteralPath $HfSource -Destination $HfTarget -Recurse
         $Imported.Add("huggingface/$EmbeddingCacheName")
     }
+}
+
+if (-not [string]::IsNullOrWhiteSpace($RapidOcrPath)) {
+    $ResolvedRapidOcr = (Resolve-Path -LiteralPath $RapidOcrPath).Path
+    $RapidOcrTargetRoot = Join-Path $OutputRoot "docling"
+    $RapidOcrTarget = Join-Path $RapidOcrTargetRoot "RapidOcr"
+    if (Test-Path -LiteralPath $RapidOcrTarget) {
+        throw "RapidOCR cache target already exists: $RapidOcrTarget"
+    }
+    New-Item -ItemType Directory -Force -Path $RapidOcrTargetRoot | Out-Null
+    Copy-Item -LiteralPath $ResolvedRapidOcr -Destination $RapidOcrTarget -Recurse
+    $Imported.Add("docling/RapidOcr")
 }
 
 if (-not [string]::IsNullOrWhiteSpace($DocumentEmbeddingPath)) {

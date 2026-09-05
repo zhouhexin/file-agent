@@ -90,9 +90,12 @@ try {
     } else {
         Write-Host "拉取数据库和图数据库基础镜像..." -ForegroundColor Cyan
         docker compose --env-file $EnvFile -f $ComposeFile pull postgres neo4j
-        Write-Host "构建完整 CPU 镜像并预下载模型；首次构建耗时较长..." -ForegroundColor Cyan
-        docker compose --env-file $EnvFile -f $ComposeFile build api gateway
+        # 首次构建基础镜像；后续代码更新复用其中的依赖和模型，只生成轻量代码层。
+        & (Join-Path $DeployDir "build-layered-images.ps1") -EnvFile $EnvFile
         docker compose --env-file $EnvFile -f $ComposeFile up -d --no-build
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker Compose 启动失败，请先检查 migrate、PostgreSQL 和 Neo4j 日志。"
     }
 
     Write-Host "等待 API 健康检查..." -ForegroundColor Cyan

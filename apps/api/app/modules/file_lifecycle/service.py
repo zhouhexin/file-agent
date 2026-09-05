@@ -76,6 +76,7 @@ from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.file_lifecycle.risk import inspect_basic_file_risks
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.path_policy import resolve_managed_relative_path
+from app.modules.managed_files.source_path_policy import managed_source_container_path
 from app.modules.classification.service import persist_document_results_classifications
 from app.modules.classification.auto_placement_policy import (
     AutoPlacementPolicy,
@@ -2950,17 +2951,18 @@ class FileLifecycleJobProcessor:
                 return relative_path
         raise RuntimeError("图片日期目录无法分配可用文件名")
 
-    @staticmethod
-    def _managed_source_container_path(managed_file: ManagedFile) -> Path:
-        """仅为外部受管源保留源文件在受管根下的父目录。"""
+    def _managed_source_container_path(self, managed_file: ManagedFile) -> Path:
+        """按硬编码材料包策略选择性保留源文件父目录。"""
 
-        if managed_file.source_upload_version_id:
-            return Path()
-        relative_path = Path(str(managed_file.relative_path or "").replace("\\", "/"))
-        if relative_path.is_absolute() or ".." in relative_path.parts:
-            return Path()
-        parent = relative_path.parent
-        return Path() if parent == Path(".") else parent
+        root = self.db.get(ManagedRoot, managed_file.root_id) if managed_file.root_id else None
+        root_container_name = Path(root.container_path).name if root is not None else None
+        return Path(
+            managed_source_container_path(
+                managed_file.relative_path,
+                root_container_name=root_container_name,
+                is_uploaded_archive=bool(managed_file.source_upload_version_id),
+            )
+        )
 
     def _initial_organization_filename(
         self,

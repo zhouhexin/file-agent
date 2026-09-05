@@ -151,6 +151,60 @@ def test_tencent_non_retryable_failure_does_not_use_local_fallback(tmp_path):
     assert local.calls == []
 
 
+def test_tencent_billing_failure_uses_explicit_local_fallback(tmp_path):
+    """资源包耗尽或欠费时，应在显式启用后降级到本地 PaddleOCR。"""
+
+    image_path = tmp_path / "page.png"
+    image_path.write_bytes(b"fake")
+    tencent = FakeProvider(name="tencent_cloud_general_accurate", text="", quality_score=0)
+    local = FakeProvider(name="paddleocr_cpu", text="本地回退正文", quality_score=0.9)
+    tencent.extract_image = lambda **_: {
+        "ok": False,
+        "source": "tencent_cloud_general_accurate",
+        "error": {
+            "code": "OCR_PROVIDER_BILLING_UNAVAILABLE",
+            "message": "资源包已用完",
+            "retryable": False,
+        },
+    }
+
+    result = OcrService(
+        primary_provider=tencent,
+        fallback_provider=local,
+        fallback_on_low_quality=False,
+        fallback_on_non_retryable_failure=False,
+        fallback_error_codes={"OCR_PROVIDER_BILLING_UNAVAILABLE"},
+    ).extract_image(image_path=image_path)
+
+    assert result["ok"] is True
+    assert result["text"] == "本地回退正文"
+    assert result["fallback_from"] == "tencent_cloud_general_accurate"
+
+
+def test_default_tencent_service_enables_billing_fallback_only_when_configured(
+    monkeypatch,
+):
+    """本地回退开关开启后，默认腾讯服务仅放行计费错误降级。"""
+
+    monkeypatch.setenv("OCR_PROVIDER", "tencent_cloud")
+    monkeypatch.setenv("OCR_EXTERNAL_CONTENT_AUTHORIZED", "true")
+    monkeypatch.setenv("TENCENT_CLOUD_OCR_SECRET_ID", "secret-id")
+    monkeypatch.setenv("TENCENT_CLOUD_OCR_SECRET_KEY", "secret-key")
+    monkeypatch.setenv("OCR_LOCAL_FALLBACK_ENABLED", "true")
+    config.get_settings.cache_clear()
+
+    try:
+        service = build_default_ocr_service()
+
+        assert isinstance(service.primary_provider, TencentCloudOcrProvider)
+        assert isinstance(service.fallback_provider, PaddleOcrProvider)
+        assert service.fallback_error_codes == frozenset(
+            {"OCR_PROVIDER_BILLING_UNAVAILABLE"}
+        )
+    finally:
+        config.get_settings.cache_clear()
+
+
 def test_paddle_provider_sets_baidu_bos_model_source_before_loading(monkeypatch):
     """加载 PaddleOCR 前必须设置百度 BOS 模型下载源，避免默认源在部署环境不可用。"""
 

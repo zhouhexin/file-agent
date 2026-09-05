@@ -22,7 +22,16 @@ build
 data/
 storage/
 logs/
+# API 曾在子目录运行时产生本地数据；绝不能把上传文件或日志送入镜像构建上下文。
+apps/api/storage/
+apps/api/logs/
 release/
+file-agent-offline-images/
+file-agent-offline-images-*/
+# 离线镜像归档和校验文件不得进入 API 代码层。
+*.tar
+*.tar.sha256
+.docker-temp/
 
 deploy/.env
 .env

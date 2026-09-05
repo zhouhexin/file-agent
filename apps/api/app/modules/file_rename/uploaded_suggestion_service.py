@@ -43,6 +43,9 @@ from app.modules.file_rename.schemas import (
     RenameFieldStatus,
 )
 from app.modules.file_rename.title_quality import assess_narrative_filename_preservation
+from app.modules.file_rename.trial_evaluation_naming import (
+    suggest_trial_evaluation_filename,
+)
 from app.modules.file_rename.validation_service import RenameValidationService
 from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.files.readable_source import ReadableDocumentSourceResolver, apply_readable_source_metadata
@@ -415,10 +418,52 @@ class UploadedRenameSuggestionService:
                     },
                     extraction_result,
                 )
+            source_relative_path = self._managed_source_relative_path(document)
+            trial_evaluation = suggest_trial_evaluation_filename(
+                original_filename=document.original_filename,
+                source_relative_path=source_relative_path,
+            )
+            if trial_evaluation is not None:
+                proposed_filename = validate_target_filename(
+                    original_filename=document.original_filename,
+                    target_filename=trial_evaluation.filename,
+                )
+                evidence = RenameEvidenceItem(
+                    quote=trial_evaluation.evidence_quote,
+                    source="managed_source_filename_pattern",
+                )
+                return (
+                    {
+                        **base,
+                        "proposed_filename": proposed_filename,
+                        "document_date": empty_field.model_dump(mode="json"),
+                        "year": RenameFieldResult(
+                            value=trial_evaluation.year,
+                            status=RenameFieldStatus.RESOLVED,
+                            source="managed_source_path",
+                            confidence=1.0,
+                            evidence_items=[evidence],
+                        ).model_dump(mode="json"),
+                        "document_number": empty_field.model_dump(mode="json"),
+                        "title": RenameFieldResult(
+                            value=trial_evaluation.title,
+                            status=RenameFieldStatus.RESOLVED,
+                            source="managed_source_filename_pattern",
+                            confidence=1.0,
+                            evidence_items=[evidence],
+                        ).model_dump(mode="json"),
+                        "template_key": "recruitment_trial_evaluation",
+                        "status": "READY",
+                        "warnings": [],
+                        "rename_validation": None,
+                        "errors": [],
+                    },
+                    extraction_result,
+                )
             resume = suggest_resume_filename(
                 original_filename=document.original_filename,
                 pages=pages,
-                source_relative_path=self._managed_source_relative_path(document),
+                source_relative_path=source_relative_path,
             )
             if resume is not None:
                 proposed_filename = validate_target_filename(

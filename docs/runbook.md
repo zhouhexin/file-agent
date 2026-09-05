@@ -1015,6 +1015,10 @@ Docker Compose 部署时，只创建并维护 `deploy/.env`：它由 `deploy/.en
 结构化抽取能力。详细资源、模型固化、联网构建和离线导入步骤见
 `docs/windows11-full-cpu-docker-deployment-plan.md` 与 `deploy/README.md`。
 
+日常代码更新使用 `deploy/build-layered-images.ps1`。脚本在具名运行时基础镜像已存在时只重建代码层；
+不要为普通源码变化传入 `-RebuildBase`。只有 Python 依赖、系统包或本地模型发生变化时才更新
+`FILE_AGENT_BASE_IMAGE_TAG` 并重建基础镜像。
+
 生产部署至少核对以下配置：
 
 ```env

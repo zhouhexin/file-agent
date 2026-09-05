@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$ArchivePath,
     [string]$ChecksumPath,
-    [string]$ImageTag = "20260826"
+    [string]$ImageTag = "20260826",
+    [string]$BaseImageTag = "20260904-v1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +32,7 @@ docker load --input $ResolvedArchive
 if ($LASTEXITCODE -ne 0) { throw "The offline image import failed." }
 
 $requiredImages = @(
+    "file-agent-api-runtime-base:$BaseImageTag",
     "file-agent-api-full-cpu:$ImageTag",
     "file-agent-web:$ImageTag",
     "pgvector/pgvector:pg16",

@@ -72,10 +72,11 @@ API/worker 镜像包含：
 - 项目基础依赖、Neo4j/embedding 依赖、`paddlex[ocr]` 和 `paddleocr[doc-parser]`。
 - PaddleOCR 中文 OCR、Docling、PP-StructureV3、PaddleOCR-VL 和 384 维文档 embedding 模型。
 
-构建阶段默认使用清华 Debian/PyPI 镜像、npmmirror、`hf-mirror.com`、ModelScope 和
-`PADDLE_PDX_MODEL_SOURCE=BOS`，所有下载源均为可覆盖构建参数。生产管理员应按本单位供应链策略验证或
-替换镜像源；Docker Hub 基础镜像若无法直接拉取，还需在 Docker Desktop Engine 中配置单位批准的
-registry mirror。PaddleX 缓存固定到
+构建阶段默认使用阿里云 Debian/PyPI、npmmirror、`hf-mirror.com`、ModelScope 和
+`PADDLE_PDX_MODEL_SOURCE=BOS`，所有下载源均为可覆盖构建参数。APT 更新配置三次重试，并把任一索引
+下载失败视为构建失败；pip 下载配置十次重试和 120 秒超时，避免网络失败被误报为依赖版本不存在。
+生产管理员应按本单位供应链策略验证或替换镜像源；Docker Hub 基础镜像若无法直接拉取，还需在 Docker
+Desktop Engine 中配置单位批准的 registry mirror。PaddleX 缓存固定到
 `/opt/file-agent/models/paddlex`。Docling 模型固定到 `/opt/file-agent/models/docling`，Hugging Face
 缓存固定到 `/opt/file-agent/models/huggingface`，embedding 模型保存到
 `/opt/file-agent/models/document-embedding`。
@@ -177,7 +178,7 @@ STRUCTURED_EXTRACTION_EXTERNAL_IMAGES_AUTHORIZED=false
 1. `deploy.ps1` 检查 Docker、CPU、Docker 可用内存、外部 LLM 必填项和 `E:/workdata`；管理员另行确认
    Docker 磁盘镜像上限与 80/443 端口可用。
 2. 生成 PostgreSQL、Neo4j、JWT 密钥和部署环境文件。
-3. 构建完整 CPU 镜像并预下载模型。
+3. 首次构建运行时基础镜像并预下载模型，再基于它生成轻量代码镜像。
 4. 启动 PostgreSQL、Neo4j。
 5. `migrate` 单独升级到唯一 Alembic head。
 6. 启动 API、调度器、watcher、分队列 worker 和网关。
@@ -185,7 +186,7 @@ STRUCTURED_EXTRACTION_EXTERNAL_IMAGES_AUTHORIZED=false
 
 离线迁移到另一台机器：
 
-1. 在联网机器执行 `export-offline-images.ps1`。
+1. 在联网机器执行 `export-offline-images.ps1`，归档基础镜像与当前代码镜像。
 2. 复制镜像 tar、SHA-256 文件、源码/Compose 和未提交密钥的环境模板。
 3. 目标机器执行 `import-offline-images.ps1` 校验并加载镜像。
 4. 使用 `deploy.ps1 -UsePrebuiltImages` 启动，不重新下载依赖或模型。
@@ -198,7 +199,24 @@ STRUCTURED_EXTRACTION_EXTERNAL_IMAGES_AUTHORIZED=false
   -LocalModelCacheContext .\data\build-model-cache
 ```
 
-普通代码更新继续复用模型镜像层；只有依赖、模型版本或预下载脚本变化时才重新下载重量级模型。
+普通代码更新通过 `build-layered-images.ps1` 直接复用具名基础镜像，并用 BuildKit `COPY --link` 生成
+独立代码层，不再执行 APT、pip、模型预加载或传统大父层导出：
+
+```powershell
+.\deploy\build-layered-images.ps1 `
+  -ImageTag "20260904-code1" `
+  -BaseImageTag "20260904-v1" `
+  -LocalModelCacheContext ".\data\build-model-cache"
+```
+
+`SeedApiImage` 可指向包含完整依赖、LibreOffice 和模型清单的已验证旧完整镜像。转换采用多阶段平铺：
+第一阶段删除旧 `/app`、`/data`、临时缓存和可能的凭据文件，第二阶段从 `scratch` 复制清理后的合并
+文件系统，使旧业务数据不再作为父层字节进入新基础镜像。脚本还会在转换后校验 `/app` 和 `/data` 不含
+文件。日常只递增代码 `ImageTag`。只有依赖、模型版本、模型预下载逻辑或系统包变化时才递增
+`BaseImageTag`；`-RebuildBase` 是显式强制重建开关。目标服务器首次导入的离线归档也保留基础镜像
+标签，因此在依赖和模型不变时，可以接收源码更新并基于本地基础镜像完成断网代码构建。前端断网更新
+使用本机 `node_modules` 完成 TypeScript/Vite 编译，并通过 `SeedWebImage` 复用旧 Web 镜像中的 Caddy；
+脚本会整体替换 `/srv`，避免旧哈希静态文件残留，同时不向镜像仓库查询 Node 或 Caddy。
 
 ## 9. 验收标准
 

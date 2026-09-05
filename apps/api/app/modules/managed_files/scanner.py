@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.logging import log_event
 from app.db.models import FilesystemScanRun, ManagedFile, ManagedRoot, WorkingCopy, utcnow
 from app.modules.managed_files.path_policy import PathPolicyError, resolve_managed_relative_path
+from app.modules.managed_files.source_path_policy import should_ignore_managed_source
 
 
 class ManagedFileScanner:
@@ -75,6 +76,7 @@ class ManagedFileScanner:
         # 记录本轮已经处理的真实相对路径，供原件重命名/移动识别使用。该集合必须
         # 在遍历前初始化；否则历史索引存在且路径变化时会触发 NameError，中断启动扫描。
         seen_paths: set[str] = set()
+        root_container_name = root_path.name
         # `sorted(root.rglob(...))` 会先枚举完整目录树，百万文件时首批导入仍会被
         # 卡住。这里保持惰性遍历，满足一批后即可提交给独立 import worker。
         for path in root_path.rglob("*"):
@@ -83,6 +85,20 @@ class ManagedFileScanner:
             relative_path = path.relative_to(root_path).as_posix()
             if _is_hidden_relative_path(relative_path):
                 # 受管目录只展示业务文件，macOS .DS_Store、点号目录等隐藏项不进入索引。
+                continue
+            if should_ignore_managed_source(
+                relative_path,
+                root_container_name=root_container_name,
+            ):
+                # 已确认的安装包、驱动、测试目录和系统垃圾文件不属于文件智能体
+                # 的业务资料范围。历史索引必须标记为 IGNORED，不能把实际存在的
+                # 原件误报为 MISSING；既有工作副本也不会被扫描器删除或覆盖。
+                ignored = existing_by_path.get(relative_path)
+                if ignored is not None:
+                    ignored.status = "IGNORED"
+                    ignored.last_seen_scan_run_id = scan_run.id
+                    ignored.updated_at = utcnow()
+                    seen_paths.add(relative_path)
                 continue
             try:
                 resolved = resolve_managed_relative_path(root_path=root_path, relative_path=relative_path)
@@ -193,9 +209,15 @@ class ManagedFileScanner:
 
         # 只有整轮遍历结束后才标记原件缺失。分批扫描过程中不能用“当前批次
         # 未出现”推断文件已消失，否则会错误影响仍在等待扫描的目录项。
+        # 一轮只有 IGNORED 文件时不会经过批次发布，因此必须在查询前显式同步
+        # last_seen_scan_run_id，避免把实际存在的忽略项误判为缺失。
+        self.db.flush()
         missing_files = (
             self.db.query(ManagedFile)
-            .filter(ManagedFile.root_id == root.id, ManagedFile.status == "ACTIVE")
+            .filter(
+                ManagedFile.root_id == root.id,
+                ManagedFile.status.in_(["ACTIVE", "IGNORED"]),
+            )
             .filter(
                 or_(
                     ManagedFile.last_seen_scan_run_id.is_(None),

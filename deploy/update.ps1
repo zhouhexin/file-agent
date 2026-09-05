@@ -109,9 +109,10 @@ try {
     if ($UsePrebuiltImages) {
         Write-Host "使用已导入的完整离线镜像。" -ForegroundColor Cyan
     } else {
-        Write-Host "重新构建应用镜像并核对预下载模型；首次执行耗时较长。" -ForegroundColor Cyan
+        Write-Host "复用运行时基础镜像并重建最新代码层。" -ForegroundColor Cyan
         docker compose --env-file $EnvFile -f $ComposeFile pull postgres neo4j
-        docker compose --env-file $EnvFile -f $ComposeFile build api gateway
+        # 基础镜像已存在时不会重新安装依赖或预加载模型。
+        & (Join-Path $DeployDir "build-layered-images.ps1") -EnvFile $EnvFile
     }
 
     # migrate 是一次性容器；更新时必须重新创建，不能复用上一次的已完成状态。
@@ -120,6 +121,9 @@ try {
         docker compose --env-file $EnvFile -f $ComposeFile up -d --no-build --pull never
     } else {
         docker compose --env-file $EnvFile -f $ComposeFile up -d --no-build
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker Compose 更新启动失败，请先检查 migrate、PostgreSQL 和 Neo4j 日志。"
     }
 
     Write-Host "等待更新后的 API 健康检查..." -ForegroundColor Cyan

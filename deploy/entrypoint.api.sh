@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+# 所有容器运行模式统一从该入口分派，脚本必须使用 LF 行尾。
+
 APP_RUNTIME="${APP_RUNTIME:-api}"
 umask 027
 

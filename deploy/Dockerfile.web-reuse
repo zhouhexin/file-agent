@@ -1,0 +1,9 @@
+# 使用本地已有的 Web 镜像提供 Caddy，只替换本机编译出的最新静态文件。
+ARG SEED_WEB_IMAGE=file-agent-web:20260826
+FROM ${SEED_WEB_IMAGE}
+
+RUN rm -rf /srv && mkdir -p /srv
+COPY deploy/Caddyfile /etc/caddy/Caddyfile
+COPY --from=web-dist / /srv
+
+EXPOSE 80 443

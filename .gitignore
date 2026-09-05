@@ -17,6 +17,9 @@ build/
 storage/
 logs/
 data/build-model-cache/
+data/docker-backup/
 file-agent-offline-images/
 .docker-temp/
 *.log
+*.tar
+*.tar.sha256

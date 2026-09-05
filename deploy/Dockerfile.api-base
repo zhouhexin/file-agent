@@ -1,0 +1,108 @@
+# 使用 Docker Desktop 内置 Dockerfile 前端，避免离线构建额外解析 docker/dockerfile 镜像。
+
+# 该基础镜像只在系统依赖、Python 依赖或模型发生变化时重建。
+FROM python:3.11-slim
+
+ARG MCP_FILESYSTEM_VERSION=2026.1.14
+ARG MODEL_PRELOAD=true
+ARG APT_DEBIAN_MIRROR=https://mirrors.aliyun.com/debian
+ARG APT_SECURITY_MIRROR=https://mirrors.aliyun.com/debian-security
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+ARG HF_ENDPOINT=https://hf-mirror.com
+ARG DOCLING_MODEL_GIT_BASE=https://hf-mirror.com
+ARG GRAPH_EMBEDDING_BUILD_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/apps/api \
+    FILE_STORAGE_ROOT=/data/uploads \
+    LOG_DIR=/data/logs \
+    FILE_AGENT_MODEL_ROOT=/opt/file-agent/models \
+    DOCLING_ARTIFACTS_PATH=/opt/file-agent/models/docling \
+    GRAPH_EMBEDDING_MODEL_PATH=/opt/file-agent/models/document-embedding \
+    PADDLE_PDX_CACHE_HOME=/opt/file-agent/models/paddlex \
+    PADDLE_PDX_MODEL_SOURCE=BOS \
+    PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=False \
+    PADDLE_PDX_CPU_NUM_THREADS=4 \
+    OMP_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    HF_HOME=/opt/file-agent/models/huggingface \
+    HF_ENDPOINT=${HF_ENDPOINT} \
+    DOCLING_MODEL_GIT_BASE=${DOCLING_MODEL_GIT_BASE} \
+    PIP_INDEX_URL=${PIP_INDEX_URL} \
+    GRAPH_EMBEDDING_BUILD_MODEL=${GRAPH_EMBEDDING_BUILD_MODEL} \
+    REQUIRE_PRELOADED_MODELS=true
+
+WORKDIR /app
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    sed -i \
+        -e "s|http://deb.debian.org/debian-security|${APT_SECURITY_MIRROR}|g" \
+        -e "s|http://deb.debian.org/debian|${APT_DEBIAN_MIRROR}|g" \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update \
+    && apt-get install -y --no-install-recommends \
+        libreoffice-writer \
+        libreoffice-calc \
+        ca-certificates \
+        fontconfig \
+        fonts-noto-cjk \
+        libgl1 \
+        libglib2.0-0 \
+        libgomp1 \
+        git \
+        git-lfs \
+        nodejs \
+        npm \
+    && npm install -g --registry="${NPM_REGISTRY}" "@modelcontextprotocol/server-filesystem@${MCP_FILESYSTEM_VERSION}" \
+    && npm cache clean --force \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /app/requirements.txt
+COPY requirements-graph.txt /app/requirements-graph.txt
+COPY deploy/requirements.full-cpu.txt /app/deploy/requirements.full-cpu.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --retries 10 --timeout 120 --upgrade pip \
+    && python -m pip install --retries 10 --timeout 120 --prefer-binary -r /app/deploy/requirements.full-cpu.txt
+
+# 模型预加载器会调用受控 Provider 验证真实离线初始化，因此基础镜像构建时临时复制源码。
+COPY . /app
+
+# 所有模型在同一层固化，避免 PaddleX 模型跨层反复复制导致基础镜像虚增。
+# 下载内容分别写入持久 BuildKit 缓存，网络失败后重建仍可复用已完成部分。
+RUN --mount=type=bind,from=local-model-cache,source=.,target=/mnt/local-model-cache,ro \
+    --mount=type=cache,target=/var/cache/file-agent-model-downloads,sharing=locked \
+    --mount=type=cache,target=/var/cache/file-agent-paddlex-models,sharing=locked \
+    mkdir -p /opt/file-agent/models \
+    && if [ "$MODEL_PRELOAD" = "true" ]; then \
+      python /app/deploy/scripts/preload_models.py import-cache; \
+      python /app/deploy/scripts/preload_models.py docling; \
+      python /app/deploy/scripts/preload_models.py paddleocr; \
+      mkdir -p /var/cache/file-agent-paddlex-models/official_models; \
+      cp -a /opt/file-agent/models/paddlex/official_models/. /var/cache/file-agent-paddlex-models/official_models/; \
+      rm -rf /opt/file-agent/models/paddlex/official_models; \
+      ln -s /var/cache/file-agent-paddlex-models/official_models /opt/file-agent/models/paddlex/official_models; \
+      PADDLE_PDX_CACHE_HOME=/var/cache/file-agent-paddlex-models python /app/deploy/scripts/preload_models.py pp-structure; \
+      ln -sfn PaddleOCR-VL-1.6 /var/cache/file-agent-paddlex-models/official_models/PaddleOCR-VL-1.6-0.9B; \
+      PADDLE_PDX_CACHE_HOME=/var/cache/file-agent-paddlex-models python /app/deploy/scripts/preload_models.py paddleocr-vl; \
+      rm /opt/file-agent/models/paddlex/official_models; \
+      rm -f /var/cache/file-agent-paddlex-models/official_models/PaddleOCR-VL-1.6-0.9B; \
+      mkdir -p /opt/file-agent/models/paddlex/official_models; \
+      cp -a /var/cache/file-agent-paddlex-models/official_models/. /opt/file-agent/models/paddlex/official_models/; \
+      ln -s PaddleOCR-VL-1.6 /opt/file-agent/models/paddlex/official_models/PaddleOCR-VL-1.6-0.9B; \
+      python /app/deploy/scripts/preload_models.py embedding; \
+      python /app/deploy/scripts/preload_models.py finalize; \
+    fi
+
+# 基础镜像不携带可运行的旧业务代码，避免后续删除过的模块残留在代码镜像中。
+RUN rm -rf /app \
+    && mkdir -p /app
+
+# 模型在构建阶段已经固化；运行期不得依赖 Hugging Face/Transformers 临时下载。
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True

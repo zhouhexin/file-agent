@@ -77,6 +77,13 @@ PADDLEX_ALLOWED_MODEL_DIRS = {
     "UVDoc",
 }
 
+RAPIDOCR_REQUIRED_FILES = {
+    "PP-OCRv6_det_small.onnx",
+    "PP-OCRv6_rec_small.onnx",
+    "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+    "ppocrv6_dict.txt",
+}
+
 PACKAGE_VERSION_LOCKS = {
     "docling": "2.120.3",
     "huggingface-hub": "1.28.0",
@@ -150,7 +157,7 @@ def _copy_tree(source: Path, target: Path) -> None:
 
 
 def import_local_cache() -> None:
-    """只导入声明白名单内的 PaddleX 和 embedding 本地缓存。"""
+    """只导入声明白名单内的 PaddleX、Docling 和 embedding 本地缓存。"""
 
     imported: list[str] = []
     if not LOCAL_CACHE_ROOT.is_dir():
@@ -164,6 +171,12 @@ def import_local_cache() -> None:
         if source.is_dir():
             _copy_tree(source, paddle_target / model_name)
             imported.append(f"paddlex/{model_name}")
+
+    rapidocr_source = LOCAL_CACHE_ROOT / "docling" / "RapidOcr"
+    if rapidocr_source.is_dir():
+        _validate_rapidocr_tree(rapidocr_source, label="本地 Docling RapidOCR")
+        _copy_tree(rapidocr_source, MODEL_ROOT / "docling" / "RapidOcr")
+        imported.append("docling/RapidOcr")
 
     embedding_cache_name = (
         "models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2"
@@ -226,6 +239,16 @@ def _validate_model_tree(root: Path, *, label: str) -> dict[str, int]:
     if not files or total_bytes < 1024:
         raise RuntimeError(f"{label} 模型目录为空或内容不完整。")
     return {"file_count": len(files), "total_bytes": total_bytes}
+
+
+def _validate_rapidocr_tree(root: Path, *, label: str) -> dict[str, int]:
+    """校验 RapidOCR 推理必需的 ONNX 模型和字典，拒绝导入部分下载。"""
+
+    facts = _validate_model_tree(root, label=label)
+    missing = sorted(name for name in RAPIDOCR_REQUIRED_FILES if not (root / name).is_file())
+    if missing:
+        raise RuntimeError(f"{label} 缺少必需文件：{', '.join(missing)}")
+    return facts
 
 
 def _checkout_docling_repository(*, repo_id: str, revision: str, target: Path) -> None:
@@ -306,21 +329,35 @@ def preload_docling() -> None:
             {"repo_id": repo_id, "revision": revision, "folder": folder_name, **facts}
         )
 
-    # Docling 2.120.3 的默认 OCR 模型来自国内 ModelScope，不经过 Hugging Face HEAD API。
+    # RapidOCR 必须先进入持久化 BuildKit 缓存，再复制到镜像目录；构建失败后可断点复用。
     rapidocr_target = target / "RapidOcr"
-    if not rapidocr_target.is_dir() or not any(rapidocr_target.rglob("*")):
-        _run_with_retry(
-            [
-                "docling-tools",
-                "models",
-                "download",
-                "rapidocr",
-                "--output-dir",
-                str(target),
-                "--quiet",
-            ]
-        )
-    rapidocr_facts = _validate_model_tree(rapidocr_target, label="Docling RapidOCR")
+    rapidocr_cache_root = DOWNLOAD_CACHE_ROOT / "docling-tools"
+    rapidocr_cache_target = rapidocr_cache_root / "RapidOcr"
+    try:
+        _validate_rapidocr_tree(rapidocr_target, label="Docling RapidOCR")
+        _copy_tree(rapidocr_target, rapidocr_cache_target)
+    except RuntimeError:
+        try:
+            _validate_rapidocr_tree(rapidocr_cache_target, label="缓存的 Docling RapidOCR")
+            _copy_tree(rapidocr_cache_target, rapidocr_target)
+        except RuntimeError:
+            rapidocr_cache_root.mkdir(parents=True, exist_ok=True)
+            if rapidocr_cache_target.exists():
+                shutil.rmtree(rapidocr_cache_target)
+            _run_with_retry(
+                [
+                    "docling-tools",
+                    "models",
+                    "download",
+                    "rapidocr",
+                    "--output-dir",
+                    str(rapidocr_cache_root),
+                    "--quiet",
+                ]
+            )
+            _validate_rapidocr_tree(rapidocr_cache_target, label="缓存的 Docling RapidOCR")
+            _copy_tree(rapidocr_cache_target, rapidocr_target)
+    rapidocr_facts = _validate_rapidocr_tree(rapidocr_target, label="Docling RapidOCR")
     _record(
         "docling",
         {

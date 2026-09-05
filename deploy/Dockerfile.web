@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# 使用 Docker Desktop 内置 Dockerfile 前端，避免离线构建额外解析 docker/dockerfile 镜像。
 
 # 构建现有 Vite/React 前端，并通过 Caddy 对外提供静态资源。
 FROM node:22-alpine AS builder
