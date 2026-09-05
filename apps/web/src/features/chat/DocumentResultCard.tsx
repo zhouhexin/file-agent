@@ -37,7 +37,7 @@ export function DocumentResultCard({
   const renamedFilenameText = result.rename_status === 'PROCESSING'
     ? '处理中'
     : result.rename_status === 'NEEDS_REVIEW'
-      ? '尚未重命名（待复核）'
+      ? '保留原名'
       : result.rename_status === 'FAILED'
         ? '未能完成重命名'
         : result.rename_status === 'NO_CHANGE'
@@ -169,7 +169,7 @@ export function DocumentResultCard({
               </p>
               <small>
                 {result.rename_status === 'NEEDS_REVIEW'
-                  ? '命名依据不足，已保留原名并等待复核。'
+                  ? '命名依据不足，已直接保留原名。'
                   : result.rename_status === 'NO_CHANGE'
                     ? '标准名称与原名一致，无需改名。'
                     : '工作副本已完成标准化命名；不可变原件未修改。'}
@@ -190,12 +190,6 @@ export function DocumentResultCard({
                   {warning.message || '文件存在需要注意的格式风险。'}
                 </p>
               ))}
-            </div>
-          ) : null}
-          {result.rename_suggestion?.proposed_filename ? (
-            <div className="document-result-rename-suggestion">
-              <p>建议名称：{result.rename_suggestion.proposed_filename}</p>
-              <small>当前文件名未改变。如需改名，请在对话中明确提出“改名”。</small>
             </div>
           ) : null}
         </>

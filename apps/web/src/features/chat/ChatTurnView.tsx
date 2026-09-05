@@ -45,6 +45,7 @@ export function ChatTurnView({
         <div className="message-row message-row-assistant">
           <div className="avatar avatar-assistant"><Bot size={15} /></div>
           <div className="message-content">
+            <AssistantIdentity status={assistantTurnStatus(turn)} />
             {uploadVersionId ? (
               <DuplicateUploadReviewLoader
                 token={token}
@@ -95,6 +96,7 @@ export function ChatTurnView({
         </div>
 
         <div className="message-content">
+          <AssistantIdentity status={assistantTurnStatus(turn)} />
           {turn.status === 'sending' ? <AgentRunReceipt state="running" /> : null}
           {turn.status === 'failed' ? <AgentRunReceipt state="failed" /> : null}
           {turn.response ? (
@@ -114,6 +116,35 @@ export function ChatTurnView({
       </div>
     </section>
   );
+}
+
+/** 只展示用户可理解的处理状态；不把 Agent、Skill 或 Tool 生命周期暴露到聊天流。 */
+function AssistantIdentity({ status }: { status: '处理中' | '已完成' | '处理失败' }) {
+  return (
+    <div className="assistant-identity" aria-label={`File Agent，${status}`}>
+      <span className="assistant-identity-avatar"><Bot size={14} aria-hidden /></span>
+      <strong>File Agent</strong>
+      <span className={`assistant-identity-status assistant-identity-status--${status === '处理中' ? 'processing' : status === '处理失败' ? 'failed' : 'completed'}`}>
+        {status}
+      </span>
+    </div>
+  );
+}
+
+function assistantTurnStatus(turn: ChatTurn): '处理中' | '已完成' | '处理失败' {
+  if (turn.status === 'sending') return '处理中';
+  if (turn.status === 'failed' || turn.response?.task_result?.task_status === 'failed') return '处理失败';
+  const phase = turn.response?.task_result?.presentation?.phase.code;
+  if (
+    phase === 'PROCESSING'
+    || phase === 'RECEIVED'
+    || phase === 'UNDERSTANDING'
+    || phase === 'ORGANIZING'
+    || phase === 'WAITING_CONFIRMATION'
+  ) {
+    return '处理中';
+  }
+  return '已完成';
 }
 
 function isInferredContextFileRequest(text: string): boolean {

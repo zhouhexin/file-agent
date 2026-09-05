@@ -285,7 +285,16 @@ export function AgentRunReceipt({
     taskResult.response_type === 'file_search_results' &&
     taskResult.file_search_result
   ) {
-    const searchDetails = taskResult.file_search_result.files.length > 0 ? (
+    if (taskResult.file_search_result.files.length === 0) {
+      // 无结果时只给出可执行的澄清提示，避免把“没有找到”包装成一个空结果大卡片。
+      return (
+        <p className="search-results-empty search-results-empty--inline">
+          {taskResult.file_search_result.user_message
+            || '没有找到相关文件，请再精确或确认一下查询条件。'}
+        </p>
+      );
+    }
+    const searchDetails = (
       <>
         <SearchResultsReceipt
           result={taskResult.file_search_result}
@@ -296,7 +305,7 @@ export function AgentRunReceipt({
         />
         {!presentation ? <SearchContextSummary context={taskResult.search_context} /> : null}
       </>
-    ) : undefined;
+    );
     return wrapFileTask(searchDetails);
   }
   if (
