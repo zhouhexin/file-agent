@@ -2240,6 +2240,85 @@
   }
 }
 
+/* 上传整理回执与普通助手回执共用 WorkBuddy 文档流，不再显示旧式大进度卡。 */
+.workbuddy-upload-receipt {
+  display: grid;
+  gap: 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
+}
+
+.submitted-upload-batch {
+  width: min(980px, 100%);
+  max-height: none;
+  overflow: visible;
+  padding: 0 0 18px;
+}
+
+.upload-batch-intro {
+  margin: 0;
+  color: #334155;
+  line-height: 1.7;
+}
+
+.upload-batch-rule {
+  height: 1px;
+  background: #dbe3ef;
+}
+
+.upload-batch-result-block {
+  display: grid;
+  gap: 10px;
+}
+
+.upload-batch-result-block h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: #1e293b;
+  font-size: 17px;
+  line-height: 1.4;
+}
+
+.upload-batch-result-block h2 small {
+  margin-left: auto;
+  color: #7b879b;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.upload-batch-result-icon {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 7px;
+  background: #eef4ff;
+  font-size: 15px;
+}
+
+.workbuddy-upload-receipt > .classification-tree-receipt {
+  margin-top: -2px;
+}
+
+.workbuddy-upload-receipt .classification-tree-header {
+  display: none;
+}
+
+.upload-batch-change-note {
+  margin: 0;
+  border-left: 2px solid #86c69b;
+  background: #f4fbf5;
+  color: #38634b;
+  padding: 9px 11px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .duplicate-review-card {
   display: grid;
   gap: 12px;

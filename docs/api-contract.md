@@ -1692,6 +1692,7 @@ GET  /api/uploads/{upload_version_id}/duplicate-review
 POST /api/uploads/{upload_version_id}/duplicate-review/decision
 POST /api/uploads/{upload_version_id}/process
 GET  /api/uploads/{upload_version_id}/archive-status
+GET  /api/conversations/{conversation_id}/upload-archive-statuses
 GET  /api/jobs/{job_id}
 GET  /api/jobs/{job_id}/events
 
@@ -1712,6 +1713,11 @@ POST /api/trash-entries/{trash_entry_id}/restore-plan
 `organization_status`、`review_reasons` 和 `pending_decision`。`categories` 同时保留可定位
 `evidence_items` 和现有分类卡使用的 `evidence` 摘要。终态为 `COMPLETED`、`NEEDS_REVIEW` 或
 `FAILED`；处于终态时，分类或命名子状态不得继续返回 `PROCESSING`。
+
+`GET /api/conversations/{conversation_id}/upload-archive-statuses` 用于聊天页刷新后恢复当前会话中
+已经启动的上传整理回执。接口只返回当前用户、当前会话绑定的上传版本的业务状态列表，跳过仍停留在
+`STAGED` 或已经取消的条目，不返回 `SYSTEM_AUDIT` 消息、服务器物理路径或内部任务载荷。前端可依据
+返回的 `processing_status` 继续轮询，终态结果必须与单文件 `archive-status` 保持相同字段语义。
 
 单文件、多文件和文件夹上传均由前端按本次选择建立同一种暂存批次。只有用户点击发送后，前端才
 逐文件调用幂等的 `POST /api/uploads/{upload_version_id}/process`；单项启动失败不影响同批其他

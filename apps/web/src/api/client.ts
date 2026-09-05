@@ -410,6 +410,17 @@ export async function getUploadArchiveStatus(
   return request<UploadArchiveStatus>(`/uploads/${uploadVersionId}/archive-status`, { token });
 }
 
+export async function getConversationUploadArchiveStatuses(
+  token: string,
+  conversationId: string,
+): Promise<UploadArchiveStatus[]> {
+  // 刷新聊天页时恢复已启动的上传整理结果；接口只返回当前用户当前会话的业务状态。
+  return request<UploadArchiveStatus[]>(
+    `/conversations/${conversationId}/upload-archive-statuses`,
+    { token },
+  );
+}
+
 export async function decideDuplicateReview(
   token: string,
   uploadVersionId: string,
