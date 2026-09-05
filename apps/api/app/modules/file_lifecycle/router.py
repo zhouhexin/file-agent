@@ -106,6 +106,23 @@ def get_archive_status(
     )
 
 
+@router.get(
+    "/api/conversations/{conversation_id}/upload-archive-statuses",
+    response_model=list[ArchiveStatusResponse],
+)
+def list_conversation_archive_statuses(
+    conversation_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[ArchiveStatusResponse]:
+    """恢复当前会话的上传归档回执，不返回生命周期内部审计消息。"""
+
+    return UploadLifecycleService(db).list_conversation_archive_statuses(
+        conversation_id=conversation_id,
+        current_user=current_user,
+    )
+
+
 @router.get("/api/working-copies", response_model=list[WorkingCopyResponse])
 def list_working_copies(
     current_user: User = Depends(get_current_user),

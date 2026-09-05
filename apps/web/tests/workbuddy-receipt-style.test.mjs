@@ -68,3 +68,48 @@ test('无搜索结果只展示澄清文字，不展示空结果大卡片', async
     await vite.close();
   }
 });
+
+test('上传归档回执使用文件整理分类树文案，不再渲染旧式本次附件卡片', async () => {
+  const vite = await createServer({ logLevel: 'silent', server: { middlewareMode: true } });
+  try {
+    const { UploadBatchProgress } = await vite.ssrLoadModule('/src/features/chat/UploadBatchProgress.tsx');
+    const html = renderToStaticMarkup(React.createElement(UploadBatchProgress, {
+      token: '',
+      batch: {
+        id: 'batch-1',
+        submitted: true,
+        total: 1,
+        completed: 1,
+        processed: 1,
+        succeeded: 1,
+        needsReview: 0,
+        failed: 0,
+        failures: [],
+        status: 'completed',
+        files: [{
+          id: 'file-1',
+          relativePath: '材料.xlsx',
+          result: {
+            document_id: 'document-1',
+            filename: '2026_材料.xlsx',
+            original_filename: '材料.xlsx',
+            renamed_filename: '2026_材料.xlsx',
+            rename_status: 'COMPLETED',
+            processing_status: 'COMPLETED',
+            extraction_status: 'COMPLETED',
+            categories: [],
+            warnings: [],
+            errors: [],
+          },
+        }],
+      },
+      onOpenAttachment: () => {},
+      onOpenDocument: () => {},
+    }));
+    assert.match(html, /文件整理 \/ 分类树/);
+    assert.doesNotMatch(html, /本次附件/);
+    assert.doesNotMatch(html, /upload-batch-track/);
+  } finally {
+    await vite.close();
+  }
+});

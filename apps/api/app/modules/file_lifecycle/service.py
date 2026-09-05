@@ -677,6 +677,43 @@ class UploadLifecycleService:
             error_message=archive.last_error_message,
         )
 
+    def list_conversation_archive_statuses(
+        self,
+        *,
+        conversation_id: str,
+        current_user: User,
+    ) -> list[ArchiveStatusResponse]:
+        """恢复当前会话已启动的上传归档结果，供刷新后的聊天页重建回执。
+
+        这里读取的是上传生命周期业务状态，不直接返回 SYSTEM_AUDIT 消息，也不暴露
+        文件系统路径；只有绑定当前用户和当前会话的重复检查记录才允许进入结果集合。
+        """
+
+        reviews = (
+            self.db.query(UploadDuplicateReview)
+            .filter(
+                UploadDuplicateReview.conversation_id == conversation_id,
+                UploadDuplicateReview.user_id == current_user.id,
+                UploadDuplicateReview.status != "CANCELLED",
+            )
+            .order_by(UploadDuplicateReview.created_at.asc(), UploadDuplicateReview.id.asc())
+            .all()
+        )
+        results: list[ArchiveStatusResponse] = []
+        for review in reviews:
+            try:
+                status = self.get_archive_status(
+                    upload_version_id=review.upload_document_version_id,
+                    current_user=current_user,
+                )
+            except HTTPException:
+                # 单条历史上传状态失效时跳过它，不能阻断整个会话的其他回执恢复。
+                continue
+            if status.status in {"STAGED", "CANCELLED"}:
+                continue
+            results.append(status)
+        return results
+
     @staticmethod
     def _upload_status_review_reasons(
         *,

@@ -12,6 +12,7 @@ import {
   fetchUploadedFileBlob,
   getFilePreview,
   getConversationDetail,
+  getConversationUploadArchiveStatuses,
   getFilesystemJob,
   sendAgentMessage,
   startUploadProcessing,
@@ -26,6 +27,7 @@ import type {
   FilePreviewResponse,
   ManagedFileResult,
   SendMessageResponse,
+  UploadArchiveStatus,
   User,
 } from '../../types';
 import { AttachmentRail } from './AttachmentRail';
@@ -170,6 +172,41 @@ function historyMessagesToTurns(messages: ConversationHistoryMessage[]): ChatTur
       metadata: historyMessage.metadata,
     };
   });
+}
+
+/** 把后端持久化的上传归档状态转换为聊天页可复用的批次回执。 */
+function buildRestoredUploadBatch(
+  statuses: UploadArchiveStatus[],
+): UploadBatchProgressState {
+  const files = statuses.map((status, index) => ({
+    id: `restored:${status.upload_document_version_id}:${index}`,
+    relativePath: status.original_filename,
+    uploadVersionId: status.upload_document_version_id,
+    result: archiveStatusToDocumentResult(status),
+  }));
+  const settled = files.filter((file) => isSettledBatchResult(file.result.processing_status));
+  const failed = files.filter((file) => file.result.processing_status === 'FAILED').length;
+  const needsReview = files.filter((file) => file.result.processing_status === 'NEEDS_REVIEW').length;
+  const succeeded = settled.length - failed - needsReview;
+  const processing = files.length !== settled.length;
+  return {
+    id: `restored:${statuses.map((status) => status.upload_document_version_id).join(',')}`,
+    submitted: true,
+    total: files.length,
+    completed: files.length,
+    processed: settled.length,
+    succeeded,
+    needsReview,
+    failed,
+    failures: files
+      .filter((file) => file.result.processing_status === 'FAILED')
+      .map((file) => ({
+        relativePath: file.relativePath,
+        message: file.result.errors?.[0]?.message || '文件自动处理失败',
+      })),
+    files,
+    status: processing ? 'processing' : failed > 0 ? 'failed' : 'completed',
+  };
 }
 
 export function ChatPage({
@@ -319,6 +356,52 @@ export function ChatPage({
       cancelled = true;
     };
   }, [primaryConversationId, scrollMessageListToBottom, token]);
+
+  useEffect(() => {
+    // 刷新后从持久化上传生命周期恢复回执；已由普通任务回执覆盖的文件不重复展示。
+    if (historyLoading) return;
+    let cancelled = false;
+    void getConversationUploadArchiveStatuses(token, conversationId)
+      .then((statuses) => {
+        if (cancelled || statuses.length === 0) return;
+        const coveredDocumentIds = new Set(
+          chatTurns.flatMap((turn) => turn.response?.task_result?.document_results ?? [])
+            .map((result) => result.document_id),
+        );
+        const visibleStatuses = statuses.filter((status) => !coveredDocumentIds.has(status.document_id));
+        if (visibleStatuses.length === 0) return;
+        setUploadBatch(buildRestoredUploadBatch(visibleStatuses));
+      })
+      .catch(() => {
+        // 历史回执恢复失败不阻断聊天页；当前消息和文件仍可正常使用。
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId, historyLoading, token]);
+
+  useEffect(() => {
+    if (!uploadBatch?.submitted || !['processing', 'completed'].includes(uploadBatch.status)) {
+      return;
+    }
+    // 处理中的批次持续读取后端状态，完成后保留同一份持久化回执，避免刷新前后两套展示。
+    const refresh = async () => {
+      try {
+        const statuses = await getConversationUploadArchiveStatuses(token, conversationId);
+        if (statuses.length > 0) {
+          setUploadBatch(buildRestoredUploadBatch(statuses));
+        }
+      } catch {
+        // 单次轮询失败不清空已有结果，下一轮继续尝试。
+      }
+    };
+    if (uploadBatch.status === 'completed') {
+      const timer = window.setTimeout(() => void refresh(), 500);
+      return () => window.clearTimeout(timer);
+    }
+    const timer = window.setInterval(() => void refresh(), 1500);
+    return () => window.clearInterval(timer);
+  }, [conversationId, token, uploadBatch?.id, uploadBatch?.status, uploadBatch?.submitted]);
 
   useEffect(() => {
     // 页面刷新后也要继续跟踪尚未完成的后台分类任务。
@@ -1373,10 +1456,28 @@ export function ChatPage({
                   }}
                 />
               ))}
+              {submittedUploadBatch ? (
+                <section className="submitted-upload-batch" aria-label="已提交文件处理进度">
+                  <UploadBatchProgress
+                    batch={submittedUploadBatch}
+                    token={token}
+                    onOpenAttachment={openAttachment}
+                    onOpenDocument={openSearchDocument}
+                  />
+                  {Object.values(duplicateReviews).map((review) => (
+                    <DuplicateUploadReviewCard
+                      key={review.id}
+                      token={token}
+                      review={review}
+                      onResolved={resolveDuplicateReview}
+                    />
+                  ))}
+                </section>
+              ) : null}
             </div>
           )}
 
-          {submittedUploadBatch ? (
+          {!hasTurns && submittedUploadBatch ? (
             <section className="submitted-upload-batch" aria-label="已提交文件处理进度">
               <UploadBatchProgress
                 batch={submittedUploadBatch}

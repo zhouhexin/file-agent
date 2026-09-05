@@ -37,26 +37,40 @@ export function UploadBatchProgress({
       : batch.status === 'failed'
         ? '批次处理未全部完成'
         : '本批次自动整理完成';
+  const completed = batch.status === 'completed' || batch.status === 'failed';
 
   return (
-    <section className="upload-batch-progress" aria-live="polite">
-      <header>
-        <span className="upload-batch-title">
-          <FolderUp size={17} />
-          <strong>本次附件</strong>
+    <section className="upload-batch-progress workbuddy-upload-receipt" aria-live="polite">
+      <header className="assistant-identity">
+        <span className="assistant-identity-avatar"><FolderUp size={14} aria-hidden /></span>
+        <strong>File Agent</strong>
+        <span className={`assistant-identity-status assistant-identity-status--${active ? 'processing' : batch.status === 'failed' ? 'failed' : 'completed'}`}>
+          {active ? '处理中' : batch.status === 'failed' ? '处理失败' : '已完成'}
         </span>
       </header>
-      <div className="upload-batch-summary">
-        {active ? <Loader2 className="upload-batch-spinner" size={15} /> : <CheckCircle2 size={15} />}
-        <span>{statusText}</span>
-        <span>已处理 {batch.processed}/{batch.total}</span>
-        <span>完成 {batch.succeeded}</span>
-        <span>待复核 {batch.needsReview}</span>
-        <span>失败 {batch.failed}</span>
-      </div>
-      <div className="upload-batch-track" aria-label={`批次完成进度 ${percent}%`}>
-        <span style={{ width: `${percent}%` }} />
-      </div>
+      <p className="upload-batch-intro">
+        {batch.status === 'failed'
+          ? '文件整理未全部完成，下面列出已处理文件和失败项：'
+          : completed
+          ? '文件已完成读取、分类和首次标准化命名，我按分类与命名结果整理如下：'
+          : statusText}
+      </p>
+      <div className="upload-batch-rule" />
+      <section className="upload-batch-result-block">
+        <h2><span className="upload-batch-result-icon">🗂️</span>文件整理 / 分类树 <small>{batch.total} 个文件</small></h2>
+        <div className="upload-batch-summary">
+          {active ? <Loader2 className="upload-batch-spinner" size={15} /> : <CheckCircle2 size={15} />}
+          <span>已处理 {batch.processed}/{batch.total}</span>
+          <span>完成 {batch.succeeded}</span>
+          <span>待复核 {batch.needsReview}</span>
+          <span>失败 {batch.failed}</span>
+        </div>
+        {active ? (
+          <div className="upload-batch-track" aria-label={`批次完成进度 ${percent}%`}>
+            <span style={{ width: `${percent}%` }} />
+          </div>
+        ) : null}
+      </section>
       {batch.failures.length > 0 ? (
         <details className="upload-batch-failures">
           <summary><AlertCircle size={14} /> 查看 {batch.failures.length} 个失败文件</summary>
@@ -78,6 +92,11 @@ export function UploadBatchProgress({
           onOpenAttachment={onOpenAttachment}
           onOpenDocument={onOpenDocument}
         />
+      ) : null}
+      {completed ? (
+        <p className="upload-batch-change-note">
+          工作副本已完成整理；上传原件保持不变。命名依据不足的文件直接保留原名。
+        </p>
       ) : null}
     </section>
   );
