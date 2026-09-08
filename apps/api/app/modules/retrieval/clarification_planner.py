@@ -43,7 +43,10 @@ class FileSearchClarificationPlanner:
                         "step_id": "step-resolve-selected-rename-review",
                         "skill": "file-rename",
                         "tool_name": "resolve-rename-reviews",
-                        "input": {"message": value.display_content},
+                        "input": {
+                            "message": value.display_content,
+                            "document_ids": list(value.document_ids),
+                        },
                         "requires_confirmation": False,
                         "risk_level": "medium",
                         "expected_outputs": [
@@ -57,7 +60,7 @@ class FileSearchClarificationPlanner:
                     "require_page_or_cell": False,
                     "allow_no_evidence_answer": True,
                 },
-                confirmation_policy={"operation_plan_required": True},
+                confirmation_policy={"operation_plan_required": False},
             )
         if value.document_ids:
             # 文件选择只负责确定范围，不能把“表格汇总、分类、总结”等原始任务

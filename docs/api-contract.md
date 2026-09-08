@@ -1726,8 +1726,8 @@ POST /api/trash-entries/{trash_entry_id}/restore-plan
 文档而破坏重复文件决策边界。上传本身不创建或发送隐式聊天任务消息。
 
 真实容器校验通过的上传图片采用固定首次组织规则：单张和批量图片都不识别具体学院，直接按
-`学院/{YYYY-MM-DD}` 发布工作副本；日期按 `Asia/Shanghai` 的原上传自然日计算。同一天的图片
-复用同一日期目录，同名图片由后端在该目录内分配版本后缀，禁止覆盖。该规则只改变工作副本和
+`学院/{YYYY}` 发布工作副本；年份按 `Asia/Shanghai` 的原上传时间计算。同一年的图片
+复用同一年份目录，同名图片由后端在该目录内分配版本后缀，禁止覆盖。该规则只改变工作副本和
 活动主分类投影，不修改不可变归档原件及 `documents.original_filename`；非图片继续使用正文证据
 分类规则。
 
@@ -1780,9 +1780,10 @@ GET /api/classification/organization/files?category_id={stable_id}&scope=descend
 工作副本；活动主分类只认当前版本的 `PRIMARY + AUTO_APPLIED/CONFIRMED` 关系。建议分类、
 已拒绝关系、`ORGANIZING` 文件和 Shadow 组织决策不得参与计数。
 
-图片日期目录不会动态写回 taxonomy。`tree` 在“学院”节点下根据活动主分类关系投影
-`category_id=__image_upload_date__:{YYYY-MM-DD}` 的虚拟日期节点；`files` 接受该后端签发 ID，
-只返回对应自然日的上传图片。日期节点属于组织视图，不表示系统从图片正文识别了具体学院。
+图片年份目录不会动态写回 taxonomy。`tree` 在“学院”节点下根据活动主分类关系投影
+`category_id=__image_upload_date__:{YYYY}` 的虚拟年份节点；`files` 接受该后端签发 ID，
+只返回对应年份的上传图片。年份节点属于组织视图，不表示系统从图片正文识别了具体学院。
+既有 `YYYY-MM-DD` 节点及受管源图片修改日期兜底继续兼容读取。
 
 `files` 支持 `scope=direct|descendants` 和服务端分页。传入 `__needs_review__` 等价于读取当前版本
 最新的非 Shadow `NEEDS_REVIEW` 组织决策。响应只包含稳定业务 ID、逻辑相对路径、分类状态、

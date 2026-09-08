@@ -196,8 +196,8 @@ class ConversationalWorkingCopyPlanService:
                     else "分类已保存，但文件移动未完成，请查看失败原因。"
                 ),
             }
-        if action == "CONFLICT_REPLACE_EXISTING":
-            # 用户当前回复已经构成唯一冲突的明确覆盖确认；仍然创建、确认并执行
+        if action in {"CONFLICT_REPLACE_EXISTING", "CONFLICT_KEEP_BOTH"}:
+            # 用户当前回复已经构成唯一冲突的明确处理确认；仍然创建、确认并执行
             # OperationPlan，只是不再插入第二次重复确认。
             self.operations.plan_repository.confirm_plan(
                 plan=plan,
@@ -218,7 +218,11 @@ class ConversationalWorkingCopyPlanService:
                 "operation_type": plan.operation_type,
                 "changeset_id": changeset_id,
                 "item_count": len(result.get("items") or []),
-                "message": "已按你的选择覆盖同名工作副本，旧文件已移入可恢复回收站。",
+                "message": (
+                    "已按你的选择同时保留文件，并完成自动重命名。"
+                    if action == "CONFLICT_KEEP_BOTH"
+                    else "已按你的选择覆盖同名工作副本，旧文件已移入可恢复回收站。"
+                ),
             }
         self.db.commit()
         self.db.refresh(plan)

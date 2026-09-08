@@ -2606,7 +2606,7 @@ def _rename_review_resolution_plan(
         ],
         evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
         confirmation_policy={
-            "operation_plan_required": True,
+            "operation_plan_required": False,
             "explicit_correction_is_confirmation": True,
         },
     )
@@ -2620,9 +2620,13 @@ def _working_copy_action_plan(
     response_style: str = "concise",
     llm_intent_plan: Dict[str, Any] | None = None,
 ) -> PlannerOutput:
-    """生成工作副本动作；显式按分类整理直接执行，其余动作保留确认边界。"""
+    """生成工作副本动作；显式分类整理和已选定的重命名冲突直接执行。"""
 
-    direct_classification_move = action == "MOVE_BY_CONFIRMED_CATEGORY"
+    direct_execution = action in {
+        "MOVE_BY_CONFIRMED_CATEGORY",
+        "CONFLICT_REPLACE_EXISTING",
+        "CONFLICT_KEEP_BOTH",
+    }
 
     return PlannerOutput(
         intent="PREPARE_WORKING_COPY_ACTION",
@@ -2631,7 +2635,7 @@ def _working_copy_action_plan(
             "document_ids": document_ids,
             "requested_outputs": [
                 "working_copy_operation_result"
-                if direct_classification_move
+                if direct_execution
                 else "operation_plan"
             ],
             "response_style": response_style,
@@ -2653,7 +2657,7 @@ def _working_copy_action_plan(
                 "risk_level": "high" if action in {"TRASH", "CONFLICT_REPLACE_EXISTING", "CONFLICT_DELETE_EXISTING"} else "medium",
                 "expected_outputs": [
                     "working_copy_operation_result"
-                    if direct_classification_move
+                    if direct_execution
                     else "operation_plan"
                 ],
                 "writes": [
@@ -2669,9 +2673,9 @@ def _working_copy_action_plan(
         ],
         evidence_policy={"require_page_or_cell": False, "allow_no_evidence_answer": True},
         confirmation_policy={
-            "operation_plan_required": not direct_classification_move,
+            "operation_plan_required": not direct_execution,
             "explicit_classification_instruction_authorizes_move": (
-                direct_classification_move
+                action == "MOVE_BY_CONFIRMED_CATEGORY"
             ),
         },
     )

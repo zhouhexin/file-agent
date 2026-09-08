@@ -207,6 +207,13 @@ def test_runtime_entrypoint_and_management_scripts_fail_closed() -> None:
     assert "-UsePrebuiltImages" in _read("deploy/README.md")
     assert "service_completed_successfully" in _read("deploy/docker-compose.production.yml")
     assert "rm -f migrate" in update
+    assert "SkipInfrastructurePull" in update
+    assert 'if ($SkipWeb)' in update
+    assert "UsePrebuiltWebDist" in update
+    assert "UsePrebuiltWebDist" in layered_builder
+    assert "prebuilt Web dist directory" in layered_builder
+    assert "Auto-selected the local Web runtime image" in layered_builder
+    assert "-SkipInfrastructurePull" in _read("deploy/README.md")
     assert 'if ($health -eq "healthy")' in update
     assert "Docker Compose 更新启动失败" in update
     assert "build-layered-images.ps1" in exporter

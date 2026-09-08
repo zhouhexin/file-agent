@@ -620,6 +620,9 @@ uploads ZIP；项目当前没有一键恢复脚本，不要在未确认目标数
 
 ## 8. 离线更新最新代码
 
+只传输源码 ZIP、同时更新 API 和前端的完整独立操作手册见
+[`windows-api-web-code-only-update-guide.md`](windows-api-web-code-only-update-guide.md)。
+
 推荐在构建机生成新的 API/Web 镜像和匹配的源码 ZIP，再传到服务器；目标服务器不重新下载依赖和模型。
 
 ### 8.1 构建机生成下一版
@@ -661,6 +664,100 @@ uploads ZIP；项目当前没有一键恢复脚本，不要在未确认目标数
 
 更新脚本会保留 `deploy/.env` 和 `data/`，重新创建一次性迁移容器，再检查 API 和模型运行时。不要用新
 源码配旧代码镜像，也不要只改镜像标签而不导入对应镜像。
+
+### 8.2.1 仅替换后端代码，不传输完整镜像 TAR
+
+当变更只涉及后端 Python、规则、taxonomy 或部署脚本，且 requirements、系统包、模型和前端均未变化
+时，可以只传输源码 ZIP。目标服务器必须已经具有当前 `file-agent-api-runtime-base`、
+`file-agent-web`、`pgvector/pgvector:pg16` 和 `neo4j:5.26-community` 镜像。
+
+在构建机项目根目录生成不含密钥和运行数据的源码 ZIP：
+
+```powershell
+$Version = "20260905-code5"
+tar.exe -a -c -f "E:\packages\file-agent-code-$Version.zip" `
+  --exclude=apps/web/node_modules `
+  --exclude=apps/web/dist `
+  --exclude=apps/api/.pytest_cache `
+  --exclude=apps/api/storage `
+  --exclude=apps/api/logs `
+  --exclude=deploy/.env `
+  --exclude=.env `
+  apps deploy docs rules skills README.md .dockerignore
+```
+
+源码包必须包含完整的 `apps/`、`deploy/`、`rules/` 和 `skills/`，不能只压缩几个改动文件，因为删除、
+重命名和模块间依赖也属于代码版本的一部分。禁止把 `deploy/.env` 放进 ZIP，以免覆盖生产密码与服务配置。
+
+目标服务器以后只需在 `E:\file-agent` 执行这一条更新命令：
+
+```powershell
+.\deploy\update.ps1 `
+  -PackageZip "E:\packages\file-agent-code-20260905-code5.zip" `
+  -SkipInfrastructurePull `
+  -SkipWeb
+```
+
+它会保留生产 `deploy/.env` 和 `data/`，同步源码后复用本地基础镜像重建 API 代码层，不重新安装依赖、
+不重新加载模型、不拉取 PostgreSQL/Neo4j，也不重建前端。随后会重新创建 `migrate`、启动全部服务、
+等待 API 健康并执行运行时校验。不要添加 `-UsePrebuiltImages`；该参数表示直接使用已有完整代码镜像，
+会跳过本次源码的代码层构建。
+
+如果目标服务器上的旧版 `update.ps1` 尚不认识 `-SkipInfrastructurePull` 或 `-SkipWeb`，只在第一次更新前
+执行下面的引导命令，从源码 ZIP 中先替换更新脚本，然后执行上面的正式命令：
+
+```powershell
+$PackageZip = "E:\packages\file-agent-code-20260905-code5.zip"
+tar.exe -xf $PackageZip -C E:\file-agent deploy/update.ps1
+```
+
+如果前端代码也有修改，不得使用 `-SkipWeb`；应同时构建/传输匹配版本的 Web 代码镜像，或者在目标机
+准备已安装依赖的 `apps/web/node_modules` 和可复用的旧 Web 镜像后执行前端分层构建。
+
+### 8.2.2 后端和前端代码同时替换
+
+前端代码也有变化时，在构建机编译静态文件。该步骤使用构建机已经安装好的 `node_modules`；如果依赖
+清单没有改变，不需要重新执行 `npm install`：
+
+```powershell
+Push-Location .\apps\web
+$PreviousApiBaseUrl = $env:VITE_API_BASE_URL
+try {
+  $env:VITE_API_BASE_URL = "/api"
+  npm run build
+} finally {
+  $env:VITE_API_BASE_URL = $PreviousApiBaseUrl
+  Pop-Location
+}
+```
+
+然后生成包含 `apps/web/dist/` 的代码包；这里不能再排除 `apps/web/dist`：
+
+```powershell
+$Version = "20260905-code5"
+tar.exe -a -c -f "E:\packages\file-agent-code-$Version.zip" `
+  --exclude=apps/web/node_modules `
+  --exclude=apps/api/.pytest_cache `
+  --exclude=apps/api/storage `
+  --exclude=apps/api/logs `
+  --exclude=deploy/.env `
+  --exclude=.env `
+  apps deploy rules skills README.md .dockerignore
+```
+
+把 ZIP 复制到目标服务器后，在 `E:\file-agent` 执行以下更新命令：
+
+```powershell
+.\deploy\update.ps1 `
+  -PackageZip "E:\packages\file-agent-code-20260905-code5.zip" `
+  -SkipInfrastructurePull `
+  -UsePrebuiltWebDist
+```
+
+该命令同时重建 API 与 Web 代码层。`-UsePrebuiltWebDist` 读取 ZIP 中的 `apps/web/dist/`，复用目标
+服务器已有 `file-agent-web:*` 镜像中的 Caddy，不要求目标服务器安装 npm 或保存 `node_modules`，也
+不会访问 Node/Caddy 镜像仓库。新代码标签对应的 Web 镜像尚不存在时，脚本会自动选择本机已有的最新
+`file-agent-web:*` 作为 Caddy 种子；如果本机一个 Web 镜像都没有，才会关闭式失败，不会退回联网下载。
 
 ### 8.3 回滚边界
 

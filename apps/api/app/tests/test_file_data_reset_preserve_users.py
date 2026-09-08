@@ -12,11 +12,14 @@ from app.db.models import (
     Conversation,
     Document,
     DocumentClassificationRun,
+    DocumentOrganizationDecision,
+    DocumentVersion,
     FilesystemJob,
     ManagedFile,
     ManagedFileRevision,
     ManagedRoot,
     User,
+    WorkingCopy,
     WorkingCopyRoot,
     Workspace,
 )
@@ -338,3 +341,202 @@ def test_working_copy_reset_refreshes_stale_classification_before_materializatio
             "CURRENT" if classification_is_current else "STALE": 1
         }
         assert list(working_target.iterdir()) == []
+
+
+def test_working_copy_reset_can_target_current_name_conflicts(monkeypatch, tmp_path: Path):
+    """按冲突原因重置时只清理命中的工作副本并重排其物化任务。"""
+
+    _client, SessionLocal = client_with_database()
+    settings = _settings(tmp_path)
+    source_root = tmp_path / "managed-source"
+    source_root.mkdir()
+    working_target = Path(settings.working_copy_storage_root) / "school-files"
+    working_target.mkdir(parents=True)
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setenv("MANAGED_ROOT_SCHOOL_FILES", str(source_root))
+
+    with SessionLocal() as db:
+        user = User(
+            username="reset-name-conflicts",
+            password_hash="hash",
+            display_name="冲突重置测试用户",
+            role="admin",
+        )
+        db.add(user)
+        db.flush()
+        workspace = Workspace(
+            name="shared",
+            owner_id=user.id,
+            is_default=True,
+            workspace_type="USER",
+        )
+        root = ManagedRoot(
+            root_key="school_files",
+            display_name="学校文件",
+            container_path=str(source_root.resolve()),
+            created_by=user.id,
+        )
+        db.add_all([workspace, root])
+        db.flush()
+        working_root = WorkingCopyRoot(
+            workspace_id=workspace.id,
+            managed_root_id=root.id,
+            root_key=root.root_key,
+            relative_storage_path="school-files",
+            status="READY",
+        )
+        db.add(working_root)
+        db.flush()
+
+        working_copies: list[WorkingCopy] = []
+        jobs: list[FilesystemJob] = []
+        for index, (filename, reasons) in enumerate(
+            [
+                ("conflict.txt", ["TARGET_NAME_CONFLICT"]),
+                ("normal.txt", ["LOW_CONFIDENCE"]),
+            ],
+            start=1,
+        ):
+            source_document = Document(
+                user_id=user.id,
+                workspace_id=workspace.id,
+                original_filename=f"source-{filename}",
+                content_type="text/plain",
+                size_bytes=6,
+                sha256=str(index) * 64,
+            )
+            working_document = Document(
+                user_id=user.id,
+                workspace_id=workspace.id,
+                original_filename=filename,
+                content_type="text/plain",
+                size_bytes=6,
+                sha256=str(index + 2) * 64,
+            )
+            managed_file = ManagedFile(
+                root_id=root.id,
+                relative_path=f"外来应聘/2023/{filename}",
+                relative_path_hash=f"source-path-{index}",
+                filename=filename,
+                extension=".txt",
+                size_bytes=6,
+                fingerprint=f"source-fingerprint-{index}",
+                status="ACTIVE",
+            )
+            db.add_all([source_document, working_document, managed_file])
+            db.flush()
+            revision = ManagedFileRevision(
+                managed_file_id=managed_file.id,
+                revision_number=1,
+                size_bytes=6,
+                quick_fingerprint=managed_file.fingerprint,
+                content_sha256=source_document.sha256,
+                status="READY",
+                analysis_status="READY",
+                is_current=True,
+                analysis_document_id=source_document.id,
+            )
+            working_copy = WorkingCopy(
+                working_copy_root_id=working_root.id,
+                workspace_id=workspace.id,
+                managed_file_id=managed_file.id,
+                document_id=working_document.id,
+                relative_path=filename,
+                relative_path_hash=f"working-path-{index}",
+                filename=filename,
+                extension=".txt",
+                size_bytes=6,
+                content_sha256=working_document.sha256,
+                imported_source_sha256=source_document.sha256,
+                status="ACTIVE",
+            )
+            db.add_all([revision, working_copy])
+            db.flush()
+            version = DocumentVersion(
+                document_id=working_document.id,
+                version_number=1,
+                working_copy_id=working_copy.id,
+                storage_tier="WORKING_COPY",
+                storage_path=f"school-files/{filename}",
+                filename=filename,
+                content_type="text/plain",
+                size_bytes=6,
+                sha256=working_document.sha256,
+                source_type="MANAGED_FILE",
+                source_managed_file_id=managed_file.id,
+                source_managed_file_revision_id=revision.id,
+                created_by=user.id,
+            )
+            db.add(version)
+            db.flush()
+            working_copy.current_version_id = version.id
+            db.add(
+                DocumentOrganizationDecision(
+                    working_copy_id=working_copy.id,
+                    document_id=working_document.id,
+                    document_version_id=version.id,
+                    policy_version="test-policy",
+                    decision="NEEDS_REVIEW",
+                    reason_codes_json=reasons,
+                    feature_snapshot_json={"shadow_only": False},
+                    idempotency_key=f"decision-{index}",
+                )
+            )
+            identity = current_classification_identity(
+                db=db,
+                settings=settings,
+                user_id=user.id,
+            )
+            source_agent_run = AgentRun(
+                id=f"source-run-{index}",
+                conversation_id=f"source-conversation-{index}",
+                message_id=f"source-message-{index}",
+                user_id=user.id,
+            )
+            db.add(source_agent_run)
+            db.flush()
+            db.add(
+                DocumentClassificationRun(
+                    document_id=source_document.id,
+                    agent_run_id=source_agent_run.id,
+                    taxonomy_key=identity.taxonomy_key,
+                    taxonomy_version=identity.taxonomy_version,
+                    classifier_version=identity.classifier_version,
+                    source="managed_source_full_text",
+                    status="COMPLETED",
+                )
+            )
+            job = FilesystemJob(
+                job_type="MATERIALIZE_WORKING_COPY",
+                queue_name="MATERIALIZE",
+                root_id=root.id,
+                created_by=user.id,
+                status="COMPLETED",
+                payload_json={"managed_file_revision_id": revision.id},
+                result_json={"status": "READY"},
+            )
+            db.add(job)
+            working_copies.append(working_copy)
+            jobs.append(job)
+            (working_target / filename).write_text(filename, encoding="utf-8")
+        db.commit()
+        working_copy_ids = [item.id for item in working_copies]
+        job_ids = [item.id for item in jobs]
+
+        result = reset_working_copy_materializations(
+            db=db,
+            settings=settings,
+            project_root=project_root,
+            root_key="school_files",
+            reason_code="TARGET_NAME_CONFLICT",
+        )
+
+        assert db.get(WorkingCopy, working_copy_ids[0]) is None
+        assert db.get(WorkingCopy, working_copy_ids[1]) is not None
+        assert db.get(FilesystemJob, job_ids[0]).status == "PENDING"
+        assert db.get(FilesystemJob, job_ids[1]).status == "COMPLETED"
+        assert not (working_target / "conflict.txt").exists()
+        assert (working_target / "normal.txt").is_file()
+        assert result["working_copies_removed"] == 1
+        assert result["physical_files_removed"] == 1

@@ -1,5 +1,5 @@
 // 聊天工作台是文件智能体主入口，文件打开动作必须经过后端受控接口。
-import { ChangeEvent, FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { ChangeEvent, FormEvent, Fragment, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, AlertTriangle, BookOpen, FolderTree, Lightbulb, LogOut, MessageSquare, Paperclip, Send, Trash2, User as UserIcon } from 'lucide-react';
 
 import {
@@ -177,6 +177,7 @@ function historyMessagesToTurns(messages: ConversationHistoryMessage[]): ChatTur
 /** 把后端持久化的上传归档状态转换为聊天页可复用的批次回执。 */
 function buildRestoredUploadBatch(
   statuses: UploadArchiveStatus[],
+  turnId?: string,
 ): UploadBatchProgressState {
   const files = statuses.map((status, index) => ({
     id: `restored:${status.upload_document_version_id}:${index}`,
@@ -191,6 +192,7 @@ function buildRestoredUploadBatch(
   const processing = files.length !== settled.length;
   return {
     id: `restored:${statuses.map((status) => status.upload_document_version_id).join(',')}`,
+    turnId,
     submitted: true,
     total: files.length,
     completed: files.length,
@@ -207,6 +209,20 @@ function buildRestoredUploadBatch(
     files,
     status: processing ? 'processing' : failed > 0 ? 'failed' : 'completed',
   };
+}
+
+function restoredUploadBatchForTurn(
+  statuses: UploadArchiveStatus[],
+  turns: ChatTurn[],
+): UploadBatchProgressState | null {
+  for (const turn of turns) {
+    const documentIds = new Set(turn.attachments.map((file) => file.document_id));
+    const matched = statuses.filter((status) => documentIds.has(status.document_id));
+    if (matched.length > 0) {
+      return buildRestoredUploadBatch(matched, turn.id);
+    }
+  }
+  return null;
 }
 
 export function ChatPage({
@@ -370,7 +386,8 @@ export function ChatPage({
         );
         const visibleStatuses = statuses.filter((status) => !coveredDocumentIds.has(status.document_id));
         if (visibleStatuses.length === 0) return;
-        setUploadBatch(buildRestoredUploadBatch(visibleStatuses));
+        const restored = restoredUploadBatchForTurn(visibleStatuses, chatTurns);
+        if (restored) setUploadBatch(restored);
       })
       .catch(() => {
         // 历史回执恢复失败不阻断聊天页；当前消息和文件仍可正常使用。
@@ -378,7 +395,7 @@ export function ChatPage({
     return () => {
       cancelled = true;
     };
-  }, [conversationId, historyLoading, token]);
+  }, [chatTurns, conversationId, historyLoading, token]);
 
   useEffect(() => {
     if (!uploadBatch?.submitted || !['processing', 'completed'].includes(uploadBatch.status)) {
@@ -388,8 +405,16 @@ export function ChatPage({
     const refresh = async () => {
       try {
         const statuses = await getConversationUploadArchiveStatuses(token, conversationId);
-        if (statuses.length > 0) {
-          setUploadBatch(buildRestoredUploadBatch(statuses));
+        const uploadVersionIds = new Set(
+          uploadBatch.files.flatMap((file) => file.uploadVersionId ? [file.uploadVersionId] : []),
+        );
+        const batchStatuses = statuses.filter(
+          (status) => uploadVersionIds.has(status.upload_document_version_id),
+        );
+        if (batchStatuses.length > 0) {
+          setUploadBatch((current) => current
+            ? buildRestoredUploadBatch(batchStatuses, current.turnId)
+            : current);
         }
       } catch {
         // 单次轮询失败不清空已有结果，下一轮继续尝试。
@@ -448,6 +473,7 @@ export function ChatPage({
       attachmentsForTurn,
       new Set(attachmentsForTurn.map((file) => file.document_id)),
       false,
+      pendingSentTask.batchId,
     );
   }, [pendingSentTask, submitting, uploadBatch]);
 
@@ -583,11 +609,18 @@ export function ChatPage({
     attachmentsForTurn: ChatAttachment[],
     clearDraftDocumentIds: Set<string>,
     clearComposer = true,
+    uploadBatchId?: string,
   ): Promise<SendMessageResponse | null> {
     // 这里只处理用户明确输入的任务；上传默认处理不再伪造聊天消息。
     setError('');
     setSubmitting(true);
     const turnId = createClientId();
+
+    if (uploadBatchId) {
+      setUploadBatch((current) => current?.id === uploadBatchId
+        ? { ...current, turnId }
+        : current);
+    }
 
     setChatTurns((current) => [
       ...current,
@@ -1421,42 +1454,61 @@ export function ChatPage({
                 </div>
               ) : null}
               {chatTurns.map((turn) => (
-                <ChatTurnView
-                  key={turn.id}
-                  token={token}
-                  turn={turn}
-                  onOpenAttachment={openAttachment}
-                  onRestoreAttachment={restoreHistoricalAttachment}
-                  onOpenDocument={openSearchDocument}
-                  onOpenManagedFile={openManagedFile}
-                  onOperationConfirmed={refreshHistoricalAttachmentStatuses}
-                  onUsePrompt={(prompt) => {
-                    // 后续建议只填入编辑框，仍由用户检查并主动发送。
-                    setMessage(prompt);
-                  }}
-                  onFollowupResult={(response) => {
-                    // 选择卡续跑会在后端创建真实消息和 AgentRun；页面直接追加该轮，
-                    // 不伪造本地搜索结果，刷新后仍能从同一会话历史恢复。
-                    setChatTurns((current) => {
-                      if (current.some((item) => item.id === response.message.id)) {
-                        return current;
-                      }
-                      return [
-                        ...current,
-                        {
-                          id: response.message.id,
-                          userText: response.message.content,
-                          attachments: [],
-                          status: 'completed',
-                          response,
-                        },
-                      ];
-                    });
-                    scrollMessageListToBottom();
-                  }}
-                />
+                <Fragment key={turn.id}>
+                  <ChatTurnView
+                    token={token}
+                    turn={turn}
+                    onOpenAttachment={openAttachment}
+                    onRestoreAttachment={restoreHistoricalAttachment}
+                    onOpenDocument={openSearchDocument}
+                    onOpenManagedFile={openManagedFile}
+                    onOperationConfirmed={refreshHistoricalAttachmentStatuses}
+                    onUsePrompt={(prompt) => {
+                      // 后续建议只填入编辑框，仍由用户检查并主动发送。
+                      setMessage(prompt);
+                    }}
+                    onFollowupResult={(response) => {
+                      // 选择卡续跑会在后端创建真实消息和 AgentRun；页面直接追加该轮，
+                      // 不伪造本地搜索结果，刷新后仍能从同一会话历史恢复。
+                      setChatTurns((current) => {
+                        if (current.some((item) => item.id === response.message.id)) {
+                          return current;
+                        }
+                        return [
+                          ...current,
+                          {
+                            id: response.message.id,
+                            userText: response.message.content,
+                            attachments: [],
+                            status: 'completed',
+                            response,
+                          },
+                        ];
+                      });
+                      scrollMessageListToBottom();
+                    }}
+                  />
+                  {submittedUploadBatch?.turnId === turn.id ? (
+                    <section className="submitted-upload-batch" aria-label="已提交文件处理进度">
+                      <UploadBatchProgress
+                        batch={submittedUploadBatch}
+                        token={token}
+                        onOpenAttachment={openAttachment}
+                        onOpenDocument={openSearchDocument}
+                      />
+                      {Object.values(duplicateReviews).map((review) => (
+                        <DuplicateUploadReviewCard
+                          key={review.id}
+                          token={token}
+                          review={review}
+                          onResolved={resolveDuplicateReview}
+                        />
+                      ))}
+                    </section>
+                  ) : null}
+                </Fragment>
               ))}
-              {submittedUploadBatch ? (
+              {submittedUploadBatch && !submittedUploadBatch.turnId ? (
                 <section className="submitted-upload-batch" aria-label="已提交文件处理进度">
                   <UploadBatchProgress
                     batch={submittedUploadBatch}

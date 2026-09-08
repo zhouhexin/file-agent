@@ -123,7 +123,7 @@ function AssistantIdentity({ status }: { status: '处理中' | '已完成' | '�
   return (
     <div className="assistant-identity" aria-label={`File Agent，${status}`}>
       <span className="assistant-identity-avatar"><Bot size={14} aria-hidden /></span>
-      <strong>File Agent</strong>
+      {/*<strong></strong>*/}
       <span className={`assistant-identity-status assistant-identity-status--${status === '处理中' ? 'processing' : status === '处理失败' ? 'failed' : 'completed'}`}>
         {status}
       </span>

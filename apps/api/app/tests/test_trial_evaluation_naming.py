@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 from app.db.models import Document
 from app.modules.file_rename.trial_evaluation_naming import (
+    should_preserve_trial_evaluation_source_name,
     suggest_trial_evaluation_filename,
 )
 from app.modules.file_rename.uploaded_suggestion_service import (
@@ -35,6 +36,32 @@ def test_trial_evaluation_rule_requires_two_names_and_managed_year() -> None:
         original_filename="计算机科学与工程学院应聘试讲意见表-李光磊.docx",
         source_relative_path="2020/考查试讲表/意见表-李光磊.docx",
     ) is None
+
+
+def test_trial_evaluation_source_name_is_protected_in_recruitment_review_directory() -> None:
+    assert should_preserve_trial_evaluation_source_name(
+        original_filename=(
+            "计算机科学与工程学院应聘试讲意见表（院人才引育小组版）--陈婧-鲁晓锋.docx"
+        ),
+        source_relative_path=(
+            "外来应聘/2022/考查试讲表/考察试讲表/9月7日/"
+            "计算机科学与工程学院应聘试讲意见表（院人才引育小组版）--陈婧-鲁晓锋.docx"
+        ),
+    ) is True
+    assert should_preserve_trial_evaluation_source_name(
+        original_filename="计算机科学与工程学院应聘试讲意见表-王怀军.docx",
+        source_relative_path=(
+            "2022/考查试讲表/考察试讲表/9月7日/"
+            "计算机科学与工程学院应聘试讲意见表-王怀军.docx"
+        ),
+    ) is True
+    assert should_preserve_trial_evaluation_source_name(
+        original_filename="计算机科学与工程学院应聘试讲意见表-李光磊-鲁晓锋.docx",
+        source_relative_path=(
+            "2020/考查试讲表/原始考察表/7月6日/"
+            "计算机科学与工程学院应聘试讲意见表-李光磊-鲁晓锋.docx"
+        ),
+    ) is False
     assert suggest_trial_evaluation_filename(
         original_filename=(
             "计算机科学与工程学院应聘试讲意见表-李光磊-鲁晓锋.docx"

@@ -28,6 +28,8 @@ def test_preflight_updates_stale_cross_platform_root_before_worker_starts(
     # 扫描批次预算不是目录定义，不能把数值 100、5 当成文件系统路径。
     monkeypatch.setenv("MANAGED_ROOT_SCAN_BATCH_SIZE", "100")
     monkeypatch.setenv("MANAGED_ROOT_SCAN_BATCH_MAX_SECONDS", "5")
+    monkeypatch.setenv("MANAGED_ROOT_HOST_PATH", "E:/workdata")
+    monkeypatch.setenv("MANAGED_ROOT_VOLUME_MODE", "ro")
     get_settings.cache_clear()
     _client, session_factory = client_with_database()
     try:
@@ -42,7 +44,17 @@ def test_preflight_updates_stale_cross_platform_root_before_worker_starts(
                 display_name="scan_batch_size",
                 container_path="100",
             )
-            db.add_all([stale_root, pseudo_root])
+            host_path_root = ManagedRoot(
+                root_key="host_path",
+                display_name="host_path",
+                container_path="E:/workdata",
+            )
+            volume_mode_root = ManagedRoot(
+                root_key="volume_mode",
+                display_name="volume_mode",
+                container_path="ro",
+            )
+            db.add_all([stale_root, pseudo_root, host_path_root, volume_mode_root])
             db.flush()
             pseudo_job = FilesystemJob(
                 job_type="SCAN_MANAGED_ROOT",
@@ -56,6 +68,8 @@ def test_preflight_updates_stale_cross_platform_root_before_worker_starts(
             db.commit()
             pseudo_root_id = pseudo_root.id
             pseudo_job_id = pseudo_job.id
+            host_path_root_id = host_path_root.id
+            volume_mode_root_id = volume_mode_root.id
 
         result = prepare_worker_startup(session_factory=session_factory)
 
@@ -69,6 +83,8 @@ def test_preflight_updates_stale_cross_platform_root_before_worker_starts(
             assert disabled_pseudo_root.enabled is False
             assert cancelled_pseudo_job is not None
             assert cancelled_pseudo_job.status == "FAILED"
+            assert db.get(ManagedRoot, host_path_root_id).enabled is False
+            assert db.get(ManagedRoot, volume_mode_root_id).enabled is False
     finally:
         get_settings.cache_clear()
         clear_overrides()

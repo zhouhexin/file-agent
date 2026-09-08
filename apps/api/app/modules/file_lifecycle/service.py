@@ -58,6 +58,9 @@ from app.modules.file_lifecycle.organizer import (
     InitialWorkingCopyOrganizer,
     rename_metadata_for_initial_organization,
 )
+from app.modules.file_rename.collision_naming import (
+    readable_collision_filename_candidates,
+)
 from app.modules.file_rename.filename_builder import replace_year_prefix_with_date
 from app.modules.file_lifecycle.schemas import (
     ArchiveStatusResponse,
@@ -103,6 +106,7 @@ from app.modules.classification.image_date_policy import (
     MANAGED_SOURCE_MODIFIED_DATE_RELATION_SOURCE,
     image_date_category_path,
     image_upload_date_label,
+    image_upload_year_label,
 )
 from app.modules.classification.loader import load_default_taxonomy
 from app.modules.chunks.service import DocumentIndexService, INDEX_VERSION
@@ -580,14 +584,14 @@ class UploadLifecycleService:
             primary_relation is not None
             and primary_relation.source == IMAGE_DATE_RELATION_SOURCE
         ):
-            # 图片日期目录是用户明确指定的组织规则，不依赖 OCR 正文语义；批次回执
+            # 图片年份目录是用户明确指定的组织规则，不依赖 OCR 正文语义；批次回执
             # 必须投影最终生效路径，不能继续展示后台候选分类或误报“缺少证据”。
             category_path = list(primary_relation.category_path_json or [])
             date_label = category_path[-1] if category_path else ""
             categories = [
                 {
                     "category_id": primary_relation.category_id,
-                    "name": date_label or "上传日期",
+                    "name": date_label or "上传年份",
                     "category_path": category_path,
                     "confidence": 1.0,
                     "status": primary_relation.status,
@@ -595,12 +599,12 @@ class UploadLifecycleService:
                     "evidence_items": [
                         {
                             "type": "upload_metadata",
-                            "quote": "按图片上传日期自动归档",
+                            "quote": "按图片上传年份自动归档",
                             "source": IMAGE_DATE_RELATION_SOURCE,
-                            "upload_date": date_label,
+                            "upload_year": date_label,
                         }
                     ],
-                    "evidence": ["按图片上传日期自动归档"],
+                    "evidence": ["按图片上传年份自动归档"],
                 }
             ]
             classification_status = "COMPLETED"
@@ -2488,8 +2492,8 @@ class FileLifecycleJobProcessor:
         image_date_source = IMAGE_DATE_RELATION_SOURCE
         image_date_classifier_version = IMAGE_DATE_CLASSIFIER_VERSION
         image_date_metadata_type = "upload_metadata"
-        image_date_metadata_key = "upload_date"
-        image_date_evidence_quote = "按图片上传日期自动归档"
+        image_date_metadata_key = "upload_year"
+        image_date_evidence_quote = "按图片上传年份自动归档"
         policy_result = None
         if not image_date_rule_applied:
             policy_result = AutoPlacementPolicy(self.settings).evaluate(
@@ -2604,6 +2608,8 @@ class FileLifecycleJobProcessor:
                     and target_path.exists()
                     and not retry_after_publish
                 ):
+                    collision_resolved = False
+                    readable_target = None
                     dated_filename = self._full_date_collision_filename(
                         decision=organization_decision,
                         filename=target_filename,
@@ -2624,12 +2630,23 @@ class FileLifecycleJobProcessor:
                         if not dated_path.exists() or retry_after_dated_publish:
                             target_filename = dated_filename
                             target_relative_path = dated_relative_path
+                            collision_resolved = True
                             if organization_decision is not None:
                                 organization_decision.rename_metadata["proposed_filename"] = dated_filename
+                    if not collision_resolved:
+                        readable_target = self._readable_initial_collision_target(
+                            working_root=working_root,
+                            managed_file=managed_file,
+                            version=version,
+                            target_parent=target_parent,
+                            target_filename=target_filename,
+                        )
+                        if readable_target is not None:
+                            target_filename, target_relative_path = readable_target
+                            if organization_decision is not None:
+                                organization_decision.rename_metadata["proposed_filename"] = target_filename
                         else:
                             reasons.append("TARGET_NAME_CONFLICT")
-                    else:
-                        reasons.append("TARGET_NAME_CONFLICT")
             except CategoryOrganizationPathError:
                 reasons.append("TARGET_PATH_UNAVAILABLE")
         elif policy_result.accepted:
@@ -2899,7 +2916,7 @@ class FileLifecycleJobProcessor:
         archived_path = self.storage.archive_path(managed_file.relative_path)
         if detect_image_content_type(archived_path) is None:
             return None
-        return image_upload_date_label(upload_version.created_at)
+        return image_upload_year_label(upload_version.created_at)
 
     def _managed_source_image_date_label(
         self,
@@ -3121,6 +3138,37 @@ class FileLifecycleJobProcessor:
             document_date=document_date,
             separator="_",
         )
+
+    def _readable_initial_collision_target(
+        self,
+        *,
+        working_root: WorkingCopyRoot,
+        managed_file: ManagedFile,
+        version: DocumentVersion,
+        target_parent: Path,
+        target_filename: str,
+    ) -> tuple[str, str] | None:
+        """仅在标准名已冲突时按原名与源目录生成可读且不覆盖的候选。"""
+
+        staged_path = self.storage.working_copy_path(version.storage_path)
+        for candidate in readable_collision_filename_candidates(
+            standard_filename=target_filename,
+            original_filename=managed_file.filename,
+            source_relative_path=managed_file.relative_path,
+        ):
+            candidate_filename = self.storage.sanitize_filename(candidate)
+            candidate_relative_path = (target_parent / candidate_filename).as_posix()
+            candidate_path = self.storage.working_copy_path(
+                f"{working_root.relative_storage_path}/{candidate_relative_path}"
+            )
+            retry_after_publish = (
+                not staged_path.exists()
+                and candidate_path.is_file()
+                and self.storage.sha256_file(candidate_path) == version.sha256
+            )
+            if not candidate_path.exists() or retry_after_publish:
+                return candidate_filename, candidate_relative_path
+        return None
 
     def _initial_organization_risk_status(
         self,

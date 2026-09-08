@@ -8,6 +8,83 @@ from app.modules.classification.classifier_service import DocumentClassification
 from app.modules.classification.runtime_factory import ClassificationRuntimeFactory
 
 
+def test_summary_fulltext_conflict_uses_fulltext_primary(monkeypatch):
+    """摘要 Top-1 与全文冲突时必须采用全文候选，同时保留冲突审计字段。"""
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://test:test@localhost/test")
+    monkeypatch.setenv("LLM_CLASSIFICATION_SUMMARY_ENABLED", "true")
+    get_settings.cache_clear()
+    summary_result = SimpleNamespace(
+        classification_text="现从事学科及研究方向：计算机科学与技术",
+        classification_summary=SimpleNamespace(id="classification-summary"),
+        document_summary=SimpleNamespace(id="document-summary"),
+        reused=False,
+    )
+    summary_service = SimpleNamespace(
+        generate_or_reuse=lambda **_kwargs: summary_result,
+    )
+    service = DocumentClassificationService(
+        graph_mode="off",
+        summary_service=summary_service,
+    )
+    service._load_pages = lambda extraction_run_id: [
+        SimpleNamespace(
+            text_content=(
+                "专家鉴定意见表\n申报专业技术职务：教授\n"
+                "教师职务任职资格评审委员会对申报材料进行评审。"
+            ),
+            page_number=1,
+            sheet_name=None,
+        )
+    ]
+
+    try:
+        result = service.classify(
+            document_id="",
+            extraction_run_id="summary-fulltext-conflict-run",
+            filename="材料.doc",
+        )
+    finally:
+        get_settings.cache_clear()
+
+    assert result["categories"][0]["category_id"] == "school.hr.title-review"
+    assert result["categories"][0]["summary_fulltext_agreement"] is False
+
+
+def test_managed_title_review_package_overrides_intrinsic_file_topic(monkeypatch):
+    """职称评定包中的论文或教学附件以包的业务用途作为唯一主分类。"""
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://test:test@localhost/test")
+    monkeypatch.setenv("LLM_CLASSIFICATION_SUMMARY_ENABLED", "false")
+    get_settings.cache_clear()
+    service = DocumentClassificationService(graph_mode="off")
+    service._load_pages = lambda extraction_run_id: [
+        SimpleNamespace(
+            text_content="本科教学工作量和代表性科研成果。",
+            page_number=1,
+            sheet_name=None,
+        )
+    ]
+
+    try:
+        result = service.classify(
+            document_id="",
+            extraction_run_id="managed-title-review-package-run",
+            filename="5.填表说明及材料要求.doc",
+            source_context=(
+                "人事处/职称评定/2025/教师系列/正常评审/"
+                "下载相关通知、表格、文件/5.填表说明及材料要求.doc"
+            ),
+        )
+    finally:
+        get_settings.cache_clear()
+
+    category = result["categories"][0]
+    assert category["category_id"] == "school.hr.title-review"
+    assert category["source"] == "managed_source_title_review_package"
+    assert category["evidence_items"][0]["type"] == "managed_source_container"
+
+
 def test_classifier_returns_taxonomy_category_path_with_evidence():
     """文件基础分类器应使用预置分类体系返回完整分类路径。"""
 
@@ -41,7 +118,7 @@ def test_classifier_returns_other_when_no_keywords_match():
             "status": "SUGGESTED",
             "evidence": [],
             "taxonomy_key": "unified_school_file_classification",
-            "taxonomy_version": "2026-09-v8",
+            "taxonomy_version": "2026-09-v9",
         }
     ]
 

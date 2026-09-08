@@ -22,8 +22,28 @@ def test_matcher_returns_specific_school_category_path():
     assert matches[0]["name"] == "学校/人事师资/职称"
     assert matches[0]["category_path"] == ["学校", "人事师资", "职称"]
     assert matches[0]["taxonomy_key"] == "unified_school_file_classification"
-    assert matches[0]["taxonomy_version"] == "2026-09-v8"
+    assert matches[0]["taxonomy_version"] == "2026-09-v9"
     assert "职称" in matches[0]["evidence"]
+
+
+def test_title_review_form_signals_override_generic_discipline_and_research_terms():
+    """专家鉴定表中的学科、成果等字段不得压过明确的职称评审文种。"""
+
+    matches = match_document_features(
+        DocumentFeatures(
+            filename="6.专家鉴定意见表-宋霄罡.doc",
+            full_text=(
+                "专家鉴定意见表\n申报人姓名：宋霄罡\n现从事学科及研究方向：计算机科学与技术\n"
+                "申报专业技术职务：教授\n提供的代表性业绩成果"
+            ),
+            source_context="人事处/职称评定/2025/教师系列/正常评审/个人提交/宋霄罡",
+        ),
+        load_default_taxonomy(),
+    )
+
+    assert matches[0]["category_id"] == "school.hr.title-review"
+    assert matches[0]["category_path"] == ["学校", "人事师资", "职称"]
+    assert "专家鉴定意见表" in matches[0]["evidence"]
 
 
 def test_matcher_prefers_longer_category_name():
@@ -69,7 +89,7 @@ def test_matcher_returns_other_when_no_taxonomy_keywords_match():
             "status": "SUGGESTED",
             "evidence": [],
             "taxonomy_key": "unified_school_file_classification",
-            "taxonomy_version": "2026-09-v8",
+            "taxonomy_version": "2026-09-v9",
         }
     ]
 

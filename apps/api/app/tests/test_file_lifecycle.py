@@ -705,6 +705,7 @@ def test_uploaded_low_confidence_name_can_be_corrected_in_same_conversation(monk
     assert "西安理工大学用印申请单.docx" in placeholder_result["final_response"]
     assert "旧待复核项已失效" not in placeholder_result["final_response"]
 
+    _drain(SessionLocal)
     corrected = client.post(
         url,
         headers=headers,
@@ -715,25 +716,21 @@ def test_uploaded_low_confidence_name_can_be_corrected_in_same_conversation(monk
     )
     assert corrected.status_code == 200
     corrected_result = corrected.json()["task_result"]
-    plan_id = corrected_result["operation_plan_id"]
-    assert corrected_result["response_type"] == "operation_plan"
-    assert plan_id
-    plan = client.get(f"/api/operations/plans/{plan_id}", headers=headers).json()
-    assert plan["operation_type"] == "RENAME_PENDING_UPLOADS"
-    assert plan["items"][0]["before"]["filename"] == "西安理工大学用印申请单.docx"
-    assert plan["items"][0]["after"]["filename"] == "2026_用印申请单.docx"
-
-    _drain(SessionLocal)
-    confirmation = client.post(
-        f"/api/operations/plans/{plan_id}/confirm",
-        headers=headers,
-        json={"confirmation": "确认执行"},
-    )
-    assert confirmation.status_code == 200
-    assert confirmation.json()["status"] == "EXECUTED"
+    assert corrected_result["response_type"] == "text"
+    assert corrected_result["operation_plan_id"] is None
+    assert "无需再次确认" in corrected_result["final_response"]
     with SessionLocal() as db:
         working_copy = db.query(WorkingCopy).filter(WorkingCopy.status == "ACTIVE").one()
         assert working_copy.filename == "2026_用印申请单.docx"
+        plan = db.query(OperationPlan).order_by(OperationPlan.created_at.desc()).first()
+        assert plan is not None
+        assert plan.status == "EXECUTED"
+        assert plan.plan_json["items"][0]["before"]["filename"] == (
+            "西安理工大学用印申请单.docx"
+        )
+        assert plan.plan_json["items"][0]["after"]["filename"] == (
+            "2026_用印申请单.docx"
+        )
     clear_overrides()
 
 
@@ -794,9 +791,9 @@ def test_explicit_re_rename_uses_current_working_copy_name(monkeypatch, tmp_path
     assert response.status_code == 200
     payload = response.json()
     task_result = payload["task_result"]
-    assert task_result["response_type"] == "operation_plan"
-    plan_id = task_result["operation_plan_id"]
-    assert plan_id
+    assert task_result["response_type"] == "text"
+    assert task_result["operation_plan_id"] is None
+    assert "无需再次确认" in task_result["final_response"]
     with SessionLocal() as db:
         run = db.get(AgentRun, task_result["task_id"])
         assert run is not None
@@ -810,26 +807,11 @@ def test_explicit_re_rename_uses_current_working_copy_name(monkeypatch, tmp_path
         assert [item.tool_name for item in invocations] == [
             "resolve-rename-reviews"
         ]
-    plan = client.get(f"/api/operations/plans/{plan_id}", headers=headers).json()
-    assert plan["items"][0]["before"]["filename"] == current_name
-    assert plan["items"][0]["after"]["filename"] == target_name
-
-    # 显式请求只生成受控计划；确认前工作副本和上传原件都不能被提前修改。
-    with SessionLocal() as db:
-        working_copy = db.query(WorkingCopy).filter(WorkingCopy.status == "ACTIVE").one()
-        assert working_copy.filename == current_name
-        upload_document = db.get(Document, uploaded["document_id"])
-        assert upload_document is not None
-        assert upload_document.original_filename == original_name
-
-    confirmation = client.post(
-        f"/api/operations/plans/{plan_id}/confirm",
-        headers=headers,
-        json={"confirmation": "确认重命名"},
-    )
-    assert confirmation.status_code == 200
-    assert confirmation.json()["status"] == "EXECUTED"
-    with SessionLocal() as db:
+        plan = db.query(OperationPlan).order_by(OperationPlan.created_at.desc()).first()
+        assert plan is not None
+        assert plan.status == "EXECUTED"
+        assert plan.plan_json["items"][0]["before"]["filename"] == current_name
+        assert plan.plan_json["items"][0]["after"]["filename"] == target_name
         working_copy = db.query(WorkingCopy).filter(WorkingCopy.status == "ACTIVE").one()
         assert working_copy.filename == target_name
         upload_document = db.get(Document, uploaded["document_id"])
@@ -914,14 +896,8 @@ def test_explicit_working_copy_rename_detects_shared_filename_conflict(
     )
     assert keep_both.status_code == 200
     keep_both_receipt = keep_both.json()["task_result"]
-    assert keep_both_receipt["response_type"] == "operation_plan"
-    confirmation = client.post(
-        f"/api/operations/plans/{keep_both_receipt['operation_plan_id']}/confirm",
-        headers=headers,
-        json={"confirmation": "确认同时保留"},
-    )
-    assert confirmation.status_code == 200
-    assert confirmation.json()["status"] == "EXECUTED"
+    assert keep_both_receipt["response_type"] == "text"
+    assert keep_both_receipt["operation_plan_id"] is None
     with SessionLocal() as db:
         active_names = sorted(
             item.filename
@@ -933,6 +909,50 @@ def test_explicit_working_copy_rename_detects_shared_filename_conflict(
             "述职报告-赵明华-计算机学院.docx",
             "述职报告-赵明华-计算机学院_第二版.docx",
         ]
+    clear_overrides()
+
+
+def test_multiple_explicit_renames_execute_without_second_confirmation(
+    monkeypatch,
+    tmp_path,
+):
+    """一条明确指令中的多个重命名应直接执行并保留同一审计计划。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "multiple-direct-rename-owner")
+    _upload(client, headers, filename="材料甲.txt", content=b"first")
+    _upload(client, headers, filename="材料乙.txt", content=b"second")
+    _drain(SessionLocal)
+
+    response = client.post(
+        "/api/conversations/multiple-direct-rename/messages",
+        headers=headers,
+        json={
+            "content": (
+                "把材料甲.txt重命名为材料甲1.txt\n"
+                "把材料乙.txt重命名为材料乙1.txt"
+            ),
+            "attachments": [],
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()["task_result"]
+    assert result["response_type"] == "text"
+    assert result["operation_plan_id"] is None
+    assert "已直接重命名 2 个文件" in result["final_response"]
+    with SessionLocal() as db:
+        assert sorted(
+            item.filename
+            for item in db.query(WorkingCopy)
+            .filter(WorkingCopy.status == "ACTIVE")
+            .all()
+        ) == ["材料乙1.txt", "材料甲1.txt"]
+        plan = db.query(OperationPlan).order_by(OperationPlan.created_at.desc()).first()
+        assert plan is not None
+        assert plan.status == "EXECUTED"
+        assert len(plan.plan_json["items"]) == 2
     clear_overrides()
 
 
@@ -1033,7 +1053,7 @@ def test_missing_rename_source_returns_similar_file_selection_before_plan(
         "_suggest_one",
         needs_review_suggestion,
     )
-    client, _ = client_with_database()
+    client, SessionLocal = client_with_database()
     headers = _auth(client, "uploaded-rename-similar-owner")
     upload = _upload(
         client,
@@ -1094,6 +1114,7 @@ def test_missing_rename_source_returns_similar_file_selection_before_plan(
         "西安理工大学用印申请单.docx"
     ]
 
+    _drain(SessionLocal)
     resolved = client.post(
         (
             "/api/file-search/clarifications/"
@@ -1105,14 +1126,11 @@ def test_missing_rename_source_returns_similar_file_selection_before_plan(
 
     assert resolved.status_code == 200
     resolved_result = resolved.json()["task_result"]
-    assert resolved_result["response_type"] == "operation_plan"
-    assert resolved_result["operation_plan_id"]
-    plan = client.get(
-        f"/api/operations/plans/{resolved_result['operation_plan_id']}",
-        headers=headers,
-    ).json()
-    assert plan["items"][0]["before"]["filename"] == "西安理工大学用印申请单.docx"
-    assert plan["items"][0]["after"]["filename"] == "2026_用印申请单.docx"
+    assert resolved_result["response_type"] == "text"
+    assert resolved_result["operation_plan_id"] is None
+    with SessionLocal() as db:
+        working_copy = db.query(WorkingCopy).filter(WorkingCopy.status == "ACTIVE").one()
+        assert working_copy.filename == "2026_用印申请单.docx"
     clear_overrides()
 
 
@@ -1222,6 +1240,77 @@ def test_rename_similarity_expands_to_user_active_shared_working_copies(
         "2020年度个人述职报告.txt"
     ]
     assert choices[0]["working_copy_id"]
+    clear_overrides()
+
+
+def test_exact_rename_search_returns_same_name_paths_and_honors_selection(
+    monkeypatch,
+    tmp_path,
+):
+    """全局精确同名查询必须展示目录，并只对用户选择的副本生成计划。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    headers = _auth(client, "exact-working-copy-rename-owner")
+    _upload(client, headers, filename="试讲意见表甲.docx", content=b"first-copy")
+    _upload(client, headers, filename="试讲意见表乙.docx", content=b"second-copy")
+    _drain(SessionLocal)
+
+    source_name = "计算机科学与工程学院应聘试讲意见表（院人才引育小组）.docx"
+    target_name = "计算机科学与工程学院应聘试讲意见表（院人才引育小组）1.docx"
+    with SessionLocal() as db:
+        copies = db.query(WorkingCopy).order_by(WorkingCopy.created_at.asc()).all()
+        assert len(copies) == 2
+        expected_copy_id = copies[1].id
+        for working_copy, year in zip(copies, ("2025", "2026"), strict=True):
+            relative_path = f"学院/人事师资/师资招聘/{year}/{source_name}"
+            working_copy.filename = source_name
+            working_copy.relative_path = relative_path
+            working_copy.relative_path_hash = hashlib.sha256(
+                relative_path.encode("utf-8")
+            ).hexdigest()
+        db.commit()
+
+    response = client.post(
+        "/api/conversations/exact-working-copy-rename/messages",
+        headers=headers,
+        json={
+            "content": f"把 {source_name} 重命名为 {target_name}",
+            "attachments": [],
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()["task_result"]
+    assert result["response_type"] == "file_selection"
+    choices = result["file_selection_result"]["choices"]
+    assert [item["directory_path"] for item in choices] == [
+        "学院/人事师资/师资招聘/2025",
+        "学院/人事师资/师资招聘/2026",
+    ]
+
+    selected = next(item for item in choices if item["working_copy_id"] == expected_copy_id)
+    resolved = client.post(
+        (
+            "/api/file-search/clarifications/"
+            f"{result['file_selection_result']['clarification_id']}/resolve"
+        ),
+        headers=headers,
+        json={"option_id": selected["option_id"], "custom_phrase": None},
+    )
+
+    assert resolved.status_code == 200
+    resolved_result = resolved.json()["task_result"]
+    assert resolved_result["response_type"] == "text"
+    assert resolved_result["operation_plan_id"] is None
+    with SessionLocal() as db:
+        plan = db.query(OperationPlan).order_by(OperationPlan.created_at.desc()).first()
+        assert plan is not None
+        assert plan.status == "EXECUTED"
+        assert plan.plan_json["items"][0]["working_copy_id"] == expected_copy_id
+        assert plan.plan_json["items"][0]["before"]["filename"] == source_name
+        assert plan.plan_json["items"][0]["after"]["filename"] == target_name
+        assert db.get(WorkingCopy, expected_copy_id).filename == target_name
     clear_overrides()
 
 
@@ -2173,11 +2262,11 @@ def test_archive_status_does_not_publish_staged_name_as_rename_result(monkeypatc
     clear_overrides()
 
 
-def test_single_and_multiple_uploaded_images_share_college_upload_date_directory(
+def test_single_and_multiple_uploaded_images_share_college_upload_year_directory(
     monkeypatch,
     tmp_path,
 ):
-    """单张与多张图片均跳过学院识别，按中国本地上传日归入同一学院日期目录。"""
+    """单张与多张图片均跳过学院识别，按中国本地上传年份归入同一学院年份目录。"""
 
     _configure(monkeypatch, tmp_path)
     monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "true")
@@ -2203,11 +2292,11 @@ def test_single_and_multiple_uploaded_images_share_college_upload_date_directory
                 DocumentVersion,
                 upload["upload_document_version_id"],
             )
-            # UTC 16:30 在中国时区已经是次日，保护日期目录的时区边界。
+            # UTC 年末在中国时区已经是次年，保护年份目录的时区边界。
             version.created_at = datetime(
                 2026,
-                9,
-                2,
+                12,
+                31,
                 16,
                 30,
                 tzinfo=timezone.utc,
@@ -2228,7 +2317,7 @@ def test_single_and_multiple_uploaded_images_share_college_upload_date_directory
     assert all(item["processing_status"] == "COMPLETED" for item in statuses)
     assert all(item["organization_status"] == "AUTO_ORGANIZED" for item in statuses)
     assert all(
-        item["categories"][0]["category_path"] == ["学院", "2026-09-03"]
+        item["categories"][0]["category_path"] == ["学院", "2027"]
         for item in statuses
     )
 
@@ -2238,7 +2327,7 @@ def test_single_and_multiple_uploaded_images_share_college_upload_date_directory
             for item in statuses
         ]
         assert all(
-            Path(item.relative_path).parent.as_posix() == "学院/2026-09-03"
+            Path(item.relative_path).parent.as_posix() == "学院/2027"
             for item in working_copies
         )
         # 文件夹中出现同名图片时必须全部保留，不得覆盖或退回中性目录。
@@ -2255,7 +2344,7 @@ def test_single_and_multiple_uploaded_images_share_college_upload_date_directory
         assert len(relations) == 2
         assert all(item.category_id == "college" for item in relations)
         assert all(
-            item.category_path_json == ["学院", "2026-09-03"]
+            item.category_path_json == ["学院", "2027"]
             for item in relations
         )
         assert all(item.source == "image_upload_date_policy" for item in relations)

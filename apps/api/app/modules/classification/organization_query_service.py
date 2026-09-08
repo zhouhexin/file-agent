@@ -86,8 +86,8 @@ class ClassificationOrganizationQueryService:
                 child_responses.append(child_response)
                 subtree_ids.update(child_ids)
             if node.id == IMAGE_DATE_CATEGORY_ROOT_ID:
-                # 日期是上传组织维度，不写入静态 taxonomy；树接口按正式关系动态
-                # 投影虚拟节点，并把最近日期放在前面便于浏览。
+                # 年份或兼容日期是上传组织维度，不写入静态 taxonomy；树接口按
+                # 正式关系动态投影虚拟节点，并把最近时间放在前面便于浏览。
                 for date_label in sorted(image_date_ids):
                     date_ids = set(image_date_ids[date_label])
                     child_responses.insert(
@@ -188,7 +188,7 @@ class ClassificationOrganizationQueryService:
                 .distinct()
             )
             if scope == "direct" and category_id == IMAGE_DATE_CATEGORY_ROOT_ID:
-                # 图片日期节点是学院根的虚拟子节点，direct 查询根节点时不能重复返回。
+                # 图片时间节点是学院根的虚拟子节点，direct 查询根节点时不能重复返回。
                 image_ids = self._image_date_copy_ids()
                 if image_ids:
                     query = query.filter(~WorkingCopy.id.in_(image_ids))
@@ -298,7 +298,7 @@ class ClassificationOrganizationQueryService:
         }
 
     def _image_date_copy_ids(self, date_label: str | None = None) -> set[str]:
-        """读取图片日期规则的活动副本 ID，日期匹配在后端受控投影上完成。"""
+        """读取图片时间规则的活动副本 ID，时间匹配在后端受控投影上完成。"""
 
         result: set[str] = set()
         rows = self._active_primary_query().filter(

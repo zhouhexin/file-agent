@@ -151,6 +151,17 @@ def test_settings_loads_classification_llm_options(monkeypatch, tmp_path):
     assert settings.llm_classification_allow_free_paths is True
 
 
+def test_unknown_classification_llm_mode_falls_back_to_rule_only(monkeypatch, tmp_path):
+    """历史非法值不得形成伪模式或意外触发外部分类调用。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.setenv("LLM_CLASSIFICATION_MODE", "llm_validate")
+    _reset_settings_cache()
+
+    assert config.get_settings().llm_classification_mode == "rule_only"
+
+
 def test_settings_default_uploads_to_classified_initial_placement(monkeypatch, tmp_path):
     """新部署默认对上传文件分类并按分类完成首次归档。"""
 

@@ -23,7 +23,21 @@ try {
     Write-Host "数据库备份：$sqlFile" -ForegroundColor Green
     if ($IncludeUploads) {
         $zipFile = Join-Path $BackupDir "file-agent-uploads-$Timestamp.zip"
-        Compress-Archive -Path (Join-Path $ProjectRoot "data\uploads\*") -DestinationPath $zipFile -Force
+        $uploadsDir = Join-Path $ProjectRoot "data\uploads"
+        if (-not (Test-Path -LiteralPath $uploadsDir -PathType Container)) {
+            throw "未找到上传文件目录：$uploadsDir"
+        }
+        if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) {
+            throw "未找到 Windows tar.exe，无法备份上传文件。"
+        }
+        if (Test-Path -LiteralPath $zipFile) {
+            Remove-Item -LiteralPath $zipFile -Force
+        }
+        & tar.exe -a -c -f $zipFile -C $uploadsDir .
+        if ($LASTEXITCODE -ne 0) {
+            Remove-Item -LiteralPath $zipFile -Force -ErrorAction SilentlyContinue
+            throw "上传文件备份失败。"
+        }
         Write-Host "上传文件备份：$zipFile" -ForegroundColor Green
     }
 } finally { Pop-Location }

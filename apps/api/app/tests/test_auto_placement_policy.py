@@ -191,3 +191,34 @@ def test_policy_accepts_trusted_managed_recruitment_container_evidence() -> None
 
     assert result.accepted is True
     assert result.reason_codes == ()
+
+
+def test_policy_accepts_trusted_managed_title_review_container_evidence() -> None:
+    """人事处职称评定材料包可用容器证据形成职称业务主分类。"""
+
+    result = AutoPlacementPolicy(_settings()).evaluate(
+        categories=[
+            _category(
+                name="学校/人事师资/职称",
+                category_id="school.hr.title-review",
+                category_path=["学校", "人事师资", "职称"],
+                source="managed_source_title_review_package",
+                matched_content_signals=[],
+                evidence_items=[
+                    {
+                        "type": "managed_source_container",
+                        "page_number": None,
+                        "sheet_name": None,
+                        "quote": "人事处/职称评定/2025/教师系列/正常评审/个人提交/宋霄罡",
+                        "signals": ["人事处职称评定材料包"],
+                        "source": "managed_source_title_review_package",
+                    }
+                ],
+            )
+        ],
+        extraction_status="COMPLETED",
+        risk_passed=True,
+    )
+
+    assert result.accepted is True
+    assert result.reason_codes == ()

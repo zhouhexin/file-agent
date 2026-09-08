@@ -2683,6 +2683,7 @@ def _resolve_rename_reviews_handler(db: Any, user_id: str | None) -> ToolHandler
             conversation_id=str(getattr(tool_input, "conversation_id")),
             agent_run_id=str(getattr(tool_input, "agent_run_id")),
             message=str(getattr(tool_input, "message")),
+            document_ids=list(getattr(tool_input, "document_ids", []) or []),
         )
 
     return handler

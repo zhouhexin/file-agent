@@ -186,6 +186,9 @@ PP-StructureV3 和 PaddleOCR-VL 的下载目录使用持久 BuildKit 缓存；�
 
 ## 更新
 
+只传输源码 ZIP、同时更新 API 和前端的完整操作步骤、参数和故障处理见
+[`docs/windows-api-web-code-only-update-guide.md`](../docs/windows-api-web-code-only-update-guide.md)。
+
 联网更新代码、重建镜像并重新执行 Alembic：
 
 ```powershell
@@ -197,6 +200,37 @@ PP-StructureV3 和 PaddleOCR-VL 的下载目录使用持久 BuildKit 缓存；�
 ```powershell
 .\deploy\update.ps1 -PackageZip C:\packages\file-agent-update.zip
 ```
+
+仅修改后端 Python、规则或 taxonomy，且目标服务器已经存在当前
+`file-agent-api-runtime-base`、`file-agent-web`、PostgreSQL 和 Neo4j 镜像时，不需要重新传输或导入
+完整镜像 TAR。源码 ZIP 必须包含完整的 `apps/`、`deploy/`、`rules/` 和 `skills/`，但不得包含
+`deploy/.env`、`data/`、模型、日志或 `node_modules`。在目标服务器项目根目录执行：
+
+```powershell
+.\deploy\update.ps1 `
+  -PackageZip "E:\packages\file-agent-code-20260905-code5.zip" `
+  -SkipInfrastructurePull `
+  -SkipWeb
+```
+
+这条命令会保留现有 `deploy/.env` 和 `data/`，只同步源码，复用当前基础镜像重建 API 代码层，重新执行
+数据库迁移并重启容器；`-SkipInfrastructurePull` 禁止访问镜像仓库，`-SkipWeb` 保留现有 Web 镜像。
+不要添加 `-UsePrebuiltImages`，否则更新脚本会继续运行已有代码镜像，新源码不会进入容器。若前端代码也
+有修改，则不能使用 `-SkipWeb`，应准备本地前端构建依赖及可复用 Web 镜像，或传输新的 Web 代码镜像。
+
+后端和前端代码同时修改时，先在构建机用 `VITE_API_BASE_URL=/api` 执行 `npm run build`，并确保源码
+ZIP 包含 `apps/web/dist/`。然后在目标服务器执行：
+
+```powershell
+.\deploy\update.ps1 `
+  -PackageZip "E:\packages\file-agent-code-20260905-code5.zip" `
+  -SkipInfrastructurePull `
+  -UsePrebuiltWebDist
+```
+
+`-UsePrebuiltWebDist` 会复用目标服务器当前 `file-agent-web:<FILE_AGENT_IMAGE_TAG>` 中的 Caddy，只把
+ZIP 中已经编译好的前端静态文件写入 Web 代码层，因此目标服务器不需要 npm/node_modules，也不会下载
+Node 或 Caddy 镜像。
 
 源码和完整镜像均已离线导入时：
 

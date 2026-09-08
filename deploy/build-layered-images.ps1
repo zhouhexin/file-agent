@@ -13,6 +13,7 @@ param(
     [string]$SeedApiImage,
     [string]$SeedWebImage,
     [switch]$RebuildBase,
+    [switch]$UsePrebuiltWebDist,
     [switch]$SkipWeb
 )
 
@@ -139,6 +140,23 @@ Assert-LastExitCode "Docker Desktop is not running or is not accessible."
 $BaseImage = "file-agent-api-runtime-base:$BaseImageTag"
 $ApiImage = "file-agent-api-full-cpu:$ImageTag"
 $WebImage = "file-agent-web:$ImageTag"
+if ($UsePrebuiltWebDist -and [string]::IsNullOrWhiteSpace($SeedWebImage)) {
+    # 优先复用同标签 Web 镜像；新代码标签尚不存在时，从本机已有 Web
+    # 镜像中选择最新一个作为 Caddy 种子，整个过程不访问镜像仓库。
+    if (Test-DockerImage $WebImage) {
+        $SeedWebImage = $WebImage
+    } else {
+        $webCandidates = docker image ls file-agent-web --format '{{.Repository}}:{{.Tag}}'
+        Assert-LastExitCode "Docker could not list reusable Web runtime images."
+        $SeedWebImage = $webCandidates |
+            Where-Object { $_ -and $_ -notmatch ':<none>$' -and $_ -ne $WebImage } |
+            Select-Object -First 1
+        if ([string]::IsNullOrWhiteSpace($SeedWebImage)) {
+            throw "No local file-agent-web image is available as the reusable Caddy runtime."
+        }
+        Write-Host "Auto-selected the local Web runtime image: $SeedWebImage" -ForegroundColor Green
+    }
+}
 
 $baseExists = Test-DockerImage $BaseImage
 $seedExists = $false
@@ -200,7 +218,24 @@ try {
 
     if (-not $SkipWeb) {
         $seedWebExists = -not [string]::IsNullOrWhiteSpace($SeedWebImage) -and (Test-DockerImage $SeedWebImage)
-        if ($seedWebExists) {
+        if ($UsePrebuiltWebDist) {
+            if (-not $seedWebExists) {
+                throw "The reusable Web runtime image does not exist: $SeedWebImage"
+            }
+            Assert-SeedWebImageHasCaddy $SeedWebImage
+            $webDistPath = Join-Path $ProjectRoot "apps/web/dist"
+            if (-not (Test-Path -LiteralPath $webDistPath -PathType Container)) {
+                throw "The source package does not contain the prebuilt Web dist directory: $webDistPath"
+            }
+            $dockerWebDistContext = ([System.IO.Path]::GetFullPath($webDistPath)).Replace([char]92, [char]47)
+            Write-Host "Building the Web image from packaged dist and local Caddy runtime: $SeedWebImage -> $WebImage" -ForegroundColor Cyan
+            docker build `
+                --build-context "web-dist=$dockerWebDistContext" `
+                --build-arg "SEED_WEB_IMAGE=$SeedWebImage" `
+                --tag $WebImage `
+                --file deploy/Dockerfile.web-reuse .
+            Assert-LastExitCode "The offline Web code image build failed."
+        } elseif ($seedWebExists) {
             Assert-SeedWebImageHasCaddy $SeedWebImage
             if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
                 throw "npm was not found. It is required to compile the latest Web source for offline runtime reuse."

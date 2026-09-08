@@ -177,6 +177,8 @@ def reset_working_copy_materializations(
     settings: Settings,
     project_root: Path,
     root_key: str,
+    reason_code: str | None = None,
+    source_path_prefix: str | None = None,
 ) -> dict[str, object]:
     """删除指定受管根的工作副本事实和文件，并重新排队物化任务。"""
 
@@ -201,18 +203,70 @@ def reset_working_copy_materializations(
         .filter(WorkingCopy.working_copy_root_id == working_root.id)
         .all()
     )
+    selection_is_scoped = bool(reason_code or source_path_prefix)
+    if reason_code:
+        latest_decisions: dict[str, DocumentOrganizationDecision] = {}
+        decisions = (
+            db.query(DocumentOrganizationDecision)
+            .filter(
+                DocumentOrganizationDecision.working_copy_id.in_(
+                    [row.id for row in copies]
+                )
+            )
+            .order_by(
+                DocumentOrganizationDecision.completed_at.desc(),
+                DocumentOrganizationDecision.created_at.desc(),
+            )
+            .all()
+        )
+        for decision in decisions:
+            if bool((decision.feature_snapshot_json or {}).get("shadow_only")):
+                continue
+            latest_decisions.setdefault(decision.working_copy_id, decision)
+        copies = [
+            row
+            for row in copies
+            if (
+                (decision := latest_decisions.get(row.id)) is not None
+                and decision.decision == "NEEDS_REVIEW"
+                and reason_code in list(decision.reason_codes_json or [])
+            )
+        ]
+    if source_path_prefix:
+        normalized_prefix = source_path_prefix.replace("\\", "/").strip("/")
+        managed_paths = {
+            row.id: row.relative_path.replace("\\", "/").strip("/")
+            for row in db.query(ManagedFile)
+            .filter(ManagedFile.id.in_([copy.managed_file_id for copy in copies]))
+            .all()
+        }
+        copies = [
+            row
+            for row in copies
+            if (
+                managed_paths.get(row.managed_file_id) == normalized_prefix
+                or managed_paths.get(row.managed_file_id, "").startswith(
+                    f"{normalized_prefix}/"
+                )
+            )
+        ]
     copy_ids = [row.id for row in copies]
     document_ids = [row.document_id for row in copies]
     version_ids = [row.current_version_id for row in copies if row.current_version_id]
-    revisions = (
+    revision_query = (
         db.query(ManagedFileRevision)
         .join(ManagedFile, ManagedFile.id == ManagedFileRevision.managed_file_id)
         .filter(
             ManagedFile.root_id == managed_root.id,
             ManagedFile.status == "ACTIVE",
         )
-        .all()
     )
+    if selection_is_scoped:
+        managed_file_ids = [row.managed_file_id for row in copies]
+        revision_query = revision_query.filter(
+            ManagedFileRevision.managed_file_id.in_(managed_file_ids)
+        )
+    revisions = revision_query.all()
     revision_ids = [row.id for row in revisions]
     source_document_ids = {
         row[0]
@@ -532,9 +586,14 @@ def reset_working_copy_materializations(
         raise RuntimeError(
             f"源侧事实发生变化，拒绝提交：before={before_source}, after={after_source}"
         )
-    if db.query(WorkingCopy).filter(
-        WorkingCopy.working_copy_root_id == working_root.id
-    ).count():
+    remaining_copy_query = db.query(WorkingCopy)
+    if selection_is_scoped:
+        remaining_copy_query = remaining_copy_query.filter(WorkingCopy.id.in_(copy_ids))
+    else:
+        remaining_copy_query = remaining_copy_query.filter(
+            WorkingCopy.working_copy_root_id == working_root.id
+        )
+    if remaining_copy_query.count():
         raise RuntimeError("测试根仍存在工作副本，拒绝提交")
     if db.query(DocumentOrganizationDecision).filter(
         DocumentOrganizationDecision.working_copy_id.in_(copy_ids)
@@ -545,13 +604,36 @@ def reset_working_copy_materializations(
     ).count():
         raise RuntimeError("测试根仍存在正式分类，拒绝提交")
 
-    physical_file_count = len(
-        [path for path in target.path.rglob("*") if path.is_file()]
-    ) if target.path.exists() else 0
-    clear_directory_contents(target)
+    if selection_is_scoped:
+        physical_file_count = 0
+        for copy in copies:
+            file_path = (target.path / copy.relative_path).resolve()
+            try:
+                file_path.relative_to(target.path)
+            except ValueError as exc:
+                raise ValueError("工作副本路径越过配置存储根") from exc
+            if file_path.is_file():
+                file_path.unlink()
+                physical_file_count += 1
+            parent = file_path.parent
+            while parent != target.path:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+    else:
+        physical_file_count = (
+            len([path for path in target.path.rglob("*") if path.is_file()])
+            if target.path.exists()
+            else 0
+        )
+        clear_directory_contents(target)
     db.commit()
     return {
         "root_key": root_key,
+        "reason_code": reason_code,
+        "source_path_prefix": source_path_prefix,
         "source_path": str(Path(managed_root.container_path).resolve()),
         "working_copy_path": str(target.path),
         "working_copies_removed": len(copy_ids),
@@ -579,6 +661,8 @@ def main() -> None:
         description="仅重置指定受管根的工作副本物化数据，保留源扫描和源分析"
     )
     parser.add_argument("--root-key", required=True)
+    parser.add_argument("--reason-code")
+    parser.add_argument("--source-path-prefix")
     parser.add_argument("--confirm-reset-working-copies", action="store_true")
     parser.add_argument("--confirm-writers-stopped", action="store_true")
     args = parser.parse_args()
@@ -595,6 +679,8 @@ def main() -> None:
                 settings=settings,
                 project_root=Path.cwd().resolve(),
                 root_key=args.root_key,
+                reason_code=args.reason_code,
+                source_path_prefix=args.source_path_prefix,
             )
         except Exception:
             db.rollback()

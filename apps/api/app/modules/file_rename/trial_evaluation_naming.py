@@ -16,6 +16,8 @@ _TRIAL_EVALUATION_PATTERN = re.compile(
 _SOURCE_YEAR_PATTERN = re.compile(
     r"(?:^|/)(?P<year>(?:19|20)\d{2})(?:年)?(?:/|$)"
 )
+_PROTECTED_PARENT_PARTS = ("考查试讲表", "考察试讲表")
+_TRIAL_EVALUATION_FILENAME_PREFIX = "计算机科学与工程学院应聘试讲意见表"
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +30,30 @@ class TrialEvaluationFilenameSuggestion:
     applicant_name: str
     reviewer_name: str
     evidence_quote: str
+
+
+def should_preserve_trial_evaluation_source_name(
+    *,
+    original_filename: str,
+    source_relative_path: str,
+) -> bool:
+    """指定外来应聘考察材料目录中的试讲意见表始终保留源文件名。"""
+
+    if not Path(original_filename).stem.strip().startswith(
+        _TRIAL_EVALUATION_FILENAME_PREFIX
+    ):
+        return False
+    parts = tuple(
+        part
+        for part in str(source_relative_path or "").replace("\\", "/").split("/")
+        if part
+    )
+    parent_parts = parts[:-1]
+    for index in range(len(parent_parts) - 1):
+        if parent_parts[index : index + 2] != _PROTECTED_PARENT_PARTS:
+            continue
+        return index == 1 or "外来应聘" in parent_parts[:index]
+    return False
 
 
 def suggest_trial_evaluation_filename(

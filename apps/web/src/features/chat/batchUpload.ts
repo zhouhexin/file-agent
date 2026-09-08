@@ -46,6 +46,7 @@ export type UploadBatchFailure = {
 
 export type UploadBatchProgressState = {
   id: string;
+  turnId?: string;
   submitted: boolean;
   total: number;
   completed: number;

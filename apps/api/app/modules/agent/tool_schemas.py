@@ -531,6 +531,7 @@ class ResolveRenameReviewsInput(StrictToolInput):
     """处理重命名待复核项的用户更正或放弃消息。"""
 
     message: str = Field(min_length=1, max_length=4000)
+    document_ids: List[str] = Field(default_factory=list)
     conversation_id: str = Field(min_length=1)
     agent_run_id: str = Field(min_length=1)
 

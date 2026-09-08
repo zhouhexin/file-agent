@@ -516,7 +516,11 @@ def get_settings() -> Settings:
             DEFAULT_ADAPTIVE_PLANNER_SCHEMA_VERSION,
         ).strip()
         or DEFAULT_ADAPTIVE_PLANNER_SCHEMA_VERSION,
-        llm_classification_mode=os.getenv("LLM_CLASSIFICATION_MODE", "rule_only").lower(),
+        llm_classification_mode=_choice(
+            os.getenv("LLM_CLASSIFICATION_MODE", "rule_only"),
+            allowed={"rule_only", "hybrid", "review_only"},
+            default="rule_only",
+        ),
         llm_classification_allow_free_paths=os.getenv("LLM_CLASSIFICATION_ALLOW_FREE_PATHS", "false").lower() == "true",
         document_summary_enabled=os.getenv("DOCUMENT_SUMMARY_ENABLED", "true").lower() == "true",
         document_summary_provider=_normalize_background_summary_provider(

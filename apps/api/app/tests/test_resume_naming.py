@@ -5,7 +5,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.modules.file_rename.resume_naming import suggest_resume_filename
+from app.modules.file_rename.resume_naming import (
+    protected_form_title,
+    suggest_resume_filename,
+)
 from app.modules.file_rename.uploaded_suggestion_service import (
     UploadedRenameSuggestionService,
 )
@@ -39,6 +42,7 @@ def test_resume_filename_patterns_use_personal_resume_template(
     suggestion = suggest_resume_filename(
         original_filename=filename,
         pages=[SimpleNamespace(text_content=_STRUCTURED_RESUME)],
+        source_relative_path=f"外来应聘/2015/{expected_name}/{filename}",
     )
 
     assert suggestion is not None
@@ -116,8 +120,48 @@ def test_multiple_labeled_names_do_not_guess_resume_owner() -> None:
     assert suggestion is None
 
 
-def test_shared_rename_service_applies_personal_resume_template(monkeypatch) -> None:
-    """同步、批量上传和单文件上传共用的建议服务应返回简历专用模板。"""
+def test_title_review_form_is_not_treated_as_resume() -> None:
+    """专家鉴定表虽然包含姓名、学位、研究方向和电话，也不能触发简历命名。"""
+
+    pages = [
+        SimpleNamespace(
+            text_content=(
+                "专家鉴定意见表\n申报人姓名：宋霄罡\n学位：工学博士\n"
+                "现从事学科及研究方向：计算机科学与技术\n联系电话：029-12345678"
+            )
+        )
+    ]
+
+    assert protected_form_title(filename="6.专家鉴定意见表-宋霄罡.doc", pages=pages) == "专家鉴定意见表"
+    assert suggest_resume_filename(
+        original_filename="6.专家鉴定意见表-宋霄罡.doc",
+        pages=pages,
+        source_relative_path="人事处/职称评定/2025/个人提交/宋霄罡/6.专家鉴定意见表-宋霄罡.doc",
+    ) is None
+
+
+def test_invalid_field_label_is_not_used_as_person_name() -> None:
+    """表格抽取把“性别”紧跟在姓名后时，必须改用招聘材料人员目录。"""
+
+    suggestion = suggest_resume_filename(
+        original_filename="材料.doc",
+        pages=[
+            SimpleNamespace(
+                text_content=(
+                    "姓名 性别 出生年月\n教育经历\n工作经历\n发表论文\n联系电话"
+                )
+            )
+        ],
+        source_relative_path="外来应聘/2025/成宽洪/材料.doc",
+    )
+
+    assert suggestion is not None
+    assert suggestion.filename == "成宽洪_个人简历.doc"
+    assert suggestion.evidence_source == "managed_source_container"
+
+
+def test_managed_source_import_applies_personal_resume_template(monkeypatch) -> None:
+    """只有复用受管源正文的首次导入才应用简历专用模板。"""
 
     db = MagicMock()
     db.query.return_value.filter.return_value.first.return_value = None
@@ -138,7 +182,11 @@ def test_shared_rename_service_applies_personal_resume_template(monkeypatch) -> 
             [],
         ),
     )
-    monkeypatch.setattr(service, "_managed_source_relative_path", lambda _document: "")
+    monkeypatch.setattr(
+        service,
+        "_managed_source_relative_path",
+        lambda _document: "外来应聘/2015/王青龙/王青龙(1).DOC",
+    )
     document = Document(
         id="resume-document",
         user_id="resume-user",
@@ -149,9 +197,52 @@ def test_shared_rename_service_applies_personal_resume_template(monkeypatch) -> 
         status="ACTIVE",
     )
 
-    suggestion, _extraction = service.suggest_for_initial_import(document=document)
+    suggestion, _extraction = service.suggest_for_initial_import(
+        document=document,
+        reuse_persisted_extraction_only=True,
+    )
 
     assert suggestion["status"] == "READY"
     assert suggestion["template_key"] == "personal_resume"
     assert suggestion["resume_name"] == "王青龙"
     assert suggestion["proposed_filename"] == "王青龙_个人简历.doc"
+
+
+def test_bulk_upload_does_not_apply_personal_resume_template(monkeypatch) -> None:
+    """普通批量上传必须保留上传名称，不运行受管源简历自动命名规则。"""
+
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = None
+    validation_service = SimpleNamespace(
+        settings=SimpleNamespace(ocr_llm_fallback_quality_threshold=0.5)
+    )
+    service = UploadedRenameSuggestionService(
+        db=db,
+        user_id="resume-upload-user",
+        validation_service=validation_service,
+    )
+    monkeypatch.setattr(
+        service,
+        "_extract_document",
+        lambda **_kwargs: (
+            {"status": "COMPLETED", "extraction_run_id": "resume-upload-run"},
+            [SimpleNamespace(text_content="个人简历\n姓名：王青龙\n教育经历\n工作经历")],
+            [],
+        ),
+    )
+    monkeypatch.setattr(service, "_managed_source_relative_path", lambda _document: "")
+    document = Document(
+        id="resume-upload-document",
+        user_id="resume-upload-user",
+        original_filename="王青龙资料.txt",
+        content_type="text/plain",
+        size_bytes=12,
+        sha256="b" * 64,
+        status="ACTIVE",
+    )
+
+    suggestion, _extraction = service.suggest_for_initial_import(document=document)
+
+    assert suggestion["status"] == "NO_CHANGE"
+    assert suggestion["template_key"] is None
+    assert suggestion["proposed_filename"] == "王青龙资料.txt"

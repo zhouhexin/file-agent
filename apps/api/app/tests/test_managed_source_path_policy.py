@@ -25,12 +25,21 @@ def test_direct_recruitment_root_preserves_entire_relative_parent():
     ) == PurePosixPath("2014应聘人员/张三/照片")
 
 
-def test_department_archive_is_flattened_after_taxonomy_placement():
-    """普通旧部门和年份目录只保留为来源元数据，不套入工作副本路径。"""
+def test_title_review_package_preserves_year_series_review_and_person_path():
+    """职称材料移除部门与业务锚点后，必须保留年度及其包内层级。"""
 
     assert managed_source_container_path(
-        "人事处/职称评定/2025/通知.docx"
-    ) == PurePosixPath()
+        "人事处/职称评定/2025/教师系列/正常评审/个人提交/宋霄罡/专家鉴定意见表.doc"
+    ) == PurePosixPath("2025/教师系列/正常评审/个人提交/宋霄罡")
+
+
+def test_direct_hr_root_title_review_package_preserves_path_below_business_anchor():
+    """人事处直接作为受管根时也只能移除职称评定锚点。"""
+
+    assert managed_source_container_path(
+        "职称评定/2025/教师系列/正常评审/个人提交/宋霄罡/评审表.pdf",
+        root_container_name="人事处",
+    ) == PurePosixPath("2025/教师系列/正常评审/个人提交/宋霄罡")
 
 
 def test_uploaded_archive_never_copies_internal_upload_path():

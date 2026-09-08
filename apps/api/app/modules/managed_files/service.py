@@ -39,6 +39,11 @@ MANAGED_ROOT_GLOBAL_CONFIG_KEYS = frozenset(
         "MANAGED_ROOT_RECONCILE_ON_STARTUP",
         "MANAGED_ROOT_SCAN_BATCH_SIZE",
         "MANAGED_ROOT_SCAN_BATCH_MAX_SECONDS",
+        # Docker Compose 的宿主机挂载参数只用于生成 volume 声明；容器内应用
+        # 只能扫描 MANAGED_ROOT_WORKDATA=/managed/workdata，不能把 Windows
+        # 宿主机路径或挂载模式误登记成独立受管根。
+        "MANAGED_ROOT_HOST_PATH",
+        "MANAGED_ROOT_VOLUME_MODE",
     }
 )
 

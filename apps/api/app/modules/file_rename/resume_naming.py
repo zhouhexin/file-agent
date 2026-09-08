@@ -24,6 +24,36 @@ _CHINESE_SURNAMES = frozenset(
     "盖益桓公"
 )
 _RESUME_TERMS = ("个人简历", "个人履历", "履历表", "简历", "curriculum vitae")
+_PROTECTED_FORM_TERMS = (
+    "专家鉴定意见表",
+    "教师职务任职资格评审表",
+    "职务任职资格评审表",
+    "职务评审简表",
+    "评审简表",
+)
+_INVALID_PERSON_NAMES = frozenset(
+    {
+        "姓名",
+        "性别",
+        "民族",
+        "籍贯",
+        "学历",
+        "学位",
+        "单位",
+        "职称",
+        "专业",
+        "方向",
+    }
+)
+_RECRUITMENT_PATH_TERMS = (
+    "外来应聘",
+    "应聘人员",
+    "应聘材料",
+    "师资招聘",
+    "教师招聘",
+    "recruitment",
+    "applicant",
+)
 _GENERIC_PATH_TERMS = (
     "应聘",
     "招聘",
@@ -55,10 +85,17 @@ def suggest_resume_filename(
     pages: list[Any],
     source_relative_path: str = "",
 ) -> ResumeFilenameSuggestion | None:
-    """仅对明确简历且姓名唯一的文件生成 ``姓名_个人简历``。"""
+    """仅对标题明确或招聘材料包内结构完整的简历生成标准名称。"""
 
     text = "\n".join(_page_text(page) for page in pages if _page_text(page))[:100_000]
-    if not _looks_like_resume(filename=original_filename, text=text):
+    if protected_form_title(filename=original_filename, pages=pages):
+        return None
+    explicit_title = _has_explicit_resume_title(filename=original_filename, text=text)
+    recruitment_resume = bool(
+        _is_confirmed_recruitment_path(source_relative_path)
+        and _has_complete_resume_structure(text)
+    )
+    if not explicit_title and not recruitment_resume:
         return None
     labeled_names = _labeled_name_candidates(text)
     if len(labeled_names) > 1:
@@ -81,8 +118,16 @@ def suggest_resume_filename(
     )
 
 
-def _looks_like_resume(*, filename: str, text: str) -> bool:
-    """显式简历词或稳定履历结构命中时才启用专用规则。"""
+def protected_form_title(*, filename: str, pages: list[Any]) -> str | None:
+    """识别应保留原名的职称评审表单，避免 OCR 或表格布局改变业务标题。"""
+
+    leading_text = "\n".join(_page_text(page) for page in pages if _page_text(page))[:1_500]
+    compact = re.sub(r"\s+", "", f"{Path(filename).stem}\n{leading_text}")
+    return next((term for term in _PROTECTED_FORM_TERMS if term in compact), None)
+
+
+def _has_explicit_resume_title(*, filename: str, text: str) -> bool:
+    """只把文件名或独立标题行中的简历/CV表达视为明确标题。"""
 
     filename_stem = Path(filename).stem
     filename_compact = re.sub(r"\s+", "", filename_stem).lower()
@@ -95,7 +140,15 @@ def _looks_like_resume(*, filename: str, text: str) -> bool:
         text,
     ):
         return True
-    personal = bool(re.search(r"姓\s*名|出生年月|性\s*别|联系方式|联系电话|电子邮箱", text))
+    return False
+
+
+def _has_complete_resume_structure(text: str) -> bool:
+    """招聘材料包的泛化文件名必须具备个人字段及至少三组履历结构。"""
+
+    personal = bool(
+        re.search(r"姓\s*名|出生年月|出生日期|性\s*别|联系方式|联系电话|电子邮箱", text)
+    )
     groups = sum(
         bool(re.search(pattern, text, flags=re.I))
         for pattern in (
@@ -105,7 +158,14 @@ def _looks_like_resume(*, filename: str, text: str) -> bool:
             r"联系电话|联系方式|电子邮箱|\bemail\b|\bphone\b",
         )
     )
-    return personal and groups >= 2
+    return personal and groups >= 3
+
+
+def _is_confirmed_recruitment_path(relative_path: str) -> bool:
+    """只接受受管源相对路径中的已知招聘材料锚点，不采用普通“个人提交”目录。"""
+
+    normalized = str(relative_path or "").replace("\\", "/").casefold()
+    return any(term.casefold() in normalized for term in _RECRUITMENT_PATH_TERMS)
 
 
 def _name_from_labeled_text(text: str) -> tuple[str, str, str] | None:
@@ -124,7 +184,7 @@ def _labeled_name_candidates(text: str) -> list[tuple[str, str, str]]:
         text,
         flags=re.M,
     ):
-        name = _chinese_name(match.group(1), require_common_surname=False)
+        name = _chinese_name(match.group(1), require_common_surname=True)
         if name:
             candidates.setdefault(
                 name,
@@ -184,6 +244,8 @@ def _chinese_name(value: str, *, require_common_surname: bool) -> str | None:
 
     normalized = re.sub(r"\s+", "", str(value or "")).strip("·")
     if not re.fullmatch(r"[\u3400-\u9fff]{2,4}", normalized):
+        return None
+    if normalized in _INVALID_PERSON_NAMES:
         return None
     if require_common_surname and normalized[0] not in _CHINESE_SURNAMES:
         return None

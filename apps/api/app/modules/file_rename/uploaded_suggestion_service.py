@@ -36,7 +36,10 @@ from app.modules.file_rename.metadata_resolution_service import RenameMetadataRe
 from app.modules.file_rename.ocr_quality_policy import assess_ocr_rename_quality
 from app.modules.file_rename.parsing_service import extract_rename_primary
 from app.modules.file_rename.policy_loader import load_rename_policy
-from app.modules.file_rename.resume_naming import suggest_resume_filename
+from app.modules.file_rename.resume_naming import (
+    protected_form_title,
+    suggest_resume_filename,
+)
 from app.modules.file_rename.schemas import (
     RenameEvidenceItem,
     RenameFieldResult,
@@ -44,6 +47,7 @@ from app.modules.file_rename.schemas import (
 )
 from app.modules.file_rename.title_quality import assess_narrative_filename_preservation
 from app.modules.file_rename.trial_evaluation_naming import (
+    should_preserve_trial_evaluation_source_name,
     suggest_trial_evaluation_filename,
 )
 from app.modules.file_rename.validation_service import RenameValidationService
@@ -419,6 +423,54 @@ class UploadedRenameSuggestionService:
                     extraction_result,
                 )
             source_relative_path = self._managed_source_relative_path(document)
+            if should_preserve_trial_evaluation_source_name(
+                original_filename=document.original_filename,
+                source_relative_path=source_relative_path,
+            ):
+                return (
+                    {
+                        **base,
+                        "proposed_filename": document.original_filename,
+                        "document_date": empty_field.model_dump(mode="json"),
+                        "year": empty_field.model_dump(mode="json"),
+                        "document_number": empty_field.model_dump(mode="json"),
+                        "title": empty_field.model_dump(mode="json"),
+                        "template_key": "protected_recruitment_trial_source_name",
+                        "status": "NO_CHANGE",
+                        "warnings": ["外来应聘考察试讲表已按目录规则保留原文件名。"],
+                        "rename_validation": None,
+                        "errors": [],
+                    },
+                    extraction_result,
+                )
+            protected_form = protected_form_title(
+                filename=document.original_filename,
+                pages=pages,
+            )
+            if protected_form is not None:
+                # 职称评审表单的原名通常已经包含人员或材料用途；OCR 标题即使可读，
+                # 也可能存在单字误识别，因此首次发布保留原名最安全。
+                return (
+                    {
+                        **base,
+                        "proposed_filename": document.original_filename,
+                        "document_date": empty_field.model_dump(mode="json"),
+                        "year": empty_field.model_dump(mode="json"),
+                        "document_number": empty_field.model_dump(mode="json"),
+                        "title": RenameFieldResult(
+                            value=protected_form,
+                            status=RenameFieldStatus.RESOLVED,
+                            source="protected_form_title",
+                            confidence=1.0,
+                        ).model_dump(mode="json"),
+                        "template_key": "protected_form_original_name",
+                        "status": "NO_CHANGE",
+                        "warnings": ["职称评审表单已保留原文件名，避免 OCR 或表格布局造成误改名。"],
+                        "rename_validation": None,
+                        "errors": [],
+                    },
+                    extraction_result,
+                )
             trial_evaluation = suggest_trial_evaluation_filename(
                 original_filename=document.original_filename,
                 source_relative_path=source_relative_path,
@@ -460,10 +512,16 @@ class UploadedRenameSuggestionService:
                     },
                     extraction_result,
                 )
-            resume = suggest_resume_filename(
-                original_filename=document.original_filename,
-                pages=pages,
-                source_relative_path=source_relative_path,
+            # 个人简历专用自动命名只适用于已完成源分析的受管目录导入。
+            # 普通批量上传即使正文像简历，也必须保留上传文件名。
+            resume = (
+                suggest_resume_filename(
+                    original_filename=document.original_filename,
+                    pages=pages,
+                    source_relative_path=source_relative_path,
+                )
+                if reuse_persisted_extraction_only
+                else None
             )
             if resume is not None:
                 proposed_filename = validate_target_filename(

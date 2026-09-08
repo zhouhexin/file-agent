@@ -1,8 +1,8 @@
 {
   "key": "unified_school_file_classification",
   "name": "学校文件统一分类体系",
-  "version": "2026-09-v8",
-  "source": "文件归类(1).xlsx + managed-directory-inventory@managed-downloads-2026-07-15-v1 + managed-directory-inventory@managed-downloads-2026-07-18-v2 + physical-path-completion@2026-08-27-v3 + college-talent-work-samples@workdata-2026-08-28-v4 + college-taxonomy-workdata-samples@workdata-2026-08-28-v5 + organization-scope-signals@workdata-2026-08-29-v6 + organization-department-document-number-fallback@2026-09-01-v7 + fallback-node-materialization@2026-09-01-v8",
+  "version": "2026-09-v9",
+  "source": "文件归类(1).xlsx + managed-directory-inventory@managed-downloads-2026-07-15-v1 + managed-directory-inventory@managed-downloads-2026-07-18-v2 + physical-path-completion@2026-08-27-v3 + college-talent-work-samples@workdata-2026-08-28-v4 + college-taxonomy-workdata-samples@workdata-2026-08-28-v5 + organization-scope-signals@workdata-2026-08-29-v6 + organization-department-document-number-fallback@2026-09-01-v7 + fallback-node-materialization@2026-09-01-v8 + title-review-form-signals@workdata-2026-09-05-v9",
   "fallback_policy": {
     "department_category_ids": [
       "school.admin",
@@ -260,7 +260,11 @@
                 "任职资格",
                 "专业技术职务任职资格",
                 "职称评定",
-                "职称资格"
+                "职称资格",
+                "专家鉴定意见表",
+                "教师职务任职资格评审表",
+                "职务评审简表",
+                "评审简表"
               ],
               "positive_signals": [
                 "职称",
@@ -271,7 +275,12 @@
                 "岗位等级",
                 "任职资格",
                 "专业技术职务",
-                "职称评定"
+                "职称评定",
+                "专家鉴定意见表",
+                "教师职务任职资格评审表",
+                "职务任职资格评审表",
+                "职务评审简表",
+                "评审简表"
               ],
               "negative_signals": [
                 "学生评优",

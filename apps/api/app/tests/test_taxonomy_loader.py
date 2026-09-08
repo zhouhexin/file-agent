@@ -14,7 +14,7 @@ def test_default_taxonomy_loads_unified_school_file_classification():
     taxonomy = load_default_taxonomy()
 
     assert taxonomy.key == "unified_school_file_classification"
-    assert taxonomy.version == "2026-09-v8"
+    assert taxonomy.version == "2026-09-v9"
     assert taxonomy.categories[0].name == "学校"
     school, college = taxonomy.categories
     assert {"全校", "校属各单位"} <= set(school.positive_signals)

@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from difflib import SequenceMatcher
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -18,6 +18,7 @@ from app.db.models import (
     AgentRun,
     Document,
     DocumentVersion,
+    ManagedFile,
     Message,
     OperationPlan,
     ToolInvocation,
@@ -61,6 +62,7 @@ class UploadedRenameReviewResolutionService:
         conversation_id: str,
         agent_run_id: str,
         message: str,
+        document_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """解析用户给出的实际名称；不在本步骤直接执行物理重命名。"""
 
@@ -100,18 +102,49 @@ class UploadedRenameReviewResolutionService:
 
         items: list[dict[str, Any]] = []
         used_source_ids: set[str] = set()
-        for source_name, target_name in corrections:
-            matches = self._match_pending(
-                pending=candidates,
-                source_name=source_name,
+        selected_document_ids = {
+            str(value) for value in document_ids or [] if str(value)
+        }
+        for selected_document_id in list(selected_document_ids):
+            selected_document = self.db.get(Document, selected_document_id)
+            if selected_document is None or selected_document.user_id != self.user_id:
+                continue
+            selected_copy = self._resolve_active_working_copy(
+                document=selected_document
             )
+            if selected_copy is not None:
+                selected_document_ids.add(selected_copy.document_id)
+        scoped_candidates = (
+            [
+                candidate
+                for candidate in candidates
+                if str(
+                    candidate.get("source_document_id")
+                    or candidate.get("document_id")
+                    or ""
+                )
+                in selected_document_ids
+            ]
+            if selected_document_ids
+            else candidates
+        )
+        for source_name, target_name in corrections:
+            matches = self._exact_active_working_copy_candidates(
+                source_name=source_name,
+                document_ids=list(selected_document_ids),
+            )
+            if not matches:
+                matches = self._match_pending(
+                    pending=scoped_candidates,
+                    source_name=source_name,
+                )
             if len(matches) != 1:
                 similar = (
                     matches
                     if matches
                     else _similar_rename_candidates(
                         source_name=source_name,
-                        candidates=candidates,
+                        candidates=scoped_candidates,
                     )
                 )
                 if similar:
@@ -148,57 +181,61 @@ class UploadedRenameReviewResolutionService:
             except ValueError as exc:
                 return _error("INVALID_TARGET_FILENAME", str(exc))
             source_copy = self._resolve_active_working_copy(document=document)
-            if source_copy is not None:
-                operation_service = WorkingCopyOperationService(self.db)
-                conflicts = operation_service.find_active_filename_conflicts(
-                    workspace_id=get_shared_workspace_id(self.db),
-                    target_filename=validated_target,
-                    exclude_working_copy_ids={source_copy.id},
+            if source_copy is None:
+                return _error(
+                    "WORKING_COPY_NOT_READY",
+                    "文件仍在后台归档或导入工作副本，请稍后重新发送重命名指令。",
                 )
-                if conflicts:
-                    source_run_id = str(
-                        suggestion.get("_source_agent_run_id") or ""
-                    )
-                    if source_run_id:
-                        self._invalidate_previous_plan(
-                            conversation_id=conversation_id,
-                            source_agent_run_id=source_run_id,
-                        )
-                    operation_service.create_filename_conflict_review(
-                        source_copy=source_copy,
-                        existing_copies=conflicts,
-                        target_filename=validated_target,
+            operation_service = WorkingCopyOperationService(self.db)
+            conflicts = operation_service.find_active_filename_conflicts(
+                workspace_id=get_shared_workspace_id(self.db),
+                target_filename=validated_target,
+                exclude_working_copy_ids={source_copy.id},
+            )
+            if conflicts:
+                source_run_id = str(
+                    suggestion.get("_source_agent_run_id") or ""
+                )
+                if source_run_id:
+                    self._invalidate_previous_plan(
                         conversation_id=conversation_id,
-                        agent_run_id=agent_run_id,
-                        current_user=current_user,
-                        source="EXPLICIT_RENAME",
+                        source_agent_run_id=source_run_id,
                     )
-                    multiple = len(conflicts) > 1
-                    return {
-                        "ok": True,
-                        "kind": "filename_conflict",
-                        "status": "NEEDS_REVIEW",
-                        "filename": validated_target,
-                        "conflict_count": len(conflicts),
-                        "allowed_decisions": (
-                            ["CANCEL"]
-                            if multiple
-                            else [
-                                "REPLACE_EXISTING_WORKING_COPY",
-                                "KEEP_BOTH",
-                                "CANCEL",
-                            ]
-                        ),
-                        "message": (
-                            f"共享工作目录中已有 {len(conflicts)} 个同名文件"
-                            f"“{validated_target}”。请先选择要处理的已有文件。"
-                            if multiple
-                            else (
-                                f"共享工作目录已存在同名文件“{validated_target}”。"
-                                "请选择“覆盖已有文件”“同时保留”或“取消”。"
-                            )
-                        ),
-                    }
+                operation_service.create_filename_conflict_review(
+                    source_copy=source_copy,
+                    existing_copies=conflicts,
+                    target_filename=validated_target,
+                    conversation_id=conversation_id,
+                    agent_run_id=agent_run_id,
+                    current_user=current_user,
+                    source="EXPLICIT_RENAME",
+                )
+                multiple = len(conflicts) > 1
+                return {
+                    "ok": True,
+                    "kind": "filename_conflict",
+                    "status": "NEEDS_REVIEW",
+                    "filename": validated_target,
+                    "conflict_count": len(conflicts),
+                    "allowed_decisions": (
+                        ["CANCEL"]
+                        if multiple
+                        else [
+                            "REPLACE_EXISTING_WORKING_COPY",
+                            "KEEP_BOTH",
+                            "CANCEL",
+                        ]
+                    ),
+                    "message": (
+                        f"共享工作目录中已有 {len(conflicts)} 个同名文件"
+                        f"“{validated_target}”。请先选择要处理的已有文件。"
+                        if multiple
+                        else (
+                            f"共享工作目录已存在同名文件“{validated_target}”。"
+                            "请选择“覆盖已有文件”“同时保留”或“取消”。"
+                        )
+                    ),
+                }
             used_source_ids.add(source_document_id)
             items.append(
                 {
@@ -244,7 +281,7 @@ class UploadedRenameReviewResolutionService:
             user_id=self.user_id,
             operation_type=DEFERRED_UPLOAD_RENAME_OPERATION,
             risk_level="medium",
-            reason="用户明确补充文件名，待工作副本就绪后执行重命名",
+            reason="用户已明确指定源文件和目标文件名，直接执行重命名",
             plan_json={
                 "target": "PENDING_UPLOAD_WORKING_COPY",
                 "source_rename_agent_run_id": (
@@ -255,17 +292,35 @@ class UploadedRenameReviewResolutionService:
             },
         )
         self.db.flush()
+        operation_service = WorkingCopyOperationService(self.db)
+        operation_service.prepare_deferred_upload_rename(
+            plan=plan,
+            current_user=current_user,
+        )
+        self.repository.confirm_plan(
+            plan=plan,
+            user_id=self.user_id,
+            confirmation_text=message[:200],
+        )
+        result, changeset_id = operation_service.execute(
+            plan=plan,
+            current_user=current_user,
+        )
+        self.db.commit()
+        self.db.refresh(plan)
         return {
-            "ok": True,
-            "kind": "rename_review_resolution",
-            "status": "WAITING_CONFIRMATION",
-            "dismissed_count": 0,
-            "accepted_count": len(items),
-            "remaining_review_count": max(0, len(pending) - len(items)),
+            "ok": plan.status in {"EXECUTED", "PARTIAL"},
+            "kind": "working_copy_operation_result",
+            "status": plan.status,
             "operation_plan_id": plan.id,
-            "completed_items": [],
-            "failed_items": [],
-            "ambiguous_items": [],
+            "operation_type": plan.operation_type,
+            "changeset_id": changeset_id,
+            "item_count": len(result.get("items") or []),
+            "items": list(result.get("items") or []),
+            "message": (
+                f"已直接重命名 {int(result.get('completed_count') or 0)} 个文件，"
+                "无需再次确认。"
+            ),
         }
 
     def _latest_pending_suggestions(
@@ -494,6 +549,66 @@ class UploadedRenameReviewResolutionService:
             )
         return unique[:100]
 
+    def _exact_active_working_copy_candidates(
+        self,
+        *,
+        source_name: str,
+        document_ids: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        """在当前用户可见的共享工作区按完整文件名查询活动副本。"""
+
+        query = (
+            self.db.query(WorkingCopy, Document, ManagedFile)
+            .join(Document, Document.id == WorkingCopy.document_id)
+            .join(ManagedFile, ManagedFile.id == WorkingCopy.managed_file_id)
+            .filter(
+                WorkingCopy.workspace_id == get_shared_workspace_id(self.db),
+                WorkingCopy.status == "ACTIVE",
+                WorkingCopy.filename == source_name,
+                Document.user_id == self.user_id,
+            )
+        )
+        selected_ids = [str(value) for value in document_ids or [] if str(value)]
+        if selected_ids:
+            query = query.filter(Document.id.in_(selected_ids))
+        rows = query.order_by(WorkingCopy.relative_path.asc()).all()
+        return [
+            {
+                "document_id": document.id,
+                "source_document_id": document.id,
+                "working_copy_id": working_copy.id,
+                "filename": working_copy.filename,
+                "source_sha256": working_copy.content_sha256,
+                "source_kind": "active_working_copy_exact",
+                "size_bytes": working_copy.size_bytes,
+                "created_at": working_copy.created_at.isoformat(),
+                "directory_path": self._candidate_directory_path(
+                    working_copy=working_copy,
+                    managed_file=managed_file,
+                ),
+                "_source_agent_run_id": "",
+            }
+            for working_copy, document, managed_file in rows
+        ]
+
+    @staticmethod
+    def _candidate_directory_path(
+        *,
+        working_copy: WorkingCopy,
+        managed_file: ManagedFile,
+    ) -> str:
+        """生成用户可见相对目录；内部中性目录改用受管源文件目录。"""
+
+        relative_path = str(working_copy.relative_path or "").replace("\\", "/")
+        if relative_path.strip("/").startswith(".internal/"):
+            relative_path = str(managed_file.relative_path or "").replace("\\", "/")
+        parts = [
+            part
+            for part in PurePosixPath(relative_path.strip("/")).parts
+            if part not in {".", "..", "/"}
+        ]
+        return "/".join(parts[:-1]) if len(parts) > 1 else "工作目录根目录"
+
     def _resolve_active_working_copy(
         self,
         *,
@@ -561,7 +676,12 @@ class UploadedRenameReviewResolutionService:
 
         options: list[dict[str, Any]] = []
         choices: list[dict[str, Any]] = []
-        for index, candidate in enumerate(candidates[:5], start=1):
+        exact_matches = all(
+            candidate.get("source_kind") == "active_working_copy_exact"
+            for candidate in candidates
+        )
+        visible_candidates = candidates if exact_matches else candidates[:5]
+        for index, candidate in enumerate(visible_candidates, start=1):
             document_id = str(
                 candidate.get("source_document_id")
                 or candidate.get("document_id")
@@ -580,13 +700,18 @@ class UploadedRenameReviewResolutionService:
                 .first()
             )
             filename = str(candidate.get("filename") or document.original_filename)
+            directory_path = str(
+                candidate.get("directory_path") or "工作目录根目录"
+            )
             option_id = f"rename-file-{index}"
             score = _filename_similarity(source_name, filename)
             options.append(
                 {
                     "id": option_id,
                     "label": filename,
-                    "description": f"文件名相似度 {score:.0%}",
+                    "description": (
+                        f"所在目录：{directory_path}；文件名相似度 {score:.0%}"
+                    ),
                     "document_id": document.id,
                     "source_filename": filename,
                     "target_filename": target_name,
@@ -598,13 +723,17 @@ class UploadedRenameReviewResolutionService:
                     "document_id": document.id,
                     "document_version_id": version.id if version is not None else "",
                     "working_copy_id": (
-                        str(version.working_copy_id or "")
-                        if version is not None
-                        else ""
+                        str(candidate.get("working_copy_id") or "")
+                        or (
+                            str(version.working_copy_id or "")
+                            if version is not None
+                            else ""
+                        )
                     ),
                     "filename": filename,
                     "size_bytes": document.size_bytes,
                     "created_at": document.created_at.isoformat(),
+                    "directory_path": directory_path,
                 }
             )
         if not choices:
@@ -629,8 +758,12 @@ class UploadedRenameReviewResolutionService:
             "kind": "file_selection",
             "status": "NEEDS_CLARIFICATION",
             "message": (
-                f"没有精确找到“{source_name}”。"
-                "以下文件名称较相似，请选择要重命名的具体文件。"
+                f"找到多个名为“{source_name}”的文件，请根据所在目录选择具体文件。"
+                if exact_matches
+                else (
+                    f"没有精确找到“{source_name}”。"
+                    "以下文件名称较相似，请选择要重命名的具体文件。"
+                )
             ),
             "clarification_id": clarification.id,
             "choices": choices,

@@ -14,6 +14,14 @@ _APPOINTMENT_CATEGORY_IDS = {
     "college.hr.appointment-assessment",
 }
 _FACULTY_RECRUITMENT_CATEGORY_ID = "college.hr.faculty-recruitment"
+_TITLE_REVIEW_CATEGORY_ID = "school.hr.title-review"
+_TITLE_REVIEW_FORM_SIGNALS = (
+    "专家鉴定意见表",
+    "教师职务任职资格评审表",
+    "职务任职资格评审表",
+    "职务评审简表",
+    "评审简表",
+)
 _RESUME_SIGNALS = (
     "个人简历",
     "求职简历",
@@ -183,20 +191,28 @@ def recall_category_candidates(
         ]
     )
     body_text = document_features.full_text or ""
-    recruitment_resume = _recruitment_resume_candidate(
-        document_features=document_features,
+    title_review_form = _title_review_form_candidate(
         taxonomy=taxonomy,
         title_text=title_text,
         body_text=body_text,
     )
-    if recruitment_resume is not None:
-        return [recruitment_resume]
+    if title_review_form is None:
+        recruitment_resume = _recruitment_resume_candidate(
+            document_features=document_features,
+            taxonomy=taxonomy,
+            title_text=title_text,
+            body_text=body_text,
+        )
+        if recruitment_resume is not None:
+            return [recruitment_resume]
     organization_scope = _detect_organization_scope(
         taxonomy=taxonomy,
         title_text=title_text,
         body_text=body_text,
     )
-    candidates: list[CategoryCandidate] = []
+    candidates: list[CategoryCandidate] = (
+        [title_review_form] if title_review_form is not None else []
+    )
     for category in flatten_category_paths(taxonomy):
         if len(category.path) == 1:
             continue
@@ -284,6 +300,51 @@ def recall_category_candidates(
     candidates = _dedupe_candidates_and_remove_shorter_embedded_matches(candidates)
     candidates.sort(key=lambda item: (-item.rule_score, item.order))
     return candidates[:max(0, min(limit, 8))]
+
+
+def _title_review_form_candidate(
+    *,
+    taxonomy: Taxonomy,
+    title_text: str,
+    body_text: str,
+) -> CategoryCandidate | None:
+    """明确职称评审表题名优先于正文中的学科、科研或履历字段。"""
+
+    title_signals = _matched_signals(title_text, _TITLE_REVIEW_FORM_SIGNALS)
+    leading_body = body_text[:1_500]
+    body_signals = _matched_signals(leading_body, _TITLE_REVIEW_FORM_SIGNALS)
+    if not title_signals and not body_signals:
+        return None
+    category = next(
+        (
+            item
+            for item in flatten_category_paths(taxonomy)
+            if item.category_id == _TITLE_REVIEW_CATEGORY_ID
+        ),
+        None,
+    )
+    if category is None:
+        return None
+    matched_signals = _unique_signals([*title_signals, *body_signals])
+    return CategoryCandidate(
+        category_id=category.category_id,
+        category_path=category.path,
+        name="/".join(category.path),
+        rule_score=4.0,
+        matched_signals=matched_signals,
+        matched_title_signals=title_signals,
+        matched_content_signals=body_signals,
+        negative_signals=[],
+        organization_scope="学校",
+        organization_score=0.0,
+        candidate_reason=(
+            "文件名、标题或正文首页明确包含职称评审表单题名："
+            f"{'、'.join(matched_signals)}"
+        ),
+        taxonomy_key=taxonomy.key,
+        taxonomy_version=taxonomy.version,
+        order=category.order,
+    )
 
 
 def _recruitment_resume_candidate(

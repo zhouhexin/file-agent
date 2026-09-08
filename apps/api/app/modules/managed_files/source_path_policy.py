@@ -33,6 +33,9 @@ _PRESERVED_PACKAGE_RULES: tuple[tuple[tuple[str, ...], int], ...] = (
     (("办公", "24年学院文化建设"), 1),
     (("办公", "2020新冠肺炎防控"), 1),
     (("宣传部", "西安理工大学视觉识别系统"), 1),
+    # 人事处职称材料属于一个完整业务包；taxonomy 已表达“学校/人事师资/职称”，
+    # 因而移除前两级锚点，仅保留年度、系列、评审类型、人员和包内结构。
+    (("人事处", "职称评定"), 2),
 )
 
 _IGNORED_TOP_LEVEL_DIRECTORIES = frozenset({"test1", "uploads", "我的文档"})

@@ -2,6 +2,9 @@
 param(
     [string]$PackageZip,
     [switch]$SkipGitPull,
+    [switch]$SkipInfrastructurePull,
+    [switch]$UsePrebuiltWebDist,
+    [switch]$SkipWeb,
     [switch]$UsePrebuiltImages
 )
 
@@ -82,6 +85,9 @@ function Resolve-PackageProjectRoot {
 }
 
 if (-not (Test-Path $EnvFile)) { throw "请先运行 deploy.ps1。" }
+if ($UsePrebuiltWebDist -and $SkipWeb) {
+    throw "-UsePrebuiltWebDist 与 -SkipWeb 不能同时使用。"
+}
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     throw "未找到 docker。请先安装并启动 Docker Desktop。"
 }
@@ -110,13 +116,36 @@ try {
         Write-Host "使用已导入的完整离线镜像。" -ForegroundColor Cyan
     } else {
         Write-Host "复用运行时基础镜像并重建最新代码层。" -ForegroundColor Cyan
-        docker compose --env-file $EnvFile -f $ComposeFile pull postgres neo4j
+        if ($SkipInfrastructurePull) {
+            Write-Host "跳过 PostgreSQL/Neo4j 拉取，仅使用本机已有镜像。" -ForegroundColor Cyan
+        } else {
+            docker compose --env-file $EnvFile -f $ComposeFile pull postgres neo4j
+            if ($LASTEXITCODE -ne 0) {
+                throw "PostgreSQL/Neo4j 镜像拉取失败；离线代码更新请使用 -SkipInfrastructurePull。"
+            }
+        }
         # 基础镜像已存在时不会重新安装依赖或预加载模型。
-        & (Join-Path $DeployDir "build-layered-images.ps1") -EnvFile $EnvFile
+        $buildArguments = @{ EnvFile = $EnvFile }
+        if ($UsePrebuiltWebDist) { $buildArguments["UsePrebuiltWebDist"] = $true }
+        if ($SkipWeb) { $buildArguments["SkipWeb"] = $true }
+        & (Join-Path $DeployDir "build-layered-images.ps1") @buildArguments
     }
 
     # migrate 是一次性容器；更新时必须重新创建，不能复用上一次的已完成状态。
-    docker compose --env-file $EnvFile -f $ComposeFile rm -f migrate 2>$null
+    # 首次更新或容器已被清理时，compose rm 会向 stderr 输出
+    # "No stopped containers"；先检查容器是否存在，确保清理操作幂等。
+    $migrateContainer = docker compose --env-file $EnvFile -f $ComposeFile ps -a -q migrate
+    if ($LASTEXITCODE -ne 0) {
+        throw "无法检查 migrate 容器状态。"
+    }
+    if (-not [string]::IsNullOrWhiteSpace(($migrateContainer -join ""))) {
+        docker compose --env-file $EnvFile -f $ComposeFile rm -f migrate
+        if ($LASTEXITCODE -ne 0) {
+            throw "无法清理旧 migrate 容器。"
+        }
+    } else {
+        Write-Host "未发现旧 migrate 容器，跳过清理。" -ForegroundColor DarkGray
+    }
     if ($UsePrebuiltImages) {
         docker compose --env-file $EnvFile -f $ComposeFile up -d --no-build --pull never
     } else {
