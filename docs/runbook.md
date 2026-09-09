@@ -1234,7 +1234,9 @@ export LOCAL_EXTRACTION_PAGE_DIR="$HOME/.file-agent/extraction-pages"
 
 MCP 已暴露 `file_ingest`、`file_batch_ingest`、`workbuddy_attachment_ingest`、`batch_resume`、`batch_get`、`job_get`、
 `duplicate_review_get`、`duplicate_decide`、`extraction_claim`、`extraction_renew`、
-`extraction_submit`、`ingest_retry` 和 `ingest_cancel`。批量工具会枚举用户明确
+`extraction_submit`、`ingest_retry`、`ingest_cancel`、`file_search`、`file_read`、
+`evidence_answer`、`file_search_clarification_resolve`、`file_rename`、`operation_plan_get`和
+`operation_plan_confirm`。批量工具会枚举用户明确
 指定的授权根内目录，固定大小、mtime 和 SHA-256，分页登记并 seal 清单，再以默认并发 2 上传；断点文件
 只保存逻辑根、相对路径和快照，不保存令牌或绝对路径。恢复时以后端事实为准，只传输未接收项，不自动
 重试业务失败。重复选择、OCR租约和最终回执都从后端持久化事实恢复，不能依赖聊天气泡或MCP进程内存。
@@ -1244,6 +1246,13 @@ WorkBuddy会话附件入口要求宿主在用户真正提交消息后传入稳�
 `FILE_AGENT_WORKBUDDY_ATTACHMENT_ROOTS`的某个目录内；MCP拒绝软链接、根外路径和特殊文件，计算真实
 快照后只向后端提交逻辑来源和multipart字节。仅选择而未提交的附件不得调用该工具；调用成功后即使
 `user_request=null`也会按`AUTO_ORGANIZE + BY_CATEGORY`执行默认分类、命名、落位和索引。
+
+对话文件工具必须复用同一WorkBuddy线程的稳定`conversation_ref`。先调用`file_search`取得后端验证过的
+`document_id`，再把ID交给`file_read`、`evidence_answer`或`file_rename`。`file_read`只接受
+`READ/SUMMARY/EXPLAIN`；`file_rename.renames`每项必须同时提供`document_id/source_filename/target_filename`。
+搜索使用只读API，不能把查询文字路由成文件动作；明确重命名仍由后端创建OperationPlan审计并检查当前
+名称与同名冲突。后端若返回待确认计划，必须先用`operation_plan_get`恢复真实状态，只在用户明确确认后
+调用`operation_plan_confirm`。
 
 新通道相关后端配置：
 

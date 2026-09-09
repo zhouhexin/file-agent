@@ -9,6 +9,7 @@ import hashlib
 import stat
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -302,6 +303,111 @@ class FileAgentIntegrationClient:
         response = await self.http.get(f"/api/jobs/{job_id}")
         return self._business_json(response)
 
+    async def conversation_task(
+        self,
+        *,
+        conversation_id: str,
+        content: str,
+        document_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """通过聊天主入口执行文件任务，只接收稳定文件 ID，不接受路径或正文。"""
+
+        return self._business_json(
+            await self.http.post(
+                f"/api/conversations/{conversation_id}/messages",
+                json={
+                    "content": content,
+                    "attachments": [
+                        {"document_id": document_id}
+                        for document_id in (document_ids or [])
+                    ],
+                },
+            )
+        )
+
+    async def file_search(
+        self,
+        *,
+        conversation_id: str,
+        query: str,
+        top_k: int = 10,
+    ) -> dict[str, Any]:
+        """调用后端只读搜索接口，避免搜索文字被通用 Agent 解释为文件写操作。"""
+
+        return self._business_json(
+            await self.http.post(
+                "/api/search",
+                json={
+                    "query": query,
+                    "conversation_id": conversation_id,
+                    "attachment_document_ids": [],
+                    "top_k": top_k,
+                },
+            )
+        )
+
+    async def evidence_answer(
+        self,
+        *,
+        conversation_id: str,
+        question: str,
+        document_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """调用后端证据回答入口，禁止调用方自行提交引用或模型生成参数。"""
+
+        return self._business_json(
+            await self.http.post(
+                f"/api/conversations/{conversation_id}/evidence-answer",
+                json={
+                    "question": question,
+                    "attachment_document_ids": document_ids or [],
+                },
+            )
+        )
+
+    async def resolve_file_search_clarification(
+        self,
+        *,
+        clarification_id: str,
+        option_id: str | None,
+        option_ids: list[str],
+        custom_phrase: str | None,
+    ) -> dict[str, Any]:
+        """原样提交后端签发的搜索澄清选项，不能让模型伪造文件范围。"""
+
+        return self._business_json(
+            await self.http.post(
+                f"/api/file-search/clarifications/{_path_segment(clarification_id)}/resolve",
+                json={
+                    "option_id": option_id,
+                    "option_ids": option_ids,
+                    "custom_phrase": custom_phrase,
+                },
+            )
+        )
+
+    async def operation_plan_get(self, *, plan_id: str) -> dict[str, Any]:
+        """读取当前用户自己的文件操作计划，供 WorkBuddy 恢复待确认状态。"""
+
+        return self._business_json(
+            await self.http.get(f"/api/operations/plans/{_path_segment(plan_id)}")
+        )
+
+    async def operation_plan_confirm(
+        self,
+        *,
+        plan_id: str,
+        confirmation: str,
+    ) -> dict[str, Any]:
+        """提交用户明确确认；真正执行仍由后端白名单执行器和修订检查控制。"""
+
+        return self._business_json(
+            await self.http.post(
+                f"/api/operations/plans/{_path_segment(plan_id)}/confirm",
+                json={"confirmation": confirmation},
+            )
+        )
+
     async def duplicate_review_get(self, *, item_id: str) -> dict[str, Any]:
         """恢复一个批次条目的最新重复候选和允许决定。"""
 
@@ -451,3 +557,12 @@ def file_sha256(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
         while chunk := source.read(chunk_size):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _path_segment(value: str) -> str:
+    """把后端业务 ID 固定为单个 URL 路径段，拒绝空值并编码路径分隔符。"""
+
+    normalized = value.strip()
+    if not normalized or len(normalized) > 200 or "\x00" in normalized:
+        raise ValueError("后端业务 ID 不能为空或超过长度限制")
+    return quote(normalized, safe="")

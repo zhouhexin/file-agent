@@ -11,12 +11,23 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from pydantic import BaseModel, ConfigDict, Field
 
 from .client import FileAgentIntegrationClient, WorkBuddyAttachmentRegistry, file_sha256
 
 
 _SUBMISSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$")
 _ATTACHMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
+
+
+class WorkBuddyAttachmentInput(BaseModel):
+    """WorkBuddy 宿主传给 MCP 的严格附件引用。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    attachment_id: str = Field(min_length=1, max_length=200)
+    filename: str = Field(min_length=1, max_length=255)
+    local_path: str = Field(min_length=1, max_length=4096)
 
 
 @dataclass(slots=True)
@@ -62,7 +73,7 @@ class AttachmentTransferService:
         self,
         *,
         submission_id: str,
-        attachments: list[dict[str, Any]],
+        attachments: list[WorkBuddyAttachmentInput | dict[str, Any]],
         user_request: str | None,
         placement_mode: str,
         rule_profile: str,
@@ -125,14 +136,24 @@ class AttachmentTransferService:
         item_map = {str(item["client_item_id"]): item for item in server_items}
         return await self._upload(batch_id=batch_id, manifest=manifest, item_map=item_map)
 
-    def _resolve_attachment(self, raw: dict[str, Any]) -> WorkBuddyAttachment:
+    def _resolve_attachment(
+        self,
+        raw: WorkBuddyAttachmentInput | dict[str, Any],
+    ) -> WorkBuddyAttachment:
         """严格校验 WorkBuddy 结构化附件，不能信任模型生成的大小或文件名。"""
 
-        allowed_keys = {"attachment_id", "filename", "local_path"}
-        if not isinstance(raw, dict) or set(raw) != allowed_keys:
-            raise ValueError("每个附件必须且只能包含 attachment_id、filename、local_path")
-        attachment_id = str(raw["attachment_id"]).strip()
-        filename = str(raw["filename"]).strip()
+        try:
+            item = (
+                raw
+                if isinstance(raw, WorkBuddyAttachmentInput)
+                else WorkBuddyAttachmentInput.model_validate(raw)
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "每个附件必须且只能包含 attachment_id、filename、local_path"
+            ) from exc
+        attachment_id = item.attachment_id.strip()
+        filename = item.filename.strip()
         if not _ATTACHMENT_ID_PATTERN.fullmatch(attachment_id):
             raise ValueError("attachment_id 不是稳定安全标识")
         if (
@@ -144,7 +165,7 @@ class AttachmentTransferService:
             or "\x00" in filename
         ):
             raise ValueError("filename 必须是单个安全文件名")
-        path = self.registry.resolve(local_path=str(raw["local_path"]), filename=filename)
+        path = self.registry.resolve(local_path=item.local_path, filename=filename)
         stat_result = path.stat()
         return WorkBuddyAttachment(
             attachment_id=attachment_id,

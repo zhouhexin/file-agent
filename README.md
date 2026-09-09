@@ -52,6 +52,10 @@ WorkBuddy 消息中明确提交、且位于预配置宿主缓存根内的会话�
 和启动命令见 `docs/runbook.md`，客户端绝对路径不会发送给后端。该试点入口默认关闭，部署时必须显式
 配置 `INTEGRATION_INGEST_ENABLED=true`；关闭时整个集成 API 返回受控不可用错误。
 
+同一MCP还提供已入库文件的只读搜索、固定模式读取、证据问答、搜索澄清恢复、明确重命名以及
+OperationPlan查询/确认。搜索不能执行写操作；读取只允许`READ/SUMMARY/EXPLAIN`；明确重命名必须携带
+搜索结果中的稳定Document ID与完整原名/新名，并继续由后端执行权限、冲突、修订和审计校验。
+
 Windows PowerShell 在仓库根目录使用当前 Python 环境运行后端测试：
 
 ```powershell

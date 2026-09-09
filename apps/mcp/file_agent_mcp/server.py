@@ -8,8 +8,9 @@ from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from .attachment_transfer import AttachmentTransferService
+from .attachment_transfer import AttachmentTransferService, WorkBuddyAttachmentInput
 from .client import FileAgentIntegrationClient, LocalRootRegistry, WorkBuddyAttachmentRegistry
+from .conversation_tools import ExplicitRenameInput, WorkBuddyConversationService
 from .transfer import BatchTransferService, TransferStateStore
 
 
@@ -108,7 +109,7 @@ async def file_batch_ingest(
 )
 async def workbuddy_attachment_ingest(
     submission_id: str,
-    attachments: list[dict[str, Any]],
+    attachments: list[WorkBuddyAttachmentInput],
     user_request: str | None = None,
     placement_mode: Literal["BY_CATEGORY", "NEUTRAL"] = "BY_CATEGORY",
     rule_profile: Literal["content_based", "legacy_school_materials"] = "content_based",
@@ -126,6 +127,149 @@ async def workbuddy_attachment_ingest(
             user_request=user_request,
             placement_mode=placement_mode,
             rule_profile=rule_profile,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="file_search",
+    description="在 File Agent 已入库文件中执行聊天搜索，并返回可继续读取的稳定文件 ID。",
+    structured_output=True,
+)
+async def file_search(conversation_ref: str, query: str) -> dict[str, Any]:
+    """复用聊天搜索与澄清链路，不让 WorkBuddy 自行判断文件相关性。"""
+
+    client = _client()
+    try:
+        return await WorkBuddyConversationService(client).search(
+            conversation_ref=conversation_ref,
+            query=query,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="file_read",
+    description="读取 file_search 已确定的文件，可执行读取、总结或讲解等固定只读任务。",
+    structured_output=True,
+)
+async def file_read(
+    conversation_ref: str,
+    document_ids: list[str],
+    read_mode: Literal["READ", "SUMMARY", "EXPLAIN"] = "SUMMARY",
+) -> dict[str, Any]:
+    """只按稳定 document_id 读取，不能由 WorkBuddy 提交服务器路径或正文。"""
+
+    client = _client()
+    try:
+        return await WorkBuddyConversationService(client).read(
+            conversation_ref=conversation_ref,
+            document_ids=document_ids,
+            read_mode=read_mode,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="evidence_answer",
+    description="基于已入库文件完整原文回答问题，并返回 File Agent 校验过的引用。",
+    structured_output=True,
+)
+async def evidence_answer(
+    conversation_ref: str,
+    question: str,
+    document_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """证据和答案都由 File Agent 生成校验，WorkBuddy 不能传入自造引用。"""
+
+    client = _client()
+    try:
+        return await WorkBuddyConversationService(client).answer(
+            conversation_ref=conversation_ref,
+            question=question,
+            document_ids=document_ids or [],
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="file_rename",
+    description="按用户明确给出的原文件名和目标文件名重命名已确定文件。",
+    structured_output=True,
+)
+async def file_rename(
+    conversation_ref: str,
+    renames: list[ExplicitRenameInput],
+) -> dict[str, Any]:
+    """复用后端受控重命名链路；MCP 不直接改文件，也不绕过 OperationPlan 审计。"""
+
+    client = _client()
+    try:
+        return await WorkBuddyConversationService(client).rename(
+            conversation_ref=conversation_ref,
+            renames=renames,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="file_search_clarification_resolve",
+    description="提交 File Agent 搜索结果中的结构化澄清选项并继续原任务。",
+    structured_output=True,
+)
+async def file_search_clarification_resolve(
+    clarification_id: str,
+    option_id: str | None = None,
+    option_ids: list[str] | None = None,
+    custom_phrase: str | None = None,
+) -> dict[str, Any]:
+    """只接受后端签发选项；修订或归属不正确时由后端拒绝。"""
+
+    client = _client()
+    try:
+        return await client.resolve_file_search_clarification(
+            clarification_id=clarification_id,
+            option_id=option_id,
+            option_ids=option_ids or [],
+            custom_phrase=custom_phrase,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="operation_plan_get",
+    description="恢复当前用户文件操作计划的真实状态和 before/after。",
+    structured_output=True,
+)
+async def operation_plan_get(plan_id: str) -> dict[str, Any]:
+    """从后端持久化事实恢复计划，不能依赖旧聊天气泡判断是否已执行。"""
+
+    client = _client()
+    try:
+        return await client.operation_plan_get(plan_id=plan_id)
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="operation_plan_confirm",
+    description="在用户明确确认后执行 File Agent 已生成且仍有效的文件操作计划。",
+    structured_output=True,
+)
+async def operation_plan_confirm(plan_id: str, confirmation: str) -> dict[str, Any]:
+    """仅转交确认文字；目标、范围、修订和白名单执行器均由后端再次校验。"""
+
+    client = _client()
+    try:
+        return await client.operation_plan_confirm(
+            plan_id=plan_id,
+            confirmation=confirmation,
         )
     finally:
         await client.close()

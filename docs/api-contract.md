@@ -1835,6 +1835,13 @@ GET /api/admin/planner-shadow/metrics?limit=5000
 关闭时所有 `/api/integrations/v1` 路由统一返回 `503 / INTEGRATION_INGEST_DISABLED`，不能只依赖
 WorkBuddy 是否展示工具来控制外部导入权限。
 
+MCP外部工具除导入外还封装`file_search`、`file_read`、`evidence_answer`、
+`file_search_clarification_resolve`、`file_rename`、`operation_plan_get`和`operation_plan_confirm`。
+这些工具不新增第二套业务API：搜索固定调用只读`POST /api/search`；读取和证据回答复用聊天主入口及
+证据回答兼容入口；明确重命名复用现有Agent与OperationPlan审计链路。文件范围必须使用后端返回的稳定
+Document ID，不接受路径或正文；读取只允许固定只读模式，证据问答不接受客户端提供Evidence，操作确认
+不能修改计划中的对象或before/after。
+
 新通道先固定目录导入清单，再按条目流式接收文件字节。清单登记和 seal 都不表示文件已经上传、解析、
 分类或归档成功；只有内容端点返回的逐项状态和后续任务状态可以证明该条目已开始处理：
 

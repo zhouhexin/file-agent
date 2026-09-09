@@ -14,6 +14,7 @@
 - 2026-09-08：P1已实现`ingest_batches`、`ingest_items`、`integration_requests`模型与迁移，以及批次创建、清单分页追加、seal、查询、游标分页、用户隔离和幂等冲突API。
 - 2026-09-08：P2已抽取不提交事务的`stage_upload`核心，新增逐条内容上传、来源快照校验、原子任务绑定、幂等重传和`file_ingest`/`job_get` stdio MCP骨架；旧聊天上传仍保持“只暂存、发送后启动”。
 - 2026-09-09：增加`workbuddy_attachment_ingest`会话附件适配入口；由WorkBuddy宿主提供稳定提交ID、附件ID、原文件名和缓存文件引用，MCP在预配置缓存根内校验并冻结清单后复用既有隔离、查重和自动整理链路。
+- 2026-09-09：第二、三阶段首组外部能力已接入：`file_search`固定走只读搜索API，`file_read`只允许固定读取模式，`evidence_answer`只提交问题和文件范围；`file_rename`要求稳定Document ID及完整before/after文件名并复用现有受控重命名链路。搜索澄清和OperationPlan均提供后端事实恢复/确认工具。
 - 2026-09-08：P3已实现授权逻辑根目录枚举、清单哈希、分页登记、seal、并发传输、本地断点状态、后端`resume`检查以及批次文件数/字节/用户容量限制；失败项不由自动恢复重置。
 - 2026-09-08：P4已增加版本化review、候选快照、工作副本revision、批内完整哈希组、`WAIT_AND_REUSE`、结构化重复读取/决定、幂等冲突、过期及混合批次聚合；`batch_get`可在刷新后恢复全部待确认项。
 - 2026-09-08：P5已实现外部OCR任务、真实页资源、领取/续租、固定页集合回写、混合PDF原生页保护、幂等提交、近似查重续跑和页级部分失败覆盖信息；外部模式不会回退内部OCR。
@@ -22,7 +23,7 @@
 - 2026-09-08：P8已补充逐项显式重试/取消、已发布文件保护、附带请求独立恢复、OCR失败页重试、中间资源期限清理、默认关闭门禁、worker运行说明和文件域重置清单；“逐份总结”按单文件固定执行，“汇总”按本轮完成集合执行。
 - 2026-09-09：首批真实试点批次 `931a898c-2e8a-4bb2-be5b-63cc1369fbfc` 已完成。固定清单 26 项，23 个新文件和 3 个明确选择“使用已有文件”的重复项全部收敛为成功；最终状态 `SUCCEEDED`、展示状态 `FILE_PROCESSING_COMPLETED`，源文件哈希、固定成员、最终 Document/Version/WorkingCopy 映射、整理、索引和命名回执由只读试点报告验证，报告 `ok=true` 且各错误集合为空。传输恢复、刷新后重复选择恢复和 worker 中断恢复均已实际执行。
 - 2026-09-09：外部 OCR 另用单图片批次验证真实 HTTP `claim -> page -> results`。本机 Tesseract 仅有英文语言包，对中文图未识别出正文，因此按真实结果提交页级 `LANGUAGE_PACK_UNAVAILABLE`，任务和批次分别正确收敛为 `PARTIAL`，失败页 `[1]`，工作副本仍为 `ACTIVE` 且保留原名，没有伪造文本或把部分结果显示成成功。另复用一个未发布图片条目验证 OCR worker 中断：租约过期后第二个 worker 可重新领取，旧 token 访问页资源返回 `409 LEASE_EXPIRED`，验证完成后该条目显式取消且未继续归档。
-- 当前自动化验证：后端全量`1208 passed, 19 skipped`；MCP目录传输、会话附件适配、整次工具重放、恢复、结构化确认、规则策略、OCR、动作、只读试点报告与真实服务注册共`22 passed`；前端`26 passed`且生产构建成功。新增迁移从既有 head 到新 head 的 PostgreSQL offline 升级与降级 SQL 编译通过，现有 PostgreSQL 已从`20260901_0001`真实升级到`20260908_0005`；隔离验证使用4个并发幂等批次请求和2个并发重复组写入者，分别只产生一个批次和一个活动组，临时身份随后精确清理。混合PDF自动化测试确认只外发缺字页并保留原生文字层。
+- 当前自动化验证：后端全量`1208 passed, 19 skipped`；MCP目录传输、会话附件适配、对话搜索、固定模式读取、证据回答、明确重命名、OperationPlan恢复/确认、整次工具重放、结构化确认、规则策略、OCR、动作、只读试点报告与真实服务注册共`30 passed`；前端`26 passed`且生产构建成功。新增迁移从既有 head 到新 head 的 PostgreSQL offline 升级与降级 SQL 编译通过，现有 PostgreSQL 已从`20260901_0001`真实升级到`20260908_0005`；隔离验证使用4个并发幂等批次请求和2个并发重复组写入者，分别只产生一个批次和一个活动组，临时身份随后精确清理。混合PDF自动化测试确认只外发缺字页并保留原生文字层。
 
 **第一阶段交付目标：** 用户在WorkBuddy中指定本地目录，或在消息中明确提交宿主已经落入受控缓存的附件，经MCP批量复制导入；File Agent完成查重、必要确认、解析与外部OCR协作、分类、重命名、索引，并返回逐文件结果。中断后可继续，已有源文件和WorkBuddy缓存文件不被移动或覆盖。
 
@@ -49,8 +50,8 @@
 | 阶段   | 交付内容                                           |
 | ---- | ---------------------------------------------- |
 | 第一阶段 | 上述本地目录与WorkBuddy会话附件批量导入闭环；包含默认自动命名所需执行器和上传附带请求的续跑能力 |
-| 第二阶段 | 独立`file_query`与澄清入口，面向已入库文件完整开放检索、总结、问答和统计     |
-| 第三阶段 | 独立`file_resolve`、`file_action`、移动、回收、恢复等完整外部工具 |
+| 第二阶段 | 独立只读`file_search`、`file_read`、`evidence_answer`与搜索澄清入口；统计继续按受控确定性能力逐项开放 |
+| 第三阶段 | 已接入明确`file_rename`和OperationPlan恢复/确认；移动、回收、恢复等其他外部动作后续按独立白名单工具开放 |
 
 首批本地材料由用户在WorkBuddy中指定处理目录并明确发起导入。`file_batch_ingest`调用本身就是提交授权，调用后不再要求用户补一条聊天文字。WorkBuddy会话附件由宿主在用户提交消息后调用`workbuddy_attachment_ingest`；宿主必须提供本轮稳定`submission_id`、每项稳定`attachment_id`、原文件名和真实缓存文件路径，该调用本身构成固定附件清单的提交授权，`user_request=null`仍自动整理。MCP仅允许读取`FILE_AGENT_WORKBUDDY_ATTACHMENT_ROOTS`配置的缓存根，拒绝根外路径、软链接、目录和特殊文件；后端只接收逻辑来源及文件字节，不接收宿主绝对路径。仅选择但尚未提交的附件不得触发工具，普通File Agent聊天页仍保持“附件必须带任务文字”的边界。
 
@@ -183,6 +184,13 @@
 | `extraction_claim`     | `POST /extraction-tasks/{id}/claim`                                    | 返回租约和授权页资源；页下载用`GET /extraction-tasks/{id}/pages/{page}` |
 | `extraction_renew`     | `POST /extraction-tasks/{id}/renew`                                    | 只续当前有效租约                                                 |
 | `extraction_submit`    | `POST /extraction-tasks/{id}/results`                                  | 逐页或分组提交，验收完成后唤醒后端任务                                      |
+| `file_search` | `POST /api/search` | 只读检索已入库文件；返回稳定Document ID、相关性说明和安全结果投影 |
+| `file_read` | `POST /api/conversations/{id}/messages` | 仅允许`READ/SUMMARY/EXPLAIN`固定模式和稳定Document ID范围 |
+| `evidence_answer` | `POST /api/conversations/{id}/evidence-answer` | 后端从完整原文生成并校验答案与引用，不接受客户端自造Evidence |
+| `file_search_clarification_resolve` | `POST /api/file-search/clarifications/{id}/resolve` | 原样提交后端签发选项，继续原固定任务 |
+| `file_rename` | `POST /api/conversations/{id}/messages` | 要求Document ID、当前文件名和目标文件名，复用受控明确重命名及审计链路 |
+| `operation_plan_get` | `GET /api/operations/plans/{id}` | 刷新或重连后恢复计划真实状态、before/after和影响范围 |
+| `operation_plan_confirm` | `POST /api/operations/plans/{id}/confirm` | 只转交用户明确确认，后端重新校验归属、状态、修订和执行器白名单 |
 
 旧接口`/api/files/upload`、`/api/uploads/{version}/process`与duplicate-review接口可以保留兼容，但新MCP不要只依次调用两个旧接口就认为实现了幂等批量导入。
 
@@ -260,6 +268,27 @@
 ```
 
 实际结果同时包含完整候选对比，不能只有一条提示文字。`display_markdown`是本项目业务字段，由后端生成；它不是WorkBuddy保证逐字直出的内置开关。WorkBuddy使用原生MCP结构化结果展示候选；同批重复结果还包含`duplicate_group_id`、`group_revision`和完整`group_member_item_ids`。用户在聊天中选择后再次调用`duplicate_decide`，并原样带回`review_id`、`review_revision`、`group_revision`、`group_member_item_ids`、所选候选ID和决定。刷新或重新连接后必须先调用`batch_get`恢复尚未处理的选择，不能依赖本地聊天气泡或内存状态判断。成员加入导致组修订变化时，旧决定必须被拒绝，刷新后重新展示完整成员集合；新成员不得继承旧决定。
+
+### 5.2.1 对话搜索、读取、证据问答和明确重命名契约
+
+WorkBuddy必须为同一聊天线程持续传入稳定`conversation_ref`。MCP将其单向哈希为长度受控的内部会话ID，
+不直接把外部主键用作数据库主键。所有文件范围均使用`file_search`返回的`document_id`；工具不接受服务器
+路径、工作目录相对路径、正文、SQL条件、检索分数或模型参数。
+
+| 工具 | 必填参数 | 关键边界 |
+| --- | --- | --- |
+| `file_search` | `conversation_ref,query` | 固定调用只读`/api/search`，查询文字不会进入可执行写操作的通用Agent；无结果时只返回后端提示 |
+| `file_read` | `conversation_ref,document_ids,read_mode` | `read_mode`只允许`READ/SUMMARY/EXPLAIN`，禁止任意instruction把只读工具变成改名、删除或移动入口 |
+| `evidence_answer` | `conversation_ref,question,document_ids?` | 只提交问题和可选文件范围；答案、页码、单元格和引用由File Agent从完整原文生成并校验 |
+| `file_search_clarification_resolve` | `clarification_id`及后端签发选项 | 不接受模型根据文件名猜测候选ID；过期、归属错误或选项变化由后端拒绝 |
+| `file_rename` | `conversation_ref,renames[]` | 每项必须含`document_id,source_filename,target_filename`；只允许basename，禁止路径、同文件重复映射和before=after |
+| `operation_plan_get` | `plan_id` | 从后端恢复真实状态，不依赖聊天气泡断言计划仍有效 |
+| `operation_plan_confirm` | `plan_id,confirmation` | 仅在用户明确确认后调用；MCP不修改计划目标，后端确认前再次校验用户、状态、目标修订、冲突和白名单执行器 |
+
+明确重命名沿用现有项目语义：用户已经同时明确目标文件和新文件名时，File Agent内部仍创建并审计
+OperationPlan，再按现有明确授权来源执行；普通模糊“整理一下名称”不得调用`file_rename`。如果后端返回
+范围歧义、同名冲突、等待工作副本或待确认计划，WorkBuddy必须展示结构化结果并使用对应恢复/确认工具，
+不能改写文件名、替换Document ID或自行声称已经完成。原件保持不变，动作只作用于活动工作副本。
 
 ### 5.3 错误与重试约定
 
@@ -510,6 +539,10 @@ MCP本机进程只需要后端地址、已授权身份凭证、受控源目录�
 | 文件动作后进程退出 | 恢复后核对实际动作，审计不重复，成功回执对应真实路径 |
 | 无权访问的重复候选 | 不展示名称/路径/任务细节，不跨范围复用 |
 | 整理成功但总结失败 | 两种状态分别返回，不说全部完成 |
+| 搜索文字伪装成删除或重命名指令 | `file_search`只进入只读搜索API，不产生文件动作或OperationPlan |
+| 读取工具传入任意写操作文字 | Schema只允许固定`READ/SUMMARY/EXPLAIN`，在调用后端前拒绝 |
+| 证据问答由客户端提交引用 | Schema无Evidence输入；后端只从完整原文和持久化证据生成引用 |
+| 明确重命名携带路径、重复Document ID或同名映射 | MCP前置拒绝；合法映射仍由后端校验权限、当前名称、冲突和审计 |
 
 优先回归现有`test_files.py`、`test_file_lifecycle.py`、`test_file_lifecycle_storage.py`、`test_filesystem_jobs.py`、`test_document_classifier.py`、`test_collision_naming.py`、`test_trial_evaluation_naming.py`、`test_managed_source_path_policy.py`、`test_operations.py`、`test_document_index_service.py`及相应提取测试。
 
@@ -535,6 +568,7 @@ python -m pytest apps/api/app/tests/test_files.py apps/api/app/tests/test_file_l
 | P7：附带请求与批次回执   | request_runner、receipt/result_revision、WorkBuddy结构化确认与恢复模板 | P6     | 整理后总结、复用后只读请求、等待项最终回执和增量续跑正确展示   |
 | P8：故障恢复与试点     | 并发/崩溃/租约/权限/清理测试，部署迁移、API和workers                       | P1–P7  | 下述试点验收通过后，才导入整批本地材料              |
 | P9：WorkBuddy会话附件适配 | attachment registry、固定提交事件、批量附件清单、缓存根校验和工具契约 | P2–P8 | 已提交附件无需额外文字并复用完整导入链路，宿主路径不进入后端 |
+| P10：对话文件能力MCP化 | 只读搜索、固定读取、证据回答、澄清恢复、明确重命名和OperationPlan工具 | P7–P9 | WorkBuddy可按稳定文件ID完成读写分离的文件任务，写操作不绕过后端审计 |
 
 建议每个工作包一个或多个独立提交；不要同时重写Agent Runtime、前端和部署框架。P2是开发里程碑，不是“上传流程已经完整上线”；批量正式使用必须至少通过P4–P8相关场景。
 

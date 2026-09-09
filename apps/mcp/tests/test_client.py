@@ -305,3 +305,71 @@ def test_ingest_item_action_only_calls_fixed_retry_or_cancel_endpoint(tmp_path) 
             await client.close()
 
     assert asyncio.run(scenario()) == {"accepted": True, "reused": False}
+
+
+def test_conversation_tools_use_read_only_and_controlled_backend_endpoints(tmp_path) -> None:
+    """搜索、证据回答和计划确认必须调用各自受控端点，不能由 MCP 直接处理正文或文件。"""
+
+    root = tmp_path / "allowed-conversation"
+    root.mkdir()
+    requests: list[tuple[str, str, dict]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        """记录安全业务请求并返回最小结构化结果。"""
+
+        payload = json.loads((await request.aread()).decode("utf-8")) if request.content else {}
+        requests.append((request.method, request.url.path, payload))
+        if request.url.path == "/api/search":
+            return httpx.Response(200, json={"files": [], "total_returned": 0})
+        if request.url.path.endswith("/evidence-answer"):
+            return httpx.Response(200, json={"task_result": {"response_type": "evidence_answer"}})
+        if request.url.path.endswith("/confirm"):
+            return httpx.Response(200, json={"id": "plan-1", "status": "EXECUTED"})
+        return httpx.Response(500, json={"error": {"code": "UNEXPECTED", "message": "unexpected"}})
+
+    async def scenario() -> None:
+        """依次调用三个外部能力。"""
+
+        client = FileAgentIntegrationClient(
+            base_url="http://file-agent.test",
+            access_token="token-value",
+            roots=LocalRootRegistry({"materials": root}),
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            await client.file_search(conversation_id="wb-conversation", query="奖学金")
+            await client.evidence_answer(
+                conversation_id="wb-conversation",
+                question="截止日期是什么？",
+                document_ids=["doc-1"],
+            )
+            await client.operation_plan_confirm(
+                plan_id="plan-1",
+                confirmation="确认执行",
+            )
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+    assert requests == [
+        (
+            "POST",
+            "/api/search",
+            {
+                "query": "奖学金",
+                "conversation_id": "wb-conversation",
+                "attachment_document_ids": [],
+                "top_k": 10,
+            },
+        ),
+        (
+            "POST",
+            "/api/conversations/wb-conversation/evidence-answer",
+            {"question": "截止日期是什么？", "attachment_document_ids": ["doc-1"]},
+        ),
+        (
+            "POST",
+            "/api/operations/plans/plan-1/confirm",
+            {"confirmation": "确认执行"},
+        ),
+    ]
