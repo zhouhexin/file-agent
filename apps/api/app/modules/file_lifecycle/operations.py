@@ -879,6 +879,7 @@ class WorkingCopyOperationService:
         working_copy.relative_path = after_relative_path
         working_copy.relative_path_hash = hashlib.sha256(after_relative_path.encode("utf-8")).hexdigest()
         working_copy.filename = PurePosixPath(after_relative_path).name
+        working_copy.revision += 1
         working_copy.updated_at = operation_time
         working_copy.last_operation_plan_id = plan.id
         version.storage_path = after_storage_path
@@ -991,6 +992,7 @@ class WorkingCopyOperationService:
         self.db.add(entry)
         self.db.flush()
         working_copy.status = "TRASHED"
+        working_copy.revision += 1
         working_copy.last_operation_plan_id = plan.id
         working_copy.updated_at = now
         version.storage_tier = "TRASH"
@@ -1117,6 +1119,7 @@ class WorkingCopyOperationService:
         working_copy.relative_path = after_relative_path
         working_copy.relative_path_hash = hashlib.sha256(after_relative_path.encode("utf-8")).hexdigest()
         working_copy.filename = PurePosixPath(after_relative_path).name
+        working_copy.revision += 1
         working_copy.last_operation_plan_id = plan.id
         working_copy.updated_at = now
         version.storage_tier = "WORKING_COPY"

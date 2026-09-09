@@ -20,7 +20,22 @@ def test_database_migrations_have_one_current_head() -> None:
 
     scripts = _migration_scripts()
 
-    assert scripts.get_heads() == ["20260901_0001"]
+    assert scripts.get_heads() == ["20260908_0005"]
+    request_revision = scripts.get_revision("20260908_0005")
+    assert request_revision is not None
+    assert request_revision.down_revision == "20260908_0004"
+    organization_revision = scripts.get_revision("20260908_0004")
+    assert organization_revision is not None
+    assert organization_revision.down_revision == "20260908_0003"
+    extraction_revision = scripts.get_revision("20260908_0003")
+    assert extraction_revision is not None
+    assert extraction_revision.down_revision == "20260908_0002"
+    duplicate_revision = scripts.get_revision("20260908_0002")
+    assert duplicate_revision is not None
+    assert duplicate_revision.down_revision == "20260908_0001"
+    ingest_revision = scripts.get_revision("20260908_0001")
+    assert ingest_revision is not None
+    assert ingest_revision.down_revision == "20260901_0001"
     merge_revision = scripts.get_revision("20260825_0001")
     assert merge_revision is not None
     assert set(merge_revision.down_revision) == {

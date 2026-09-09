@@ -93,6 +93,11 @@ DEFAULT_AUTO_CLASSIFICATION_FALLBACK_THRESHOLD = 0.90
 DEFAULT_AUTO_CLASSIFICATION_FALLBACK_MARGIN = 0.20
 DEFAULT_UPLOAD_MAX_FILE_SIZE_MB = 1024
 DEFAULT_UPLOAD_CHUNK_SIZE_BYTES = 1024 * 1024
+DEFAULT_INTEGRATION_MAX_BATCH_FILES = 1000
+DEFAULT_INTEGRATION_MAX_BATCH_BYTES = 10 * 1024 * 1024 * 1024
+DEFAULT_INTEGRATION_USER_QUOTA_BYTES = 100 * 1024 * 1024 * 1024
+DEFAULT_EXTERNAL_EXTRACTION_LEASE_SECONDS = 300
+DEFAULT_EXTERNAL_PAGE_RETENTION_HOURS = 24
 DEFAULT_DOCUMENT_CHUNK_MAX_CHARS = 1200
 DEFAULT_DOCUMENT_CHUNK_OVERLAP_CHARS = 120
 DEFAULT_DOCUMENT_INDEX_MAX_CHARS = 50_000_000
@@ -204,6 +209,15 @@ class Settings(BaseModel):
     upload_max_file_size_mb: int = DEFAULT_UPLOAD_MAX_FILE_SIZE_MB
     upload_chunk_size_bytes: int = DEFAULT_UPLOAD_CHUNK_SIZE_BYTES
     upload_allowed_extensions: tuple[str, ...] = DEFAULT_UPLOAD_ALLOWED_EXTENSIONS
+    # 新集成通道默认关闭，试点部署必须显式开启；限额仍只能由后端作最终裁决。
+    integration_ingest_enabled: bool = False
+    integration_max_batch_files: int = DEFAULT_INTEGRATION_MAX_BATCH_FILES
+    integration_max_batch_bytes: int = DEFAULT_INTEGRATION_MAX_BATCH_BYTES
+    integration_user_quota_bytes: int = DEFAULT_INTEGRATION_USER_QUOTA_BYTES
+    integration_external_ocr_enabled: bool = True
+    integration_allow_partial_extraction: bool = True
+    external_extraction_lease_seconds: int = DEFAULT_EXTERNAL_EXTRACTION_LEASE_SECONDS
+    external_page_retention_hours: int = DEFAULT_EXTERNAL_PAGE_RETENTION_HOURS
     retrieval_mode: str = "lexical"
     chinese_tokenizer: str = "jieba"
     # 阶段四的 CPU 两阶段检索是默认主路径；关闭仅用于紧急回退旧兼容实现。
@@ -698,6 +712,61 @@ def get_settings() -> Settings:
                     if item.strip()
                 }
             )
+        ),
+        integration_ingest_enabled=(
+            os.getenv("INTEGRATION_INGEST_ENABLED", "false").lower() == "true"
+        ),
+        integration_max_batch_files=max(
+            1,
+            int(
+                os.getenv(
+                    "INTEGRATION_MAX_BATCH_FILES",
+                    str(DEFAULT_INTEGRATION_MAX_BATCH_FILES),
+                )
+            ),
+        ),
+        integration_max_batch_bytes=max(
+            1,
+            int(
+                os.getenv(
+                    "INTEGRATION_MAX_BATCH_BYTES",
+                    str(DEFAULT_INTEGRATION_MAX_BATCH_BYTES),
+                )
+            ),
+        ),
+        integration_user_quota_bytes=max(
+            1,
+            int(
+                os.getenv(
+                    "INTEGRATION_USER_QUOTA_BYTES",
+                    str(DEFAULT_INTEGRATION_USER_QUOTA_BYTES),
+                )
+            ),
+        ),
+        integration_external_ocr_enabled=(
+            os.getenv("INTEGRATION_EXTERNAL_OCR_ENABLED", "true").lower() == "true"
+        ),
+        integration_allow_partial_extraction=(
+            os.getenv("INTEGRATION_ALLOW_PARTIAL_EXTRACTION", "true").lower() == "true"
+        ),
+        external_extraction_lease_seconds=max(
+            30,
+            min(
+                3600,
+                int(
+                    os.getenv(
+                        "EXTERNAL_EXTRACTION_LEASE_SECONDS",
+                        str(DEFAULT_EXTERNAL_EXTRACTION_LEASE_SECONDS),
+                    )
+                ),
+            ),
+        ),
+        external_page_retention_hours=max(
+            1,
+            min(
+                24 * 30,
+                int(os.getenv("EXTERNAL_PAGE_RETENTION_HOURS", str(DEFAULT_EXTERNAL_PAGE_RETENTION_HOURS))),
+            ),
         ),
         retrieval_mode=_choice(
             os.getenv("RETRIEVAL_MODE", "lexical"),

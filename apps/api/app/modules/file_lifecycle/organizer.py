@@ -104,8 +104,14 @@ class InitialWorkingCopyOrganizer:
         document: Document,
         version: DocumentVersion,
         managed_file: ManagedFile,
+        source_context: str = "",
+        reuse_persisted_extraction_only: bool = False,
     ) -> InitialOrganizationDecision:
-        """生成不直接写文件系统的分类和命名分析结果。"""
+        """生成不直接写文件系统的分类和命名分析结果。
+
+        外部 OCR 链路必须传 ``reuse_persisted_extraction_only=True``，保证这里只读取已经验收的
+        ``document_pages``，不会因为首次整理再次落入内部 OCR Provider。
+        """
 
         if not self.settings.initial_working_copy_organization_enabled:
             filename = FileLifecycleStorageService.sanitize_filename(managed_file.filename)
@@ -125,10 +131,21 @@ class InitialWorkingCopyOrganizer:
         # 延迟导入避免重命名 OperationPlan 服务反向引用生命周期审计造成模块循环。
         from app.modules.file_rename.uploaded_suggestion_service import UploadedRenameSuggestionService
 
-        rename_suggestion, extraction_result = UploadedRenameSuggestionService(
+        suggestion_service = UploadedRenameSuggestionService(
             db=self.db,
             user_id=self.user_id,
-        ).suggest_for_initial_import(document=document)
+        )
+        if reuse_persisted_extraction_only or source_context:
+            rename_suggestion, extraction_result = suggestion_service.suggest_for_initial_import(
+                document=document,
+                reuse_persisted_extraction_only=reuse_persisted_extraction_only,
+                source_relative_path=source_context or None,
+            )
+        else:
+            # 旧聊天上传保持原调用契约，避免扩大 WorkBuddy 来源参数到无关入口。
+            rename_suggestion, extraction_result = suggestion_service.suggest_for_initial_import(
+                document=document,
+            )
         # 高置信度建议也不能替代用户确认。这里必须固定为原上传名，防止正文中偶然
         # 出现的年份或标题（例如表格历史条目）直接改变用户实际可见的工作副本名称。
         filename = FileLifecycleStorageService.sanitize_filename(managed_file.filename)
@@ -144,6 +161,7 @@ class InitialWorkingCopyOrganizer:
                     extraction_run_id=str(extraction_result.get("extraction_run_id") or ""),
                     filename=filename,
                     force_reprocess=False,
+                    source_context=source_context,
                 )
             except Exception:
                 # 自动整理属于体验增强；分类异常不能阻止不可变原始文件生成可用工作副本。

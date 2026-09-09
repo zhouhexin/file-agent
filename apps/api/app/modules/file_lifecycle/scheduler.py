@@ -31,6 +31,17 @@ def enqueue_reconciliation_jobs(*, db: Session, created_by: str | None = None) -
         payload={"reason": "startup-or-scheduler"},
     )
     job_ids.append(upload_job.id)
+    cleanup_job = queue.create_job(
+        job_type="CLEANUP_EXTERNAL_EXTRACTION_RESOURCES",
+        queue_name="FILE_OPERATION",
+        root_id=None,
+        created_by=created_by,
+        deduplication_key="cleanup-external-extraction-resources",
+        reuse_completed=True,
+        priority=100,
+        payload={"reason": "retention-policy"},
+    )
+    job_ids.append(cleanup_job.id)
     settings = get_settings()
     if settings.neo4j_sync_enabled and settings.graph_projection_worker_enabled:
         # 全量投影只作为一次性 bootstrap；后续正式分类变化通过 PostgreSQL outbox

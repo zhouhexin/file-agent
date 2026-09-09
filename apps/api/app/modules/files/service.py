@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import HTTPException, UploadFile
@@ -13,7 +14,14 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import Document, User, WorkingCopy
+from app.db.models import (
+    Document,
+    DocumentVersion,
+    UploadArchiveRecord,
+    UploadDuplicateReview,
+    User,
+    WorkingCopy,
+)
 from app.modules.file_lifecycle.service import UploadLifecycleService
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
@@ -32,6 +40,23 @@ from app.modules.files.schemas import (
     SpreadsheetSheetSummary,
 )
 from app.modules.files.content_types import infer_content_type
+
+
+@dataclass(slots=True)
+class StagedUpload:
+    """一次已经完整落盘、但尚未提交事务的上传暂存结果。
+
+    该对象只在请求级 Service 间传递数据库对象和受控相对路径。调用方可以继续把版本绑定到
+    批次条目并创建后台任务，但不能把本地绝对路径暴露给外部客户端。
+    """
+
+    document: Document
+    version: DocumentVersion
+    archive: UploadArchiveRecord
+    review: UploadDuplicateReview
+    relative_path: str
+    size_bytes: int
+    sha256: str
 
 
 class FileUploadService:
@@ -55,9 +80,50 @@ class FileUploadService:
         Document。文件夹选择只是一种浏览器选取方式，目录相对路径不进入后端数据。
         """
 
+        staged: StagedUpload | None = None
+        try:
+            staged = await self.stage_upload(
+                file=file,
+                current_user=current_user,
+                conversation_id=conversation_id,
+            )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            if staged is not None:
+                self.remove_staged_file(staged.relative_path)
+            raise
+        self.db.refresh(staged.document)
+        return self._to_upload_response(
+            document=staged.document,
+            version_id=staged.version.id,
+            review_id=staged.review.id,
+            job_id=None,
+            archive_status=staged.archive.status,
+            review_status=staged.review.status,
+            relative_path=None,
+        )
+
+    async def stage_upload(
+        self,
+        *,
+        file: UploadFile,
+        current_user: User,
+        conversation_id: str | None = None,
+        expected_filename: str | None = None,
+    ) -> StagedUpload:
+        """接收并登记文件，但把提交、任务启动和最终回执留给调用方。
+
+        旧聊天上传和 WorkBuddy 批次上传必须共享相同的扩展名、MIME、大小、隔离区和
+        DocumentVersion 规则。批次调用方只能用清单中的 ``expected_filename`` 约束上传对象，
+        不能把来源相对路径当作服务器写入路径。
+        """
+
         filename = Path(file.filename or "uploaded-file").name
-        # 浏览器可能把合法图片上报为 application/octet-stream；统一推断可避免同一文件在
-        # 上传、受管目录导入和工作副本导入三条链路中得到不同 MIME。
+        if expected_filename is not None and filename != expected_filename:
+            raise HTTPException(status_code=409, detail="上传文件名与固定清单不一致")
+        # 浏览器和 MCP 客户端可能把合法文件上报为 application/octet-stream；统一推断可避免
+        # 同一文件在不同入口得到不同 MIME。
         content_type = infer_content_type(
             filename=filename,
             declared_content_type=file.content_type,
@@ -67,8 +133,6 @@ class FileUploadService:
         relative_path: str | None = None
         try:
             if conversation_id:
-                # 聊天页允许先选附件、后发送文字；因此上传必须在同一事务中创建
-                # 当前用户的空会话，不能把尚未创建的前端会话 ID 直接写入外键。
                 ConversationRepository(self.db).ensure_conversation(
                     conversation_id=conversation_id,
                     user_id=current_user.id,
@@ -98,23 +162,29 @@ class FileUploadService:
                 conversation_id=conversation_id,
             )
             document.ingest_status = "STAGED"
-            self.db.commit()
+            return StagedUpload(
+                document=document,
+                version=version,
+                archive=archive,
+                review=review,
+                relative_path=relative_path,
+                size_bytes=size_bytes,
+                sha256=sha256,
+            )
         except Exception:
-            self.db.rollback()
             incoming_path.unlink(missing_ok=True)
             if relative_path:
-                (Path(get_settings().file_storage_root) / relative_path).unlink(missing_ok=True)
+                self.remove_staged_file(relative_path)
             raise
-        self.db.refresh(document)
-        return self._to_upload_response(
-            document=document,
-            version_id=version.id,
-            review_id=review.id,
-            job_id=None,
-            archive_status=archive.status,
-            review_status=review.status,
-            relative_path=None,
-        )
+
+    @staticmethod
+    def remove_staged_file(relative_path: str) -> None:
+        """删除失败事务已经发布的私有暂存文件，且严格限制在存储根内。"""
+
+        storage_root = Path(get_settings().file_storage_root).resolve()
+        candidate = (storage_root / relative_path).resolve()
+        if candidate != storage_root and storage_root in candidate.parents:
+            candidate.unlink(missing_ok=True)
 
     def _to_upload_response(
         self,

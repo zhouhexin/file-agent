@@ -1714,6 +1714,8 @@ class WorkingCopy(Base):
     last_operation_plan_id: Mapped[Optional[str]] = mapped_column(
         String(36), ForeignKey("operation_plans.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # 名称、路径、内容或状态的受控修改必须递增；查询和展示不能改变该值。
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
@@ -1785,6 +1787,12 @@ class DocumentOrganizationDecision(Base):
     classifier_version: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     calibration_version: Mapped[str] = mapped_column(String(80), nullable=False, default="unpublished")
     policy_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    authorization_source: Mapped[str] = mapped_column(
+        String(80), nullable=False, default="LEGACY_CONFIGURATION", index=True
+    )
+    source_request_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    before_revision: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    after_revision: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     decision: Mapped[str] = mapped_column(String(40), nullable=False, default="PENDING", index=True)
     calibrated_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     required_threshold: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -2099,6 +2107,17 @@ class UploadDuplicateReview(Base):
         String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="CHECKING", index=True)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
+    comparison_phase: Mapped[str] = mapped_column(String(30), nullable=False, default="EXACT")
+    ingest_item_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("ingest_items.id", ondelete="SET NULL"), nullable=True, unique=True, index=True
+    )
+    selected_candidate_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("upload_duplicate_candidates.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    decision_scope_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
     decision: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     selected_existing_working_copy_id: Mapped[Optional[str]] = mapped_column(
         String(36), ForeignKey("working_copies.id", ondelete="SET NULL"), nullable=True, index=True
@@ -2142,6 +2161,14 @@ class UploadDuplicateCandidate(Base):
     candidate_working_copy_id: Mapped[Optional[str]] = mapped_column(
         String(36), ForeignKey("working_copies.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    candidate_ingest_item_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("ingest_items.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    compared_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    compared_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    compared_working_copy_revision: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     match_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     match_scope: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     similarity_score: Mapped[float] = mapped_column(Float, nullable=False)
@@ -2149,6 +2176,334 @@ class UploadDuplicateCandidate(Base):
     user_visible_summary_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     rank: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class IngestBatch(Base):
+    """WorkBuddy/MCP 批量导入的业务聚合记录。
+
+    批次只保存清单、策略、状态和回执修订，不保存文件正文。它与 ``FilesystemJob`` 分离，
+    避免把任一阶段任务完成误判为整个批次已经完成。
+    """
+
+    __tablename__ = "ingest_batches"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "client_id",
+            "idempotency_key",
+            name="uq_ingest_batches_user_client_idempotency",
+        ),
+        Index("ix_ingest_batches_user_status", "user_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    client_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest_status: Mapped[str] = mapped_column(String(30), nullable=False, default="OPEN", index=True)
+    manifest_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    result_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    policy_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    policy_version: Mapped[str] = mapped_column(String(40), nullable=False, default="ingest-v1")
+    user_request: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    conversation_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="PENDING", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class IngestItem(Base):
+    """批次中的单个固定清单项及其最终文件映射。
+
+    每个条目独立推进和失败，重复确认只能暂停当前条目，不能通过批次状态阻塞其他文件。
+    ``error_json`` 和 ``result_json`` 只保存结构化摘要，不得写入正文或本地绝对路径。
+    """
+
+    __tablename__ = "ingest_items"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "client_item_id", name="uq_ingest_items_batch_client_item"),
+        Index("ix_ingest_items_batch_status", "batch_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    batch_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("ingest_batches.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    client_item_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    source_root_ref: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    expected_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_mtime_ns: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expected_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    actual_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    upload_document_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    archive_record_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("upload_archive_records.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    workflow_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    stage: Mapped[str] = mapped_column(String(40), nullable=False, default="RECEIVE", index=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="PENDING", index=True)
+    decision: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    final_document_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    final_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    final_working_copy_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("working_copies.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    extraction_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_extraction_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    current_job_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("filesystem_jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    error_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    result_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class IngestRequestExecution(Base):
+    """批次附带请求对一组已完成文件的一次可恢复执行。
+
+    等待重复确认不能阻塞其他文件的只读请求，因此执行记录固定本次文件集合；后续新完成
+    文件使用新的集合修订增量执行，不覆盖已经返回的 AgentRun 和回执。
+    """
+
+    __tablename__ = "ingest_request_executions"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "item_set_digest", name="uq_ingest_request_execution_item_set"),
+        Index("ix_ingest_request_executions_batch_status", "batch_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    batch_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("ingest_batches.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    item_ids_json: Mapped[list] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=list
+    )
+    document_ids_json: Mapped[list] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=list
+    )
+    item_set_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="PENDING", index=True)
+    filesystem_job_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("filesystem_jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    conversation_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    agent_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    result_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    error_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class IngestDuplicateGroup(Base):
+    """同一用户授权范围内、按完整内容哈希聚合的批内重复组。"""
+
+    __tablename__ = "ingest_duplicate_groups"
+    __table_args__ = (
+        Index(
+            "uq_ingest_duplicate_groups_active_content",
+            "batch_id",
+            "content_sha256",
+            unique=True,
+            postgresql_where=text("status = 'ACTIVE'"),
+            sqlite_where=text("status = 'ACTIVE'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    batch_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("ingest_batches.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
+    primary_item_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("ingest_items.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="ACTIVE", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class IngestDuplicateGroupMember(Base):
+    """批内重复组成员及其等待主任务、用户决定。"""
+
+    __tablename__ = "ingest_duplicate_group_members"
+    __table_args__ = (
+        UniqueConstraint("group_id", "ingest_item_id", name="uq_ingest_duplicate_group_member"),
+        UniqueConstraint("ingest_item_id", name="uq_ingest_duplicate_group_member_item"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    group_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("ingest_duplicate_groups.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    ingest_item_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("ingest_items.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    joined_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    decision: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    waits_for_item_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("ingest_items.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class ExternalExtractionTask(Base):
+    """WorkBuddy 外部 OCR 的版本化任务和租约事实。"""
+
+    __tablename__ = "external_extraction_tasks"
+    __table_args__ = (
+        UniqueConstraint(
+            "ingest_item_id",
+            "source_version_id",
+            "provider_contract_version",
+            name="uq_external_extraction_task_source_contract",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    ingest_item_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("ingest_items.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    phase: Mapped[str] = mapped_column(String(40), nullable=False, default="PARSE_STAGING")
+    provider_contract_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    page_manifest_json: Mapped[list] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=list
+    )
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="PENDING", index=True)
+    lease_owner: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)
+    lease_token_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_submission_key: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    last_submission_digest: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    extraction_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_extraction_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    error_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class ExternalExtractionPage(Base):
+    """外部 OCR 逐页结果摘要；正文事实最终仍写入 DocumentPage。"""
+
+    __tablename__ = "external_extraction_pages"
+    __table_args__ = (
+        UniqueConstraint("task_id", "page_number", name="uq_external_extraction_page"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    task_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("external_extraction_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    page_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="PENDING", index=True)
+    result_digest: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    result_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    error_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class IntegrationRequest(Base):
+    """外部集成写请求的幂等审计记录。
+
+    同一用户、客户端和幂等键只能对应一个请求摘要；相同键携带不同载荷必须拒绝，
+    防止重试把另一次确认或批次创建误当成旧结果。
+    """
+
+    __tablename__ = "integration_requests"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "client_id",
+            "idempotency_key",
+            name="uq_integration_requests_user_client_idempotency",
+        ),
+        Index("ix_integration_requests_user_operation", "user_id", "operation"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    client_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    operation: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_refs_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="PENDING", index=True)
+    result_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
 
 
 class FilesystemJob(Base):

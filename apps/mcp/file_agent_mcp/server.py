@@ -1,0 +1,313 @@
+"""WorkBuddy 可启动的 stdio MCP 服务入口。"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any, Literal
+
+from mcp.server.fastmcp import FastMCP
+
+from .client import FileAgentIntegrationClient, LocalRootRegistry
+from .transfer import BatchTransferService, TransferStateStore
+
+
+mcp = FastMCP(
+    "file-agent-local-import",
+    instructions="仅处理用户已经配置授权根并明确指定的本地文件。",
+)
+
+
+def _client() -> FileAgentIntegrationClient:
+    """按当前进程配置构造客户端，避免把访问令牌放进 MCP 工具参数。"""
+
+    return FileAgentIntegrationClient(
+        base_url=os.getenv("FILE_AGENT_API_BASE_URL", "http://127.0.0.1:8000"),
+        access_token=os.getenv("FILE_AGENT_ACCESS_TOKEN", ""),
+        roots=LocalRootRegistry.from_environment(),
+    )
+
+
+@mcp.tool(
+    name="file_ingest",
+    description="上传已登记批次中的一个本地文件，并自动启动后端整理任务。",
+    structured_output=True,
+)
+async def file_ingest(
+    batch_id: str,
+    item_id: str,
+    source_root_ref: str,
+    source_relative_path: str,
+) -> dict[str, Any]:
+    """从授权逻辑根上传一个固定清单项，不接受绝对路径。"""
+
+    client = _client()
+    try:
+        return await client.file_ingest(
+            batch_id=batch_id,
+            item_id=item_id,
+            source_root_ref=source_root_ref,
+            source_relative_path=source_relative_path,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="job_get",
+    description="查询当前用户可见的 File Agent 后台任务状态。",
+    structured_output=True,
+)
+async def job_get(job_id: str) -> dict[str, Any]:
+    """读取后端持久化任务状态，供 WorkBuddy 轮询单文件处理进度。"""
+
+    client = _client()
+    try:
+        return await client.job_get(job_id=job_id)
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="file_batch_ingest",
+    description="枚举明确授权目录，固定批次清单并传输全部文件。",
+    structured_output=True,
+)
+async def file_batch_ingest(
+    source_root_ref: str,
+    relative_directory: str,
+    recursive: bool = True,
+    user_request: str | None = None,
+    placement_mode: Literal["BY_CATEGORY", "NEUTRAL"] = "BY_CATEGORY",
+    rule_profile: Literal["content_based", "legacy_school_materials"] = "content_based",
+) -> dict[str, Any]:
+    """启动本地目录批次导入；目录与非默认规则都必须由用户明确指定。"""
+
+    client = _client()
+    try:
+        return await BatchTransferService(
+            client,
+            TransferStateStore.from_environment(),
+        ).ingest_directory(
+            source_root_ref=source_root_ref,
+            relative_directory=relative_directory,
+            recursive=recursive,
+            user_request=user_request,
+            placement_mode=placement_mode,
+            rule_profile=rule_profile,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="batch_resume",
+    description="按后端事实恢复原批次尚未完成的本地文件传输。",
+    structured_output=True,
+)
+async def batch_resume(batch_id: str) -> dict[str, Any]:
+    """恢复已保存清单，不扩大目录范围或重置业务失败项。"""
+
+    client = _client()
+    try:
+        return await BatchTransferService(
+            client,
+            TransferStateStore.from_environment(),
+        ).resume(batch_id=batch_id)
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="batch_get",
+    description="恢复批次、逐文件状态和所有尚待选择的重复确认。",
+    structured_output=True,
+)
+async def batch_get(batch_id: str) -> dict[str, Any]:
+    """以后端持久化事实重建展示状态，不依赖本地聊天记录。"""
+
+    client = _client()
+    try:
+        return await client.batch_snapshot(batch_id=batch_id)
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="duplicate_review_get",
+    description="恢复一个导入条目的最新重复候选、修订和允许决定。",
+    structured_output=True,
+)
+async def duplicate_review_get(item_id: str) -> dict[str, Any]:
+    """读取后端候选事实，不能从旧聊天气泡恢复选择。"""
+
+    client = _client()
+    try:
+        return await client.duplicate_review_get(item_id=item_id)
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="duplicate_decide",
+    description="提交用户明确选择的重复候选和处理决定。",
+    structured_output=True,
+)
+async def duplicate_decide(
+    item_id: str,
+    review_id: str,
+    review_revision: int,
+    decision: str,
+    request_id: str,
+    idempotency_key: str,
+    candidate_id: str | None = None,
+    group_revision: int | None = None,
+    group_member_item_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """把结构化选择原样交给后端校验，不从自然语言推断内部候选 ID。"""
+
+    client = _client()
+    try:
+        return await client.duplicate_decide(
+            item_id=item_id,
+            review_id=review_id,
+            review_revision=review_revision,
+            group_revision=group_revision,
+            group_member_item_ids=group_member_item_ids or [],
+            decision=decision,
+            candidate_id=candidate_id,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="ingest_retry",
+    description="显式重试一个后端已标记失败的导入条目。",
+    structured_output=True,
+)
+async def ingest_retry(
+    item_id: str,
+    request_id: str,
+    idempotency_key: str,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """只重试指定条目，不重置批次或其他文件。"""
+
+    client = _client()
+    try:
+        return await client.ingest_item_action(
+            item_id=item_id,
+            action="retry",
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+            reason=reason,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="ingest_cancel",
+    description="取消一个尚未完成的导入条目并保留审计。",
+    structured_output=True,
+)
+async def ingest_cancel(
+    item_id: str,
+    request_id: str,
+    idempotency_key: str,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """取消本次条目，不删除或修改已经选择复用的现有文件。"""
+
+    client = _client()
+    try:
+        return await client.ingest_item_action(
+            item_id=item_id,
+            action="cancel",
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+            reason=reason,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="extraction_claim",
+    description="领取外部 OCR 任务并下载真实待识别页面到本地受控暂存目录。",
+    structured_output=True,
+)
+async def extraction_claim(task_id: str, worker_id: str) -> dict[str, Any]:
+    """返回租约、固定页集合和 WorkBuddy 可交给 OCR 工具的本地页面路径。"""
+
+    client = _client()
+    try:
+        output_dir = os.getenv("LOCAL_EXTRACTION_PAGE_DIR", "~/.file-agent/extraction-pages")
+        return await client.extraction_claim(
+            task_id=task_id,
+            worker_id=worker_id,
+            output_dir=Path(output_dir),
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="extraction_renew",
+    description="续期当前外部 OCR 租约。",
+    structured_output=True,
+)
+async def extraction_renew(task_id: str, worker_id: str, lease_token: str) -> dict[str, Any]:
+    """长时间 OCR 期间续租，过期租约不能复活。"""
+
+    client = _client()
+    try:
+        return await client.extraction_renew(
+            task_id=task_id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="extraction_submit",
+    description="提交固定页集合的 OCR 结果并让 File Agent 继续查重和整理。",
+    structured_output=True,
+)
+async def extraction_submit(
+    task_id: str,
+    worker_id: str,
+    lease_token: str,
+    submission_key: str,
+    source_sha256: str,
+    source_version_id: str,
+    pages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """提交 Provider 原始可用字段；缺失置信度或坐标时不得伪造。"""
+
+    client = _client()
+    try:
+        return await client.extraction_submit(
+            task_id=task_id,
+            payload={
+                "worker_id": worker_id,
+                "lease_token": lease_token,
+                "submission_key": submission_key,
+                "source_sha256": source_sha256,
+                "source_version_id": source_version_id,
+                "pages": pages,
+            },
+        )
+    finally:
+        await client.close()
+
+
+def main() -> None:
+    """通过 stdio 启动 MCP，避免额外暴露本地 HTTP 监听端口。"""
+
+    mcp.run(transport="stdio")

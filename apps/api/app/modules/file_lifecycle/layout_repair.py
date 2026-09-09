@@ -236,6 +236,7 @@ class WorkingCopyLayoutRepairService:
         working_copy.relative_path_hash = hashlib.sha256(relative_path.encode("utf-8")).hexdigest()
         working_copy.filename = filename
         working_copy.extension = Path(filename).suffix.lower()
+        working_copy.revision += 1
         working_copy.updated_at = utcnow()
         version = self.db.get(DocumentVersion, working_copy.current_version_id)
         if version is not None:

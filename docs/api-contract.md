@@ -1828,3 +1828,129 @@ GET /api/admin/planner-shadow/metrics?limit=5000
 决策/范围/风险/确认一致率以及错误码计数。服务默认只聚合最新 Catalog 与 Planner schema 的同一批
 样本，失败生成和失败校验同样计入分母。接口不能修改 `ADAPTIVE_PLANNER_MODE` 或灰度比例，也不能
 返回 Shadow 决策中的输入内容。
+
+## 21. WorkBuddy/MCP 批量导入 API
+
+该接口面默认由 `INTEGRATION_INGEST_ENABLED=false` 关闭；试点部署显式设为 `true` 后才接受请求。
+关闭时所有 `/api/integrations/v1` 路由统一返回 `503 / INTEGRATION_INGEST_DISABLED`，不能只依赖
+WorkBuddy 是否展示工具来控制外部导入权限。
+
+新通道先固定目录导入清单，再按条目流式接收文件字节。清单登记和 seal 都不表示文件已经上传、解析、
+分类或归档成功；只有内容端点返回的逐项状态和后续任务状态可以证明该条目已开始处理：
+
+```text
+POST /api/integrations/v1/ingest-batches
+POST /api/integrations/v1/ingest-batches/{batch_id}/items
+POST /api/integrations/v1/ingest-batches/{batch_id}/seal
+POST /api/integrations/v1/ingest-batches/{batch_id}/resume
+GET  /api/integrations/v1/ingest-batches/{batch_id}
+GET  /api/integrations/v1/ingest-batches/{batch_id}/items?cursor=...&limit=100
+PUT  /api/integrations/v1/ingest-batches/{batch_id}/items/{item_id}/content
+GET  /api/integrations/v1/ingest-items/{item_id}/duplicate-review
+POST /api/integrations/v1/ingest-items/{item_id}/duplicate-decision
+POST /api/integrations/v1/ingest-items/{item_id}/retry
+POST /api/integrations/v1/ingest-items/{item_id}/cancel
+POST /api/integrations/v1/extraction-tasks/{task_id}/claim
+POST /api/integrations/v1/extraction-tasks/{task_id}/renew
+GET  /api/integrations/v1/extraction-tasks/{task_id}/pages/{page_number}
+POST /api/integrations/v1/extraction-tasks/{task_id}/results
+```
+
+创建批次请求示例：
+
+```json
+{
+  "client_id": "workbuddy-local",
+  "request_id": "request-20260908-001",
+  "idempotency_key": "batch-submit-event-001",
+  "source_root_ref": "local-materials",
+  "relative_directory": "待导入",
+  "recursive": true,
+  "ingest_policy": "AUTO_ORGANIZE",
+  "placement_mode": "BY_CATEGORY",
+  "rule_profile": "content_based",
+  "user_request": null,
+  "conversation_id": null
+}
+```
+
+`source_root_ref` 是 MCP 本地配置中的逻辑引用，`relative_directory` 是该根内的 POSIX 相对目录；API
+不得接收本地绝对路径。`user_request=null` 只表示没有额外总结或读取请求，seal 后的文件仍默认进入
+分类、命名、按主分类落位和索引流水线。同一 `user_id + client_id + idempotency_key` 的完全相同请求
+返回原批次；载荷不同返回 `IDEMPOTENCY_CONFLICT`。
+
+追加清单请求按页提交，单次最多 200 项：
+
+```json
+{
+  "items": [
+    {
+      "client_item_id": "item-001",
+      "source_root_ref": "local-materials",
+      "source_relative_path": "待导入/材料一.pdf",
+      "original_filename": "材料一.pdf",
+      "size_bytes": 1024,
+      "mtime_ns": 1788850000000000000,
+      "expected_sha256": null
+    }
+  ]
+}
+```
+
+后端校验逻辑根、目录范围、文件名与路径末段、大小、时间和可选 SHA-256。相同
+`batch_id + client_item_id` 仅在完整来源快照一致时视为幂等重试；任何字段变化都返回
+`IDEMPOTENCY_CONFLICT`。`seal` 至少要求一个条目；seal 后追加返回 `MANIFEST_SEALED`，重复 seal
+返回同一修订。
+
+批次响应包含 `manifest_status`、`manifest_revision`、`result_revision`、冻结策略、逐状态 `counts`、
+`display_status`、`final_receipt_ready` 和结构化 `receipt`。仍有自动任务或OCR时`display_status=PROCESSING`；
+只剩终态或重复待确认时为`FILE_PROCESSING_COMPLETED`，即使后台聚合状态因混合结果仍是`PARTIAL`。
+条目分页除通用 `stage/status` 外，明确返回 `ingest_status`、`extraction_status`、
+`organization_status`、`index_status` 和 `user_task_status`，以及逻辑来源路径和最终对象 ID；不返回
+宿主机路径、文件正文、内部归档记录 ID 或任务载荷。批次 `receipt` 同时返回 `new_file_count`、
+`reused_count`、`excluded_count` 和按最终 Document ID 去重的 `retained_file_count`。无权访问的批次
+与不存在批次统一返回 `INGEST_BATCH_NOT_FOUND`，防止跨用户枚举。
+
+内容端点使用字段名为 `file` 的 multipart 文件流，仅接受 `SEALED` 批次。后端沿用旧上传入口的扩展名、
+MIME、大小、隔离区、DocumentVersion 和原件保护规则，并额外校验 multipart 文件名、实际大小及可选
+SHA-256 与固定清单一致。来源快照变化返回 `SOURCE_SNAPSHOT_CHANGED`，删除本次未提交的暂存字节和
+Document，只在对应条目保留失败回执。接收成功后在同一事务中绑定上传版本、归档记录及
+`CHECK_UPLOAD_DUPLICATES` 任务，条目进入 `RUNNING/EXACT_CHECK`；不再要求调用方补发聊天文字。
+
+相同条目内容端点的网络重试返回原 `filesystem_job_id`，不得重复创建 Document、版本或任务。响应中的
+`item.id` 是外部可恢复的 `upload_id`；内部上传版本和归档记录 ID 不对 MCP 暴露。任务进度继续通过当前
+用户权限范围内的 `GET /api/jobs/{job_id}` 查询。
+
+`resume` 只返回原清单中仍为 `PENDING/RECEIVE` 且没有上传版本的条目 ID，不重置 `FAILED`、
+`CANCELLED`、等待重复确认或任何已完成结果。MCP 必须同时读取本机不可变来源快照和后端条目状态；大小或
+修改时间发生变化时停止恢复，并要求创建新批次。
+
+重复确认响应固定返回 `review_id`、`review_revision`、`comparison_phase`、候选 `candidate_id` 和
+`allowed_decisions`。同批重复还必须返回 `duplicate_group_id`、`group_revision` 和完整的
+`group_member_item_ids`；决定请求除独立的 `client_id/request_id/idempotency_key` 外，必须原样带回
+`review_id/review_revision/group_revision/group_member_item_ids/candidate_id/decision`。候选修订变化返回
+`DUPLICATE_REVIEW_REVISION_CONFLICT`，重复组成员变化返回 `DUPLICATE_GROUP_REVISION_CONFLICT`，客户端
+刷新真实 review 后才能重新选择，不能根据文件名猜测目标。同批完整哈希重复项只启动一个主查重任务，
+后到成员可选择 `WAIT_AND_REUSE`；主任务成功后绑定相同最终文件 ID，失败或取消时只报告依赖失败，不自动
+另存，也不执行其后续任务。现有文件候选继续支持 `USE_EXISTING_FILE`，只替换本次引用，不自动修改已有
+名称或人工分类。
+
+`rule_profile=content_based` 不向分类或命名器提供来源目录信号；只有用户显式选择
+`legacy_school_materials` 时，后端才把固定清单中的 `source_root_ref + source_relative_path` 作为
+只读规则上下文，用于既有职称/应聘材料包规则。该上下文不能成为服务器写入路径，也不能替代正文证据。
+
+批次状态按逐项事实聚合：仍有自动处理项时为 `RUNNING`；只剩成功、失败、取消、过期或重复待确认时生成
+终态，其中混合结果为 `PARTIAL`。成功项加用户主动取消项仍为 `SUCCEEDED`；全部取消为 `CANCELLED`，全部
+过期为 `EXPIRED`，全部失败为 `FAILED`。因此“3 成功 + 1 待确认 + 1 失败”返回 `PARTIAL`，展示层应显示
+“文件处理完成”并保留重复确认入口。
+
+`retry`与`cancel`请求必须携带`client_id/request_id/idempotency_key`及可选`reason`。接收失败时，
+重试重新开放原固定清单项；阶段任务失败时只重置原幂等任务。文件已经成功发布而附带总结/读取失败时，
+重试只重开固定文件集合的附带请求，不重新分类、命名或归档。取消只作用于尚未发布条目；如果文件已经
+发布，只能取消尚未被 worker 领取的附带请求并保留条目成功状态，不能删除或回滚真实导入结果。
+两者同键不同载荷均返回`IDEMPOTENCY_CONFLICT`。
+
+外部OCR领取返回随机租约token和固定页资源，数据库只保存token哈希。页面下载必须同时提交worker和
+租约token；结果提交校验用户、租约、源版本、SHA-256和完整任务页集合。相同`submission_key`与相同结果
+返回原结果，不同结果返回冲突。允许部分提取时任务返回`PARTIAL`、保存失败页和覆盖率并继续保守整理，
+不能把失败页伪装为完整正文，也不会隐式调用旧内部OCR。

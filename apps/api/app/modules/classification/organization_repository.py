@@ -75,6 +75,10 @@ class OrganizationDecisionRepository:
         taxonomy_key_override: str | None = None,
         taxonomy_version_override: str | None = None,
         classifier_version_override: str | None = None,
+        authorization_source: str = "LEGACY_CONFIGURATION",
+        source_request_id: str | None = None,
+        before_revision: int | None = None,
+        after_revision: int | None = None,
     ) -> DocumentOrganizationDecision:
         """按文件版本和策略版本幂等写入组织决策快照。
 
@@ -123,6 +127,10 @@ class OrganizationDecisionRepository:
             classification_run.classifier_version if classification_run else ""
         )
         row.calibration_version = calibration_version
+        row.authorization_source = authorization_source
+        row.source_request_id = source_request_id
+        row.before_revision = before_revision
+        row.after_revision = after_revision
         row.decision = decision
         row.calibrated_confidence = policy_result.calibrated_confidence
         row.required_threshold = policy_result.required_threshold

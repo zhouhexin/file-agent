@@ -30,11 +30,15 @@ from app.db.models import (
     DocumentExtractionRun,
     DocumentIndexRun,
     DocumentOrganizationDecision,
+    DocumentPage,
     DocumentSearchProfile,
     DocumentVersion,
     FileObject,
     FileRenameReviewItem,
     FilesystemJob,
+    IngestBatch,
+    IngestItem,
+    IngestRequestExecution,
     ManagedFile,
     ManagedFileRevision,
     ManagedRoot,
@@ -250,8 +254,13 @@ class UploadLifecycleService:
         *,
         upload_version_id: str,
         current_user: User,
+        commit: bool = True,
     ) -> UploadProcessingStartResponse:
-        """幂等启动一个已发送暂存文件的查重任务。"""
+        """幂等启动一个已提交文件的查重任务。
+
+        聊天接口默认独立提交；批次接入可传 ``commit=False``，把条目绑定、生命周期状态和任务
+        创建纳入同一事务，避免出现任务已经可见但批次条目仍未记录版本的中间状态。
+        """
 
         if not self.settings.filesystem_async_jobs_enabled:
             raise RuntimeError("FILESYSTEM_ASYNC_JOBS_ENABLED 必须开启")
@@ -300,7 +309,10 @@ class UploadLifecycleService:
             archive.filesystem_job_id = job.id
             archive.status = "DUPLICATE_CHECK_PENDING"
             document.ingest_status = "DUPLICATE_CHECK_PENDING"
-            self.db.commit()
+            if commit:
+                self.db.commit()
+            else:
+                self.db.flush()
         elif not review.duplicate_check_job_id or not archive.filesystem_job_id:
             raise HTTPException(status_code=409, detail="Upload is not staged for processing")
         return UploadProcessingStartResponse(
@@ -878,6 +890,21 @@ class UploadLifecycleService:
     def _enqueue_archive(self, *, review: UploadDuplicateReview, archive: UploadArchiveRecord) -> FilesystemJob:
         """为已允许归档的上传创建幂等归档任务。"""
 
+        integration_context: dict[str, Any] = {}
+        if review.ingest_item_id:
+            ingest_item = self.db.get(IngestItem, review.ingest_item_id)
+            ingest_batch = self.db.get(IngestBatch, ingest_item.batch_id) if ingest_item else None
+            if ingest_item is not None and ingest_batch is not None:
+                # 批次创建时冻结的策略必须沿任务链传递；不能在 worker 执行时重新读取
+                # 全局开关，否则同一批文件会因部署配置变化产生不同的整理结果。
+                integration_context = {
+                    "ingest_batch_id": ingest_batch.id,
+                    "ingest_item_id": ingest_item.id,
+                    "integration_policy": dict(ingest_batch.policy_json or {}),
+                    "integration_policy_version": ingest_batch.policy_version,
+                    "integration_source_request_id": ingest_batch.request_id,
+                    "auto_organize_authorized": True,
+                }
         return FilesystemJobQueue(self.db).create_job(
             job_type="ARCHIVE_UPLOAD_TO_MANAGED_ROOT",
             queue_name="ARCHIVE",
@@ -888,6 +915,7 @@ class UploadLifecycleService:
                 "upload_document_version_id": review.upload_document_version_id,
                 "user_id": review.user_id,
                 "workspace_id": review.workspace_id,
+                **integration_context,
             },
         )
 
@@ -902,6 +930,24 @@ class UploadLifecycleService:
             deduplication_key=f"upload-cleanup:{review.upload_document_version_id}",
             payload={"upload_document_version_id": review.upload_document_version_id, "user_id": review.user_id},
         )
+
+    def enqueue_reused_upload_cleanup(self, *, review: UploadDuplicateReview) -> FilesystemJob:
+        """为等待同批主任务后已复用或终止的暂存副本创建幂等清理任务。
+
+        该方法只安排受控 worker，不在 API/状态同步过程中直接删除文件。
+        """
+
+        return self._enqueue_cleanup(review=review)
+
+    def enqueue_archive_after_external_extraction(
+        self,
+        *,
+        review: UploadDuplicateReview,
+        archive: UploadArchiveRecord,
+    ) -> FilesystemJob:
+        """外部 OCR 和近似查重完成后安排既有原件归档任务。"""
+
+        return self._enqueue_archive(review=review, archive=archive)
 
     def _append_audit(
         self,
@@ -950,6 +996,8 @@ class FileLifecycleJobProcessor:
             "IMPORT_WORKING_COPIES": self._import_working_copy,
             "MATERIALIZE_WORKING_COPY": self._materialize_working_copy,
             "ANALYZE_DOCUMENT_VERSION": self._analyze_document_version,
+            "RUN_INGEST_EXTRA_REQUEST": self._run_ingest_extra_request,
+            "CLEANUP_EXTERNAL_EXTRACTION_RESOURCES": self._cleanup_external_extraction_resources,
             "CLEANUP_UPLOAD_TEMP": self._cleanup_upload_temp,
             "RECONCILE_UPLOAD_ARCHIVES": self._reconcile_upload_archives,
             "RECONCILE_MANAGED_ROOT": self._reconcile_managed_root,
@@ -958,8 +1006,55 @@ class FileLifecycleJobProcessor:
         handler = handlers.get(job.job_type)
         if handler is None:
             return False
+        cancelled_item = self._cancelled_ingest_item(job)
+        if cancelled_item is not None and job.job_type != "CLEANUP_UPLOAD_TEMP":
+            # 取消事实优先于尚未领取或租约恢复的旧任务；worker 不得在取消后继续归档、
+            # 物化或分析该上传。已运行到文件发布临界区的并发仍由各阶段原子发布校验保护。
+            FilesystemJobQueue(self.db).mark_completed(
+                job=job,
+                result={"skipped": True, "reason": "INGEST_ITEM_CANCELLED"},
+            )
+            return True
         handler(job)
         return True
+
+    def _cancelled_ingest_item(self, job: FilesystemJob) -> IngestItem | None:
+        """从任务固定引用或上传 review 解析已取消条目。"""
+
+        payload = dict(job.payload_json or {})
+        item_id = str(payload.get("ingest_item_id") or "")
+        if not item_id:
+            version_id = str(payload.get("upload_document_version_id") or "")
+            review = self.repository.get_review_by_version(version_id) if version_id else None
+            item_id = str(review.ingest_item_id or "") if review is not None else ""
+        item = self.db.get(IngestItem, item_id) if item_id else None
+        return item if item is not None and item.status == "CANCELLED" else None
+
+    def _run_ingest_extra_request(self, job: FilesystemJob) -> None:
+        """执行批次附带请求并保存可由 batch_get 恢复的安全回执。"""
+
+        from app.modules.ingestion.request_runner import IngestRequestRunner
+
+        execution_id = str((job.payload_json or {}).get("ingest_request_execution_id") or "")
+        if not execution_id:
+            raise RuntimeError("RUN_INGEST_EXTRA_REQUEST 缺少执行记录 ID")
+        execution = IngestRequestRunner(self.db).run(execution_id=execution_id)
+        FilesystemJobQueue(self.db).mark_completed(
+            job=job,
+            result={
+                "ingest_request_execution_id": execution.id,
+                "agent_run_id": execution.agent_run_id,
+                "status": execution.status,
+            },
+        )
+
+    def _cleanup_external_extraction_resources(self, job: FilesystemJob) -> None:
+        """按配置保留期清理外部 OCR 派生页资源，业务事实继续保留。"""
+
+        from app.modules.external_extraction.service import ExternalExtractionService
+
+        result = ExternalExtractionService(self.db).cleanup_expired_page_resources()
+        FilesystemJobQueue(self.db).mark_completed(job=job, result=result)
 
     @staticmethod
     def supports(job_type: str) -> bool:
@@ -971,6 +1066,8 @@ class FileLifecycleJobProcessor:
             "IMPORT_WORKING_COPIES",
             "MATERIALIZE_WORKING_COPY",
             "ANALYZE_DOCUMENT_VERSION",
+            "RUN_INGEST_EXTRA_REQUEST",
+            "CLEANUP_EXTERNAL_EXTRACTION_RESOURCES",
             "CLEANUP_UPLOAD_TEMP",
             "RECONCILE_UPLOAD_ARCHIVES",
             "RECONCILE_MANAGED_ROOT",
@@ -980,6 +1077,21 @@ class FileLifecycleJobProcessor:
     def record_failure(self, *, job: FilesystemJob, error_message: str, retrying: bool) -> None:
         """把 worker 失败同步到上传归档状态，运行日志不能替代业务状态。"""
 
+        if job.job_type == "RUN_INGEST_EXTRA_REQUEST":
+            execution_id = str((job.payload_json or {}).get("ingest_request_execution_id") or "")
+            execution = self.db.get(IngestRequestExecution, execution_id) if execution_id else None
+            if execution is not None:
+                execution.status = "PENDING" if retrying else "FAILED"
+                execution.error_json = {
+                    "code": "EXTRA_REQUEST_FAILED",
+                    "message": error_message,
+                    "retrying": retrying,
+                }
+                batch = self.db.get(IngestBatch, execution.batch_id)
+                if batch is not None:
+                    batch.result_revision += 1
+                self.db.flush()
+            return
         version_id = str((job.payload_json or {}).get("upload_document_version_id") or "")
         if not version_id:
             return
@@ -1185,6 +1297,24 @@ class FileLifecycleJobProcessor:
             max_candidates=self.settings.upload_duplicate_max_candidates,
             filename=version.filename,
         )
+        ingest_item = self.db.get(IngestItem, review.ingest_item_id) if review.ingest_item_id else None
+        if not candidates and ingest_item is not None:
+            # WorkBuddy 新通道把扫描件 OCR 委托给外部客户端。阶段任务写入等待事实后立即结束，
+            # 不持有 worker 租约轮询，也不会偷偷回退到旧内部 OCR Provider。
+            from app.modules.external_extraction.service import ExternalExtractionService
+
+            extraction_task = ExternalExtractionService(self.db).prepare_for_ingest_item(item=ingest_item)
+            if extraction_task is not None:
+                archive.status = "WAITING_EXTERNAL_EXTRACTION"
+                review.status = "WAITING_EXTERNAL_EXTRACTION"
+                FilesystemJobQueue(self.db).mark_completed(
+                    job=job,
+                    result={
+                        "status": archive.status,
+                        "external_extraction_task_id": extraction_task.id,
+                    },
+                )
+                return
         candidates.extend(self._append_near_duplicate_candidates(review=review, version=version, exact=candidates))
         if candidates:
             archive.status = "WAITING_DUPLICATE_CONFIRMATION"
@@ -1330,12 +1460,19 @@ class FileLifecycleJobProcessor:
                 "workspace_id": get_shared_workspace_id(self.db),
                 "user_id": document.user_id,
                 "source_upload_document_id": document.id,
+                # MCP 批次策略从归档任务原样传到首次工作副本，禁止后台重新猜测。
+                **self._integration_job_context(dict(job.payload_json or {})),
             },
         )
+        cleanup_job = UploadLifecycleService(self.db, self.settings)._enqueue_cleanup(review=review)
         archive.filesystem_job_id = import_job.id
         FilesystemJobQueue(self.db).mark_completed(
             job=job,
-            result={"managed_file_id": managed_file.id, "import_job_id": import_job.id},
+            result={
+                "managed_file_id": managed_file.id,
+                "import_job_id": import_job.id,
+                "cleanup_job_id": cleanup_job.id,
+            },
         )
 
     def _enqueue_document_analysis(
@@ -1364,6 +1501,8 @@ class FileLifecycleJobProcessor:
                 "document_id": document.id,
                 "document_version_id": version.id,
                 "user_id": user_id,
+                # 分析与首次发布必须消费创建批次时已经冻结的同一策略。
+                **self._integration_job_context(dict(job.payload_json or {})),
             },
         )
 
@@ -1605,6 +1744,11 @@ class FileLifecycleJobProcessor:
             self.db.flush()
             version.working_copy_id = working_copy.id
             working_copy.current_version_id = version.id
+            self._clone_upload_extraction_for_working_copy(
+                managed_file=managed_file,
+                target_document=document,
+                target_version=version,
+            )
             working_root.status = "READY"
             working_root.last_imported_at = utcnow()
             if not gated_initial_placement:
@@ -1688,6 +1832,64 @@ class FileLifecycleJobProcessor:
             if final_target is not None and final_storage_relative_path and final_target_created:
                 final_target.unlink(missing_ok=True)
             raise
+
+    def _clone_upload_extraction_for_working_copy(
+        self,
+        *,
+        managed_file: ManagedFile,
+        target_document: Document,
+        target_version: DocumentVersion,
+    ) -> None:
+        """复用上传暂存阶段的外部 OCR 正文，避免正式分析再次调用内部 OCR。
+
+        只有原件哈希、上传版本哈希和目标工作副本哈希完全一致时才复制派生事实；选择已有文件
+        等异内容分支不会调用此方法，也不能把新上传正文挂到已有版本。
+        """
+
+        if not managed_file.source_upload_version_id:
+            return
+        source_version = self.db.get(DocumentVersion, managed_file.source_upload_version_id)
+        if (
+            source_version is None
+            or source_version.sha256 != target_version.sha256
+            or source_version.sha256 != managed_file.content_sha256
+        ):
+            return
+        source_run = (
+            self.db.query(DocumentExtractionRun)
+            .filter(
+                DocumentExtractionRun.document_version_id == source_version.id,
+                DocumentExtractionRun.status == "COMPLETED",
+                DocumentExtractionRun.extractor == "workbuddy-external-ocr",
+            )
+            .order_by(DocumentExtractionRun.updated_at.desc())
+            .first()
+        )
+        if source_run is None:
+            return
+        clone = DocumentExtractionRun(
+            document_id=target_document.id,
+            document_version_id=target_version.id,
+            status="COMPLETED",
+            extractor=source_run.extractor,
+            parser_name=source_run.parser_name,
+            parser_version=source_run.parser_version,
+            parser_config_hash=source_run.parser_config_hash,
+        )
+        self.db.add(clone)
+        self.db.flush()
+        for page in self.db.query(DocumentPage).filter(DocumentPage.extraction_run_id == source_run.id).all():
+            self.db.add(
+                DocumentPage(
+                    document_id=target_document.id,
+                    extraction_run_id=clone.id,
+                    page_number=page.page_number,
+                    sheet_name=page.sheet_name,
+                    text_content=page.text_content,
+                    metadata_json={**dict(page.metadata_json or {}), "reused_from_upload_extraction": source_run.id},
+                )
+            )
+        self.db.flush()
 
     def _materialize_working_copy(self, job: FilesystemJob) -> None:
         """按需把已分析原始文件修订物化为工作副本。
@@ -2273,6 +2475,7 @@ class FileLifecycleJobProcessor:
         result = self._ensure_existing_working_copy_search_artifacts(
             working_copy=working_copy,
             managed_file=managed_file,
+            job_payload=payload,
         )
         organization_decision = result.pop("_organization_decision", None)
         if result.get("status") != "READY":
@@ -2307,6 +2510,10 @@ class FileLifecycleJobProcessor:
                     organization_decision=None,
                     changeset=changeset,
                     extraction_status="FAILED",
+                    auto_organize_authorized=bool(payload.get("auto_organize_authorized")),
+                    placement_mode=self._integration_placement_mode(payload),
+                    source_request_id=str(payload.get("integration_source_request_id") or "") or None,
+                    organization_policy_version=str(payload.get("integration_policy_version") or "") or None,
                 )
             # 可判定的“不支持/需人工处理”属于业务终态，不应把同一文件无意义重跑三次。
             # 只有实际异常才交给 worker 的最多三次失败重试机制。
@@ -2400,6 +2607,10 @@ class FileLifecycleJobProcessor:
                 if isinstance(organization_decision, InitialOrganizationDecision)
                 else "FAILED"
             ),
+            auto_organize_authorized=bool(payload.get("auto_organize_authorized")),
+            placement_mode=self._integration_placement_mode(payload),
+            source_request_id=str(payload.get("integration_source_request_id") or "") or None,
+            organization_policy_version=str(payload.get("integration_policy_version") or "") or None,
         )
         if pending_decision and pending_decision.get("reason") == "LOW_CONFIDENCE_RENAME":
             self.db.add(
@@ -2456,6 +2667,10 @@ class FileLifecycleJobProcessor:
         organization_decision: InitialOrganizationDecision | None,
         changeset: ChangeSet,
         extraction_status: str,
+        auto_organize_authorized: bool = False,
+        placement_mode: str = "BY_CATEGORY",
+        source_request_id: str | None = None,
+        organization_policy_version: str | None = None,
     ) -> DocumentOrganizationDecision | None:
         """记录 Shadow 决策，或把隐藏副本首次原子发布到分类/中性路径。
 
@@ -2466,14 +2681,26 @@ class FileLifecycleJobProcessor:
 
         actual_placement = bool(
             working_copy.status == "ORGANIZING"
-            and self.settings.auto_primary_classification_enabled
-            and self.settings.auto_initial_placement_enabled
-            and not self.settings.auto_classification_shadow_mode
+            and (
+                auto_organize_authorized
+                or (
+                    self.settings.auto_primary_classification_enabled
+                    and self.settings.auto_initial_placement_enabled
+                    and not self.settings.auto_classification_shadow_mode
+                )
+            )
         )
         shadow_only = not actual_placement
         if not actual_placement and not self.settings.auto_classification_shadow_mode:
             return None
 
+        before_revision = working_copy.revision
+        authorization_source = (
+            "WORKBUDDY_INGEST_POLICY" if auto_organize_authorized else "LEGACY_CONFIGURATION"
+        )
+        effective_policy_version = (
+            organization_policy_version or self.settings.auto_classification_policy_version
+        )
         categories = organization_decision.categories if organization_decision is not None else []
         risk_status = self._initial_organization_risk_status(
             managed_file,
@@ -2487,7 +2714,9 @@ class FileLifecycleJobProcessor:
             version=version,
         )
         image_date_rule_applied = bool(
-            image_date_label and risk_status in {"PASS", "WARNING"}
+            placement_mode == "BY_CATEGORY"
+            and image_date_label
+            and risk_status in {"PASS", "WARNING"}
         )
         image_date_source = IMAGE_DATE_RELATION_SOURCE
         image_date_classifier_version = IMAGE_DATE_CLASSIFIER_VERSION
@@ -2502,7 +2731,8 @@ class FileLifecycleJobProcessor:
                 risk_passed=risk_status in {"PASS", "WARNING"},
             )
             if (
-                managed_source_image_date_label
+                placement_mode == "BY_CATEGORY"
+                and managed_source_image_date_label
                 and risk_status in {"PASS", "WARNING"}
                 and self._managed_source_image_date_fallback_needed(
                     categories=categories,
@@ -2566,7 +2796,12 @@ class FileLifecycleJobProcessor:
                 date_label=str(image_date_label),
                 target_filename=target_filename,
             )
-        elif policy_result.accepted and classification_run is not None and primary_suggestion is not None:
+        elif (
+            placement_mode == "BY_CATEGORY"
+            and policy_result.accepted
+            and classification_run is not None
+            and primary_suggestion is not None
+        ):
             try:
                 target = CategoryOrganizationPathResolver(self.storage).resolve_category(
                     category_id=primary_suggestion.category_id,
@@ -2649,7 +2884,7 @@ class FileLifecycleJobProcessor:
                             reasons.append("TARGET_NAME_CONFLICT")
             except CategoryOrganizationPathError:
                 reasons.append("TARGET_PATH_UNAVAILABLE")
-        elif policy_result.accepted:
+        elif placement_mode == "BY_CATEGORY" and policy_result.accepted:
             reasons.append("NO_TAXONOMY_CANDIDATE")
 
         reasons = list(dict.fromkeys(reasons))
@@ -2663,7 +2898,7 @@ class FileLifecycleJobProcessor:
                     None if image_date_rule_applied else primary_suggestion
                 ),
                 policy_result=policy_result,
-                policy_version=self.settings.auto_classification_policy_version,
+                policy_version=effective_policy_version,
                 calibration_version=self.settings.auto_classification_calibration_version,
                 decision=evaluated_decision,
                 reason_codes=reasons,
@@ -2684,6 +2919,10 @@ class FileLifecycleJobProcessor:
                 classifier_version_override=(
                     image_date_classifier_version if image_date_rule_applied else None
                 ),
+                authorization_source=authorization_source,
+                source_request_id=source_request_id,
+                before_revision=before_revision,
+                after_revision=before_revision,
             )
 
         if not reasons and target_relative_path:
@@ -2723,6 +2962,7 @@ class FileLifecycleJobProcessor:
         working_copy.filename = Path(final_relative_path).name
         working_copy.extension = Path(final_relative_path).suffix.lower()
         working_copy.status = "ACTIVE"
+        working_copy.revision += 1
         version.storage_path = final_storage_path
         version.filename = working_copy.filename
         document.ingest_status = "INDEXED" if extraction_status == "COMPLETED" else "INGESTED"
@@ -2762,7 +3002,7 @@ class FileLifecycleJobProcessor:
             classification_run=classification_run,
             primary_suggestion=(None if image_date_rule_applied else primary_suggestion),
             policy_result=policy_result,
-            policy_version=self.settings.auto_classification_policy_version,
+            policy_version=effective_policy_version,
             calibration_version=self.settings.auto_classification_calibration_version,
             decision=evaluated_decision,
             reason_codes=reasons,
@@ -2781,6 +3021,10 @@ class FileLifecycleJobProcessor:
             classifier_version_override=(
                 image_date_classifier_version if image_date_rule_applied else None
             ),
+            authorization_source=authorization_source,
+            source_request_id=source_request_id,
+            before_revision=before_revision,
+            after_revision=working_copy.revision,
         )
         decision_row.path_record_id = path_record.id
 
@@ -3202,6 +3446,7 @@ class FileLifecycleJobProcessor:
         *,
         working_copy: WorkingCopy,
         managed_file: ManagedFile,
+        job_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """为历史幂等工作副本补齐解析索引和瘦检索投影。
 
@@ -3210,7 +3455,7 @@ class FileLifecycleJobProcessor:
         """
 
         artifact_status = working_copy_search_artifact_status(self.db, working_copy)
-        if artifact_status["ready"]:
+        if artifact_status["ready"] and working_copy.status != "ORGANIZING":
             return {"status": "READY", "reused": True}
         document = self.db.get(Document, working_copy.document_id)
         version = self.db.get(DocumentVersion, working_copy.current_version_id)
@@ -3260,6 +3505,44 @@ class FileLifecycleJobProcessor:
                 user_id=document.user_id,
             ).get_latest_successful_extraction(document_id=document.id)
             extraction_run_id = str(reusable["run"].id) if reusable is not None else ""
+            extraction_error: dict[str, Any] = {}
+            if working_copy.status == "ORGANIZING":
+                # 首次发布即使已有外部 OCR 页面，也仍须执行分类、命名和落位；已有正文只表示
+                # 禁止重复解析/OCR，不能把整个 InitialWorkingCopyOrganizer 短路掉。
+                source_context = ""
+                payload = dict(job_payload or {})
+                ingest_item_id = str(payload.get("ingest_item_id") or "")
+                ingest_item = self.db.get(IngestItem, ingest_item_id) if ingest_item_id else None
+                ingest_batch = self.db.get(IngestBatch, ingest_item.batch_id) if ingest_item else None
+                if ingest_item is not None and ingest_batch is not None:
+                    from app.modules.ingestion.source_provenance import SourceProvenanceService
+
+                    source_context = SourceProvenanceService.resolve(
+                        batch=ingest_batch,
+                        item=ingest_item,
+                    ).source_context
+                decision = InitialWorkingCopyOrganizer(
+                    db=self.db,
+                    user_id=document.user_id,
+                    settings=self.settings,
+                ).decide(
+                    document=document,
+                    version=version,
+                    managed_file=managed_file,
+                    source_context=source_context,
+                    reuse_persisted_extraction_only=reusable is not None,
+                )
+                organization_decision = decision
+                extraction_result = (
+                    decision.extraction_result
+                    if isinstance(decision.extraction_result, dict)
+                    else {}
+                )
+                if extraction_result.get("status") == "COMPLETED":
+                    extraction_run_id = str(extraction_result.get("extraction_run_id") or "")
+                else:
+                    extraction_run_id = ""
+                    extraction_error = dict(extraction_result.get("error") or {})
             if extraction_run_id:
                 log_event(
                     "working_copy.search_repair.extraction_reused",
@@ -3270,8 +3553,11 @@ class FileLifecycleJobProcessor:
                     extraction_run_id=extraction_run_id,
                     message="复用已有成功解析结果补建正文索引",
                 )
-            extraction_error: dict[str, Any] = {}
-            if not extraction_run_id and not artifact_status.get("repair_blocked"):
+            if (
+                not extraction_run_id
+                and organization_decision is None
+                and not artifact_status.get("repair_blocked")
+            ):
                 log_event(
                     "working_copy.search_repair.extraction_started",
                     document_id=document.id,
@@ -3557,6 +3843,9 @@ class FileLifecycleJobProcessor:
                 duplicate_review_id=review.id,
                 candidate_managed_file_id=managed_file.id,
                 candidate_working_copy_id=working_copy.id if working_copy else None,
+                compared_version_id=working_copy.current_version_id if working_copy else None,
+                compared_sha256=managed_file.content_sha256,
+                compared_working_copy_revision=working_copy.revision if working_copy else None,
                 match_type="NEAR_DUPLICATE",
                 match_scope=scope,
                 similarity_score=score,
@@ -3685,6 +3974,16 @@ class FileLifecycleJobProcessor:
             payload.get("skip_document_analysis")
             and payload.get("source_managed_file_revision_id")
         )
+        integration_policy = payload.get("integration_policy")
+        integration_auto_organize = bool(
+            payload.get("auto_organize_authorized")
+            and isinstance(integration_policy, dict)
+            and integration_policy.get("ingest_policy") == "AUTO_ORGANIZE"
+        )
+        if managed_file.source_type == "UPLOAD_ARCHIVE" and integration_auto_organize:
+            # 新 MCP 接口已经由用户选择目录并授权自动整理，因此不受旧聊天上传功能开关
+            # 影响；冻结策略只允许首次归档使用，后续修改仍必须走受控文件操作链路。
+            return True
         return bool(
             (
                 (
@@ -3697,6 +3996,31 @@ class FileLifecycleJobProcessor:
             and self.settings.auto_initial_placement_enabled
             and not self.settings.auto_classification_shadow_mode
         )
+
+    @staticmethod
+    def _integration_job_context(payload: dict[str, Any]) -> dict[str, Any]:
+        """提取允许跨异步任务传播的批次策略字段。
+
+        这里只传播逻辑 ID 和冻结策略，绝不传播客户端绝对路径、正文或认证令牌。
+        """
+
+        allowed_keys = (
+            "ingest_batch_id",
+            "ingest_item_id",
+            "integration_policy",
+            "integration_policy_version",
+            "integration_source_request_id",
+            "auto_organize_authorized",
+        )
+        return {key: payload[key] for key in allowed_keys if key in payload}
+
+    @staticmethod
+    def _integration_placement_mode(payload: dict[str, Any]) -> str:
+        """从冻结批次策略读取物理落位模式，非法值安全降级为分类落位。"""
+
+        policy = payload.get("integration_policy")
+        mode = str(policy.get("placement_mode") or "BY_CATEGORY") if isinstance(policy, dict) else "BY_CATEGORY"
+        return mode if mode in {"BY_CATEGORY", "NEUTRAL"} else "BY_CATEGORY"
 
     @staticmethod
     def _initial_organization_pending_decision(

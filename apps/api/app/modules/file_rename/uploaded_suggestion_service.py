@@ -266,6 +266,7 @@ class UploadedRenameSuggestionService:
         *,
         document: Document,
         reuse_persisted_extraction_only: bool = False,
+        source_relative_path: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """为尚未发布的工作副本生成首次命名建议，不创建 OperationPlan。
 
@@ -279,9 +280,15 @@ class UploadedRenameSuggestionService:
             return self._suggest_one(
                 document=document,
                 reuse_persisted_extraction_only=True,
+                source_relative_path_override=source_relative_path,
             )
         # 默认上传流程保持既有调用形态，避免扩大本次受管目录改动的影响面。
-        return self._suggest_one(document=document)
+        if source_relative_path is None:
+            return self._suggest_one(document=document)
+        return self._suggest_one(
+            document=document,
+            source_relative_path_override=source_relative_path,
+        )
 
     def _resolve_working_copy(self, *, source_document: Document) -> WorkingCopy | None:
         """把上传 Document 或工作副本 Document 唯一解析为活动工作副本。"""
@@ -336,8 +343,9 @@ class UploadedRenameSuggestionService:
         *,
         document: Document,
         reuse_persisted_extraction_only: bool = False,
+        source_relative_path_override: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        """为一个工作副本 Document 生成建议；单文件失败不会扩大到其他文件。"""
+        """为一个工作副本 Document 生成建议；显式来源只供已授权批次规则使用。"""
 
         empty_field = RenameFieldResult(status=RenameFieldStatus.MISSING)
         base = {
@@ -422,7 +430,11 @@ class UploadedRenameSuggestionService:
                     },
                     extraction_result,
                 )
-            source_relative_path = self._managed_source_relative_path(document)
+            source_relative_path = (
+                source_relative_path_override
+                if source_relative_path_override is not None
+                else self._managed_source_relative_path(document)
+            )
             if should_preserve_trial_evaluation_source_name(
                 original_filename=document.original_filename,
                 source_relative_path=source_relative_path,

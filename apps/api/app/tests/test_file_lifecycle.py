@@ -293,7 +293,7 @@ def _trash_working_copy(client, headers: dict[str, str], working_copy_id: str, c
 
 
 def test_upload_is_archived_then_imported_by_separate_jobs(monkeypatch, tmp_path):
-    """查重、归档、快速导入和后台分析必须串联为四个持久化任务。"""
+    """查重、归档、快速导入、暂存清理和后台分析必须串联为持久化任务。"""
 
     _configure(monkeypatch, tmp_path)
     client, SessionLocal = client_with_database()
@@ -302,7 +302,8 @@ def test_upload_is_archived_then_imported_by_separate_jobs(monkeypatch, tmp_path
 
     processed = _drain(SessionLocal)
 
-    assert len(processed) == 4
+    # 归档成功后必须额外清理上传暂存，不能把已发布文件长期留在临时目录。
+    assert len(processed) == 5
     status = client.get(
         f"/api/uploads/{upload['upload_document_version_id']}/archive-status",
         headers=headers,
@@ -400,7 +401,8 @@ def test_default_upload_is_classified_then_first_published_to_taxonomy_path(monk
 
     processed.extend(_drain(SessionLocal))
 
-    assert len(processed) == 4
+    # taxonomy 发布链路同样包含独立的上传暂存清理任务。
+    assert len(processed) == 5
     status = client.get(
         f"/api/uploads/{upload['upload_document_version_id']}/archive-status",
         headers=headers,
@@ -2305,7 +2307,8 @@ def test_single_and_multiple_uploaded_images_share_college_upload_year_directory
 
     for upload in uploads:
         _start_upload(client, headers, upload)
-    assert len(_drain(SessionLocal)) == 8
+    # 两个文件各自执行查重、归档、导入、暂存清理与分析。
+    assert len(_drain(SessionLocal)) == 10
 
     statuses = [
         client.get(

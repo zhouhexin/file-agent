@@ -1,0 +1,29 @@
+[project]
+name = "file-agent-mcp"
+version = "0.1.0"
+description = "WorkBuddy 本地文件导入的 File Agent MCP 适配器。"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.28.0",
+  "mcp>=1.0.0",
+]
+
+[project.scripts]
+file-agent-mcp = "file_agent_mcp.server:main"
+file-agent-mcp-pilot-validate = "file_agent_mcp.pilot_validation:main"
+file-agent-mcp-pilot-run = "file_agent_mcp.pilot_run:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8.4.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["file_agent_mcp*"]

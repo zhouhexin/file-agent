@@ -855,7 +855,7 @@ PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=lifecycle-1 \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 
 PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=source-analysis-1 \
-  FILESYSTEM_WORKER_QUEUES=SOURCE_ANALYSIS,ANALYSIS \
+  FILESYSTEM_WORKER_QUEUES=SOURCE_ANALYSIS,ANALYSIS,AGENT \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 
 PYTHONPATH=apps/api FILESYSTEM_WORKER_ID=structured-extraction-1 \
@@ -1214,7 +1214,85 @@ Shadow 会写 `document_organization_decisions`，但不会移动已有 `ACTIVE`
 `AUTO_PRIMARY_CLASSIFICATION_ENABLED=false` 并重启 Worker。该操作不会移动或回写既有
 `AUTO_APPLIED` 文件；既有活动文件的后续路径变化仍必须经过 OperationPlan。
 
-## 10. 当前限制
+## 10. WorkBuddy 本地批量导入 MCP
+
+MCP 运行在保存源文件的用户机器上。先把允许读取的本地目录配置为逻辑根；工具调用只提交逻辑根和
+POSIX 相对路径，File Agent API 不接收客户端绝对路径：
+
+```bash
+cd apps/mcp
+/opt/homebrew/anaconda3/envs/py311/bin/python -m pip install -e .
+export FILE_AGENT_API_BASE_URL=http://127.0.0.1:8000
+export FILE_AGENT_ACCESS_TOKEN='登录后取得的访问令牌'
+export FILE_AGENT_LOCAL_ROOTS='{"local-materials":"/用户明确授权的资料目录"}'
+export LOCAL_TRANSFER_STATE_DIR="$HOME/.file-agent/transfer-state"
+export LOCAL_UPLOAD_CONCURRENCY=2
+export LOCAL_EXTRACTION_PAGE_DIR="$HOME/.file-agent/extraction-pages"
+/opt/homebrew/anaconda3/envs/py311/bin/python -m file_agent_mcp
+```
+
+MCP 已暴露 `file_ingest`、`file_batch_ingest`、`batch_resume`、`batch_get`、`job_get`、
+`duplicate_review_get`、`duplicate_decide`、`extraction_claim`、`extraction_renew`、
+`extraction_submit`、`ingest_retry` 和 `ingest_cancel`。批量工具会枚举用户明确
+指定的授权根内目录，固定大小、mtime 和 SHA-256，分页登记并 seal 清单，再以默认并发 2 上传；断点文件
+只保存逻辑根、相对路径和快照，不保存令牌或绝对路径。恢复时以后端事实为准，只传输未接收项，不自动
+重试业务失败。重复选择、OCR租约和最终回执都从后端持久化事实恢复，不能依赖聊天气泡或MCP进程内存。
+
+新通道相关后端配置：
+
+```bash
+INTEGRATION_INGEST_ENABLED=true
+INTEGRATION_MAX_BATCH_FILES=1000
+INTEGRATION_MAX_BATCH_BYTES=10737418240
+INTEGRATION_USER_QUOTA_BYTES=107374182400
+INTEGRATION_EXTERNAL_OCR_ENABLED=true
+INTEGRATION_ALLOW_PARTIAL_EXTRACTION=true
+EXTERNAL_EXTRACTION_LEASE_SECONDS=300
+EXTERNAL_PAGE_RETENTION_HOURS=24
+```
+
+`INTEGRATION_INGEST_ENABLED` 默认是 `false`。只有已经配置独立试点归档根、工作副本根、授权用户和
+对应 worker 后才可开启；关闭时整个 `/api/integrations/v1` 接口面返回
+`INTEGRATION_INGEST_DISABLED`，不会仅靠 MCP 工具隐藏来充当安全边界。
+
+外部OCR页图只在有效租约内下载；部分页面失败时成功页保留，批次最终显示`PARTIAL`及失败页范围。
+服务器渲染的PDF页图超过保留期后由`FILE_OPERATION`队列清理，任务、页摘要、错误和Agent审计继续保留。
+批次附带请求由`AGENT`队列执行，因此生产worker队列必须包含`AGENT`；分类/整理类文字不重复执行默认分类，
+读取或总结请求在对应文件完成首次整理和索引后自动运行。
+现有Windows合并启动脚本尚未内置该新队列时，另开一个CMD运行
+`scripts\start-workbuddy-ingest-worker.cmd`；macOS/Linux按上文把`AGENT`加入分析worker队列。
+
+逐文件响应包含接收、提取、整理、索引和附带请求五个独立状态；批次回执包含新增、复用、排除和实际
+保留文件数。`rule_profile=content_based` 是普通目录默认值，不使用目录名推断分类；只有明确选择
+`legacy_school_materials` 才启用来源目录中的职称、应聘材料包规则，来源上下文只读且不能控制目标路径。
+
+MCP 单元测试：
+
+```bash
+cd apps/mcp
+/opt/homebrew/anaconda3/envs/py311/bin/python -m pytest -q
+```
+
+迁移完成后可以在目标 PostgreSQL 执行隔离并发校验。脚本只创建
+`workbuddy-pg-validation-<随机值>`临时用户及其批次，验证4路批次幂等和2路重复组唯一约束，最终按
+临时用户ID精确清理；它不读取文件正文、不调用文件处理，也不能替代首批材料试点：
+
+```bash
+PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
+  -m app.scripts.validate_workbuddy_postgresql
+```
+
+首批20–30份材料完成处理后，用导入返回的批次ID生成只读验收报告。命令会对比本地冻结清单与当前
+源文件的大小、mtime和SHA-256，检查服务端成员、终态、最终Document/Version/WorkingCopy映射、整理、
+索引、命名回执以及刷新后重复确认是否完整；任何一项不满足都会返回非零退出码：
+
+```bash
+cd apps/mcp
+/opt/homebrew/anaconda3/envs/py311/bin/python -m file_agent_mcp.pilot_validation \
+  --batch-id '<file_batch_ingest 返回的 batch_id>'
+```
+
+## 11. 当前限制
 
 - 当前已接入 OpenAI-compatible LLM 意图理解；默认 `LLM_ENABLED=false` 时仍使用 `DeterministicPlanner`。
 - Adaptive Planner 已具备 Catalog 校验、步骤级绑定、3 轮规划预算、Shadow 对比和稳定灰度开关，但尚未达到生产 Shadow 观察期与默认启用门槛；当前默认只读 Shadow，不能直接改为 100% enabled。
@@ -1226,7 +1304,7 @@ Shadow 会写 `document_organization_decisions`，但不会移动已有 `ACTIVE`
 - 当前已有最小 JWT 鉴权，但没有 refresh token、复杂 RBAC、ACL 或 admin 权限体系。
 - 当前前端已有注册、登录、Chat、异步上传状态、逐文件重复确认卡和通用 OperationPlan 确认卡；同名文件处理、移入回收站及恢复均可从对话完成，独立文件管理界面仍待补充。
 
-## 11. 维护规则
+## 12. 维护规则
 
 以下任一内容发生变化时，必须同步更新本文和 `README.md`：
 

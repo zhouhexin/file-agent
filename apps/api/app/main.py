@@ -31,6 +31,7 @@ from app.modules.file_rename.router import router as file_rename_router
 from app.modules.file_lifecycle.router import router as file_lifecycle_router
 from app.modules.file_lifecycle.scheduler import enqueue_reconciliation_jobs
 from app.modules.file_lifecycle.shared_workspace import get_or_create_shared_workspace
+from app.modules.integrations.router import router as integrations_router
 from app.modules.managed_files.router import router as managed_files_router
 from app.modules.operations.router import router as operations_router
 from app.modules.retrieval.router import router as retrieval_router
@@ -149,6 +150,7 @@ app.include_router(conversations_router)
 app.include_router(files_router)
 app.include_router(file_rename_router)
 app.include_router(file_lifecycle_router)
+app.include_router(integrations_router)
 app.include_router(managed_files_router)
 app.include_router(operations_router)
 app.include_router(retrieval_router)

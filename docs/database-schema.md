@@ -1178,3 +1178,110 @@ planner_shadow_comparisons:
 `CatalogSnapshot` 的完整 schema 只存在于请求级运行上下文；`agent_runs` 和 Graph 快照只持久化版本、
 指纹与启用名称。这样可以审计“当时允许模型看到哪些能力”，又不会把 handler、数据库会话或模型客户
 端写入持久化状态。
+
+## 11. WorkBuddy/MCP Batch Ingestion Extension
+
+迁移 `20260908_0001` 顺接 `20260901_0001`，建立 P1 批次业务事实。它不替代
+`upload_archive_records` 或 `filesystem_jobs`：前者记录一个上传版本的归档状态，后者记录一次阶段执行，
+而以下表负责跨阶段聚合、恢复和外部写请求幂等。
+
+```text
+ingest_batches
+- id uuid/string(36) pk
+- user_id fk users.id
+- workspace_id fk workspaces.id
+- client_id
+- request_id
+- idempotency_key
+- request_fingerprint sha256
+- manifest_status OPEN | SEALED
+- manifest_revision integer
+- result_revision integer
+- policy_json jsonb
+- policy_version
+- user_request nullable
+- conversation_id nullable fk conversations.id
+- status
+- created_at / updated_at timestamptz
+- unique(user_id, client_id, idempotency_key)
+
+ingest_items
+- id uuid/string(36) pk，作为外部 upload_id
+- batch_id fk ingest_batches.id on delete cascade
+- client_item_id
+- source_root_ref
+- source_relative_path
+- original_filename
+- expected_size
+- source_mtime_ns
+- expected_sha256 nullable
+- actual_sha256 nullable
+- upload_document_version_id nullable
+- archive_record_id nullable
+- workflow_revision
+- stage / status / decision
+- final_document_id / final_version_id / final_working_copy_id nullable
+- extraction_run_id / current_job_id nullable
+- error_json / result_json jsonb
+- created_at / updated_at timestamptz
+- unique(batch_id, client_item_id)
+
+integration_requests
+- id uuid/string(36) pk
+- user_id fk users.id
+- client_id / request_id / operation / idempotency_key
+- payload_digest sha256
+- target_refs_json / result_json jsonb
+- status
+- created_at / updated_at timestamptz
+- unique(user_id, client_id, idempotency_key)
+
+ingest_request_executions
+- id uuid/string(36) pk
+- batch_id fk ingest_batches.id on delete cascade
+- item_ids_json / document_ids_json jsonb，固定一次增量请求范围
+- item_set_digest sha256，unique(batch_id, item_set_digest)
+- status / filesystem_job_id / conversation_id / agent_run_id
+- result_json / error_json jsonb
+- created_at / updated_at timestamptz
+```
+
+`policy_json` 只能保存逻辑根引用、相对目录和已校验策略，不得保存宿主机绝对路径。`error_json`、
+`result_json` 和 `target_refs_json` 只保存结构化摘要与业务 ID，不得写入文件正文、OCR 全文、凭证或内部
+客户端对象。批次和条目分别维护状态；等待重复确认只能暂停对应条目，不能依靠一个子 job 的状态覆盖
+整个批次事实。
+
+迁移`20260908_0003`新增`external_extraction_tasks`和`external_extraction_pages`，保存源版本/哈希、固定页
+清单、租约哈希、提交幂等摘要、正式提取运行映射以及逐页状态。迁移`20260908_0004`为
+`document_organization_decisions`增加`authorization_source`、`source_request_id`、`before_revision`和
+`after_revision`，证明首次自动整理来自冻结批次策略且只发生一次。迁移`20260908_0005`新增上述附带请求
+执行映射；其安全回执可重建，但不能替代AgentRun、ToolInvocation或文件事实。
+
+迁移 `20260908_0002` 增加版本化重复确认和同批内容组：
+
+```text
+working_copies
+- revision bigint default 1；名称、路径、内容或状态修改时递增
+
+upload_duplicate_reviews
+- revision / comparison_phase
+- ingest_item_id unique nullable
+- selected_candidate_id nullable
+- decision_scope_json jsonb
+
+upload_duplicate_candidates
+- candidate_ingest_item_id nullable
+- compared_version_id / compared_sha256 / compared_working_copy_revision nullable
+
+ingest_duplicate_groups
+- batch_id / user_id / workspace_id / content_sha256
+- revision / primary_item_id / status
+- 活动状态下 batch_id + sha256 唯一；不同批次绝不能共享等待主任务
+
+ingest_duplicate_group_members
+- group_id / ingest_item_id unique
+- joined_revision / decision / waits_for_item_id
+```
+
+确认必须同时核验 review 修订、候选 ID 及候选工作副本版本/哈希/修订。`WAIT_AND_REUSE` 只能引用同批组
+中固定的主条目；主条目失败或取消时，等待成员不得自动转为“保留两份”。

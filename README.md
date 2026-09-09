@@ -45,6 +45,12 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m uvicorn app
 cd apps/web && npm install && npm test && npm run build && npm run dev
 ```
 
+WorkBuddy 本地导入适配器位于 `apps/mcp`。当前支持明确授权目录的批次枚举/传输与断点恢复、逐文件
+精确/近似重复确认、外部 OCR 页面领取与回写、显式取消/重试，以及整理后附带读取或总结请求。新通道
+无需额外聊天文字；`user_request=null` 仍默认分类、标准化命名、按主分类落位和索引。逻辑根、访问令牌
+和启动命令见 `docs/runbook.md`，客户端绝对路径不会发送给后端。该试点入口默认关闭，部署时必须显式
+配置 `INTEGRATION_INGEST_ENABLED=true`；关闭时整个集成 API 返回受控不可用错误。
+
 Windows PowerShell 在仓库根目录使用当前 Python 环境运行后端测试：
 
 ```powershell
@@ -89,6 +95,7 @@ worker。预检通过后分别启动 scheduler 和五个合并后的 worker：�
 绝对路径。脚本无论从哪个当前目录调用都会先切换到仓库根，因此相对
 `WORKING_COPY_STORAGE_ROOT=./storage/working-copies` 始终指向仓库内目录。共享开发数据库已有
 WorkingCopy 记录但当前机器物理文件缺失时，下一次扫描会重新调度导入并从不可变原件修复本地副本。
+启用WorkBuddy批次附带读取/总结时，还需运行`scripts\start-workbuddy-ingest-worker.cmd`消费独立`AGENT`队列。
 以下是 macOS/Linux 的等价分终端命令：
 
 ```bash
@@ -96,7 +103,7 @@ WorkingCopy 记录但当前机器物理文件缺失时，下一次扫描会重�
 # SOURCE_ANALYSIS；源侧索引完成即可检索和回答，随后由 MATERIALIZE 后台完成全量工作副本同步。
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION,MATERIALIZE,IMPORT \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
-PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=SOURCE_ANALYSIS,ANALYSIS \
+PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=SOURCE_ANALYSIS,ANALYSIS,AGENT \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
 PYTHONPATH=apps/api FILESYSTEM_WORKER_QUEUES=STRUCTURED_EXTRACTION \
   /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules.managed_files.worker
