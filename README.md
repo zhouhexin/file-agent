@@ -45,7 +45,8 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m uvicorn app
 cd apps/web && npm install && npm test && npm run build && npm run dev
 ```
 
-WorkBuddy 本地导入适配器位于 `apps/mcp`。当前支持明确授权目录的批次枚举/传输与断点恢复、逐文件
+WorkBuddy 导入适配器位于 `apps/mcp`。当前支持明确授权目录的批次枚举/传输与断点恢复，以及用户已在
+WorkBuddy 消息中明确提交、且位于预配置宿主缓存根内的会话附件导入；同时支持逐文件
 精确/近似重复确认、外部 OCR 页面领取与回写、显式取消/重试，以及整理后附带读取或总结请求。新通道
 无需额外聊天文字；`user_request=null` 仍默认分类、标准化命名、按主分类落位和索引。逻辑根、访问令牌
 和启动命令见 `docs/runbook.md`，客户端绝对路径不会发送给后端。该试点入口默认关闭，部署时必须显式

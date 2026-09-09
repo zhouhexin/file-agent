@@ -8,13 +8,14 @@ from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from .client import FileAgentIntegrationClient, LocalRootRegistry
+from .attachment_transfer import AttachmentTransferService
+from .client import FileAgentIntegrationClient, LocalRootRegistry, WorkBuddyAttachmentRegistry
 from .transfer import BatchTransferService, TransferStateStore
 
 
 mcp = FastMCP(
     "file-agent-local-import",
-    instructions="仅处理用户已经配置授权根并明确指定的本地文件。",
+    instructions="仅处理用户明确提交的 WorkBuddy 附件或已经配置授权根并明确指定的本地文件。",
 )
 
 
@@ -92,6 +93,36 @@ async def file_batch_ingest(
             source_root_ref=source_root_ref,
             relative_directory=relative_directory,
             recursive=recursive,
+            user_request=user_request,
+            placement_mode=placement_mode,
+            rule_profile=rule_profile,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="workbuddy_attachment_ingest",
+    description="导入用户在本轮 WorkBuddy 消息中明确提交的附件，并自动分类、命名、落位和索引。",
+    structured_output=True,
+)
+async def workbuddy_attachment_ingest(
+    submission_id: str,
+    attachments: list[dict[str, Any]],
+    user_request: str | None = None,
+    placement_mode: Literal["BY_CATEGORY", "NEUTRAL"] = "BY_CATEGORY",
+    rule_profile: Literal["content_based", "legacy_school_materials"] = "content_based",
+) -> dict[str, Any]:
+    """接收 WorkBuddy 附件缓存引用；调用本身即构成本轮附件的提交授权。"""
+
+    client = _client()
+    try:
+        return await AttachmentTransferService(
+            client,
+            WorkBuddyAttachmentRegistry.from_environment(),
+        ).ingest(
+            submission_id=submission_id,
+            attachments=attachments,
             user_request=user_request,
             placement_mode=placement_mode,
             rule_profile=rule_profile,

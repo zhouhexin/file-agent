@@ -6,6 +6,7 @@ import json
 import mimetypes
 import os
 import hashlib
+import stat
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -87,6 +88,57 @@ class LocalRootRegistry:
         return files
 
 
+class WorkBuddyAttachmentRegistry:
+    """限制 WorkBuddy 会话附件只能来自显式授权的本机缓存目录。"""
+
+    def __init__(self, roots: list[Path]) -> None:
+        """规范化缓存根；空配置关闭附件入口，避免退化为任意路径读取器。"""
+
+        self._roots: list[Path] = []
+        for path in roots:
+            resolved = path.expanduser().resolve()
+            if not resolved.is_dir():
+                raise ValueError("WorkBuddy 附件缓存根不存在或不是目录")
+            self._roots.append(resolved)
+
+    @classmethod
+    def from_environment(cls) -> "WorkBuddyAttachmentRegistry":
+        """从 JSON 数组读取 WorkBuddy 已授权的附件缓存根。"""
+
+        raw = os.getenv("FILE_AGENT_WORKBUDDY_ATTACHMENT_ROOTS", "[]")
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("FILE_AGENT_WORKBUDDY_ATTACHMENT_ROOTS 必须是 JSON 数组") from exc
+        if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+            raise ValueError("FILE_AGENT_WORKBUDDY_ATTACHMENT_ROOTS 必须是路径字符串 JSON 数组")
+        return cls([Path(item) for item in parsed])
+
+    def resolve(self, *, local_path: str, filename: str) -> Path:
+        """解析附件缓存文件，并拒绝越权路径、符号链接和特殊文件。"""
+
+        if not self._roots:
+            raise ValueError("WorkBuddy 附件入口未配置授权缓存根")
+        raw_path = Path(local_path).expanduser()
+        if not raw_path.is_absolute():
+            raise ValueError("WorkBuddy attachment local_path 必须是缓存文件绝对路径")
+        # 先检查路径本身而不是只检查 resolve 后结果，防止缓存根内软链接跳转到任意文件。
+        if raw_path.is_symlink():
+            raise ValueError("WorkBuddy 附件缓存文件不能是符号链接")
+        resolved = raw_path.resolve()
+        if not any(resolved != root and root in resolved.parents for root in self._roots):
+            raise ValueError("WorkBuddy 附件不在已授权缓存根内")
+        try:
+            mode = resolved.stat().st_mode
+        except OSError as exc:
+            raise ValueError("WorkBuddy 附件缓存文件不存在") from exc
+        if not stat.S_ISREG(mode):
+            raise ValueError("WorkBuddy 附件必须是普通文件")
+        if resolved.name != filename:
+            raise ValueError("WorkBuddy 附件文件名与缓存文件不一致")
+        return resolved
+
+
 class FileAgentIntegrationClient:
     """调用受认证的批次内容和任务查询 API。"""
 
@@ -144,6 +196,24 @@ class FileAgentIntegrationClient:
             response = await self.http.put(
                 f"/api/integrations/v1/ingest-batches/{batch_id}/items/{item_id}/content",
                 files={"file": (path.name, source, content_type)},
+            )
+        return self._business_json(response)
+
+    async def upload_resolved_file(
+        self,
+        *,
+        batch_id: str,
+        item_id: str,
+        path: Path,
+        filename: str,
+    ) -> dict[str, Any]:
+        """上传已由专用来源适配器校验的文件，不把本机路径发送给后端。"""
+
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        with path.open("rb") as source:
+            response = await self.http.put(
+                f"/api/integrations/v1/ingest-batches/{batch_id}/items/{item_id}/content",
+                files={"file": (filename, source, content_type)},
             )
         return self._business_json(response)
 

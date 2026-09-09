@@ -19,6 +19,7 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
     assert names == {
         "file_ingest",
         "file_batch_ingest",
+        "workbuddy_attachment_ingest",
         "batch_resume",
         "batch_get",
         "job_get",
