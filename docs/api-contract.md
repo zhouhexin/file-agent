@@ -1792,6 +1792,27 @@ GET /api/classification/organization/files?category_id={stable_id}&scope=descend
 
 ## 20. Adaptive Planner Admin APIs
 
+## Classification v10 supersession
+
+本节优先于本文件中较早的“分类待复核”“`__needs_review__` 虚拟节点”及“SET_PRIMARY/MOVE 必须确认”的历史描述。
+
+分类输出只对新流程公开 `CLASSIFIED` 或 `OTHER`。`OTHER` 的稳定 ID 固定为 `system.other`，显示路径和物理目录均为“其他”；正文证据不足、组织范围不明、候选冲突或解析不完整时都进入该结果，不创建新的分类 `NEEDS_REVIEW` 状态、分类待办或虚拟树节点。历史 `NEEDS_REVIEW`、`.other`、`.issued` 仅用于兼容读取和审计，不能作为新候选召回或新 PRIMARY。
+
+`GET /api/classification/organization/tree` 返回 `schema_version=2`、业务节点计数和聚合的 `other` 节点；不得再返回 `__needs_review__`。`GET /api/classification/organization/files` 对 `category_id=system.other` 返回该唯一兜底下的文件，不接受 `__needs_review__` 作为新查询参数。树与列表响应都应同时区分 `effective_primary`、`pending_placement`、`classification_outcome`、`legacy_location` 和与分类无关的 `pending_decision`，避免把重复、风险、重命名或冲突处理误显示为分类复核。
+
+下列直接请求是单次明确授权，不调用 `/confirm`，也不插入伪造的 `OperationConfirmation`：
+
+```text
+POST /api/classification/working-copies/{working_copy_id}/primary-category
+POST /api/classification/working-copies/{working_copy_id}/placement
+POST /api/integrations/v1/working-copies/{working_copy_id}/primary-category
+POST /api/integrations/v1/working-copies/{working_copy_id}/placement
+```
+
+请求必须包含稳定对象、当前版本和 revision，以及目标 category 或受控目录。后端完成身份、授权范围、taxonomy、冲突和版本校验后，创建 `authorization_mode=EXPLICIT_REQUEST` 的内部 OperationPlan、placement operation、ToolInvocation、ChangeSet 和路径审计，并返回真实异步状态。对象或目标有歧义时先返回选择；选择完成后执行同一请求，不追加确认。删除、覆盖、独立重命名、恢复和外发不在此例外内。
+
+批量和查询响应中的 `ingest_final_filename` 是导入完成时锁定的审计快照，之后文件重命名不会改变它；`current_filename` 必须依据当前 `final_working_copy_id` 投影。当前工作副本删除、失效或不存在时，响应还必须明确相应的当前状态，而不能把旧快照误称为当前名称。
+
 ### 20.1 List Capability Suggestions
 
 ```text

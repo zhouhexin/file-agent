@@ -1216,6 +1216,40 @@ Shadow 会写 `document_organization_decisions`，但不会移动已有 `ACTIVE`
 
 ## 10. WorkBuddy 本地目录与会话附件导入 MCP
 
+## Classification v10 evaluation, pilot, and rollback
+
+本节优先于本文件中较早的 top1 测试阈值、分类 `NEEDS_REVIEW` 和分支 `.other` 自动兜底描述。新策略固定使用 `system.other`；无法可靠细分时仍完成归档到“其他”，不等待人工分类，不建立分类待复核目录。历史待复核、分支 `.other/.issued` 只用于查询兼容和审计。
+
+部署配置必须显式核验：
+
+```dotenv
+CLASSIFICATION_POLICY_BUNDLE_VERSION=workdata-v1
+CLASSIFICATION_FALLBACK_CATEGORY_ID=system.other
+CLASSIFICATION_QUALITY_MODE=conservative_rules
+CLASSIFICATION_DIRECTORY_POLICY=CATEGORY_WITH_OPTIONAL_CONTAINER
+CLASSIFICATION_PLACEMENT_ENABLED=true
+CLASSIFICATION_DIRECT_REQUEST_ENABLED=true
+CLASSIFICATION_RECONCILE_ENABLED=false
+```
+
+`CLASSIFICATION_QUALITY_MODE` 只允许 `shadow`、`conservative_rules` 或 `calibrated`。`calibrated` 必须有已发布的校准版本；缺失时服务应拒绝启动，不得沿用旧阈值假装已校准。新开关与旧 `AUTO_*` 自动归档开关值冲突时同样拒绝启动。`AUTO_INITIAL_PLACEMENT_ENABLED` 仅影响首次自动归档，不阻止本轮用户明确提交的分类更正或移动。
+
+发布前在隔离受控目录运行只读评测，不连接生产数据库、不调用 placement、不复制或移动原件：
+
+```powershell
+$env:PYTHONPATH = 'apps/api'
+& 'D:\anaconda\envs\myenv\python.exe' -m app.scripts.evaluate_classification_policy `
+  --manifest <受控清单目录>\manifest.json `
+  --taxonomy-snapshot apps\api\app\modules\classification\taxonomies\unified_school_file_classification.json `
+  --rule-snapshot rules\classification-policies\workdata-v1.json `
+  --quality-mode conservative_rules `
+  --output-dir <新的空输出目录>
+```
+
+先冻结 19 个问题样本，再补至 200 个开发问题样本，最后用 600–1,000 个独立文件族进行校准与保留验证。Gold Label 必须独立保存、人工仲裁后才进入分母；复制件、未仲裁样本和超范围样本只作诊断。报告必须查看 Recall@8、完整 PRIMARY ID、非 OTHER 自动业务精度/覆盖率、OTHER 精度/比例、多标签精度、格式和类别分层、样本数及 Wilson 95% 区间。没有这些真实结果不得声称已完成校准或达到 98% 业务精度。
+
+试点只覆盖隔离根的新入库文件。确认 OTHER、明确 SET_PRIMARY、明确 MOVE、歧义选择、同名冲突和进程中断恢复均有真实回执后，再扩展入口。规则回滚只切换下一批的新 bundle；不得删除人工 PRIMARY 或改变已冻结操作。暂停执行时停止接收新 placement，而已发生文件系统副作用的 operation 必须由现有恢复器完成，不能遗留文件与数据库不一致。
+
 MCP 运行在保存源文件的用户机器上。先把允许读取的本地目录配置为逻辑根；工具调用只提交逻辑根和
 POSIX 相对路径，File Agent API 不接收客户端绝对路径：
 

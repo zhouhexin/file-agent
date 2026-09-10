@@ -745,6 +745,16 @@ document_organization_decisions
 
 ### 4.19 qa_answers
 
+### 4.19.1 Classification v10 and placement compatibility
+
+本节优先于本文件中对 `document_organization_decisions.decision=NEEDS_REVIEW` 的旧分类语义。新分类结果的唯一兜底为 `system.other`，`classification_outcome` 只能投影为 `CLASSIFIED` 或 `OTHER`；证据不足、冲突或范围不明不是新的分类复核状态。历史 `NEEDS_REVIEW` 行只读兼容，不参与新候选、新 PRIMARY 或用户分类队列。
+
+`document_category_suggestions` 继续保存多个 `SUGGESTED` 候选和定位证据；`document_categories` 只保存已生效的 PRIMARY/SECONDARY/RELATED 关系。当前版本每个工作副本最多一个活跃 PRIMARY（`AUTO_APPLIED` 或 `CONFIRMED`），新 OTHER PRIMARY 的 `category_id=system.other`。`document_category_feedback` 的 PRIMARY `REJECT` 仅记录负反馈，不删除已经生效的 PRIMARY；撤销当前主类是明确 `SET_PRIMARY(system.other)`；仅“撤回我此前的确认”只撤回该用户自己的来源，不能删除其他用户或自动来源。
+
+直接 `SET_PRIMARY` 和 `MOVE` 创建的 placement operation 必须保存 `working_copy_id`、`document_id`、`document_version_id`、revision、taxonomy key/version/digest、目标 category、before/target relative path、授权快照、决策快照和幂等键。它们有内部 OperationPlan 与 ChangeSet，但 `authorization_mode=EXPLICIT_REQUEST`、状态 `AUTHORIZED`，不写 `operation_confirmations` 假行，也不填 `confirmed_at`。执行状态、文件系统状态和数据库提交状态必须分别可恢复。
+
+分类评测不写上述任一正式表。离线脚本的输入、Gold Labels 和正文放在受控的非 Git 目录；输出只包含脱敏逐样本结果、汇总、混淆矩阵和 taxonomy/rule/manifest 哈希。
+
 ```sql
 create table qa_answers (
   id uuid primary key default gen_random_uuid(),
