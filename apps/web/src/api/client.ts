@@ -330,7 +330,7 @@ export async function getClassificationOrganizationFiles(
   token: string,
   options: { categoryId?: string; page?: number; pageSize?: number } = {},
 ): Promise<OrganizationFilePageResponse> {
-  // 分类目录始终使用服务端分页；虚拟待复核节点也只传稳定 category_id。
+  // 分类目录始终使用服务端分页；无法细分的文件由稳定 system.other 聚合。
   const params = new URLSearchParams({
     scope: 'descendants',
     page: String(options.page ?? 1),

@@ -328,6 +328,7 @@ class DocumentSummaryService:
         )
         log_event(
             "document.summary.completed",
+            settings=self.settings,
             document_id=document_id,
             status="COMPLETED",
             message="普通文档摘要和分类主题摘要已持久化",
@@ -362,6 +363,7 @@ class DocumentSummaryService:
             except (LLMResponseError, ValidationError, ValueError, TypeError) as exc:
                 log_event(
                     "document.summary.degraded",
+                    settings=self.settings,
                     level="WARNING",
                     status="DEGRADED",
                     error_code=exc.__class__.__name__,

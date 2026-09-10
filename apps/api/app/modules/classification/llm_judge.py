@@ -6,7 +6,7 @@ from typing import Any
 
 
 CLASSIFICATION_JUDGE_SYSTEM_PROMPT = """你是文件分类判定器。你只能基于候选分类判定文档类别。
-默认情况下不得创造新分类；如果输入允许自由分类，也只能把自由分类作为待复核建议。
+不得创造新分类或自由分类路径；证据无法在原文定位的业务候选不得输出。
 必须输出 JSON 对象，格式为 {"labels": [...]}。labels 最多 3 项。
 每个 label 必须包含 category_id、confidence、reason、evidence。
 evidence 中的 quote 必须来自原文。"""
@@ -72,19 +72,17 @@ class LLMClassificationJudge:
             if not isinstance(label, dict):
                 continue
             category_id = str(label.get("category_id") or "")
-            if category_id in candidate_by_id:
-                accepted.append(
-                    self._build_candidate_label(
-                        candidate=candidate_by_id[category_id],
-                        label=label,
-                        document_text=document_text,
-                    )
-                )
+            if category_id not in candidate_by_id:
+                # 保留旧配置字段的读取兼容，但新流程不能把模型自造路径写成
+                # 分类复核建议；唯一 PRIMARY 选择器会把无可靠候选归入 OTHER。
                 continue
-            if self.allow_free_category_paths:
-                free_label = self._build_free_path_label(label=label, document_text=document_text, candidates=candidates)
-                if free_label is not None:
-                    accepted.append(free_label)
+            accepted_label = self._build_candidate_label(
+                candidate=candidate_by_id[category_id],
+                label=label,
+                document_text=document_text,
+            )
+            if accepted_label is not None:
+                accepted.append(accepted_label)
         return accepted
 
     def _build_candidate_label(
@@ -93,54 +91,24 @@ class LLMClassificationJudge:
         candidate: dict[str, Any],
         label: dict[str, Any],
         document_text: str,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         """把 LLM 对候选分类的选择转换为分类建议。"""
 
         evidence_items = _validated_evidence_items(label=label, document_text=document_text, source="hybrid")
-        status = "SUGGESTED" if evidence_items else "NEEDS_REVIEW"
+        if not evidence_items:
+            # 不生成无可定位证据的业务分类建议。调用方会回退到已验证的规则候选，
+            # 或由唯一 PRIMARY 选择器生成 system.other，而不是创建分类复核队列。
+            return None
         return {
             **candidate,
             "confidence": _clamp_confidence(label.get("confidence")),
-            "status": status,
+            "status": "SUGGESTED",
             "source": "hybrid",
             "reason": str(label.get("reason") or ""),
             "prompt_version": self.prompt_version,
             "evidence_items": evidence_items,
             "evidence": _signals_from_evidence_items(evidence_items) or list(candidate.get("evidence") or []),
         }
-
-    def _build_free_path_label(
-        self,
-        *,
-        label: dict[str, Any],
-        document_text: str,
-        candidates: list[dict[str, Any]],
-    ) -> dict[str, Any] | None:
-        """把 LLM 自由分类路径转换为待复核建议。"""
-
-        category_path = label.get("category_path")
-        if not isinstance(category_path, list) or not category_path:
-            return None
-        cleaned_path = [str(item) for item in category_path if str(item).strip()]
-        if not cleaned_path:
-            return None
-        evidence_items = _validated_evidence_items(label=label, document_text=document_text, source="llm_free_path")
-        first_candidate = candidates[0] if candidates else {}
-        return {
-            "name": "/".join(cleaned_path),
-            "category_id": None,
-            "category_path": cleaned_path,
-            "confidence": _clamp_confidence(label.get("confidence")),
-            "status": "NEEDS_REVIEW",
-            "source": "llm_free_path",
-            "reason": str(label.get("reason") or ""),
-            "prompt_version": self.prompt_version,
-            "evidence": _signals_from_evidence_items(evidence_items),
-            "evidence_items": evidence_items,
-            "taxonomy_key": str(first_candidate.get("taxonomy_key") or ""),
-            "taxonomy_version": str(first_candidate.get("taxonomy_version") or ""),
-        }
-
 
 def _candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
     """构造传给 LLM 的候选分类信息，避免泄露无关运行状态。"""

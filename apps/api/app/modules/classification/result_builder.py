@@ -113,6 +113,8 @@ def format_document_results_response(document_results: list[dict[str, Any]]) -> 
             for category in result.get("categories", [])
             if isinstance(category, dict)
         ]
-        category_text = "、".join(category_names) if category_names else "待复核"
+        # 新版分类的证据不足已经由选择器收敛为 system.other；这里保留空数组
+        # 的历史兼容读取，但不能把它重新投影成分类“待复核”。
+        category_text = "、".join(category_names) if category_names else "其他"
         blocks.append(f"{index}. {filename}\n分类建议：{category_text}")
     return "\n\n".join(blocks)

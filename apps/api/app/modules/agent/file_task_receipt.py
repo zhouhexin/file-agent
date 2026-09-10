@@ -301,14 +301,6 @@ def _system_lifecycle_task_kind(
         # 处理的是命名选择，因此优先展示为命名建议，而不是泛化的分类结果。
         if any(_has_rename_suggestion(item) for item in document_results):
             return "RENAME_SUGGESTION"
-        if not document_results and any(
-            str(invocation.output_json.get("organization_decision") or "").upper()
-            == "NEEDS_REVIEW"
-            for invocation in result.tool_invocations
-            if invocation.tool_name == "document-background-analysis"
-            and isinstance(invocation.output_json, dict)
-        ):
-            return "CLARIFICATION"
         # 上传时分类属于内部存储路由事实，独立生命周期任务不能将其当作用户主动要求的分类结果展示。
         return None
     if "managed-source-auto-classification" in tool_names:
@@ -533,12 +525,8 @@ def _build_outcome(
         for item in document_results
         if str(item.get("extraction_status") or "").upper() == "FAILED"
     )
-    needs_review = sum(
-        1
-        for item in document_results
-        if str(item.get("organization_status") or "").upper() == "NEEDS_REVIEW"
-        and str(item.get("extraction_status") or "").upper() != "FAILED"
-    )
+    # 分类不足已完成 OTHER 收纳，不能因为遗留 organization_status 再计为待处理。
+    needs_review = 0
     completed = (
         max(0, len(document_results) - failed)
         if document_results
@@ -593,13 +581,12 @@ def _build_lifecycle_outcome(
         for item in document_results
         if str(item.get("extraction_status") or "").upper() == "FAILED"
     )
+    # 仅真实的非分类待决策（例如加密文件、重名冲突、重命名）进入待处理统计；
+    # 历史 organization_status=NEEDS_REVIEW 不得重新形成分类复核卡。
     needs_review = sum(
         1
         for item in document_results
-        if (
-            str(item.get("organization_status") or "").upper() == "NEEDS_REVIEW"
-            or isinstance(item.get("pending_decision"), dict)
-        )
+        if isinstance(item.get("pending_decision"), dict)
         and str(item.get("extraction_status") or "").upper() != "FAILED"
     )
     completed = (

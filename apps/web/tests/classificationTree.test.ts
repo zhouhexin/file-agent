@@ -46,8 +46,8 @@ test('分类树只使用第一条主分类路径且文件不重复', () => {
   assert.equal(tree[0].children[0].children[0].files.length, 1);
 });
 
-test('缺少主分类的文件进入待确认', () => {
+test('缺少主分类的文件进入其他', () => {
   const file = result('未知.txt', []);
-  assert.deepEqual(primaryCategoryPath(file), ['待确认']);
-  assert.equal(buildClassificationTree([file])[0].name, '待确认');
+  assert.deepEqual(primaryCategoryPath(file), ['其他']);
+  assert.equal(buildClassificationTree([file])[0].name, '其他');
 });

@@ -76,8 +76,8 @@ def test_llm_judge_accepts_only_candidate_category_ids():
     assert categories[0]["evidence_items"][0]["quote"] == "请各学院组织专任教师完成岗位续聘材料提交。"
 
 
-def test_llm_judge_marks_unlocated_quote_as_needs_review():
-    """LLM 证据 quote 无法在原文定位时，结果必须降级为 NEEDS_REVIEW。"""
+def test_llm_judge_discards_unlocated_business_label():
+    """LLM 证据无法定位时不得创建分类复核建议。"""
 
     judge = LLMClassificationJudge(
         client=FakeLLMClient(
@@ -100,12 +100,11 @@ def test_llm_judge_marks_unlocated_quote_as_needs_review():
         candidates=[_candidate()],
     )
 
-    assert categories[0]["status"] == "NEEDS_REVIEW"
-    assert categories[0]["evidence_items"] == []
+    assert categories == []
 
 
-def test_llm_judge_can_allow_free_paths_as_review_only():
-    """开启自由路径时，LLM 自建分类只能作为 NEEDS_REVIEW 建议保留。"""
+def test_llm_judge_never_surfaces_model_created_free_paths():
+    """兼容开关不能把模型自造路径暴露为分类待复核建议。"""
 
     judge = LLMClassificationJudge(
         client=FakeLLMClient(
@@ -130,8 +129,4 @@ def test_llm_judge_can_allow_free_paths_as_review_only():
         candidates=[_candidate()],
     )
 
-    assert categories[0]["name"] == "学校/新增分类/临时建议"
-    assert categories[0]["category_id"] is None
-    assert categories[0]["source"] == "llm_free_path"
-    assert categories[0]["status"] == "NEEDS_REVIEW"
-    assert categories[0]["evidence_items"][0]["source"] == "llm_free_path"
+    assert categories == []

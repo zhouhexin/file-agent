@@ -20,14 +20,27 @@ class OrganizationTreeNodeResponse(BaseModel):
 
 
 class OrganizationTreeResponse(BaseModel):
-    """当前 taxonomy 分类树及待复核虚拟节点。"""
+    """schema v2 的当前 taxonomy 分类树及 OTHER 聚合计数。"""
 
+    schema_version: int = 2
     taxonomy_key: str
     taxonomy_version: str
     total_active_files: int
     classified_file_count: int
-    needs_review_file_count: int
+    business_classified_file_count: int
+    other_file_count: int
+    # 兼容一个发布版本的旧客户端；schema v2 UI 不应使用该字段表达复核语义。
+    needs_review_file_count: int = 0
     nodes: list[OrganizationTreeNodeResponse] = Field(default_factory=list)
+
+
+class OrganizationPrimaryResponse(BaseModel):
+    """文件当前已生效或待执行的主分类投影，不伪造历史 fallback。"""
+
+    category_id: str
+    category_path: list[str] = Field(default_factory=list)
+    status: str | None = None
+    placement_operation_id: str | None = None
 
 
 class OrganizationFileItemResponse(BaseModel):
@@ -42,6 +55,11 @@ class OrganizationFileItemResponse(BaseModel):
     primary_category_id: str | None = None
     primary_category_path: list[str] = Field(default_factory=list)
     primary_category_status: str | None = None
+    classification_outcome: str = "OTHER"
+    placement_status: str = "PENDING"
+    effective_primary: OrganizationPrimaryResponse | None = None
+    pending_primary: OrganizationPrimaryResponse | None = None
+    legacy_location: bool = False
     organization_decision: str | None = None
     organization_reason_codes: list[str] = Field(default_factory=list)
     updated_at: datetime
@@ -57,4 +75,5 @@ class OrganizationFilePageResponse(BaseModel):
     category_id: str | None = None
     scope: str
     review_only: bool
+    deprecated_compatibility: bool = False
     files: list[OrganizationFileItemResponse] = Field(default_factory=list)

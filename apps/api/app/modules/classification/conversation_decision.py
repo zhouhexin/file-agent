@@ -1,4 +1,4 @@
-"""自然语言分类接受、拒绝和纠正的受控应用服务。
+"""自然语言分类接受、拒绝、纠正和本人撤回的受控应用服务。
 
 Planner 只传用户原话和后端附件范围。本服务从当前会话、规范工作副本和 taxonomy
 中解析真实对象；存在多个文件或建议时只创建选择卡，不猜测最高分候选。
@@ -117,7 +117,9 @@ class ConversationalClassificationDecisionService:
                     target_category_id=target_category_id,
                     target_category_ids=target_category_ids or None,
                     relation_role=(
-                        "PRIMARY" if action in {"ACCEPT", "CORRECT"} else "RELATED"
+                        "PRIMARY"
+                        if action in {"ACCEPT", "CORRECT", "WITHDRAW"}
+                        else "RELATED"
                     ),
                 )
             except ClassificationClarificationError as exc:
@@ -137,7 +139,9 @@ class ConversationalClassificationDecisionService:
             action=action,
             corrected_category_id=target_category_id,
             relation_role=(
-                "PRIMARY" if action in {"ACCEPT", "CORRECT"} else "RELATED"
+                "PRIMARY"
+                if action in {"ACCEPT", "CORRECT", "WITHDRAW"}
+                else "RELATED"
             ),
             agent_run_id=agent_run_id,
             idempotency_key=f"{agent_run_id}:{suggestion.id}:{action}:{target_category_id or ''}",
@@ -188,7 +192,8 @@ class ConversationalClassificationDecisionService:
                 "message": response.user_message,
             }
 
-        # REJECT 与非 PRIMARY 关系仍是纯分类反馈，不得因为本次改造而移动文件。
+        # REJECT、WITHDRAW 与非 PRIMARY 关系都是纯分类反馈。WITHDRAW 只会撤回
+        # 当前用户自己的确认来源；两者均不得因为本次改造而移动文件。
         response = ClassificationDecisionService(self.db).decide(
             suggestion_id=suggestion.id,
             request=request,
@@ -323,9 +328,17 @@ class ConversationalClassificationDecisionService:
 
 
 def classification_decision_action(message: str) -> str | None:
-    """确定性识别用户是否在接受、拒绝或纠正分类。"""
+    """确定性识别用户是否在接受、拒绝、纠正或撤回本人分类确认。"""
 
     compact = re.sub(r"\s+", "", str(message or ""))
+    if re.search(
+        r"(?:撤回|撤销)(?:我|本人|自己)(?:此前|之前|先前)?(?:对)?(?:这个|该)?(?:分类|归类)?(?:的)?确认",
+        compact,
+    ) or re.search(
+        r"(?:撤回|撤销)(?:我|本人|自己)(?:此前|之前|先前)?(?:的)?确认(?:的)?(?:分类|归类)",
+        compact,
+    ):
+        return "WITHDRAW"
     if not compact or (
         not any(value in compact for value in ("分类", "归类"))
         and not any(

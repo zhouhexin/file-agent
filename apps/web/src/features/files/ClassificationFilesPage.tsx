@@ -1,4 +1,4 @@
-// 文件分类页只浏览已发布工作副本；任何后续移动或改名仍需从聊天生成 OperationPlan。
+// 文件分类页只浏览已发布工作副本；分类依据不足的文件会明确归入“其他”。
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, ChevronLeft, ChevronRight, Download, FolderTree, RefreshCw } from 'lucide-react';
 
@@ -22,31 +22,34 @@ type ClassificationFilesPageProps = {
 
 const PAGE_SIZE = 20;
 
-const REASON_LABELS: Record<string, string> = {
-  OTHER_CATEGORY: '仅匹配到“其他”分类',
-  NO_TAXONOMY_CANDIDATE: '未找到可用分类',
-  EVIDENCE_MISSING: '缺少可定位证据',
-  LOW_CONFIDENCE: '分类依据不足',
-  LOW_MARGIN: '候选分类接近',
-  EVIDENCE_NOT_LOCATED: '缺少可定位证据',
-  INSUFFICIENT_CONTENT_SIGNALS: '正文信号不足',
-  NEGATIVE_SIGNAL_MATCHED: '存在冲突信号',
-  SUMMARY_FULLTEXT_CONFLICT: '摘要与全文结论冲突',
-  TARGET_PATH_CONFLICT: '目标路径冲突',
-  TARGET_NAME_CONFLICT: '目标文件名冲突',
-  TARGET_PATH_UNAVAILABLE: '分类目录不可用',
-  PARSE_NOT_READY: '文件解析未完成',
-  AUTO_RECLASSIFICATION_DISABLED: '自动重新归位当前处于关闭或影子模式',
-  MULTIPLE_ACTIVE_PRIMARY_CATEGORIES: '存在多个有效主分类',
-  CONFIRMED_CATEGORY_PROTECTED: '人工确认的主分类未被自动结果覆盖',
-  WORKING_COPY_ROOT_MISSING: '工作副本目录配置缺失',
-};
-
 function formatSize(size: number): string {
   // 文件大小只用于概览，保留一位小数即可。
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function classificationLabel(file: OrganizationFilePageResponse['files'][number]): string {
+  if (file.effective_primary?.category_path.length) {
+    return file.effective_primary.category_path.join(' / ');
+  }
+  return file.classification_outcome === 'OTHER' ? '其他' : '未识别到主分类';
+}
+
+function classificationStatus(file: OrganizationFilePageResponse['files'][number]) {
+  if (file.pending_primary) {
+    return <span className="classification-status neutral">分类落位处理中</span>;
+  }
+  if (file.classification_outcome === 'OTHER') {
+    return <span className="classification-status neutral">已归入其他</span>;
+  }
+  if (file.primary_category_status === 'CONFIRMED') {
+    return <span className="classification-status confirmed">已确认</span>;
+  }
+  if (file.primary_category_status === 'AUTO_APPLIED') {
+    return <span className="classification-status automatic">自动归类</span>;
+  }
+  return <span className="classification-status neutral">处理中</span>;
 }
 
 function TreeNode({
@@ -172,7 +175,7 @@ export function ClassificationFilesPage({ token, onBack }: ClassificationFilesPa
       <header className="classification-files-header">
         <div>
           <h1><FolderTree size={24} /> 文件分类</h1>
-          <p>浏览已发布的主分类结果；调整路径或文件名仍需在聊天中确认操作计划。</p>
+          <p>浏览已发布的主分类结果；无法可靠细分的文件会归入“其他”。</p>
         </div>
         <div className="classification-files-actions">
           <button type="button" onClick={onBack}><ArrowLeft size={16} /> 返回聊天</button>
@@ -232,18 +235,8 @@ export function ClassificationFilesPage({ token, onBack }: ClassificationFilesPa
                       <strong>{file.filename}</strong>
                       <span>{file.relative_path}</span>
                     </td>
-                    <td>{file.primary_category_path.join(' / ') || '尚未自动归类'}</td>
-                    <td>
-                      {file.organization_decision === 'NEEDS_REVIEW' ? (
-                        <span className="classification-status review">
-                          {file.organization_reason_codes.map((code) => REASON_LABELS[code] ?? code).join('、') || '待复核'}
-                        </span>
-                      ) : file.primary_category_status === 'CONFIRMED' ? (
-                        <span className="classification-status confirmed">已确认</span>
-                      ) : file.primary_category_status === 'AUTO_APPLIED' ? (
-                        <span className="classification-status automatic">自动归类</span>
-                      ) : <span className="classification-status neutral">未分类</span>}
-                    </td>
+                    <td>{classificationLabel(file)}</td>
+                    <td>{classificationStatus(file)}</td>
                     <td>{formatSize(file.size_bytes)}</td>
                     <td>
                       <button

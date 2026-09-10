@@ -635,16 +635,16 @@ class UploadLifecycleService:
             and (classification_status != "COMPLETED" or not categories)
         )
         if classification_missing:
-            review_reasons.append("当前工作副本没有可展示的分类证据，需要人工复核。")
-            review_reasons = list(dict.fromkeys(review_reasons))
+            # 新版公开投影不能因历史分类缺口再次建立分类复核队列。这里不修改
+            # 历史 PRIMARY 或物理位置，只给上传/聊天回执提供统一 OTHER 展示。
+            categories = [self._public_other_category()]
+            classification_status = "COMPLETED"
         processing_status = (
             "FAILED"
             if archive.status == "FAILED"
             else "NEEDS_REVIEW"
             if archive.status == "NEEDS_REVIEW"
             or rename_review is not None
-            or classification_missing
-            or (decision is not None and decision.decision == "NEEDS_REVIEW")
             else "COMPLETED"
             if working_copy is not None and working_copy.status == "ACTIVE"
             else "PROCESSING"
@@ -679,16 +679,16 @@ class UploadLifecycleService:
             classification_status=(
                 "FAILED"
                 if archive.status == "FAILED"
-                else "NEEDS_REVIEW"
+                else "SKIPPED"
                 if archive.status == "NEEDS_REVIEW" and classification is None
                 else classification_status
             ),
             categories=categories,
             organization_status=(
-                decision.decision
+                "OTHER"
+                if decision is not None and decision.decision == "NEEDS_REVIEW"
+                else decision.decision
                 if decision is not None
-                else "NEEDS_REVIEW"
-                if processing_status == "NEEDS_REVIEW"
                 else None
             ),
             review_reasons=review_reasons,
@@ -748,24 +748,24 @@ class UploadLifecycleService:
         if archive.status == "NEEDS_REVIEW":
             reasons.append("文件存在需要人工处理的格式或安全风险，原件未被修改。")
         reason_messages = {
-            "PARSE_FAILED": "文件正文解析未完成，分类结果需要复核。",
-            "RISK_CHECK_FAILED": "文件风险检查未通过，暂未自动归入正式分类。",
-            "NO_TAXONOMY_CANDIDATE": "没有找到可靠的具体分类。",
-            "OTHER_CATEGORY": "只能确定为其他分类，需要人工确认。",
+            "PARSE_FAILED": "文件正文解析未完成，暂不能生成分类结果。",
+            "RISK_CHECK_FAILED": "文件风险检查未通过，暂不能自动整理。",
+            "NO_TAXONOMY_CANDIDATE": "已归入其他，暂未识别到明确业务类别。",
+            "OTHER_CATEGORY": "已归入其他，暂未识别到明确业务类别。",
             "FREE_PATH_NOT_ALLOWED": "分类候选不属于当前正式分类目录。",
-            "EVIDENCE_MISSING": "正文中缺少可定位的分类证据。",
-            "POLICY_VERSION_UNAVAILABLE": "分类规则版本信息不完整。",
-            "TARGET_NAME_CONFLICT": "标准文件名与现有文件冲突，已保留在待复核位置。",
+            "EVIDENCE_MISSING": "已归入其他，正文中未找到足以确定业务类别的依据。",
+            "POLICY_VERSION_UNAVAILABLE": "分类策略版本不完整，已按其他目录收纳。",
+            "TARGET_NAME_CONFLICT": "标准文件名与现有文件冲突，已保留原名称。",
             "TARGET_PATH_UNAVAILABLE": "目标分类路径当前不可用。",
         }
         if decision is not None:
             reasons.extend(
-                reason_messages.get(code, "文件分类需要人工复核。")
+                reason_messages.get(code, "分类处理已保留诊断信息。")
                 for code in list(decision.reason_codes_json or [])
             )
         if pending_decision:
             reasons.append(
-                str(pending_decision.get("message") or "标准文件名依据不足，需要人工复核。")
+                str(pending_decision.get("message") or "标准文件名依据不足，请补充名称。")
             )
         if archive.status == "FAILED" and archive.last_error_message:
             reasons.append(str(archive.last_error_message))
@@ -803,6 +803,24 @@ class UploadLifecycleService:
                 }
             )
         return projected
+
+    @staticmethod
+    def _public_other_category() -> dict[str, Any]:
+        """为旧活动副本的读取投影提供新版统一 OTHER，不改写历史分类事实。"""
+
+        taxonomy = load_default_taxonomy()
+        return {
+            "name": "其他",
+            "category_id": "system.other",
+            "category_path": ["其他"],
+            "confidence": 0.0,
+            "status": "SUGGESTED",
+            "source": "system_fallback",
+            "evidence": [],
+            "evidence_items": [],
+            "taxonomy_key": taxonomy.key,
+            "taxonomy_version": taxonomy.version,
+        }
 
     def to_review_response(self, review: UploadDuplicateReview) -> DuplicateReviewResponse:
         """把内部候选转换为脱敏 API 响应。"""
@@ -1418,7 +1436,9 @@ class FileLifecycleJobProcessor:
                 "document_id": document.id,
                 "document_version_id": version.id,
                 "filename": version.filename,
-                "organization_status": "NEEDS_REVIEW",
+                # 加密是文件风险限制而不是分类复核；待决策项会单独保留。
+                "organization_status": None,
+                "classification_status": "SKIPPED",
                 "extraction_status": "SKIPPED",
                 "page_count": 0,
                 "char_count": 0,

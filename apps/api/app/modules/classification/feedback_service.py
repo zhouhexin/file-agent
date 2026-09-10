@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -47,14 +46,13 @@ class ClassificationFeedbackService:
             .filter(DocumentCategoryFeedback.user_id == current_user.id)
             .filter(DocumentCategoryFeedback.is_active.is_(True))
         )
-        rows = query.all()
+        sample_actions = {"ACCEPTED", "REJECTED", "CORRECTED"}
+        rows = query.filter(DocumentCategoryFeedback.action.in_(sample_actions)).all()
         counts = {"ACCEPTED": 0, "REJECTED": 0, "CORRECTED": 0}
         for row in rows:
             if row.action in counts:
                 counts[row.action] += 1
-        unique_documents = (
-            query.with_entities(func.count(func.distinct(DocumentCategoryFeedback.document_id))).scalar() or 0
-        )
+        unique_documents = len({row.document_id for row in rows})
         return ClassificationFeedbackSummaryResponse(
             total=len(rows),
             accepted=counts["ACCEPTED"],

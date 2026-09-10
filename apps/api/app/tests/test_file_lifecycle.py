@@ -2702,8 +2702,8 @@ def test_encrypted_pdf_archives_original_but_stops_before_working_copy(monkeypat
     assert status["status"] == "NEEDS_REVIEW"
     assert status["processing_status"] == "NEEDS_REVIEW"
     assert status["rename_status"] == "NEEDS_REVIEW"
-    assert status["classification_status"] == "NEEDS_REVIEW"
-    assert status["organization_status"] == "NEEDS_REVIEW"
+    assert status["classification_status"] == "SKIPPED"
+    assert status["organization_status"] is None
     assert status["review_reasons"]
     assert status["working_copy_id"] is None
     history = client.get("/api/conversations/encrypted-file-conv", headers=headers).json()
@@ -3252,7 +3252,9 @@ def test_auto_reclassification_change_moves_without_second_confirmation(
 
         assert protected.output_json["status"] == "COMPLETED"
         assert "operation_plan_id" not in protected.output_json
-        assert protected.output_json["suggestions"][0]["status"] == "NEEDS_REVIEW"
+        # 受已确认 PRIMARY 保护是操作性跳过，并非分类不确定性；不能把它
+        # 重新暴露为已废弃的分类“待复核”状态。
+        assert protected.output_json["suggestions"][0]["status"] == "SKIPPED"
         assert (
             "CONFIRMED_CATEGORY_PROTECTED"
             in protected.output_json["suggestions"][0]["reason_codes"]

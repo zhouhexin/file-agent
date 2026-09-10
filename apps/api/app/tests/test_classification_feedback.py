@@ -189,6 +189,7 @@ def test_correction_supersedes_acceptance_and_creates_positive_and_negative_labe
             request=ClassificationFeedbackRequest(
                 action="CORRECT",
                 corrected_category_id="school.hr.appointment-assessment",
+                relation_role="PRIMARY",
             ),
             current_user=user,
         )
@@ -286,8 +287,8 @@ def test_repeated_decision_is_idempotent_and_keeps_single_formal_source():
         db.close()
 
 
-def test_second_user_rejection_does_not_remove_first_users_confirmation():
-    """共享分类有多个确认来源时，一个用户撤回不能结束其他用户的事实。"""
+def test_second_user_withdrawal_does_not_remove_first_users_confirmation():
+    """共享 PRIMARY 有多个确认来源时，只能撤回本人的来源。"""
 
     db = _feedback_session()
     try:
@@ -306,6 +307,7 @@ def test_second_user_rejection_does_not_remove_first_users_confirmation():
             suggestion_id=suggestion.id,
             request=ClassificationFeedbackRequest(
                 action="ACCEPT",
+                relation_role="PRIMARY",
                 agent_run_id="11111111-1111-4111-8111-111111111111",
             ),
             current_user=first_user,
@@ -314,6 +316,7 @@ def test_second_user_rejection_does_not_remove_first_users_confirmation():
             suggestion_id=suggestion.id,
             request=ClassificationFeedbackRequest(
                 action="ACCEPT",
+                relation_role="PRIMARY",
                 agent_run_id=second_run.id,
             ),
             current_user=second_user,
@@ -321,7 +324,8 @@ def test_second_user_rejection_does_not_remove_first_users_confirmation():
         service.record(
             suggestion_id=suggestion.id,
             request=ClassificationFeedbackRequest(
-                action="REJECT",
+                action="WITHDRAW",
+                relation_role="PRIMARY",
                 agent_run_id=second_run.id,
             ),
             current_user=second_user,
@@ -335,6 +339,32 @@ def test_second_user_rejection_does_not_remove_first_users_confirmation():
             .all()
         )
         assert [item.user_id for item in active_sources] == [first_user.id]
+    finally:
+        db.close()
+
+
+def test_primary_rejection_only_records_negative_feedback_without_changing_location():
+    """未生效的 PRIMARY 建议被拒绝时，不创建关系、不撤回来源也不移动文件。"""
+
+    db = _feedback_session()
+    try:
+        user, suggestion = _seed_suggestion(db)
+        response = ClassificationFeedbackService(db).record(
+            suggestion_id=suggestion.id,
+            request=ClassificationFeedbackRequest(
+                action="REJECT",
+                relation_role="PRIMARY",
+            ),
+            current_user=user,
+        )
+
+        assert response.action == "REJECTED"
+        assert response.positive_category_ids == []
+        assert response.negative_category_ids == [suggestion.category_id]
+        assert response.application_status == "APPLIED"
+        assert db.query(DocumentCategory).count() == 0
+        assert db.query(DocumentCategoryConfirmationSource).count() == 0
+        assert db.get(WorkingCopy, "working-copy-feedback").relative_path == "职称材料.docx"
     finally:
         db.close()
 

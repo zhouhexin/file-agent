@@ -62,7 +62,7 @@ export function UploadBatchProgress({
           {active ? <Loader2 className="upload-batch-spinner" size={15} /> : <CheckCircle2 size={15} />}
           <span>已处理 {batch.processed}/{batch.total}</span>
           <span>完成 {batch.succeeded}</span>
-          <span>待复核 {batch.needsReview}</span>
+          <span>需处理 {batch.needsReview}</span>
           <span>失败 {batch.failed}</span>
         </div>
         {active ? (

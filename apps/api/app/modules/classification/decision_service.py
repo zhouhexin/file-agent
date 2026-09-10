@@ -51,7 +51,7 @@ class _TaxonomyTarget:
 
 
 class ClassificationDecisionService:
-    """原子执行 ACCEPT、REJECT 和 CORRECT 分类决定。"""
+    """原子执行分类反馈和本人 PRIMARY 确认来源撤回。"""
 
     def __init__(self, db: Session) -> None:
         """保存请求级数据库会话。"""
@@ -145,6 +145,20 @@ class ClassificationDecisionService:
                 changeset_id=run.changeset_id,
             )
 
+        if request.action == "REJECT" and relation_role == "PRIMARY":
+            self._ensure_primary_rejection_is_unapplied(
+                canonical=canonical,
+                suggestion=suggestion,
+                current_user=current_user,
+            )
+        if request.action == "WITHDRAW":
+            self._ensure_user_has_active_confirmation_source(
+                canonical=canonical,
+                category_id=original_target.category_id,
+                relation_role=relation_role,
+                current_user=current_user,
+            )
+
         previous_feedback = (
             self.db.query(DocumentCategoryFeedback)
             .filter(
@@ -163,6 +177,7 @@ class ClassificationDecisionService:
             "ACCEPT": "ACCEPTED",
             "REJECT": "REJECTED",
             "CORRECT": "CORRECTED",
+            "WITHDRAW": "WITHDRAWN",
         }[request.action]
         feedback = DocumentCategoryFeedback(
             suggestion_id=suggestion.id,
@@ -183,6 +198,7 @@ class ClassificationDecisionService:
             is_active=True,
             idempotency_key=idempotency_key,
             comment=request.comment,
+            application_status="APPLIED",
         )
         self.db.add(feedback)
         self.db.flush()
@@ -211,10 +227,15 @@ class ClassificationDecisionService:
                 after_value={"status": "CONFIRMED"},
             )
         elif request.action == "REJECT":
+            # PRIMARY 的 REJECT 仅表示该建议不是用户认可的标签。它不能隐式
+            # 撤销已生效主类、确认来源或目录位置；需要撤销时必须提交 WITHDRAW。
+            pass
+        elif request.action == "WITHDRAW":
             ended = self._withdraw_user_sources(
                 working_copy_id=canonical.working_copy.id,
                 document_version_id=canonical.document_version.id,
                 category_id=original_target.category_id,
+                relation_role=relation_role,
                 user_id=current_user.id,
             )
             for relation in ended:
@@ -222,18 +243,25 @@ class ClassificationDecisionService:
                 self._write_change_item(
                     changeset=changeset,
                     relation=relation,
-                    change_type="CATEGORY_REMOVED",
-                    before_value={"status": "CONFIRMED"},
-                    after_value={"status": relation.status},
+                    change_type="CATEGORY_CONFIRMATION_WITHDRAWN",
+                    before_value={"confirmation_source_status": "ACTIVE"},
+                    after_value={
+                        "confirmation_source_status": "WITHDRAWN",
+                        "status": relation.status,
+                    },
                 )
         else:
             ended = self._withdraw_user_sources(
                 working_copy_id=canonical.working_copy.id,
                 document_version_id=canonical.document_version.id,
                 category_id=original_target.category_id,
+                relation_role=relation_role,
                 user_id=current_user.id,
             )
             changed_relations.extend(ended)
+            # 测试与部分后台调用使用 autoflush=False。先把旧 PRIMARY 的结束状态
+            # 刷入事务，避免后续冲突查询仍将它视为活动主类。
+            self.db.flush()
             relation, _created = self._confirm_relation(
                 suggestion=suggestion,
                 target=corrected_target,
@@ -296,6 +324,92 @@ class ClassificationDecisionService:
                 detail="请在当前对话中重新选择该共享文件后再确认分类。",
             )
         return row[1]
+
+    def _ensure_primary_rejection_is_unapplied(
+        self,
+        *,
+        canonical: Any,
+        suggestion: DocumentCategorySuggestion,
+        current_user: User,
+    ) -> None:
+        """拒绝已由本人确认的建议时，不把 REJECT 偷换成撤回动作。"""
+
+        pending_feedback = (
+            self.db.query(DocumentCategoryFeedback)
+            .filter(
+                DocumentCategoryFeedback.suggestion_id == suggestion.id,
+                DocumentCategoryFeedback.user_id == current_user.id,
+                DocumentCategoryFeedback.is_active.is_(True),
+                DocumentCategoryFeedback.application_status == "PENDING",
+            )
+            .with_for_update()
+            .first()
+        )
+        if pending_feedback is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="该主分类正在处理中，请查询落位状态；不能用拒绝取消已受理操作。",
+            )
+        source = (
+            self.db.query(DocumentCategoryConfirmationSource)
+            .join(
+                DocumentCategory,
+                DocumentCategoryConfirmationSource.document_category_id
+                == DocumentCategory.id,
+            )
+            .filter(
+                DocumentCategory.working_copy_id == canonical.working_copy.id,
+                DocumentCategory.document_version_id == canonical.document_version.id,
+                DocumentCategory.category_id == suggestion.category_id,
+                DocumentCategory.relation_role == "PRIMARY",
+                DocumentCategory.status == "CONFIRMED",
+                DocumentCategoryConfirmationSource.user_id == current_user.id,
+                DocumentCategoryConfirmationSource.suggestion_id == suggestion.id,
+                DocumentCategoryConfirmationSource.status == "ACTIVE",
+            )
+            .with_for_update()
+            .first()
+        )
+        if source is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="该建议已由您确认；如需撤回本人确认，请明确提交 WITHDRAW。",
+            )
+
+    def _ensure_user_has_active_confirmation_source(
+        self,
+        *,
+        canonical: Any,
+        category_id: str,
+        relation_role: str,
+        current_user: User,
+    ) -> None:
+        """WITHDRAW 只允许撤回当前用户实际存在的一条确认来源。"""
+
+        source = (
+            self.db.query(DocumentCategoryConfirmationSource)
+            .join(
+                DocumentCategory,
+                DocumentCategoryConfirmationSource.document_category_id
+                == DocumentCategory.id,
+            )
+            .filter(
+                DocumentCategory.working_copy_id == canonical.working_copy.id,
+                DocumentCategory.document_version_id == canonical.document_version.id,
+                DocumentCategory.category_id == category_id,
+                DocumentCategory.relation_role == relation_role,
+                DocumentCategory.status == "CONFIRMED",
+                DocumentCategoryConfirmationSource.user_id == current_user.id,
+                DocumentCategoryConfirmationSource.status == "ACTIVE",
+            )
+            .with_for_update()
+            .first()
+        )
+        if source is None:
+            raise HTTPException(
+                status_code=409,
+                detail="没有找到您仍有效的分类确认，无法撤回。",
+            )
 
     def _resolve_taxonomy_target(
         self,
@@ -433,6 +547,7 @@ class ClassificationDecisionService:
         working_copy_id: str,
         document_version_id: str,
         category_id: str,
+        relation_role: str,
         user_id: str,
     ) -> list[DocumentCategory]:
         """结束当前用户对分类的来源，保留其他用户仍有效的关系。"""
@@ -443,6 +558,7 @@ class ClassificationDecisionService:
                 DocumentCategory.working_copy_id == working_copy_id,
                 DocumentCategory.document_version_id == document_version_id,
                 DocumentCategory.category_id == category_id,
+                DocumentCategory.relation_role == relation_role,
                 DocumentCategory.status.in_(["AUTO_APPLIED", "CONFIRMED"]),
             )
             .with_for_update()
@@ -452,10 +568,7 @@ class ClassificationDecisionService:
         now = utcnow()
         for relation in relations:
             if relation.status == "AUTO_APPLIED":
-                relation.status = "REJECTED"
-                relation.ended_at = now
-                relation.updated_at = now
-                changed.append(relation)
+                # 自动关系不是当前用户的确认来源，WITHDRAW 不能结束它。
                 continue
             sources = (
                 self.db.query(DocumentCategoryConfirmationSource)
@@ -627,6 +740,11 @@ class ClassificationDecisionService:
             original_category_id=suggestion.category_id,
             corrected_category_id=feedback.corrected_category_id,
         )
+        user_message = "分类决定已保存，文件位置未改变。"
+        if feedback.action == "REJECTED":
+            user_message = "已记录您不接受该分类建议，文件位置未改变。"
+        elif feedback.action == "WITHDRAWN":
+            user_message = "已撤回您此前的分类确认，文件位置未改变。"
         return ClassificationFeedbackResponse(
             id=feedback.id,
             suggestion_id=suggestion.id,
@@ -642,7 +760,8 @@ class ClassificationDecisionService:
             negative_category_ids=negative,
             changeset_id=changeset_id,
             file_position_changed=False,
-            user_message="分类决定已保存，文件位置未改变。",
+            user_message=user_message,
+            application_status=feedback.application_status,
             created_at=feedback.created_at,
         )
 
@@ -680,6 +799,8 @@ def _sample_labels(
         return ([original] if original else []), []
     if action == "REJECTED":
         return [], ([original] if original else [])
+    if action == "WITHDRAWN":
+        return [], []
     return (
         [corrected_category_id] if corrected_category_id else [],
         [original] if original else [],

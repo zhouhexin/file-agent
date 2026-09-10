@@ -247,6 +247,45 @@ def test_background_classification_is_hidden_while_archive_keeps_business_title(
     assert "读取结果" not in str(archive_receipt.presentation.model_dump())
 
 
+def test_legacy_organization_review_does_not_create_classification_attention() -> None:
+    """历史组织复核读取兼容为 OTHER，不再生成分类待处理卡。"""
+
+    receipt = build_user_task_receipt(
+        _make_result(
+            intent="SYSTEM_FILE_LIFECYCLE",
+            tool_invocations=[
+                ToolInvocationRecord(
+                    tool_name="upload-archive",
+                    input_json={"target_type": "managed_file"},
+                    output_json={"status": "COMPLETED"},
+                    status="COMPLETED",
+                )
+            ],
+            document_results=[
+                {
+                    "document_id": "document-legacy",
+                    "filename": "历史材料.docx",
+                    "extraction_status": "COMPLETED",
+                    "organization_status": "NEEDS_REVIEW",
+                    "categories": [
+                        {
+                            "name": "其他",
+                            "category_id": "system.other",
+                            "category_path": ["其他"],
+                        }
+                    ],
+                }
+            ],
+        )
+    )
+
+    assert receipt.presentation is not None
+    assert receipt.presentation.task_kind == "INGEST"
+    assert receipt.presentation.outcome.needs_review_count == 0
+    assert receipt.presentation.phase.code == "COMPLETED"
+    assert receipt.task_status == "completed"
+
+
 def test_search_receipt_has_scope_counts_change_impact_and_safe_actions() -> None:
     """文件搜索必须展示业务范围、结果完整性和只读状态。"""
 

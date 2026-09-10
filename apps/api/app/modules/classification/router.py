@@ -268,7 +268,7 @@ def get_classification_organization_tree(
     db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ) -> OrganizationTreeResponse:
-    """返回共享活动文件的主分类树和待复核虚拟节点。"""
+    """返回 schema v2 主分类树；分类依据不足的文件聚合到 OTHER。"""
 
     return ClassificationOrganizationQueryService(db).tree()
 
@@ -277,13 +277,13 @@ def get_classification_organization_tree(
 def list_classification_organization_files(
     category_id: str | None = None,
     scope: str = Query(default="descendants", pattern="^(direct|descendants)$"),
-    review_only: bool = False,
+    review_only: bool = Query(default=False, deprecated=True),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ) -> OrganizationFilePageResponse:
-    """按分类范围或待复核状态分页读取已发布工作副本。"""
+    """按分类范围分页读取已发布工作副本；旧复核参数兼容映射到 OTHER。"""
 
     try:
         return ClassificationOrganizationQueryService(db).files(

@@ -100,9 +100,8 @@ export function archiveStatusToDocumentResult(status: UploadArchiveStatus): Docu
     renamed_filename: renameSettled ? status.renamed_filename : null,
     rename_status: status.rename_status,
     processing_status: status.processing_status,
-    organization_status: status.organization_status === 'NEEDS_REVIEW'
-      ? 'NEEDS_REVIEW'
-      : 'READY',
+    // 分类缺口由后端统一投影为 OTHER；这里不把旧组织复核状态重新带回分类树。
+    organization_status: 'READY',
     extraction_status: failed ? 'FAILED' : status.classification_status,
     page_count: 0,
     text_reused: false,

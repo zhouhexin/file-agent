@@ -19,7 +19,7 @@ class ClassificationFeedbackRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["ACCEPT", "REJECT", "CORRECT"]
+    action: Literal["ACCEPT", "REJECT", "CORRECT", "WITHDRAW"]
     corrected_category_id: str | None = Field(default=None, max_length=255)
     corrected_category_path: list[CategoryPathSegment] = Field(default_factory=list, max_length=20)
     relation_role: Literal["PRIMARY", "SECONDARY", "RELATED", "DOCUMENT_TYPE"] = "RELATED"
@@ -39,6 +39,8 @@ class ClassificationFeedbackRequest(BaseModel):
             self.corrected_category_id or self.corrected_category_path
         ):
             raise ValueError("只有 CORRECT 操作可以提供更正后的分类。")
+        if self.action == "WITHDRAW" and self.relation_role != "PRIMARY":
+            raise ValueError("WITHDRAW 只允许撤回本人此前的 PRIMARY 分类确认。")
         return self
 
 

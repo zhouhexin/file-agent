@@ -1139,6 +1139,7 @@ def test_planner_routes_natural_language_classification_decisions():
         ("这个不是科研材料", "REJECT"),
         ("这个不是科研材料，是干部考察材料", "CORRECT"),
         ("将这个文件分类为学校/人事师资/考核聘任", "CORRECT"),
+        ("撤回我此前的确认", "WITHDRAW"),
     ]
     for message, action in cases:
         plan = DeterministicPlanner().plan(
@@ -2820,11 +2821,13 @@ def test_tool_dispatch_records_step_failure_and_continues_batch():
     assert [item["status"] for item in result.tool_results] == ["FAILED", "COMPLETED"]
     assert [item["document_id"] for item in result.document_results] == ["doc-bad", "doc-good"]
     assert [item["extraction_status"] for item in result.document_results] == ["FAILED", "COMPLETED"]
-    assert result.document_results[1]["categories"][0]["name"] == "学校/人事师资/职称"
-    assert result.document_results[1]["categories"][0]["confidence"] > 0
-    assert result.document_results[1]["categories"][0]["evidence"]
+    # Fake Tool 只给出短 preview，不能伪造可定位的职称业务证据；新版分类
+    # 必须完成为 system.other，且不让单文件失败中断批量后续处理。
+    assert result.document_results[1]["categories"][0]["name"] == "其他"
+    assert result.document_results[1]["categories"][0]["category_id"] == "system.other"
+    assert result.document_results[1]["categories"][0]["evidence"] == []
     assert "模拟解析失败" in (result.final_response or "")
-    assert "学校/人事师资/职称" in (result.final_response or "")
+    assert "其他" in (result.final_response or "")
 
 
 def test_document_results_response_lists_multiple_categories_with_confidence():

@@ -223,8 +223,8 @@ def _seed_organization_data(db):
     return annual, planning, unclassified, review, shadow, organizing, confirmed_review
 
 
-def test_tree_counts_only_active_primary_and_real_review_decisions():
-    """树计数纳入自动/人工主分类，但排除 Shadow 和未发布文件。"""
+def test_tree_uses_schema_v2_other_aggregation_without_review_node():
+    """分类依据不足的活动文件归 OTHER，不再公开待复核节点或计数。"""
 
     db = _session()
     _seed_organization_data(db)
@@ -233,18 +233,22 @@ def test_tree_counts_only_active_primary_and_real_review_decisions():
 
     assert result.total_active_files == 6
     assert result.classified_file_count == 3
-    assert result.needs_review_file_count == 1
-    assert _find_node(result.nodes, NEEDS_REVIEW_NODE_ID).subtree_file_count == 1
+    assert result.schema_version == 2
+    assert result.business_classified_file_count == 3
+    assert result.other_file_count == 3
+    assert result.needs_review_file_count == 0
+    assert all(node.category_id != NEEDS_REVIEW_NODE_ID for node in result.nodes)
     assert _find_node(result.nodes, "school").subtree_file_count == 3
     assert _find_node(result.nodes, "school.admin").subtree_file_count == 3
     assert _find_node(result.nodes, "school.admin.annual-plan-summary").direct_file_count == 2
+    assert _find_node(result.nodes, "system.other").direct_file_count == 3
 
 
-def test_files_support_direct_descendant_review_and_stable_pagination():
-    """分类范围、复核虚拟节点与分页都不会重复或泄漏 ORGANIZING 文件。"""
+def test_files_support_direct_descendant_other_compatibility_and_stable_pagination():
+    """旧复核链接规范到 OTHER，且分页不会重复或泄漏 ORGANIZING 文件。"""
 
     db = _session()
-    annual, planning, _, review, _, _, confirmed_review = _seed_organization_data(db)
+    annual, planning, unclassified, review, shadow, _, confirmed_review = _seed_organization_data(db)
     service = ClassificationOrganizationQueryService(db)
 
     descendants = service.files(
@@ -290,12 +294,65 @@ def test_files_support_direct_descendant_review_and_stable_pagination():
         confirmed_review.id,
     }
     assert direct.total == 0
-    assert review_page.total == 1
-    assert review_page.files[0].working_copy_id == review.id
-    assert review_page.files[0].organization_reason_codes == ["LOW_CONFIDENCE"]
+    assert review_page.category_id == "system.other"
+    assert review_page.review_only is False
+    assert review_page.deprecated_compatibility is True
+    assert review_page.total == 3
+    assert {item.working_copy_id for item in review_page.files} == {
+        unclassified.id,
+        review.id,
+        shadow.id,
+    }
+    assert all(item.classification_outcome == "OTHER" for item in review_page.files)
+    assert all(item.effective_primary is None for item in review_page.files)
     assert first.total == 6
     assert first.total_pages == 3
     assert not ({item.working_copy_id for item in first.files} & {item.working_copy_id for item in second.files})
+
+
+def test_other_aggregation_keeps_historical_primary_and_location_truthful():
+    """历史 fallback 可在 OTHER 找到，但文件项不把它伪造成新的 system.other。"""
+
+    db = _session()
+    _seed_organization_data(db)
+    root = db.query(WorkingCopyRoot).one()
+    user = db.query(User).one()
+    legacy = _seed_copy(db, index=9, root=root, user=user)
+    current_other = _seed_copy(db, index=10, root=root, user=user)
+    _add_primary(
+        db,
+        legacy,
+        category_id="school.admin.other",
+        category_path=["学校", "行政综合管理类", "其他"],
+        status="CONFIRMED",
+    )
+    _add_primary(
+        db,
+        current_other,
+        category_id="system.other",
+        category_path=["其他"],
+        status="AUTO_APPLIED",
+    )
+    db.commit()
+
+    service = ClassificationOrganizationQueryService(db)
+    tree = service.tree()
+    page = service.files(
+        category_id="system.other",
+        scope="descendants",
+        review_only=False,
+        page=1,
+        page_size=20,
+    )
+    by_copy = {item.working_copy_id: item for item in page.files}
+
+    assert tree.other_file_count == 5
+    assert _find_node(tree.nodes, "system.other").direct_file_count == 5
+    assert by_copy[legacy.id].classification_outcome == "OTHER"
+    assert by_copy[legacy.id].legacy_location is True
+    assert by_copy[legacy.id].effective_primary.category_id == "school.admin.other"
+    assert by_copy[current_other.id].legacy_location is False
+    assert by_copy[current_other.id].effective_primary.category_id == "system.other"
 
 
 def test_image_upload_years_are_virtual_children_of_college_category():

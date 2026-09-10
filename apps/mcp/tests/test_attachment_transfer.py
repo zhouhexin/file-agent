@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import os
 from pathlib import Path
 
 import pytest
@@ -115,7 +117,16 @@ def test_attachment_registry_rejects_symlink_even_when_link_is_in_cache(tmp_path
     outside = tmp_path / "secret.txt"
     outside.write_text("secret", encoding="utf-8")
     link = cache / "secret.txt"
-    link.symlink_to(outside)
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        # Windows 无开发者模式或管理员权限时无法建立该安全测试的 symlink 前置条件。
+        if (
+            (os.name == "nt" and getattr(exc, "winerror", None) == 1314)
+            or exc.errno in {errno.EPERM, errno.EACCES}
+        ):
+            pytest.skip("当前 Windows 环境无创建符号链接权限，跳过真实 symlink 前置条件。")
+        raise
 
     with pytest.raises(ValueError, match="不能是符号链接"):
         WorkBuddyAttachmentRegistry([cache]).resolve(local_path=str(link), filename=link.name)

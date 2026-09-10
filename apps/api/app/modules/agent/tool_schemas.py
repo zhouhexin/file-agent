@@ -569,7 +569,7 @@ class WorkingCopyActionPlanInput(StrictToolInput):
 class ClassificationDecisionInput(StrictToolInput):
     """自然语言分类决定只能携带原话和后端解析的附件范围。"""
 
-    action: Literal["ACCEPT", "REJECT", "CORRECT"]
+    action: Literal["ACCEPT", "REJECT", "CORRECT", "WITHDRAW"]
     message: str = Field(min_length=1, max_length=4000)
     document_ids: List[str] = Field(default_factory=list, max_length=50)
     conversation_id: str = Field(min_length=1, max_length=36)

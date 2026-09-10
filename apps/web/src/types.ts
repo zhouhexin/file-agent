@@ -9,7 +9,7 @@ export type User = {
   default_workspace_id: string | null;
 };
 
-// 主分类目录只展示已发布工作副本；虚拟“待复核”节点由后端按真实组织决策计算。
+// 主分类目录只展示已发布工作副本；无法可靠细分的文件聚合在“其他”。
 export type OrganizationTreeNode = {
   category_id: string;
   name: string;
@@ -21,12 +21,21 @@ export type OrganizationTreeNode = {
 };
 
 export type OrganizationTreeResponse = {
+  schema_version: number;
   taxonomy_key: string;
   taxonomy_version: string;
   total_active_files: number;
   classified_file_count: number;
-  needs_review_file_count: number;
+  business_classified_file_count: number;
+  other_file_count: number;
   nodes: OrganizationTreeNode[];
+};
+
+export type OrganizationPrimary = {
+  category_id: string;
+  category_path: string[];
+  status: string | null;
+  placement_operation_id: string | null;
 };
 
 export type OrganizationFileItem = {
@@ -39,6 +48,11 @@ export type OrganizationFileItem = {
   primary_category_id: string | null;
   primary_category_path: string[];
   primary_category_status: 'AUTO_APPLIED' | 'CONFIRMED' | string | null;
+  classification_outcome: 'CLASSIFIED' | 'OTHER' | string;
+  placement_status: string;
+  effective_primary: OrganizationPrimary | null;
+  pending_primary: OrganizationPrimary | null;
+  legacy_location: boolean;
   organization_decision: string | null;
   organization_reason_codes: string[];
   updated_at: string;
@@ -52,6 +66,7 @@ export type OrganizationFilePageResponse = {
   category_id: string | null;
   scope: 'direct' | 'descendants';
   review_only: boolean;
+  deprecated_compatibility: boolean;
   files: OrganizationFileItem[];
 };
 
@@ -823,11 +838,11 @@ export type DocumentResult = {
   working_copy_id?: string;
   filename: string;
   original_filename?: string;
-  /** 仅在实际改名完成或明确判定无需改名后返回；处理中、失败和待复核为 null。 */
+  /** 仅在实际改名完成或明确判定无需改名后返回；处理中、失败或名称待处理时为 null。 */
   renamed_filename?: string | null;
   rename_status?: 'COMPLETED' | 'NO_CHANGE' | 'NEEDS_REVIEW' | string;
   processing_status?: 'COMPLETED' | 'FAILED' | 'NEEDS_REVIEW' | string;
-  organization_status?: 'READY' | 'NEEDS_REVIEW' | string;
+  organization_status?: 'READY' | string;
   /** 用户可理解的原文检索准备状态，不暴露内部索引、Skill 或 Tool。 */
   search_status?: 'READY' | 'NEEDS_REVIEW' | string;
   /** 当前文件可定位证据数量，只用于说明检索准备度。 */

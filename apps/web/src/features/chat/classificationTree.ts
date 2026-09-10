@@ -18,15 +18,15 @@ type MutableClassificationTreeNode = ClassificationTreeNode & {
   childMap: Map<string, MutableClassificationTreeNode>;
 };
 
-/** 将主分类路径规范为稳定层级；缺少可靠主分类时统一进入待确认。 */
+/** 将主分类路径规范为稳定层级；缺少可靠主分类时统一进入“其他”。 */
 export function primaryCategoryPath(result: DocumentResult): string[] {
   if (result.extraction_status === 'FAILED') return ['处理失败'];
   const primary = (result.categories ?? [])[0];
-  if (!primary) return ['待确认'];
+  if (!primary) return ['其他'];
   const explicitPath = cleanPath(primary.category_path ?? []);
   if (explicitPath.length > 0) return explicitPath;
   const namePath = cleanPath(splitCategoryName(primary));
-  return namePath.length > 0 ? namePath : ['待确认'];
+  return namePath.length > 0 ? namePath : ['其他'];
 }
 
 /** 构造只用于展示的主分类树，每个文件严格只出现一次。 */

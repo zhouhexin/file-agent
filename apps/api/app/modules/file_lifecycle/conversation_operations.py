@@ -174,38 +174,6 @@ class ConversationalWorkingCopyPlanService:
             return _error(f"WORKING_COPY_PLAN_{exc.status_code}", str(exc.detail))
         except ValueError as exc:
             return _error("WORKING_COPY_SCOPE_INVALID", str(exc))
-        if action == "MOVE_AFTER_AUTO_RECLASSIFICATION":
-            # 用户在当前消息中已经明确要求分类、重新分类或按分类整理，
-            # 该指令本身就是本次归位授权；仍保留 OperationPlan、确认记录、
-            # 路径快照和 ChangeSet，但不再要求用户发送第二条确认消息。
-            self.operations.plan_repository.confirm_plan(
-                plan=plan,
-                user_id=user.id,
-                confirmation_text=message,
-            )
-            result, changeset_id = self.operations.execute(
-                plan=plan,
-                current_user=user,
-            )
-            self.db.commit()
-            self.db.refresh(plan)
-            completed_count = int(result.get("completed_count") or 0)
-            return {
-                "ok": plan.status in {"EXECUTED", "PARTIAL"},
-                "kind": "working_copy_operation_result",
-                "status": plan.status,
-                "operation_plan_id": plan.id,
-                "operation_type": plan.operation_type,
-                "changeset_id": changeset_id,
-                "item_count": len(result.get("items") or []),
-                "items": list(result.get("items") or []),
-                "file_position_changed": completed_count > 0,
-                "message": (
-                    "已按分类直接移动工作副本。"
-                    if completed_count > 0
-                    else "分类已保存，但文件移动未完成，请查看失败原因。"
-                ),
-            }
         if action in {"CONFLICT_REPLACE_EXISTING", "CONFLICT_KEEP_BOTH"}:
             # 用户当前回复已经构成唯一冲突的明确处理确认；仍然创建、确认并执行
             # OperationPlan，只是不再插入第二次重复确认。
@@ -267,7 +235,7 @@ class ConversationalWorkingCopyPlanService:
 
         policy = AutoPlacementPolicy(settings)
         repository = OrganizationDecisionRepository(self.db)
-        pending_targets: list[tuple[WorkingCopy, DocumentCategorySuggestion]] = []
+        pending_targets: list[tuple[WorkingCopy, str, str]] = []
         details: list[dict[str, Any]] = []
         for working_copy in copies:
             classification_run = (
@@ -318,11 +286,18 @@ class ConversationalWorkingCopyPlanService:
                 risk_passed=True,
             )
             reason_codes = list(policy_result.reason_codes)
+            operational_reason_codes: list[str] = []
             if (
                 not settings.auto_primary_classification_enabled
                 or settings.auto_classification_shadow_mode
             ):
-                reason_codes.append("AUTO_RECLASSIFICATION_DISABLED")
+                operational_reason_codes.append("AUTO_RECLASSIFICATION_DISABLED")
+
+            target_category_id = str(
+                (policy_result.primary_category or {}).get("category_id") or ""
+            )
+            if not policy_result.accepted or not target_category_id:
+                operational_reason_codes.append("AUTO_RECLASSIFICATION_BLOCKED")
 
             active_primary = (
                 self.db.query(DocumentCategory)
@@ -338,26 +313,26 @@ class ConversationalWorkingCopyPlanService:
             )
             previous = active_primary[0] if len(active_primary) == 1 else None
             if len(active_primary) > 1:
-                reason_codes.append("MULTIPLE_ACTIVE_PRIMARY_CATEGORIES")
+                operational_reason_codes.append("MULTIPLE_ACTIVE_PRIMARY_CATEGORIES")
             if (
                 previous is not None
                 and previous.status == "CONFIRMED"
-                and previous.category_id != primary_suggestion.category_id
+                and previous.category_id != target_category_id
             ):
-                reason_codes.append("CONFIRMED_CATEGORY_PROTECTED")
+                operational_reason_codes.append("CONFIRMED_CATEGORY_PROTECTED")
 
             target_relative_path: str | None = None
             working_root = self.db.get(
                 WorkingCopyRoot, working_copy.working_copy_root_id
             )
             if working_root is None:
-                reason_codes.append("WORKING_COPY_ROOT_MISSING")
-            elif not reason_codes:
+                operational_reason_codes.append("WORKING_COPY_ROOT_MISSING")
+            elif not operational_reason_codes:
                 try:
                     target = CategoryOrganizationPathResolver(
                         self.storage
                     ).resolve_category(
-                        category_id=primary_suggestion.category_id,
+                        category_id=target_category_id,
                         taxonomy_key=classification_run.taxonomy_key,
                         taxonomy_version=classification_run.taxonomy_version,
                         working_copy=working_copy,
@@ -365,9 +340,10 @@ class ConversationalWorkingCopyPlanService:
                     )
                     target_relative_path = target.target_relative_path
                 except CategoryOrganizationPathError:
-                    reason_codes.append("TARGET_PATH_UNAVAILABLE")
+                    operational_reason_codes.append("TARGET_PATH_UNAVAILABLE")
 
-            if reason_codes:
+            all_reason_codes = list(dict.fromkeys([*reason_codes, *operational_reason_codes]))
+            if operational_reason_codes:
                 repository.create_or_update_decision(
                     working_copy=working_copy,
                     classification_run=classification_run,
@@ -377,8 +353,8 @@ class ConversationalWorkingCopyPlanService:
                     calibration_version=(
                         settings.auto_classification_calibration_version
                     ),
-                    decision="NEEDS_REVIEW",
-                    reason_codes=reason_codes,
+                    decision="SKIPPED",
+                    reason_codes=all_reason_codes,
                     shadow_only=True,
                     decision_scope=f"reclassification:{agent_run_id}",
                 )
@@ -386,15 +362,16 @@ class ConversationalWorkingCopyPlanService:
                     {
                         "document_id": working_copy.document_id,
                         "filename": working_copy.filename,
-                        "status": "NEEDS_REVIEW",
-                        "reason_codes": reason_codes,
+                        "status": "SKIPPED",
+                        "classification_outcome": policy_result.classification_outcome,
+                        "reason_codes": all_reason_codes,
                     }
                 )
                 continue
 
             if (
                 previous is not None
-                and previous.category_id == primary_suggestion.category_id
+                and previous.category_id == target_category_id
             ):
                 repository.create_or_update_decision(
                     working_copy=working_copy,
@@ -415,7 +392,8 @@ class ConversationalWorkingCopyPlanService:
                         "document_id": working_copy.document_id,
                         "filename": working_copy.filename,
                         "status": "UNCHANGED",
-                        "category_id": primary_suggestion.category_id,
+                        "category_id": target_category_id,
+                        "classification_outcome": policy_result.classification_outcome,
                     }
                 )
                 continue
@@ -423,7 +401,9 @@ class ConversationalWorkingCopyPlanService:
             # 不得先替换正式 PRIMARY 再创建旧 MOVE 计划。用户本轮“重新分类并整理”
             # 的明确请求只授权创建冻结 SET_PRIMARY 操作；关系和路径由 worker 事务 B
             # 一起提交，失败时旧 PRIMARY 保持有效。
-            pending_targets.append((working_copy, primary_suggestion))
+            pending_targets.append(
+                (working_copy, target_category_id, classification_run.taxonomy_version)
+            )
             details.append(
                 {
                     "document_id": working_copy.document_id,
@@ -432,7 +412,9 @@ class ConversationalWorkingCopyPlanService:
                     "previous_category_id": (
                         previous.category_id if previous is not None else None
                     ),
-                    "category_id": primary_suggestion.category_id,
+                    "category_id": target_category_id,
+                    "classification_outcome": policy_result.classification_outcome,
+                    "reason_codes": all_reason_codes,
                     "target_relative_path": target_relative_path,
                 }
             )
@@ -729,7 +711,7 @@ class ConversationalWorkingCopyPlanService:
         self,
         *,
         user: User,
-        targets: list[tuple[WorkingCopy, DocumentCategorySuggestion]],
+        targets: list[tuple[WorkingCopy, str, str]],
         conversation_id: str,
         agent_run_id: str,
     ) -> dict[str, Any]:
@@ -751,8 +733,8 @@ class ConversationalWorkingCopyPlanService:
             return _error("AUTHORIZATION_SOURCE_NOT_FOUND", "找不到当前用户的原始重新分类请求。")
         taxonomy = load_default_taxonomy()
         submissions: list[dict[str, Any]] = []
-        for working_copy, suggestion in targets:
-            if suggestion.taxonomy_version != taxonomy.version:
+        for working_copy, target_category_id, taxonomy_version in targets:
+            if taxonomy_version != taxonomy.version:
                 return _error("TAXONOMY_VERSION_STALE", "分类目录已更新，请重新分类后再整理。")
             try:
                 command = PlacementCommand(
@@ -760,7 +742,7 @@ class ConversationalWorkingCopyPlanService:
                     action=PlacementAction.SET_PRIMARY,
                     expected_revision=working_copy.revision,
                     expected_document_version_id=working_copy.current_version_id,
-                    target_category_id=suggestion.category_id,
+                    target_category_id=target_category_id,
                     taxonomy_version=taxonomy.version,
                     idempotency_key=(
                         f"conversation-auto-reclassification:{agent_run_id}:{working_copy.id}"

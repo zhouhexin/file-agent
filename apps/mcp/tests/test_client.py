@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
+import os
 from pathlib import Path
 
 import httpx
@@ -19,7 +21,17 @@ def test_local_root_registry_rejects_traversal_and_symlink_escape(tmp_path) -> N
     root.mkdir()
     outside = tmp_path / "secret.txt"
     outside.write_text("secret", encoding="utf-8")
-    (root / "escape.txt").symlink_to(outside)
+    try:
+        (root / "escape.txt").symlink_to(outside)
+    except OSError as exc:
+        # Windows 未开启开发者模式且进程无管理员权限时不能建立测试前置条件；
+        # 这不代表本地根目录的越权防护失效。
+        if (
+            (os.name == "nt" and getattr(exc, "winerror", None) == 1314)
+            or exc.errno in {errno.EPERM, errno.EACCES}
+        ):
+            pytest.skip("当前 Windows 环境无创建符号链接权限，跳过真实 symlink 前置条件。")
+        raise
     registry = LocalRootRegistry({"materials": root})
 
     with pytest.raises(ValueError):
