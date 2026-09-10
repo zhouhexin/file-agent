@@ -890,6 +890,9 @@ class Stage1DocumentRecallService:
                 "managed_file_id": managed_file.id if managed_file else wc.managed_file_id,
                 "document_id": doc.id,
                 "document_version_id": wc.current_version_id or "",
+                # 只读返回当前修订号，供后续受控 SET_PRIMARY/MOVE 冻结对象版本；
+                # 不能由客户端自行递增或覆盖。
+                "revision": int(wc.revision),
                 "filename": wc.filename,
                 "root_key": managed_root.root_key if managed_root else None,
                 # 源文件相对路径是用户可理解的稳定逻辑位置；源记录缺失的历史

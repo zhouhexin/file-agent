@@ -80,6 +80,20 @@ def test_file_search_uses_chat_entry_and_preserves_query() -> None:
     assert client.calls[0]["conversation_id"] == conversation_id_for_workbuddy("thread-1")
 
 
+def test_file_search_with_move_words_never_routes_to_placement_write() -> None:
+    """搜索文字即使包含“移动”也只能调用只读搜索接口。"""
+
+    client = FakeConversationClient()
+    asyncio.run(
+        WorkBuddyConversationService(client).search(
+            conversation_ref="thread-read-only",
+            query="找出奖学金材料后把它们移动到财务目录",
+        )
+    )
+
+    assert [call["method"] for call in client.calls] == ["file_search"]
+
+
 def test_file_read_requires_stable_document_scope() -> None:
     """文件读取不能退化为让 WorkBuddy 传路径或让模型猜目标文件。"""
 

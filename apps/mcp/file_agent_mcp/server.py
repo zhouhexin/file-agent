@@ -11,8 +11,9 @@ from mcp.server.fastmcp import FastMCP
 from .attachment_transfer import AttachmentTransferService, WorkBuddyAttachmentInput
 from .client import FileAgentIntegrationClient, LocalRootRegistry, WorkBuddyAttachmentRegistry
 from .conversation_tools import (
-    ExplicitClassificationPlacementInput,
     ExplicitRenameInput,
+    MoveWorkingCopyInput,
+    SetPrimaryCategoryInput,
     WorkBuddyConversationService,
 )
 from .transfer import BatchTransferService, TransferStateStore
@@ -222,19 +223,19 @@ async def file_rename(
 
 
 @mcp.tool(
-    name="classification_placement_submit",
+    name="file_set_primary_category",
     description=(
-        "提交用户已明确指定的主分类更正或受控移动。"
+        "把已确定文件的主分类设为指定 taxonomy 节点，并按该主类异步落位。"
         "必须提供 file_search 返回的 working_copy_id、当前版本、revision 和 taxonomy 目标；"
         "不接受本机路径，不需要也不能提供二次确认字段。"
     ),
     structured_output=True,
 )
-async def classification_placement_submit(
-    command: ExplicitClassificationPlacementInput,
+async def file_set_primary_category(
+    command: SetPrimaryCategoryInput,
     request_id: str,
 ) -> dict[str, Any]:
-    """转交冻结的 SET_PRIMARY/MOVE 命令；后端负责授权快照、冲突检查和异步执行。"""
+    """转交冻结的 SET_PRIMARY 命令；后端负责授权快照、冲突检查和异步执行。"""
 
     client = _client()
     try:
@@ -247,11 +248,36 @@ async def classification_placement_submit(
 
 
 @mcp.tool(
-    name="classification_placement_status",
+    name="file_move",
+    description=(
+        "将已确定文件移动到指定分类或预先配置的受控目录。"
+        "必须提供 file_search 返回的 working_copy_id、当前版本、revision 和稳定提交 ID；"
+        "不接受宿主本机路径，也不能移动原件。"
+    ),
+    structured_output=True,
+)
+async def file_move(
+    command: MoveWorkingCopyInput,
+    request_id: str,
+) -> dict[str, Any]:
+    """转交冻结的 MOVE 命令；仅后端可解析受控目录并执行工作副本移动。"""
+
+    client = _client()
+    try:
+        return await WorkBuddyConversationService(client).submit_classification_placement(
+            command=command,
+            request_id=request_id,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="file_placement_status",
     description="查询当前用户先前提交的分类落位操作进度和最终结果；此工具只读，不移动文件。",
     structured_output=True,
 )
-async def classification_placement_status(operation_id: str) -> dict[str, Any]:
+async def file_placement_status(operation_id: str) -> dict[str, Any]:
     """读取后端持久化的落位状态；其他用户的操作按不存在处理。"""
 
     client = _client()

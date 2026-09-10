@@ -24,8 +24,9 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
         "file_read",
         "evidence_answer",
         "file_rename",
-        "classification_placement_submit",
-        "classification_placement_status",
+        "file_set_primary_category",
+        "file_move",
+        "file_placement_status",
         "file_search_clarification_resolve",
         "operation_plan_get",
         "operation_plan_confirm",
@@ -44,11 +45,23 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
     # 结构化子项也必须拒绝多余字段，不能只依赖 handler 内的二次检查。
     assert schemas["file_rename"]["$defs"]["ExplicitRenameInput"]["additionalProperties"] is False
     assert (
-        schemas["classification_placement_submit"]["$defs"][
-            "ExplicitClassificationPlacementInput"
+        schemas["file_set_primary_category"]["$defs"][
+            "SetPrimaryCategoryInput"
         ]["additionalProperties"]
         is False
     )
+    assert (
+        schemas["file_move"]["$defs"][
+            "MoveWorkingCopyInput"
+        ]["additionalProperties"]
+        is False
+    )
+    assert schemas["file_set_primary_category"]["$defs"][
+        "SetPrimaryCategoryInput"
+    ]["properties"]["action"]["const"] == "SET_PRIMARY"
+    assert schemas["file_move"]["$defs"]["MoveWorkingCopyInput"][
+        "properties"
+    ]["action"]["const"] == "MOVE"
     assert (
         schemas["workbuddy_attachment_ingest"]["$defs"]["WorkBuddyAttachmentInput"][
             "additionalProperties"

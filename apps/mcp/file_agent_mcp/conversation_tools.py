@@ -81,6 +81,18 @@ class ExplicitClassificationPlacementInput(BaseModel):
         return self.model_dump(mode="json")
 
 
+class SetPrimaryCategoryInput(ExplicitClassificationPlacementInput):
+    """MCP 主分类更正的专用命令，动作固定为 SET_PRIMARY。"""
+
+    action: Literal["SET_PRIMARY"] = "SET_PRIMARY"
+
+
+class MoveWorkingCopyInput(ExplicitClassificationPlacementInput):
+    """MCP 受控目录或跨分类移动的专用命令，动作固定为 MOVE。"""
+
+    action: Literal["MOVE"] = "MOVE"
+
+
 def conversation_id_for_workbuddy(conversation_ref: str) -> str:
     """把外部会话引用映射成稳定内部 ID，不暴露或信任宿主原始主键格式。"""
 

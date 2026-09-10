@@ -778,6 +778,8 @@ class TwoStageFileSearchService:
                     "managed_file_id": c.get("managed_file_id"),
                     "document_id": c.get("document_id"),
                     "document_version_id": vid,
+                    # 此字段是只读并发令牌，供明确分类落位提交冻结当前工作副本。
+                    "revision": c.get("revision"),
                     "filename": c.get("filename", ""),
                     # 逻辑路径只用于用户区分同名文件，绝不能替换为容器绝对路径。
                     "root_key": c.get("root_key"),

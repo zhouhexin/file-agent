@@ -132,6 +132,7 @@ def test_search_api_returns_shared_workspace_safe_file_projection():
         owner_document_id,
         other_document_id,
     }
+    assert all(item["revision"] == 1 for item in payload["files"])
     assert all(
         {"search_text", "score", "tool_name", "absolute_path"}.isdisjoint(item)
         for item in payload["files"]
