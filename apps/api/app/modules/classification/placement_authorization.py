@@ -45,6 +45,7 @@ _EXECUTION_PATTERNS = {
         re.compile(r"(?:接受|确认).{0,20}(?:主分类|分类)"),
         re.compile(r"(?:主分类|分类).{0,16}(?:是对的|正确|没问题)"),
         re.compile(r"(?:这个|该).{0,12}(?:是对的|正确|没问题)"),
+        re.compile(r"重新分类.{0,80}(?:整理|移动|归位)"),
     ),
     PlacementAction.MOVE: (
         re.compile(r"(?:移动到|移入|挪到|放到|归位到).+"),

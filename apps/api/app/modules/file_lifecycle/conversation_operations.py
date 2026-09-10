@@ -123,6 +123,7 @@ class ConversationalWorkingCopyPlanService:
             elif action == "MOVE_AFTER_AUTO_RECLASSIFICATION":
                 outcome = self._create_auto_reclassification_move_plan(
                     user=user,
+                    message=message,
                     document_ids=document_ids,
                     conversation_id=conversation_id,
                     agent_run_id=agent_run_id,
@@ -249,11 +250,12 @@ class ConversationalWorkingCopyPlanService:
         self,
         *,
         user: User,
+        message: str,
         document_ids: list[str],
         conversation_id: str,
         agent_run_id: str,
     ):
-        """比较本次重新分类与正式主分类，达标时生成并直接执行移动计划。"""
+        """比较本次重新分类与正式主分类，达标时受理同一异步落位协调器。"""
 
         settings = get_settings()
         copies = self._resolve_working_copies(
@@ -265,7 +267,7 @@ class ConversationalWorkingCopyPlanService:
 
         policy = AutoPlacementPolicy(settings)
         repository = OrganizationDecisionRepository(self.db)
-        changed_document_ids: list[str] = []
+        pending_targets: list[tuple[WorkingCopy, DocumentCategorySuggestion]] = []
         details: list[dict[str, Any]] = []
         for working_copy in copies:
             classification_run = (
@@ -418,44 +420,15 @@ class ConversationalWorkingCopyPlanService:
                 )
                 continue
 
-            new_relation, ended_relations = repository.replace_auto_applied_primary(
-                working_copy=working_copy,
-                classification_run=classification_run,
-                suggestion=primary_suggestion,
-            )
-            self._audit_auto_reclassification(
-                user=user,
-                agent_run_id=agent_run_id,
-                new_relation=new_relation,
-                ended_relations=ended_relations,
-                confidence=policy_result.calibrated_confidence,
-            )
-            repository.create_or_update_decision(
-                working_copy=working_copy,
-                classification_run=classification_run,
-                primary_suggestion=primary_suggestion,
-                policy_result=policy_result,
-                policy_version=settings.auto_classification_policy_version,
-                calibration_version=settings.auto_classification_calibration_version,
-                decision=(
-                    "DIRECT_MOVE_AUTHORIZED"
-                    if target_relative_path != working_copy.relative_path
-                    else "AUTO_RECLASSIFIED"
-                ),
-                reason_codes=[],
-                target_relative_path=target_relative_path,
-                decision_scope=f"reclassification:{agent_run_id}",
-            )
-            if target_relative_path != working_copy.relative_path:
-                changed_document_ids.append(working_copy.document_id)
-                item_status = "MOVE_REQUIRED"
-            else:
-                item_status = "AUTO_RECLASSIFIED"
+            # 不得先替换正式 PRIMARY 再创建旧 MOVE 计划。用户本轮“重新分类并整理”
+            # 的明确请求只授权创建冻结 SET_PRIMARY 操作；关系和路径由 worker 事务 B
+            # 一起提交，失败时旧 PRIMARY 保持有效。
+            pending_targets.append((working_copy, primary_suggestion))
             details.append(
                 {
                     "document_id": working_copy.document_id,
                     "filename": working_copy.filename,
-                    "status": item_status,
+                    "status": "PLACEMENT_PENDING",
                     "previous_category_id": (
                         previous.category_id if previous is not None else None
                     ),
@@ -464,24 +437,20 @@ class ConversationalWorkingCopyPlanService:
                 }
             )
 
-        if not changed_document_ids:
+        if not pending_targets:
             return {
                 "ok": True,
                 "kind": "auto_reclassification_no_move",
                 "status": "COMPLETED",
                 "item_count": 0,
                 "suggestions": details,
-                "message": "重新分类已完成，没有需要移动的文件。",
+                "message": "重新分类没有产生需要应用的主分类变更。",
             }
-        return self._create_category_move_plan(
+        return self._submit_auto_reclassification_placements(
             user=user,
-            document_ids=changed_document_ids,
+            targets=pending_targets,
             conversation_id=conversation_id,
             agent_run_id=agent_run_id,
-            reason=(
-                "重新分类结果达到自动分类标准且与原分类不同；"
-                "已按本次重新分类指令直接移动共享工作副本"
-            ),
         )
 
     @staticmethod
@@ -754,6 +723,78 @@ class ConversationalWorkingCopyPlanService:
             "file_position_changed": False,
             "requires_confirmation": False,
             "message": "已受理按确认分类整理，正在处理工作副本目录。",
+        }
+
+    def _submit_auto_reclassification_placements(
+        self,
+        *,
+        user: User,
+        targets: list[tuple[WorkingCopy, DocumentCategorySuggestion]],
+        conversation_id: str,
+        agent_run_id: str,
+    ) -> dict[str, Any]:
+        """为已通过质量策略的重分类建议受理冻结 SET_PRIMARY 操作。
+
+        用户消息已经由当前 AgentRun 固定；每项保留当前 revision、版本和 taxonomy
+        快照，不能把自动分类结果先写入 ``DocumentCategory`` 再补移动。
+        """
+
+        run = self.db.get(AgentRun, agent_run_id)
+        message_record = self.db.get(Message, run.message_id) if run is not None else None
+        if (
+            run is None
+            or message_record is None
+            or message_record.user_id != user.id
+            or message_record.conversation_id != conversation_id
+            or message_record.role != "user"
+        ):
+            return _error("AUTHORIZATION_SOURCE_NOT_FOUND", "找不到当前用户的原始重新分类请求。")
+        taxonomy = load_default_taxonomy()
+        submissions: list[dict[str, Any]] = []
+        for working_copy, suggestion in targets:
+            if suggestion.taxonomy_version != taxonomy.version:
+                return _error("TAXONOMY_VERSION_STALE", "分类目录已更新，请重新分类后再整理。")
+            try:
+                command = PlacementCommand(
+                    working_copy_id=working_copy.id,
+                    action=PlacementAction.SET_PRIMARY,
+                    expected_revision=working_copy.revision,
+                    expected_document_version_id=working_copy.current_version_id,
+                    target_category_id=suggestion.category_id,
+                    taxonomy_version=taxonomy.version,
+                    idempotency_key=(
+                        f"conversation-auto-reclassification:{agent_run_id}:{working_copy.id}"
+                    ),
+                )
+                authorization = PlacementAuthorizationService(self.db).authorize_chat_message(
+                    command=command,
+                    current_user=user,
+                    message_id=run.message_id,
+                    workspace_id=working_copy.workspace_id,
+                    client_id="classification-chat",
+                    request_id=run.id,
+                )
+                submission = ClassificationPlacementService(self.db).submit(
+                    command=command,
+                    authorization=authorization,
+                )
+            except PlacementAuthorizationError as exc:
+                return _error(exc.code, str(exc))
+            except PlacementServiceError as exc:
+                return _error(exc.code, str(exc))
+            submissions.append(submission.as_dict())
+        return {
+            "ok": True,
+            "kind": "classification_placement_submission",
+            "status": "PREPARED",
+            "item_count": len(submissions),
+            "items": submissions,
+            "operation_id": submissions[0]["operation_id"] if len(submissions) == 1 else None,
+            "placement_operation_id": submissions[0]["operation_id"] if len(submissions) == 1 else None,
+            "placement_status": "PENDING",
+            "file_position_changed": False,
+            "requires_confirmation": False,
+            "message": "已受理重新分类后的目录整理，正在处理工作副本。",
         }
 
     def _create_category_move_plan(

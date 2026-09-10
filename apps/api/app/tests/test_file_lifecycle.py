@@ -3072,10 +3072,23 @@ def test_auto_reclassification_change_moves_without_second_confirmation(
             .one()
         )
         taxonomy = load_default_taxonomy()
+        conversation = Conversation(
+            id="44444444-4444-4444-8444-444444444444",
+            user_id=user.id,
+            title="重新分类整理测试",
+        )
+        message = Message(
+            id="abababab-abab-4bab-8bab-abababababab",
+            conversation_id=conversation.id,
+            user_id=user.id,
+            role="user",
+            content="重新分类这个文件，并在分类变化时整理位置",
+            attachments_json=[],
+        )
         run = AgentRun(
             id="44444444-4444-4444-8444-444444444444",
-            conversation_id="auto-reclassification-conversation",
-            message_id="auto-reclassification-message",
+            conversation_id=conversation.id,
+            message_id=message.id,
             user_id=user.id,
         )
         classification_run = DocumentClassificationRun(
@@ -3131,7 +3144,7 @@ def test_auto_reclassification_change_moves_without_second_confirmation(
             classifier_version="previous-classifier",
             source="auto_placement_policy",
         )
-        db.add_all([run, classification_run, suggestion, old_relation])
+        db.add_all([conversation, message, run, classification_run, suggestion, old_relation])
         db.commit()
 
         executed = ToolRegistry(db=db, user_id=user.id).invoke(
@@ -3145,8 +3158,14 @@ def test_auto_reclassification_change_moves_without_second_confirmation(
             },
         )
 
-        assert executed.output_json["status"] == "EXECUTED"
-        assert executed.output_json["file_position_changed"] is True
+        assert executed.output_json["status"] == "PREPARED"
+        assert executed.output_json["file_position_changed"] is False
+        assert executed.output_json["placement_operation_id"]
+        assert db.query(OperationConfirmation).count() == 0
+        db.refresh(old_relation)
+        assert old_relation.status == "AUTO_APPLIED"
+        db.commit()
+        _drain(SessionLocal)
         current_copy = db.get(WorkingCopy, working_copy["id"])
         assert current_copy.relative_path != original_path
         db.refresh(old_relation)
@@ -3155,7 +3174,7 @@ def test_auto_reclassification_change_moves_without_second_confirmation(
             db.query(DocumentCategory)
             .filter(
                 DocumentCategory.working_copy_id == working_copy["id"],
-                DocumentCategory.status == "AUTO_APPLIED",
+                DocumentCategory.status == "CONFIRMED",
             )
             .one()
         )
