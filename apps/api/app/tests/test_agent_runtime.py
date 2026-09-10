@@ -123,6 +123,8 @@ def test_tool_registry_contains_mvp_catalog_and_endpoint_requires_authentication
     assert "job-status-read" not in tool_names
     assert "document-lineage-read" not in tool_names
     assert "working-copy-action-plan-create" in tool_names
+    assert "working-copy-placement-submit" in tool_names
+    assert "working-copy-placement-status" in tool_names
     # 未接真实持久化服务的旧占位入口不得继续出现在可调用白名单中。
     assert "operation-plan-create" not in tool_names
     assert "change-report" not in tool_names

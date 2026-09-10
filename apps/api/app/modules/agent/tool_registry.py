@@ -19,6 +19,8 @@ from pydantic import BaseModel, ValidationError
 from app.core.config import get_settings
 from app.core.logging import format_exception_traceback, log_event
 from app.db.models import (
+    AgentRun,
+    ClassificationPlacementOperation,
     Document,
     DocumentInsight,
     User,
@@ -48,6 +50,7 @@ from app.modules.agent.tool_contracts import (
     SpreadsheetToolOutput,
     StructuredExtractionToolOutput,
     ToolOutputValidationError,
+    WorkingCopyPlacementToolOutput,
     WorkspaceFileSearchToolOutput,
 )
 from app.modules.agent.tool_schemas import (
@@ -78,6 +81,8 @@ from app.modules.agent.tool_schemas import (
     StructuredImageExtractionInput,
     ToolInputValidationError,
     WorkingCopyActionPlanInput,
+    WorkingCopyPlacementStatusInput,
+    WorkingCopyPlacementSubmitInput,
 )
 from app.modules.classification.taxonomy_service import read_default_taxonomy_catalog
 from app.modules.classification.evidence_reader import (
@@ -85,6 +90,15 @@ from app.modules.classification.evidence_reader import (
 )
 from app.modules.classification.conversation_decision import (
     ConversationalClassificationDecisionService,
+)
+from app.modules.classification.placement_authorization import (
+    PlacementAuthorizationError,
+    PlacementAuthorizationService,
+)
+from app.modules.classification.placement_schemas import PlacementCommand
+from app.modules.classification.placement_service import (
+    ClassificationPlacementService,
+    PlacementServiceError,
 )
 from app.modules.chunks.service import DocumentIndexService
 from app.modules.files.extraction_repository import FileExtractionRepository
@@ -330,6 +344,7 @@ class ToolRegistry:
             status=status,
             changeset_id=output.get("changeset_id"),
             operation_plan_id=output.get("operation_plan_id"),
+            placement_operation_id=output.get("placement_operation_id"),
         )
 
 
@@ -2745,6 +2760,137 @@ def _classification_decision_handler(db: Any, user_id: str | None) -> ToolHandle
     return handler
 
 
+def _working_copy_placement_submit_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """从真实 AgentRun 消息核验授权后受理单个分类落位。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """拒绝 LLM 自报授权，只读取 dispatcher 注入的运行身份和数据库消息。"""
+
+        if db is None:
+            return _placement_tool_error("DB_REQUIRED", "提交分类落位需要数据库会话。")
+        if user_id is None:
+            return _placement_tool_error("AUTH_REQUIRED", "提交分类落位需要当前用户。")
+        current_user = db.get(User, user_id)
+        agent_run_id = str(getattr(tool_input, "agent_run_id", ""))
+        run = db.get(AgentRun, agent_run_id)
+        if (
+            current_user is None
+            or run is None
+            or run.user_id != user_id
+            or run.conversation_id != str(getattr(tool_input, "conversation_id", ""))
+        ):
+            return _placement_tool_error("AGENT_RUN_SCOPE_INVALID", "分类落位与当前对话范围不一致。")
+        try:
+            command = PlacementCommand.model_validate(
+                {
+                    key: value
+                    for key, value in tool_input.model_dump().items()
+                    if key not in {"conversation_id", "agent_run_id"}
+                }
+            )
+            authorization = PlacementAuthorizationService(db).authorize_chat_message(
+                command=command,
+                current_user=current_user,
+                message_id=run.message_id,
+                workspace_id=_working_copy_workspace_id(db, str(command.working_copy_id)),
+                client_id="agent-runtime",
+                request_id=run.id,
+            )
+            submission = ClassificationPlacementService(db).submit(
+                command=command,
+                authorization=authorization,
+                # Graph dispatcher 持久化本次 ToolInvocation，避免与服务内部审计重复。
+                record_tool_invocation=False,
+            )
+            operation = db.get(ClassificationPlacementOperation, submission.operation_id)
+            return {
+                "ok": True,
+                "kind": "classification_placement_submission",
+                "status": submission.status,
+                "operation_id": submission.operation_id,
+                "placement_operation_id": submission.operation_id,
+                "working_copy_id": submission.working_copy_id,
+                "placement_status": submission.placement_status,
+                "effective_primary": submission.effective_primary,
+                "pending_primary": submission.pending_primary,
+                "file_position_changed": None,
+                "requires_confirmation": False,
+                "operation_plan_id": operation.operation_plan_id if operation is not None else None,
+                "changeset_id": operation.changeset_id if operation is not None else None,
+            }
+        except PlacementAuthorizationError as exc:
+            return _placement_tool_error(exc.code, str(exc))
+        except PlacementServiceError as exc:
+            return _placement_tool_error(exc.code, str(exc))
+        except ValueError as exc:
+            return _placement_tool_error("PLACEMENT_INPUT_INVALID", str(exc))
+
+    return handler
+
+
+def _working_copy_placement_status_handler(db: Any, user_id: str | None) -> ToolHandler:
+    """读取当前用户拥有的分类落位进度，不触发移动或分类写入。"""
+
+    def handler(tool_input: BaseModel) -> Dict[str, Any]:
+        """按 actor 和 workspace 隐藏其他用户操作是否存在。"""
+
+        if db is None:
+            return _placement_tool_error("DB_REQUIRED", "查询分类落位状态需要数据库会话。")
+        if user_id is None:
+            return _placement_tool_error("AUTH_REQUIRED", "查询分类落位状态需要当前用户。")
+        operation = db.get(ClassificationPlacementOperation, str(getattr(tool_input, "operation_id")))
+        if operation is None or operation.actor_user_id != user_id:
+            return _placement_tool_error("PLACEMENT_NOT_FOUND", "分类落位操作不存在。")
+        result = dict(operation.result_json or {})
+        placement_status = str(
+            result.get("placement_status")
+            or {
+                "EXECUTING": "APPLYING",
+                "FS_APPLIED": "RECONCILING",
+                "RECONCILING": "RECONCILING",
+                "FAILED": "ERROR",
+            }.get(operation.state, "PENDING")
+        )
+        return {
+            "ok": True,
+            "kind": "classification_placement_status",
+            "status": operation.state,
+            "operation_id": operation.id,
+            "placement_operation_id": operation.id,
+            "working_copy_id": operation.working_copy_id,
+            "placement_status": placement_status,
+            "effective_primary": result.get("effective_primary"),
+            "pending_primary": result.get("pending_primary"),
+            "file_position_changed": result.get("file_position_changed"),
+            "requires_confirmation": False,
+            "operation_plan_id": operation.operation_plan_id,
+            "changeset_id": operation.changeset_id,
+        }
+
+    return handler
+
+
+def _working_copy_workspace_id(db: Any, working_copy_id: str) -> str:
+    """读取冻结对象所属 workspace，禁止 Tool 输入指定跨工作区身份。"""
+
+    working_copy = db.get(WorkingCopy, working_copy_id)
+    if working_copy is None or working_copy.status != "ACTIVE":
+        raise PlacementServiceError("WORKING_COPY_NOT_FOUND", "活动工作副本不存在")
+    return str(working_copy.workspace_id)
+
+
+def _placement_tool_error(code: str, message: str) -> Dict[str, Any]:
+    """返回可持久化的落位失败摘要，不泄露绝对路径或授权快照。"""
+
+    return {
+        "ok": False,
+        "kind": "classification_placement",
+        "status": "FAILED",
+        "error": {"code": code, "message": message},
+        "requires_confirmation": False,
+    }
+
+
 def _managed_file_read_document_handler(db: Any, user_id: str | None) -> ToolHandler:
     """创建读取受管文件正文的 Tool handler。"""
 
@@ -3910,7 +4056,9 @@ def _build_mvp_tools(
         _tool("classify-managed-files", "Snapshot, extract and classify files selected from a server managed directory.", ManagedFileClassificationInput, True, False, ["documents", "file_objects", "document_extraction_runs", "document_pages", "document_classification_runs", "document_category_suggestions", "change_sets", "change_items"], _managed_file_classification_handler(db, user_id), output_model=ManagedFileReadToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
         _tool("generate-rename-suggestions", "Resolve uploaded attachments or managed-original scope to working copies, then persist controlled rename suggestions without changing original files.", GenerateRenameSuggestionsInput, True, False, ["document_pages", "operation_plans"], _generate_rename_suggestions_handler(db, user_id), output_model=OperationPlanToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
         _tool("resolve-rename-reviews", "Resolve pending rename reviews from explicit user corrections and immediately execute a confirmed OperationPlan.", ResolveRenameReviewsInput, True, False, ["operation_plans", "operation_confirmations", "change_sets", "change_items"], _resolve_rename_reviews_handler(db, user_id)),
-        _tool("classification-decision", "Accept, reject, or correct one backend-resolved classification suggestion and persist the formal shared-file relation.", ClassificationDecisionInput, True, False, ["document_category_feedback", "document_categories", "document_category_confirmation_sources", "change_sets", "change_items", "classification_graph_outbox"], _classification_decision_handler(db, user_id), output_model=ClassificationDecisionToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
+        _tool("classification-decision", "Record a backend-resolved classification decision; PRIMARY accepts or corrections submit the audited asynchronous placement coordinator, while auxiliary feedback remains file-position read-only.", ClassificationDecisionInput, True, False, ["document_category_feedback", "document_categories", "document_category_confirmation_sources", "change_sets", "change_items", "classification_graph_outbox", "classification_placement_operations"], _classification_decision_handler(db, user_id), output_model=ClassificationDecisionToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
+        _tool("working-copy-placement-submit", "Submit one backend-resolved PRIMARY category or controlled directory placement after validating the real user message; accepted means asynchronous processing, not completed movement.", WorkingCopyPlacementSubmitInput, True, False, ["operation_plans", "classification_placement_operations", "filesystem_jobs", "tool_invocations", "change_sets", "working_copy_path_reservations"], _working_copy_placement_submit_handler(db, user_id), output_model=WorkingCopyPlacementToolOutput, adaptive_ready=False, observation_policy="PLANNER_AFTER_EXECUTION"),
+        _tool("working-copy-placement-status", "Read the current user's persisted classification placement progress without writing classifications or files.", WorkingCopyPlacementStatusInput, False, False, [], _working_copy_placement_status_handler(db, user_id), output_model=WorkingCopyPlacementToolOutput, adaptive_ready=False, observation_policy="PLANNER_AFTER_EXECUTION"),
         _tool("working-copy-action-plan-create", "Create a controlled working-copy OperationPlan from conversation context; an explicit classify, reclassify, or organize-by-classification instruction authorizes immediate audited movement, while unrelated high-risk actions remain pending confirmation.", WorkingCopyActionPlanInput, True, False, ["operation_plans", "operation_confirmations", "working_copy_path_records", "working_copies", "document_versions", "document_categories", "document_organization_decisions", "change_sets", "change_items", "classification_graph_outbox"], _working_copy_action_plan_handler(db, user_id), output_model=OperationPlanToolOutput, adaptive_ready=True, observation_policy="PLANNER_AFTER_EXECUTION"),
         _tool("managed-root-scan", "Create an async scan job for a managed logical root.", ManagedRootScanInput, True, False, ["filesystem_jobs", "filesystem_job_events"], _managed_root_scan_handler(db, user_id)),
         _tool("mcp-filesystem-list", "List files and directories in the server managed filesystem root without database scan.", MCPFilesystemListInput, False, False, [], _mcp_filesystem_list_handler()),

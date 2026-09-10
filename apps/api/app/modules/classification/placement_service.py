@@ -21,6 +21,10 @@ from app.db.models import (
     ClassificationGraphOutbox,
     ClassificationPlacementOperation,
     DocumentCategory,
+    DocumentCategoryConfirmationSource,
+    DocumentCategoryFeedback,
+    DocumentCategorySuggestion,
+    DocumentClassificationRun,
     DocumentOrganizationDecision,
     DocumentVersion,
     FileObject,
@@ -126,10 +130,14 @@ class ClassificationPlacementService:
         *,
         command: PlacementCommand,
         authorization: PlacementAuthorizationContext,
+        feedback_context: dict[str, Any] | None = None,
+        record_tool_invocation: bool = True,
     ) -> PlacementSubmission:
         """事务 A：冻结授权、源身份、目标目录并创建 plan/operation/job。
 
         该方法不移动文件；调用方提交当前数据库事务后，文件 worker 才能看到任务。
+        ``feedback_context`` 仅允许服务端反馈入口传入，用于事务 B 绑定真实反馈，
+        不能作为 HTTP/MCP 命令字段暴露。
         """
 
         if authorization.authorization_mode != PlacementAuthorizationMode.EXPLICIT_REQUEST:
@@ -202,6 +210,11 @@ class ClassificationPlacementService:
                     "OTHER" if target.category_id == "system.other" else "CLASSIFIED"
                 ),
                 "selection_basis": "EXPLICIT_REQUEST",
+                **(
+                    {"feedback_context": _normalize_feedback_context(feedback_context)}
+                    if feedback_context is not None
+                    else {}
+                ),
             },
         )
         try:
@@ -247,26 +260,27 @@ class ClassificationPlacementService:
             payload={"placement_operation_id": operation.id},
         )
         operation.job_id = job.id
-        invocation = ToolInvocation(
-            agent_run_id=None,
-            placement_operation_id=operation.id,
-            tool_name="working-copy-placement-submit",
-            input_json={
-                "working_copy_id": working_copy.id,
-                "action": command.action.value,
-                "expected_revision": command.expected_revision,
-                "expected_document_version_id": str(command.expected_document_version_id),
-                "target_category_id": target.category_id,
-                "taxonomy_version": command.taxonomy_version,
-                "idempotency_key": command.idempotency_key,
-            },
-            output_json={"operation_id": operation.id, "status": "PREPARED", "job_id": job.id},
-            status="COMPLETED",
-            changeset_id=changeset.id,
-            operation_plan_id=plan.id,
-            finished_at=utcnow(),
-        )
-        self.db.add(invocation)
+        if record_tool_invocation:
+            invocation = ToolInvocation(
+                agent_run_id=None,
+                placement_operation_id=operation.id,
+                tool_name="working-copy-placement-submit",
+                input_json={
+                    "working_copy_id": working_copy.id,
+                    "action": command.action.value,
+                    "expected_revision": command.expected_revision,
+                    "expected_document_version_id": str(command.expected_document_version_id),
+                    "target_category_id": target.category_id,
+                    "taxonomy_version": command.taxonomy_version,
+                    "idempotency_key": command.idempotency_key,
+                },
+                output_json={"operation_id": operation.id, "status": "PREPARED", "job_id": job.id},
+                status="COMPLETED",
+                changeset_id=changeset.id,
+                operation_plan_id=plan.id,
+                finished_at=utcnow(),
+            )
+            self.db.add(invocation)
         plan.plan_json = {
             **dict(plan.plan_json or {}),
             "items": [
@@ -546,8 +560,13 @@ class ClassificationPlacementService:
         if not target_identity.matches(actual_target) or not expected_identity.matches(actual_target):
             raise PlacementServiceError("PLACEMENT_RECONCILIATION_REQUIRED", "目标文件身份已变化")
 
+        feedback, suggestion = self._resolve_feedback_context(operation=operation)
         existing_primary = self._active_primary(working_copy)
-        relation_changed = existing_primary is None or existing_primary.category_id != operation.target_category_id
+        relation_changed = (
+            existing_primary is None
+            or existing_primary.category_id != operation.target_category_id
+        )
+        source_changed = False
         path_changed = working_copy.relative_path != operation.target_relative_path
         if relation_changed:
             now = utcnow()
@@ -571,6 +590,11 @@ class ClassificationPlacementService:
             category_path = list(
                 (operation.decision_snapshot_json or {}).get("category_path") or []
             )
+            classification_run = (
+                self.db.get(DocumentClassificationRun, suggestion.classification_run_id)
+                if suggestion is not None
+                else None
+            )
             new_primary = DocumentCategory(
                 working_copy_id=working_copy.id,
                 document_id=working_copy.document_id,
@@ -581,15 +605,49 @@ class ClassificationPlacementService:
                 status="CONFIRMED",
                 taxonomy_key=operation.taxonomy_key,
                 taxonomy_version=operation.taxonomy_version,
-                classifier_version="placement-service-v1",
-                source="placement_explicit_request",
-                evidence_json=[],
+                classifier_version=(
+                    classification_run.classifier_version
+                    if classification_run is not None
+                    else "placement-service-v1"
+                ),
+                source=("user_confirmed" if feedback is not None else "placement_explicit_request"),
+                source_suggestion_id=(suggestion.id if suggestion is not None else None),
+                evidence_json=(list(suggestion.evidence_json or []) if suggestion is not None else []),
             )
             self.db.add(new_primary)
             self.db.flush()
             self._enqueue_outbox(new_primary, source_key=f"placement-applied:{operation.id}")
         else:
             new_primary = existing_primary
+            if feedback is not None and suggestion is not None:
+                # 同类确认不能假装无事发生：AUTO_APPLIED 升级为人工确认，或新的
+                # 用户反馈成为该共享关系的可追溯来源，均属于一次真实元数据变更。
+                if (
+                    new_primary.status != "CONFIRMED"
+                    or new_primary.source != "user_confirmed"
+                    or new_primary.source_suggestion_id != suggestion.id
+                    or list(new_primary.evidence_json or []) != list(suggestion.evidence_json or [])
+                ):
+                    new_primary.status = "CONFIRMED"
+                    new_primary.source = "user_confirmed"
+                    new_primary.source_suggestion_id = suggestion.id
+                    new_primary.evidence_json = list(suggestion.evidence_json or [])
+                    new_primary.updated_at = utcnow()
+                    relation_changed = True
+                    self._enqueue_outbox(
+                        new_primary,
+                        source_key=f"placement-confirmed:{operation.id}",
+                    )
+
+        if feedback is not None and suggestion is not None and new_primary is not None:
+            source_changed = self._apply_feedback_confirmation_source(
+                relation=new_primary,
+                feedback=feedback,
+                suggestion=suggestion,
+                actor_user_id=operation.actor_user_id,
+            )
+            feedback.application_status = "APPLIED"
+            feedback.placement_operation_id = operation.id
 
         version = self.db.get(DocumentVersion, working_copy.current_version_id)
         if version is None:
@@ -619,7 +677,7 @@ class ClassificationPlacementService:
                 raise PlacementServiceError("FILE_OBJECT_AMBIGUOUS", "当前工作副本文件对象不唯一")
             if file_objects:
                 file_objects[0].storage_path = version.storage_path
-        changed = relation_changed or path_changed
+        changed = relation_changed or path_changed or source_changed
         if changed:
             working_copy.revision += 1
         working_copy.placement_status = "IN_SYNC"
@@ -685,19 +743,23 @@ class ClassificationPlacementService:
         changeset = self.db.get(ChangeSet, operation.changeset_id)
         if changeset is None:
             raise PlacementServiceError("CHANGESET_MISSING", "分类落位缺少审计变更集")
-        if relation_changed:
+        if relation_changed or source_changed:
             self.db.add(
                 ChangeItem(
                     changeset_id=changeset.id,
                     target_type="document_category",
                     target_id=new_primary.id if new_primary else None,
                     target_document_id=working_copy.document_id,
-                    change_type="CATEGORY_ADDED",
+                    change_type=("CATEGORY_ADDED" if existing_primary is None else "CATEGORY_CONFIRMED"),
                     before_value_json=_relation_view(existing_primary) or {},
                     after_value_json=_relation_view(new_primary) or {},
-                    source="placement_explicit_request",
+                    source=("placement_feedback" if feedback is not None else "placement_explicit_request"),
                     confidence=1.0,
-                    evidence_json={},
+                    evidence_json=(
+                        {"source_suggestion_id": suggestion.id}
+                        if suggestion is not None
+                        else {}
+                    ),
                     execution_status="COMPLETED",
                 )
             )
@@ -718,7 +780,11 @@ class ClassificationPlacementService:
                 )
             )
         changeset.status = "COMPLETED"
-        changeset.summary = "主分类和工作副本目录已同步更新。" if changed else "目标主分类和目录已一致，无需变更。"
+        changeset.summary = (
+            "主分类、确认来源和工作副本目录已同步更新。"
+            if changed
+            else "目标主分类、确认来源和目录已一致，无需变更。"
+        )
         plan = self.db.get(OperationPlan, operation.operation_plan_id)
         if plan is not None:
             plan.status = "EXECUTED"
@@ -736,6 +802,9 @@ class ClassificationPlacementService:
             "original_unchanged": True,
             "index_status": "READY",
             "requires_confirmation": False,
+            "feedback_application_status": (
+                feedback.application_status if feedback is not None else None
+            ),
         }
         operation.state = "COMMITTED"
         operation.result_json = result
@@ -757,6 +826,89 @@ class ClassificationPlacementService:
         DocumentSearchProfileService(db=self.db).upsert_current_profile(working_copy.id)
         self.db.commit()
         return result
+
+    def _resolve_feedback_context(
+        self,
+        *,
+        operation: ClassificationPlacementOperation,
+    ) -> tuple[DocumentCategoryFeedback | None, DocumentCategorySuggestion | None]:
+        """读取并校验由事务 A 冻结的真实反馈关联。
+
+        普通 API/MCP 的 SET_PRIMARY 没有 suggestion/feedback，必须返回空关联；
+        绝不能为它们补造一条反馈。来自建议的 PRIMARY 决定则必须保持 actor、工作
+        副本、版本、目标分类与冻结快照一致，防止 worker 把过期反馈应用到新版本。
+        """
+
+        context = dict((operation.decision_snapshot_json or {}).get("feedback_context") or {})
+        if not context:
+            return None, None
+        feedback_id = str(context.get("feedback_id") or "")
+        suggestion_id = str(context.get("suggestion_id") or "")
+        if not feedback_id or not suggestion_id:
+            raise PlacementServiceError("FEEDBACK_CONTEXT_INVALID", "分类反馈关联不完整")
+        feedback = (
+            self.db.query(DocumentCategoryFeedback)
+            .filter(DocumentCategoryFeedback.id == feedback_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        suggestion = self.db.get(DocumentCategorySuggestion, suggestion_id)
+        if feedback is None or suggestion is None:
+            raise PlacementServiceError("FEEDBACK_CONTEXT_INVALID", "分类反馈或建议已不存在")
+        if (
+            feedback.user_id != operation.actor_user_id
+            or feedback.working_copy_id != operation.working_copy_id
+            or feedback.document_version_id != operation.expected_document_version_id
+            or feedback.suggestion_id != suggestion.id
+            or suggestion.document_version_id != operation.expected_document_version_id
+            or str(context.get("relation_role")) != "PRIMARY"
+            or str(context.get("target_category_id")) != operation.target_category_id
+            or feedback.application_status not in {"PENDING", "APPLIED"}
+            or feedback.placement_operation_id not in {None, operation.id}
+        ):
+            raise PlacementServiceError("FEEDBACK_CONTEXT_INVALID", "分类反馈已过期或与落位操作不一致")
+        return feedback, suggestion
+
+    def _apply_feedback_confirmation_source(
+        self,
+        *,
+        relation: DocumentCategory,
+        feedback: DocumentCategoryFeedback,
+        suggestion: DocumentCategorySuggestion,
+        actor_user_id: str,
+    ) -> bool:
+        """为当前用户写入或更新 PRIMARY 确认来源，返回是否发生实际变化。"""
+
+        existing_source = (
+            self.db.query(DocumentCategoryConfirmationSource)
+            .filter(
+                DocumentCategoryConfirmationSource.document_category_id == relation.id,
+                DocumentCategoryConfirmationSource.user_id == actor_user_id,
+                DocumentCategoryConfirmationSource.status == "ACTIVE",
+            )
+            .with_for_update()
+            .one_or_none()
+        )
+        if existing_source is None:
+            self.db.add(
+                DocumentCategoryConfirmationSource(
+                    document_category_id=relation.id,
+                    user_id=actor_user_id,
+                    feedback_id=feedback.id,
+                    suggestion_id=suggestion.id,
+                    status="ACTIVE",
+                )
+            )
+            self.db.flush()
+            return True
+        if (
+            existing_source.feedback_id == feedback.id
+            and existing_source.suggestion_id == suggestion.id
+        ):
+            return False
+        existing_source.feedback_id = feedback.id
+        existing_source.suggestion_id = suggestion.id
+        return True
 
     def _enqueue_outbox(self, relation: DocumentCategory, *, source_key: str) -> None:
         latest = int(
@@ -809,6 +961,20 @@ class ClassificationPlacementService:
         plan = self.db.get(OperationPlan, operation.operation_plan_id)
         if plan is not None:
             plan.status = "FAILED" if terminal else "EXECUTING"
+        feedback_context = dict(
+            (operation.decision_snapshot_json or {}).get("feedback_context") or {}
+        )
+        feedback_id = str(feedback_context.get("feedback_id") or "")
+        if terminal and feedback_id:
+            feedback = self.db.get(DocumentCategoryFeedback, feedback_id)
+            if (
+                feedback is not None
+                and feedback.placement_operation_id == operation.id
+                and feedback.application_status == "PENDING"
+            ):
+                # 文件动作终态失败时保留“已收到但未应用”的真实反馈事实，不能将
+                # 尚未生效的目标投影为 PRIMARY。
+                feedback.application_status = "FAILED"
         self.db.commit()
 
 
@@ -822,3 +988,23 @@ def _relation_view(relation: DocumentCategory | None) -> dict[str, Any] | None:
         "category_path": list(relation.category_path_json or []),
         "status": relation.status,
     }
+
+
+def _normalize_feedback_context(value: dict[str, Any]) -> dict[str, str]:
+    """只冻结反馈绑定所需的稳定 ID，拒绝把任意请求内容写入操作快照。"""
+
+    required = {
+        "feedback_id",
+        "suggestion_id",
+        "action",
+        "relation_role",
+        "target_category_id",
+    }
+    normalized = {key: str(value.get(key) or "").strip() for key in required}
+    if not all(normalized.values()):
+        raise PlacementServiceError("FEEDBACK_CONTEXT_INVALID", "分类反馈关联不完整")
+    if normalized["action"] not in {"ACCEPTED", "CORRECTED"}:
+        raise PlacementServiceError("FEEDBACK_CONTEXT_INVALID", "分类反馈动作不支持主类落位")
+    if normalized["relation_role"] != "PRIMARY":
+        raise PlacementServiceError("FEEDBACK_CONTEXT_INVALID", "分类反馈不是主类决定")
+    return normalized

@@ -209,6 +209,18 @@ class ClassificationDecisionToolOutput(GenericToolOutput):
     document_id: str | None = None
 
 
+class WorkingCopyPlacementToolOutput(GenericToolOutput):
+    """分类落位提交或进度查询的受控回执。"""
+
+    kind: str | None = None
+    operation_id: str | None = None
+    working_copy_id: str | None = None
+    placement_status: str | None = None
+    effective_primary: dict[str, Any] | None = None
+    pending_primary: dict[str, Any] | None = None
+    file_position_changed: bool | None = None
+
+
 class SpreadsheetToolOutput(GenericToolOutput):
     """表格分析、Profile 和校验 Tool 的业务输出契约。"""
 

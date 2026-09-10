@@ -1324,6 +1324,7 @@ def _step_result(invocation: ToolInvocationRecord) -> Dict[str, Any]:
         "invocation_id": invocation.id,
         "changeset_id": invocation.changeset_id,
         "operation_plan_id": invocation.operation_plan_id,
+        "placement_operation_id": invocation.placement_operation_id,
     }
 
 
@@ -1340,6 +1341,7 @@ def _trusted_tool_input(
         "resolve-rename-reviews",
         "working-copy-action-plan-create",
         "classification-decision",
+        "working-copy-placement-submit",
         "classify-managed-files",
     }:
         tool_input["conversation_id"] = state["conversation_id"]

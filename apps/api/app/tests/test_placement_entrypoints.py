@@ -3,10 +3,21 @@
 from __future__ import annotations
 
 from app.db.models import (
+    AgentRun,
     ClassificationPlacementOperation,
+    Conversation,
+    DocumentCategory,
+    DocumentCategoryConfirmationSource,
+    DocumentCategoryFeedback,
+    DocumentCategorySuggestion,
+    DocumentClassificationRun,
+    Message,
     OperationConfirmation,
     OperationPlan,
+    User,
 )
+from app.modules.classification.loader import load_default_taxonomy
+from app.modules.agent.tool_registry import ToolRegistry
 from app.tests.helpers import client_with_database
 from app.tests.test_file_lifecycle import _auth, _configure, _drain, _upload
 
@@ -67,6 +78,7 @@ def test_http_set_primary_uses_direct_authorization_and_returns_real_status(monk
         assert db.query(OperationConfirmation).count() == 0
     finally:
         db.close()
+
 
     pending = client.get(
         f"/api/classification/placements/{submission['operation_id']}",
@@ -197,5 +209,127 @@ def test_http_placement_rejects_client_authorization_injection_before_writes(mon
     try:
         assert db.query(ClassificationPlacementOperation).count() == 0
         assert db.query(OperationPlan).count() == 0
+    finally:
+        db.close()
+
+
+def test_primary_feedback_is_received_before_worker_applies_relation_and_path(monkeypatch, tmp_path):
+    """PRIMARY 接受必须只受理反馈；worker 再原子应用关系、来源和目录。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, session_factory = client_with_database()
+    headers = _auth(client, "placement-feedback-owner")
+    _upload(client, headers, "反馈主分类材料.txt", b"feedback placement material")
+    _drain(session_factory)
+    working_copy = client.get("/api/working-copies", headers=headers).json()[0]
+
+    db = session_factory()
+    try:
+        user = db.query(User).filter(User.username == "placement-feedback-owner").one()
+        run_id = "77777777-7777-4777-8777-777777777777"
+        classification_run_id = "88888888-8888-4888-8888-888888888888"
+        suggestion_id = "99999999-9999-4999-8999-999999999999"
+        from app.db.models import AgentRun
+
+        taxonomy = load_default_taxonomy()
+        db.add_all(
+            [
+                AgentRun(
+                    id=run_id,
+                    conversation_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    message_id="placement-feedback-message",
+                    user_id=user.id,
+                ),
+                DocumentClassificationRun(
+                    id=classification_run_id,
+                    document_id=working_copy["document_id"],
+                    agent_run_id=run_id,
+                    taxonomy_key=taxonomy.key,
+                    taxonomy_version=taxonomy.version,
+                    classifier_version="placement-feedback-test",
+                ),
+                DocumentCategorySuggestion(
+                    id=suggestion_id,
+                    classification_run_id=classification_run_id,
+                    document_id=working_copy["document_id"],
+                    document_version_id=working_copy["current_version_id"],
+                    category_id="college.finance",
+                    category_name="学院/财务管理",
+                    category_path_json=["学院", "财务管理"],
+                    taxonomy_key=taxonomy.key,
+                    taxonomy_version=taxonomy.version,
+                    confidence=0.8,
+                    evidence_json=[{"type": "text_quote", "quote": "反馈分类测试"}],
+                    rank=1,
+                ),
+            ]
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    received = client.post(
+        f"/api/classification/suggestions/{suggestion_id}/feedback",
+        headers=headers,
+        json={
+            "action": "ACCEPT",
+            "relation_role": "PRIMARY",
+            "agent_run_id": run_id,
+            "idempotency_key": "feedback-primary-accept",
+        },
+    )
+
+    assert received.status_code == 200
+    received_body = received.json()
+    assert received_body["application_status"] == "PENDING"
+    assert received_body["placement_status"] == "PENDING"
+    assert received_body["file_position_changed"] is False
+    assert received_body["placement_operation_id"]
+
+    db = session_factory()
+    try:
+        feedback = db.get(DocumentCategoryFeedback, received_body["id"])
+        operation = db.get(
+            ClassificationPlacementOperation,
+            received_body["placement_operation_id"],
+        )
+        assert feedback is not None and feedback.application_status == "PENDING"
+        assert operation is not None and operation.state == "PREPARED"
+        assert db.get(OperationPlan, operation.operation_plan_id).status == "AUTHORIZED"
+        assert db.query(OperationConfirmation).count() == 0
+        assert db.query(DocumentCategoryConfirmationSource).count() == 0
+    finally:
+        db.close()
+
+    _drain(session_factory)
+
+    completed = client.get(
+        f"/api/classification/placement-operations/{received_body['placement_operation_id']}",
+        headers=headers,
+    )
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "COMMITTED"
+    assert completed.json()["result"]["file_position_changed"] is True
+
+    db = session_factory()
+    try:
+        feedback = db.get(DocumentCategoryFeedback, received_body["id"])
+        relation = (
+            db.query(DocumentCategory)
+            .filter(
+                DocumentCategory.working_copy_id == working_copy["id"],
+                DocumentCategory.relation_role == "PRIMARY",
+                DocumentCategory.status == "CONFIRMED",
+            )
+            .one()
+        )
+        source = db.query(DocumentCategoryConfirmationSource).one()
+        assert feedback.application_status == "APPLIED"
+        assert feedback.placement_operation_id == received_body["placement_operation_id"]
+        assert relation.category_id == "college.finance"
+        assert relation.source == "user_confirmed"
+        assert relation.source_suggestion_id == suggestion_id
+        assert source.feedback_id == feedback.id
+        assert source.suggestion_id == suggestion_id
     finally:
         db.close()

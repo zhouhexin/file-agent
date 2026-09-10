@@ -22,6 +22,7 @@ from app.db.models import (
     DocumentCategorySuggestion,
     DocumentClassificationRun,
     FileRenameReviewItem,
+    Message,
     TrashEntry,
     User,
     WorkingCopy,
@@ -29,6 +30,16 @@ from app.db.models import (
     utcnow,
 )
 from app.modules.classification.auto_placement_policy import AutoPlacementPolicy
+from app.modules.classification.loader import load_default_taxonomy
+from app.modules.classification.placement_authorization import (
+    PlacementAuthorizationError,
+    PlacementAuthorizationService,
+)
+from app.modules.classification.placement_schemas import PlacementAction, PlacementCommand
+from app.modules.classification.placement_service import (
+    ClassificationPlacementService,
+    PlacementServiceError,
+)
 from app.modules.classification.organization_repository import (
     OrganizationDecisionRepository,
 )
@@ -98,8 +109,9 @@ class ConversationalWorkingCopyPlanService:
                     agent_run_id=agent_run_id,
                 )
             elif action == "MOVE_BY_CONFIRMED_CATEGORY":
-                outcome = self._create_category_move_plan(
+                outcome = self._submit_confirmed_category_placements(
                     user=user,
+                    message=message,
                     document_ids=document_ids,
                     conversation_id=conversation_id,
                     agent_run_id=agent_run_id,
@@ -161,10 +173,7 @@ class ConversationalWorkingCopyPlanService:
             return _error(f"WORKING_COPY_PLAN_{exc.status_code}", str(exc.detail))
         except ValueError as exc:
             return _error("WORKING_COPY_SCOPE_INVALID", str(exc))
-        if action in {
-            "MOVE_BY_CONFIRMED_CATEGORY",
-            "MOVE_AFTER_AUTO_RECLASSIFICATION",
-        }:
+        if action == "MOVE_AFTER_AUTO_RECLASSIFICATION":
             # 用户在当前消息中已经明确要求分类、重新分类或按分类整理，
             # 该指令本身就是本次归位授权；仍保留 OperationPlan、确认记录、
             # 路径快照和 ChangeSet，但不再要求用户发送第二条确认消息。
@@ -652,6 +661,100 @@ class ConversationalWorkingCopyPlanService:
         )
         plan.agent_run_id = agent_run_id
         return plan
+
+    def _submit_confirmed_category_placements(
+        self,
+        *,
+        user: User,
+        message: str,
+        document_ids: list[str],
+        conversation_id: str,
+        agent_run_id: str,
+    ) -> dict[str, Any]:
+        """把旧“按确认分类整理”入口转交异步 placement 协调器。
+
+        该兼容入口不再创建 ``MOVE_WORKING_COPIES`` 计划、更不伪造
+        ``OperationConfirmation``。每个已唯一解析的工作副本均冻结为独立操作；
+        当前实现仅在所有对象均可唯一解析时受理，避免旧入口把歧义或冲突静默移动。
+        """
+
+        run = self.db.get(AgentRun, agent_run_id)
+        message_record = self.db.get(Message, run.message_id) if run is not None else None
+        if (
+            run is None
+            or message_record is None
+            or message_record.user_id != user.id
+            or message_record.conversation_id != conversation_id
+            or message_record.role != "user"
+        ):
+            return _error("AUTHORIZATION_SOURCE_NOT_FOUND", "找不到当前用户的原始分类整理请求。")
+        copies = self._resolve_working_copies(
+            document_ids=document_ids,
+            workspace_id=get_shared_workspace_id(self.db),
+        )
+        if not copies:
+            return _error("WORKING_COPY_NOT_FOUND", "请明确选择要按分类整理的共享文件。")
+        taxonomy = load_default_taxonomy()
+        submissions: list[dict[str, Any]] = []
+        for working_copy in copies:
+            primary = (
+                self.db.query(DocumentCategory)
+                .filter(
+                    DocumentCategory.working_copy_id == working_copy.id,
+                    DocumentCategory.document_version_id == working_copy.current_version_id,
+                    DocumentCategory.relation_role == "PRIMARY",
+                    DocumentCategory.status.in_(["AUTO_APPLIED", "CONFIRMED"]),
+                )
+                .with_for_update()
+                .one_or_none()
+            )
+            if primary is None:
+                return _error(
+                    "PRIMARY_CATEGORY_NOT_FOUND",
+                    f"文件“{working_copy.filename}”尚未确认唯一主分类。",
+                )
+            if primary.taxonomy_version != taxonomy.version:
+                return _error("TAXONOMY_VERSION_STALE", "分类目录已更新，请刷新后重新整理。")
+            try:
+                command = PlacementCommand(
+                    working_copy_id=working_copy.id,
+                    action=PlacementAction.MOVE,
+                    expected_revision=working_copy.revision,
+                    expected_document_version_id=working_copy.current_version_id,
+                    target_category_id=primary.category_id,
+                    taxonomy_version=taxonomy.version,
+                    idempotency_key=f"conversation-category-move:{agent_run_id}:{working_copy.id}",
+                )
+                authorization = PlacementAuthorizationService(self.db).authorize_chat_message(
+                    command=command,
+                    current_user=user,
+                    message_id=run.message_id,
+                    workspace_id=working_copy.workspace_id,
+                    client_id="classification-chat",
+                    request_id=run.id,
+                )
+                submission = ClassificationPlacementService(self.db).submit(
+                    command=command,
+                    authorization=authorization,
+                )
+            except PlacementAuthorizationError as exc:
+                return _error(exc.code, str(exc))
+            except PlacementServiceError as exc:
+                return _error(exc.code, str(exc))
+            submissions.append(submission.as_dict())
+        return {
+            "ok": True,
+            "kind": "classification_placement_submission",
+            "status": "PREPARED",
+            "item_count": len(submissions),
+            "items": submissions,
+            "operation_id": submissions[0]["operation_id"] if len(submissions) == 1 else None,
+            "placement_operation_id": submissions[0]["operation_id"] if len(submissions) == 1 else None,
+            "placement_status": "PENDING",
+            "file_position_changed": False,
+            "requires_confirmation": False,
+            "message": "已受理按确认分类整理，正在处理工作副本目录。",
+        }
 
     def _create_category_move_plan(
         self,

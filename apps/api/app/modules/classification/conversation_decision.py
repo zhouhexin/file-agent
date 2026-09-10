@@ -23,14 +23,19 @@ from app.modules.classification.clarification_service import (
 )
 from app.modules.classification.decision_service import ClassificationDecisionService
 from app.modules.classification.feedback_schemas import ClassificationFeedbackRequest
+from app.modules.classification.placement_authorization import (
+    PlacementAuthorizationError,
+    PlacementAuthorizationService,
+)
+from app.modules.classification.primary_feedback_placement import (
+    PrimaryFeedbackPlacementService,
+)
+from app.modules.classification.placement_service import PlacementServiceError
 from app.modules.classification.loader import load_default_taxonomy
 from app.modules.classification.schemas import CategoryNode
 from app.modules.file_lifecycle.shared_access import (
     CanonicalWorkingFileError,
     CanonicalWorkingFileResolver,
-)
-from app.modules.file_lifecycle.conversation_operations import (
-    ConversationalWorkingCopyPlanService,
 )
 
 
@@ -137,30 +142,57 @@ class ConversationalClassificationDecisionService:
             agent_run_id=agent_run_id,
             idempotency_key=f"{agent_run_id}:{suggestion.id}:{action}:{target_category_id or ''}",
         )
+        if action in {"ACCEPT", "CORRECT"}:
+            # 接受/更正 PRIMARY 的自然语言入口必须回读真实用户消息；不能在
+            # Planner 的 Tool 参数里相信“已确认”或直接同步移动文件。
+            try:
+                response = PrimaryFeedbackPlacementService(self.db).submit(
+                    suggestion_id=suggestion.id,
+                    request=request,
+                    current_user=user,
+                    client_id="classification-chat",
+                    request_id=run.id,
+                    source_event_ref=f"message:{run.message_id}",
+                    conversation_id=conversation_id,
+                    authorization_factory=lambda command, workspace_id: PlacementAuthorizationService(
+                        self.db
+                    ).authorize_chat_message(
+                        command=command,
+                        current_user=user,
+                        message_id=run.message_id,
+                        workspace_id=workspace_id,
+                        client_id="classification-chat",
+                        request_id=run.id,
+                    ),
+                )
+            except (PlacementAuthorizationError, PlacementServiceError) as exc:
+                code = getattr(exc, "code", "CLASSIFICATION_PLACEMENT_FAILED")
+                return _error(str(code), str(exc))
+            return {
+                "ok": True,
+                "kind": "classification_decision",
+                "status": "PREPARED",
+                "feedback_id": response.id,
+                "working_copy_id": response.working_copy_id,
+                "document_id": response.document_id,
+                "document_version_id": response.document_version_id,
+                "action": response.action,
+                "changeset_id": response.changeset_id,
+                "file_position_changed": False,
+                "placement_operation_id": response.placement_operation_id,
+                "placement_status": response.placement_status,
+                "move_status": None,
+                "move_operation_plan_id": None,
+                "move_changeset_id": None,
+                "move_result": None,
+                "message": response.user_message,
+            }
+
+        # REJECT 与非 PRIMARY 关系仍是纯分类反馈，不得因为本次改造而移动文件。
         response = ClassificationDecisionService(self.db).decide(
             suggestion_id=suggestion.id,
             request=request,
             current_user=user,
-        )
-        move_result: dict[str, Any] | None = None
-        if action in {"ACCEPT", "CORRECT"}:
-            move_result = ConversationalWorkingCopyPlanService(
-                self.db,
-                user.id,
-            ).prepare(
-                action="MOVE_BY_CONFIRMED_CATEGORY",
-                message=message,
-                document_ids=[response.document_id],
-                conversation_id=conversation_id,
-                agent_run_id=agent_run_id,
-            )
-        file_position_changed = bool(
-            move_result and move_result.get("file_position_changed")
-        )
-        user_message = (
-            str(move_result.get("message") or "")
-            if move_result is not None
-            else response.user_message
         )
         return {
             "ok": True,
@@ -172,18 +204,12 @@ class ConversationalClassificationDecisionService:
             "document_version_id": response.document_version_id,
             "action": response.action,
             "changeset_id": response.changeset_id,
-            "file_position_changed": file_position_changed,
-            "move_status": (
-                str(move_result.get("status") or "") if move_result else None
-            ),
-            "move_operation_plan_id": (
-                move_result.get("operation_plan_id") if move_result else None
-            ),
-            "move_changeset_id": (
-                move_result.get("changeset_id") if move_result else None
-            ),
-            "move_result": move_result,
-            "message": user_message or response.user_message,
+            "file_position_changed": False,
+            "move_status": None,
+            "move_operation_plan_id": None,
+            "move_changeset_id": None,
+            "move_result": None,
+            "message": response.user_message,
         }
 
     def _collapse_explicit_correction_source(

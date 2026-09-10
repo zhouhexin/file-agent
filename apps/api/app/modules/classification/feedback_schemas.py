@@ -43,7 +43,7 @@ class ClassificationFeedbackRequest(BaseModel):
 
 
 class ClassificationFeedbackResponse(BaseModel):
-    """已持久化反馈及其样本含义。"""
+    """已持久化反馈及其样本含义和真实落位进度。"""
 
     id: str
     suggestion_id: str
@@ -58,6 +58,10 @@ class ClassificationFeedbackResponse(BaseModel):
     changeset_id: str | None = None
     file_position_changed: bool = False
     user_message: str = "分类决定已保存，文件位置未改变。"
+    # PRIMARY 接受/更正先进入受控异步落位；PENDING 不能解释为文件已移动。
+    application_status: str = "LEGACY"
+    placement_operation_id: str | None = None
+    placement_status: str | None = None
     created_at: datetime
 
 

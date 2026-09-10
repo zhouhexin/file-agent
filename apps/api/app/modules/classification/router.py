@@ -22,6 +22,9 @@ from app.modules.classification.clarification_service import (
     ClassificationClarificationService,
 )
 from app.modules.classification.feedback_service import ClassificationFeedbackService
+from app.modules.classification.primary_feedback_placement import (
+    PrimaryFeedbackPlacementService,
+)
 from app.modules.classification.taxonomy_service import read_default_taxonomy_catalog
 from app.modules.classification.loader import load_default_taxonomy
 from app.modules.classification.schemas import CategoryNode
@@ -332,16 +335,34 @@ def get_classification_taxonomy_options(
 def record_classification_feedback(
     suggestion_id: str,
     request: ClassificationFeedbackRequest,
+    http_request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ClassificationFeedbackResponse:
-    """原子保存明确反馈、正式分类、审计和图谱待办。"""
+    """保存明确反馈；PRIMARY 接受/更正异步落位，辅助关系保持既有反馈语义。"""
 
     settings = get_settings()
-    response = ClassificationFeedbackService(
-        db,
-        evaluation_min_samples=settings.graph_feedback_eval_min_samples,
-    ).record(suggestion_id=suggestion_id, request=request, current_user=current_user)
+    if request.relation_role == "PRIMARY" and request.action in {"ACCEPT", "CORRECT"}:
+        try:
+            response = PrimaryFeedbackPlacementService(db).submit(
+                suggestion_id=suggestion_id,
+                request=request,
+                current_user=current_user,
+                client_id="classification-feedback-api",
+                request_id=str(getattr(http_request.state, "request_id", "") or "classification-feedback-api"),
+                source_event_ref=(
+                    "classification-feedback:"
+                    f"{str(getattr(http_request.state, 'request_id', '') or 'classification-feedback-api')}"
+                ),
+            )
+        except PlacementServiceError as exc:
+            db.rollback()
+            raise _placement_http_exception(exc) from exc
+    else:
+        response = ClassificationFeedbackService(
+            db,
+            evaluation_min_samples=settings.graph_feedback_eval_min_samples,
+        ).record(suggestion_id=suggestion_id, request=request, current_user=current_user)
     db.commit()
     return response
 
@@ -386,10 +407,11 @@ def get_classification_clarification(
 def resolve_classification_clarification(
     clarification_id: str,
     request: ClassificationClarificationResolveRequest,
+    http_request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ClassificationFeedbackResponse:
-    """消费后端签发的分类选项，并调用与按钮相同的正式分类事务。"""
+    """消费后端签发选项；PRIMARY 选择直接受理落位而不追加二次确认。"""
 
     clarification_service = ClassificationClarificationService(db)
     try:
@@ -400,20 +422,38 @@ def resolve_classification_clarification(
         )
     except ClassificationClarificationError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    response = ClassificationFeedbackService(
-        db,
-        evaluation_min_samples=get_settings().graph_feedback_eval_min_samples,
-    ).record(
-        suggestion_id=selection.suggestion_id,
-        request=ClassificationFeedbackRequest(
-            action=selection.action,
-            corrected_category_id=selection.target_category_id,
-            relation_role=selection.relation_role,
-            agent_run_id=selection.agent_run_id,
-            idempotency_key=f"{clarification_id}:{request.option_id}",
-        ),
-        current_user=current_user,
+    feedback_request = ClassificationFeedbackRequest(
+        action=selection.action,
+        corrected_category_id=selection.target_category_id,
+        relation_role=selection.relation_role,
+        agent_run_id=selection.agent_run_id,
+        idempotency_key=f"{clarification_id}:{request.option_id}",
     )
+    if selection.relation_role == "PRIMARY" and selection.action in {"ACCEPT", "CORRECT"}:
+        request_id = str(getattr(http_request.state, "request_id", "") or "classification-clarification-api")
+        try:
+            response = PrimaryFeedbackPlacementService(db).submit(
+                suggestion_id=selection.suggestion_id,
+                request=feedback_request,
+                current_user=current_user,
+                client_id="classification-clarification-api",
+                request_id=request_id,
+                source_event_ref=(
+                    f"classification-clarification:{clarification_id}:{request.option_id}:{request_id}"
+                ),
+            )
+        except PlacementServiceError as exc:
+            db.rollback()
+            raise _placement_http_exception(exc) from exc
+    else:
+        response = ClassificationFeedbackService(
+            db,
+            evaluation_min_samples=get_settings().graph_feedback_eval_min_samples,
+        ).record(
+            suggestion_id=selection.suggestion_id,
+            request=feedback_request,
+            current_user=current_user,
+        )
     clarification_service.mark_resolved(
         clarification_id=clarification_id,
         user_id=current_user.id,

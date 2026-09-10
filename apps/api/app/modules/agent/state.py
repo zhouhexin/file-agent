@@ -78,6 +78,7 @@ class ToolInvocationRecord(BaseModel):
     status: str
     changeset_id: Optional[str] = None
     operation_plan_id: Optional[str] = None
+    placement_operation_id: Optional[str] = None
 
 
 class AgentRunResult(BaseModel):

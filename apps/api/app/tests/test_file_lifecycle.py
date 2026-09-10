@@ -14,6 +14,7 @@ from app.core import config
 from app.db.models import (
     AgentRun,
     ChangeItem,
+    Conversation,
     Document,
     DocumentClassificationSummary,
     DocumentCategory,
@@ -2936,7 +2937,7 @@ def test_explicit_category_organization_moves_shared_file_without_second_confirm
     monkeypatch,
     tmp_path,
 ):
-    """按分类整理指令直接授权受控移动，同时保留计划、确认和版本审计。"""
+    """按分类整理指令直接受理异步落位，不生成确认记录或同步完成回执。"""
 
     _configure(monkeypatch, tmp_path)
     client, SessionLocal = client_with_database()
@@ -2950,14 +2951,29 @@ def test_explicit_category_organization_moves_shared_file_without_second_confirm
     try:
         user = db.query(User).filter(User.username == "category-move-owner").one()
         taxonomy = load_default_taxonomy()
+        conversation = Conversation(
+            id="33333333-3333-4333-8333-333333333333",
+            user_id=user.id,
+            title="按分类整理测试",
+        )
+        message = Message(
+            id="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            conversation_id=conversation.id,
+            user_id=user.id,
+            role="user",
+            content="按确认分类整理这个文件",
+            attachments_json=[],
+        )
         run = AgentRun(
             id="33333333-3333-4333-8333-333333333333",
-            conversation_id="category-move-conversation",
-            message_id="category-move-message",
+            conversation_id=conversation.id,
+            message_id=message.id,
             user_id=user.id,
         )
         db.add_all(
             [
+                conversation,
+                message,
                 run,
                 DocumentCategory(
                     working_copy_id=working_copy["id"],
@@ -2989,10 +3005,19 @@ def test_explicit_category_organization_moves_shared_file_without_second_confirm
                 "agent_run_id": run.id,
             },
         )
+        assert executed.output_json["status"] == "PREPARED"
+        assert executed.output_json["file_position_changed"] is False
+        assert executed.output_json["placement_operation_id"]
+        assert db.query(OperationConfirmation).count() == 0
+        db.commit()
+    finally:
+        db.close()
+
+    _drain(SessionLocal)
+
+    db = SessionLocal()
+    try:
         moved = db.get(WorkingCopy, working_copy["id"])
-        assert executed.output_json["status"] == "EXECUTED"
-        assert executed.output_json["file_position_changed"] is True
-        assert executed.output_json["operation_plan_id"]
         assert moved.relative_path != original_path
         assert moved.relative_path == "学校/人事师资/考核聘任/教师考核材料.txt"
         assert (
@@ -3004,8 +3029,8 @@ def test_explicit_category_organization_moves_shared_file_without_second_confirm
         assert (
             db.query(WorkingCopyPathRecord)
             .filter(
-                WorkingCopyPathRecord.working_copy_id == working_copy["id"],
-                WorkingCopyPathRecord.operation_type == "MOVE",
+                    WorkingCopyPathRecord.working_copy_id == working_copy["id"],
+                    WorkingCopyPathRecord.operation_type == "CLASSIFICATION_PLACEMENT",
                 WorkingCopyPathRecord.status == "COMPLETED",
             )
             .count()
@@ -3225,11 +3250,11 @@ def test_auto_reclassification_change_moves_without_second_confirmation(
         clear_overrides()
 
 
-def test_explicit_target_classification_persists_relation_and_moves_immediately(
+def test_explicit_target_classification_submits_then_worker_applies_relation_and_move(
     monkeypatch,
     tmp_path,
 ):
-    """“将文件分类为 X”必须一次完成正式分类和归位，不再返回确认卡。"""
+    """聊天更正只受理落位；worker 才原子提交 PRIMARY 和目录，且不造确认记录。"""
 
     _configure(monkeypatch, tmp_path)
     client, SessionLocal = client_with_database()
@@ -3246,10 +3271,23 @@ def test_explicit_target_classification_persists_relation_and_moves_immediately(
             .one()
         )
         taxonomy = load_default_taxonomy()
+        conversation = Conversation(
+            id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            user_id=user.id,
+            title="分类更正测试",
+        )
+        message = Message(
+            id="dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            conversation_id=conversation.id,
+            user_id=user.id,
+            role="user",
+            content="将这个文件分类为学校/人事师资/考核聘任",
+            attachments_json=[],
+        )
         run = AgentRun(
             id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-            conversation_id="direct-target-classify-conv",
-            message_id="direct-target-classify-msg",
+            conversation_id=conversation.id,
+            message_id=message.id,
             user_id=user.id,
         )
         classification_run = DocumentClassificationRun(
@@ -3287,7 +3325,7 @@ def test_explicit_target_classification_persists_relation_and_moves_immediately(
             source="rule",
             rank=1,
         )
-        db.add_all([run, classification_run, suggestion])
+        db.add_all([conversation, message, run, classification_run, suggestion])
         db.commit()
 
         result = ToolRegistry(db=db, user_id=user.id).invoke(
@@ -3301,8 +3339,19 @@ def test_explicit_target_classification_persists_relation_and_moves_immediately(
             },
         )
 
-        assert result.output_json["status"] == "COMPLETED"
-        assert result.output_json["file_position_changed"] is True
+        assert result.output_json["status"] == "PREPARED"
+        assert result.output_json["file_position_changed"] is False
+        assert result.output_json["placement_operation_id"]
+        assert db.query(OperationConfirmation).count() == 0
+        # Tool Registry 独立调用没有 Agent service 的外层事务；提交后 worker 才可见。
+        db.commit()
+    finally:
+        db.close()
+
+    _drain(SessionLocal)
+
+    db = SessionLocal()
+    try:
         moved = db.get(WorkingCopy, working_copy["id"])
         assert moved.relative_path == "学校/人事师资/考核聘任/待指定分类材料.txt"
         relation = (

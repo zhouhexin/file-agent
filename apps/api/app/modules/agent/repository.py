@@ -198,6 +198,7 @@ class AgentRunRepository:
             status=record.status,
             changeset_id=record.changeset_id,
             operation_plan_id=record.operation_plan_id,
+            placement_operation_id=record.placement_operation_id,
             finished_at=utcnow(),
         )
         self.db.add(invocation)
@@ -231,6 +232,7 @@ class AgentRunRepository:
                 status=item.status,
                 changeset_id=item.changeset_id,
                 operation_plan_id=item.operation_plan_id,
+                placement_operation_id=item.placement_operation_id,
             )
             for item in (invocations if invocations is not None else self.list_tool_invocations(run.id))
         ]

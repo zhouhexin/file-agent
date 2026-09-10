@@ -586,6 +586,30 @@ class ClassificationDecisionInput(StrictToolInput):
         return list(dict.fromkeys(normalized))
 
 
+class WorkingCopyPlacementSubmitInput(StrictToolInput):
+    """Agent 受控提交单个分类落位的冻结并发与目标事实。"""
+
+    action: Literal["SET_PRIMARY", "MOVE"]
+    working_copy_id: str = Field(min_length=36, max_length=36)
+    expected_revision: int = Field(gt=0)
+    expected_document_version_id: str = Field(min_length=36, max_length=36)
+    target_category_id: str | None = Field(default=None, min_length=1, max_length=255)
+    taxonomy_version: str = Field(min_length=1, max_length=80)
+    container_segments: List[str] = Field(default_factory=list, max_length=20)
+    target_root_key: str | None = Field(default=None, min_length=1, max_length=100)
+    target_directory_segments: List[str] = Field(default_factory=list, max_length=20)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+    # 以下二项由 graph dispatcher 注入，Planner 不能选择其他会话或运行。
+    conversation_id: str = Field(min_length=1, max_length=36)
+    agent_run_id: str = Field(min_length=1, max_length=36)
+
+
+class WorkingCopyPlacementStatusInput(StrictToolInput):
+    """读取当前用户可见的单个分类落位操作进度。"""
+
+    operation_id: str = Field(min_length=36, max_length=36)
+
+
 class ManagedRootScanInput(StrictToolInput):
     """创建受管目录扫描任务的输入。"""
 
