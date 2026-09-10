@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
+from hashlib import sha256
 from uuid import uuid4
 
 from sqlalchemy import and_, exists
@@ -26,8 +27,12 @@ from app.db.models import (
 )
 from app.modules.changesets.repository import ChangeSetRepository
 from app.modules.changesets.service import persist_changeset_from_document_results
-from app.modules.classification.auto_placement_policy import AutoPlacementPolicy
+from app.modules.classification.auto_placement_policy import (
+    AutoPlacementPolicy,
+    AutoPlacementPolicyResult,
+)
 from app.modules.classification.classifier_service import DocumentClassificationService
+from app.modules.classification.loader import load_default_taxonomy
 from app.modules.classification.organization_path import (
     CategoryOrganizationPathError,
     CategoryOrganizationPathResolver,
@@ -35,6 +40,7 @@ from app.modules.classification.organization_path import (
 from app.modules.classification.organization_repository import (
     OrganizationDecisionRepository,
 )
+from app.modules.classification.primary_selection import select_primary_category
 from app.modules.classification.service import persist_document_results_classifications
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
@@ -57,14 +63,16 @@ def reclassify_unclassified(*, apply: bool, limit: int | None = None) -> dict:
                 "mode": "apply" if apply else "dry-run",
                 "matched_count": 0,
                 "classified_count": 0,
-                "needs_review_count": 0,
+                "other_count": 0,
+                "skipped_count": 0,
                 "files": [],
             }
 
         actor = _audit_actor(db)
         run = _create_audit_run(db=db, actor=actor) if apply else None
+        settings = get_settings()
         service = DocumentClassificationService(db=db, graph_mode="off")
-        policy = AutoPlacementPolicy(get_settings())
+        policy = AutoPlacementPolicy(settings)
         document_results: list[dict] = []
         previews: list[dict] = []
         copies_by_document_id = {item.document_id: item for item in copies}
@@ -90,6 +98,7 @@ def reclassify_unclassified(*, apply: bool, limit: int | None = None) -> dict:
                     "category_path": list(primary.get("category_path") or []) if primary else [],
                     "confidence": float(primary.get("confidence") or 0) if primary else 0,
                     "accepted": decision.accepted,
+                    "classification_outcome": decision.classification_outcome,
                     "reason_codes": list(decision.reason_codes),
                     "status": "PREVIEW",
                 }
@@ -125,18 +134,34 @@ def reclassify_unclassified(*, apply: bool, limit: int | None = None) -> dict:
                 extraction_status=str(result.get("extraction_status") or "FAILED"),
                 risk_passed=True,
             )
-            reason_codes = list(policy_result.reason_codes)
+            policy_reason_codes = list(policy_result.reason_codes)
+            operational_reason_codes: list[str] = []
             target_relative_path = None
+            target_category_id = _policy_target_category_id(policy_result)
+            # 策略接受且目标为 system.other 时，PARSE_FAILED、OTHER_CATEGORY 等原因码
+            # 只是可审计的降级说明，不能再把文件送入新的分类复核状态。
+            if not _can_apply_persisted_primary(
+                policy_result=policy_result,
+                suggestion=suggestion,
+            ):
+                operational_reason_codes.append("AUTO_RECLASSIFICATION_BLOCKED")
             if classification_run is None or suggestion is None:
-                reason_codes.append("CURRENT_RECLASSIFICATION_NOT_FOUND")
-            if not reason_codes and classification_run is not None and suggestion is not None:
+                operational_reason_codes.append("CURRENT_RECLASSIFICATION_NOT_FOUND")
+            elif str(suggestion.category_id or "") != target_category_id:
+                # 持久化建议必须与冻结的策略主类一致，避免在异常数据下把业务候选
+                # 误写成正式 PRIMARY；这属于运行完整性问题，而不是分类复核队列。
+                operational_reason_codes.append("PRIMARY_SUGGESTION_MISMATCH")
+            if (
+                not operational_reason_codes
+                and classification_run is not None
+                and suggestion is not None
+            ):
                 working_root = db.get(
                     WorkingCopyRoot,
                     working_copy.working_copy_root_id,
                 )
                 if working_root is None:
-                    reason_codes.append("WORKING_COPY_ROOT_MISSING")
-                    target = None
+                    operational_reason_codes.append("WORKING_COPY_ROOT_MISSING")
                 try:
                     if working_root is not None:
                         target = path_resolver.resolve_category(
@@ -148,21 +173,29 @@ def reclassify_unclassified(*, apply: bool, limit: int | None = None) -> dict:
                         )
                         target_relative_path = target.target_relative_path
                 except CategoryOrganizationPathError:
-                    reason_codes.append("TARGET_PATH_UNAVAILABLE")
+                    operational_reason_codes.append("TARGET_PATH_UNAVAILABLE")
 
-            if reason_codes:
+            reason_codes = list(
+                dict.fromkeys([*policy_reason_codes, *operational_reason_codes])
+            )
+            if operational_reason_codes:
                 organization_repository.create_or_update_decision(
                     working_copy=working_copy,
                     classification_run=classification_run,
                     primary_suggestion=suggestion,
                     policy_result=policy_result,
-                    policy_version=get_settings().auto_classification_policy_version,
-                    calibration_version=get_settings().auto_classification_calibration_version,
-                    decision="NEEDS_REVIEW",
+                    policy_version=settings.classification_policy_bundle_version,
+                    calibration_version=settings.auto_classification_calibration_version,
+                    decision="SKIPPED",
                     reason_codes=reason_codes,
+                    shadow_only=True,
                     decision_scope=f"batch-reclassification:{run.id}",
                 )
-                preview.update(status="NEEDS_REVIEW", reason_codes=reason_codes)
+                preview.update(
+                    status="SKIPPED",
+                    classification_outcome=policy_result.classification_outcome,
+                    reason_codes=reason_codes,
+                )
                 continue
 
             assert classification_run is not None and suggestion is not None
@@ -176,14 +209,18 @@ def reclassify_unclassified(*, apply: bool, limit: int | None = None) -> dict:
                 classification_run=classification_run,
                 primary_suggestion=suggestion,
                 policy_result=policy_result,
-                policy_version=get_settings().auto_classification_policy_version,
-                calibration_version=get_settings().auto_classification_calibration_version,
-                decision="AUTO_RECLASSIFIED",
-                reason_codes=[],
+                policy_version=settings.classification_policy_bundle_version,
+                calibration_version=settings.auto_classification_calibration_version,
+                decision=policy_result.evaluated_decision,
+                reason_codes=reason_codes,
                 target_relative_path=target_relative_path,
                 decision_scope=f"batch-reclassification:{run.id}",
             )
-            preview["status"] = "CLASSIFIED"
+            preview.update(
+                status="CLASSIFIED",
+                classification_outcome=policy_result.classification_outcome,
+                reason_codes=reason_codes,
+            )
             if changeset is not None:
                 changeset_repository.create_item(
                     changeset_id=changeset.id,
@@ -206,7 +243,8 @@ def reclassify_unclassified(*, apply: bool, limit: int | None = None) -> dict:
         run.final_response = (
             f"批量重新分类完成：处理 {summary['matched_count']} 个文件，"
             f"形成正式分类 {summary['classified_count']} 个，"
-            f"待复核 {summary['needs_review_count']} 个；未移动或改名文件。"
+            f"其中归入其他 {summary['other_count']} 个，"
+            f"因运行条件跳过 {summary['skipped_count']} 个；未移动或改名文件。"
         )
         run.graph_state_json = {
             "status": run.status,
@@ -263,15 +301,7 @@ def _classify_one(
         .first()
     )
     if extraction is None:
-        return {
-            "document_id": working_copy.document_id,
-            "document_version_id": str(working_copy.current_version_id or ""),
-            "filename": working_copy.filename,
-            "extraction_status": "FAILED",
-            "categories": [],
-            "source": "batch-reclassify-unclassified",
-            "errors": [{"code": "EXTRACTION_NOT_FOUND", "message": "没有可复用的正文解析结果。"}],
-        }
+        return _missing_extraction_other_result(working_copy=working_copy)
     classified = service.classify(
         document_id=working_copy.document_id,
         document_version_id=str(working_copy.current_version_id or ""),
@@ -301,6 +331,88 @@ def _classify_one(
         "warnings": list(classified.get("warnings") or []),
         "errors": list(classified.get("errors") or []),
     }
+
+
+def _missing_extraction_other_result(*, working_copy: WorkingCopy) -> dict:
+    """为缺少正文的历史副本生成可审计的 ``system.other`` 结果。
+
+    新版策略允许解析失败的文件完成归档，但必须保留 ``FAILED`` 解析事实；不能用空候选
+    让后续持久化遗漏唯一 PRIMARY，更不能借此创建分类待复核状态。
+    """
+
+    taxonomy = load_default_taxonomy()
+    document_version_id = str(working_copy.current_version_id or "")
+    fingerprint = sha256(
+        (
+            f"missing-extraction:{working_copy.document_id}:{document_version_id}:"
+            f"{taxonomy.key}:{taxonomy.version}"
+        ).encode("utf-8")
+    ).hexdigest()
+    selection = select_primary_category(
+        taxonomy=taxonomy,
+        candidates=[],
+        input_fingerprint=fingerprint,
+        extraction_status="FAILED",
+    )
+    primary = {
+        **selection.primary_candidate,
+        "relation_role": "PRIMARY",
+        "classifier_version": "primary-selection-v10",
+    }
+    return {
+        "status": "FAILED",
+        "document_id": working_copy.document_id,
+        "document_version_id": document_version_id,
+        "workspace_id": working_copy.workspace_id,
+        "filename": working_copy.filename,
+        "extraction_status": "FAILED",
+        "categories": [primary],
+        "taxonomy_key": taxonomy.key,
+        "taxonomy_version": taxonomy.version,
+        "classifier_version": "primary-selection-v10",
+        "classification_outcome": selection.classification_outcome.value,
+        "classification_quality": selection.classification_quality.value,
+        "selection_basis": selection.selection_basis,
+        "reason_codes": selection.reason_codes,
+        "input_fingerprint": selection.input_fingerprint,
+        "content_fingerprint": fingerprint,
+        "text_reused": False,
+        "classification_reused": False,
+        "source": "batch-reclassify-unclassified",
+        "warnings": [],
+        "errors": [
+            {
+                "code": "EXTRACTION_NOT_FOUND",
+                "message": "没有可复用的正文解析结果，已按其他完成分类收纳。",
+            }
+        ],
+    }
+
+
+def _policy_target_category_id(policy_result: AutoPlacementPolicyResult) -> str:
+    """提取策略冻结的唯一主类 ID，拒绝以持久化建议反向猜测策略目标。"""
+
+    return str((policy_result.primary_category or {}).get("category_id") or "")
+
+
+def _can_apply_persisted_primary(
+    *,
+    policy_result: AutoPlacementPolicyResult,
+    suggestion: object | None,
+) -> bool:
+    """确认策略已接受且持久化首条建议与策略主类完全一致。
+
+    ``OTHER_CATEGORY``、``PARSE_FAILED`` 等策略原因只说明为何选择 Other；只要
+    ``accepted`` 为真，它们不能阻断本次正式 PRIMARY 写入。
+    """
+
+    target_category_id = _policy_target_category_id(policy_result)
+    suggestion_category_id = str(getattr(suggestion, "category_id", "") or "")
+    return bool(
+        policy_result.accepted
+        and target_category_id
+        and suggestion_category_id == target_category_id
+    )
 
 
 def _audit_actor(db: Session) -> User:
@@ -361,7 +473,13 @@ def _summary(*, mode: str, previews: list[dict]) -> dict:
         "mode": mode,
         "matched_count": len(previews),
         "classified_count": status_counts.get("CLASSIFIED", 0),
-        "needs_review_count": status_counts.get("NEEDS_REVIEW", 0),
+        "other_count": sum(
+            1
+            for item in previews
+            if item.get("status") in {"PREVIEW", "CLASSIFIED"}
+            and item.get("classification_outcome") == "OTHER"
+        ),
+        "skipped_count": status_counts.get("SKIPPED", 0),
         "files": previews,
     }
 
