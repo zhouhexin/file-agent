@@ -1918,6 +1918,16 @@ POST /api/integrations/v1/extraction-tasks/{task_id}/results
 `reused_count`、`excluded_count` 和按最终 Document ID 去重的 `retained_file_count`。无权访问的批次
 与不存在批次统一返回 `INGEST_BATCH_NOT_FOUND`，防止跨用户枚举。
 
+成功发布的条目必须区分导入历史快照和当前工作副本投影：`ingest_final_filename` 固定为导入完成时
+的名称，兼容旧记录时读取 `result.ingest_final_filename`，缺失则回退到历史
+`result.final_filename`；`result.final_filename` 继续作为旧客户端可读的导入快照，不得在后续改名时
+覆盖。`current_filename`、`current_file_status`、`current_file_available`、
+`current_working_copy_revision` 和 `current_document_version_id` 每次根据 `final_working_copy_id` 从当前
+工作副本批量投影。活动文件返回 `ACTIVE/true`；回收站文件返回 `TRASHED/false` 并保留最后名称；
+尚未发布返回 `NOT_PUBLISHED`；成功条目的工作副本关联不存在或失效时返回 `UNAVAILABLE`。后续文件
+生命周期变化不递增导入批次的 `result_revision`，调用方应使用 `current_working_copy_revision` 判断
+当前投影是否变化。
+
 内容端点使用字段名为 `file` 的 multipart 文件流，仅接受 `SEALED` 批次。后端沿用旧上传入口的扩展名、
 MIME、大小、隔离区、DocumentVersion 和原件保护规则，并额外校验 multipart 文件名、实际大小及可选
 SHA-256 与固定清单一致。来源快照变化返回 `SOURCE_SNAPSHOT_CHANGED`，删除本次未提交的暂存字节和

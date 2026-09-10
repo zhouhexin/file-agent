@@ -36,6 +36,7 @@ class _FakeParsedQuery:
     terms: list[str] = field(default_factory=list)
     year: int | None = None
     relative_year: int | None = None
+    relation_mode: str = "UNSPECIFIED"
 
 
 @dataclass
@@ -350,6 +351,83 @@ def test_exact_short_person_name_recalls_completed_chunk_when_thin_profile_omits
 
         assert [item["working_copy_id"] for item in result] == [working_copy.id]
         assert result[0]["_hit_source"] == "exact_short_phrase_chunk"
+    finally:
+        db.close()
+
+
+def test_two_character_profile_hit_skips_unindexed_global_chunk_scan():
+    """两字主题已由瘦投影命中时，不应再执行会退化为全表扫描的正文 LIKE。"""
+
+    db = _db_session()
+    try:
+        _setup_profile(
+            db,
+            suffix="short-profile",
+            user_id="user1",
+            filename="学生请假条.docx",
+            summary_text="学生请假材料",
+        )
+        db.commit()
+        service = Stage1DocumentRecallService(
+            db=db,
+            user_id="user1",
+            workspace_id="ws-user1",
+            config=_FakeConfig(),
+        )
+        indexed_modes: list[bool] = []
+
+        def _chunk_rows(**kwargs):
+            indexed_modes.append(bool(kwargs["indexed_only"]))
+            return []
+
+        service._supports_indexed_short_phrase_candidates = lambda: True
+        service._short_phrase_chunk_rows = _chunk_rows
+        result = service._exact_short_phrase_match(
+            "假条",
+            _FakeParsedQuery(cleaned="假条"),
+            _FakeScope(),
+        )
+
+        assert [item["working_copy_id"] for item in result] == ["wc-short-profile"]
+        assert indexed_modes == [True]
+    finally:
+        db.close()
+
+
+def test_two_character_literal_request_keeps_complete_body_scan():
+    """用户明确要求正文连续包含时，即使瘦投影命中也不能省略完整正文校验。"""
+
+    db = _db_session()
+    try:
+        _setup_profile(
+            db,
+            suffix="short-literal",
+            user_id="user1",
+            filename="学生请假条.docx",
+            summary_text="学生请假材料",
+        )
+        db.commit()
+        service = Stage1DocumentRecallService(
+            db=db,
+            user_id="user1",
+            workspace_id="ws-user1",
+            config=_FakeConfig(),
+        )
+        indexed_modes: list[bool] = []
+
+        def _chunk_rows(**kwargs):
+            indexed_modes.append(bool(kwargs["indexed_only"]))
+            return []
+
+        service._supports_indexed_short_phrase_candidates = lambda: True
+        service._short_phrase_chunk_rows = _chunk_rows
+        service._exact_short_phrase_match(
+            "假条",
+            _FakeParsedQuery(cleaned="假条", relation_mode="LITERAL"),
+            _FakeScope(),
+        )
+
+        assert indexed_modes == [True, False]
     finally:
         db.close()
 

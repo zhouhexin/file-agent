@@ -174,7 +174,7 @@
 | `file_batch_ingest`    | 本地枚举后调用`POST /ingest-batches`、分页追加`/items`、`/seal`                     | 固定本次清单与用户规则，创建传输任务；尽快返回批次ID                              |
 | `workbuddy_attachment_ingest` | 校验宿主附件缓存引用后复用`POST /ingest-batches`、`/items`、`/seal`和内容端点 | 固定本轮已提交附件清单；不把宿主绝对路径发送给后端，空附带请求仍自动整理 |
 | `file_ingest`          | `PUT /ingest-batches/{batch_id}/items/{item_id}/content`               | 流式上传一个条目；无批次时先创建单条目批次                                    |
-| `batch_get`            | `GET /ingest-batches/{id}`、`GET /ingest-batches/{id}/items?cursor=...` | 返回状态、`result_revision`、统计、分页明细、最终回执及待交互项；刷新或重连后用后端事实恢复选择 |
+| `batch_get`            | `GET /ingest-batches/{id}`、`GET /ingest-batches/{id}/items?cursor=...` | 返回状态、`result_revision`、统计、分页明细、最终回执及待交互项；条目同时区分导入名称快照和当前工作副本名称/状态；刷新或重连后用后端事实恢复选择 |
 | `batch_resume`         | `POST /ingest-batches/{id}/resume`及本地传输恢复                              | 只恢复原清单未完成的传输；不重置业务失败项和已完成结果                              |
 | `ingest_retry`         | `POST /ingest-items/{id}/retry`                                        | 显式重试可重试失败，记录原因与新阶段执行代次                                   |
 | `ingest_cancel`        | `POST /ingest-items/{id}/cancel`                                       | 取消尚未完成的本次条目及依赖任务，不回收已有复用目标                               |
@@ -284,6 +284,12 @@ WorkBuddy必须为同一聊天线程持续传入稳定`conversation_ref`。MCP�
 | `file_rename` | `conversation_ref,renames[]` | 每项必须含`document_id,source_filename,target_filename`；只允许basename，禁止路径、同文件重复映射和before=after |
 | `operation_plan_get` | `plan_id` | 从后端恢复真实状态，不依赖聊天气泡断言计划仍有效 |
 | `operation_plan_confirm` | `plan_id,confirmation` | 仅在用户明确确认后调用；MCP不修改计划目标，后端确认前再次校验用户、状态、目标修订、冲突和白名单执行器 |
+
+`batch_get` 中的 `result.final_filename` 和顶层 `ingest_final_filename` 都表示导入完成时的审计快照，
+后续重命名不得覆盖；顶层 `current_filename` 和 `current_file_status` 则根据
+`final_working_copy_id` 实时读取。分页投影必须批量读取工作副本，禁止逐条产生 N+1 查询；旧批次仅有
+`result.final_filename` 时仍须兼容为 `ingest_final_filename`。回收站、未发布和关联失效必须分别返回
+`TRASHED`、`NOT_PUBLISHED`、`UNAVAILABLE`，不能继续把历史名称伪装成活动文件的当前名称。
 
 明确重命名沿用现有项目语义：用户已经同时明确目标文件和新文件名时，File Agent内部仍创建并审计
 OperationPlan，再按现有明确授权来源执行；普通模糊“整理一下名称”不得调用`file_rename`。如果后端返回

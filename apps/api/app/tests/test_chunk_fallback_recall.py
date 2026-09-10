@@ -8,7 +8,8 @@
 5. 短预览限制长度
 """
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -134,6 +135,37 @@ def test_service_class_exists():
 def test_fallback_recall_method_exists():
     """fallback_recall 方法已存在。"""
     assert hasattr(DocumentChunkLexicalSearchService, "fallback_recall")
+
+
+def test_two_character_fallback_candidate_uses_indexed_word_similarity():
+    """两字短语的全局补召回不得生成无法有效使用 trigram 的前后模糊 LIKE。"""
+
+    predicate = DocumentChunkLexicalSearchService._exact_search_candidate_predicate(
+        "假条"
+    )
+    statement = str(
+        select(DocumentChunk.id)
+        .where(predicate)
+        .compile(dialect=postgresql.dialect())
+    )
+
+    assert "<%" in statement
+    assert "LIKE" not in statement
+
+
+def test_three_character_fallback_candidate_keeps_continuous_phrase_match():
+    """三字以上短语仍保留连续字面匹配，pg_trgm 可以为其生成候选。"""
+
+    predicate = DocumentChunkLexicalSearchService._exact_search_candidate_predicate(
+        "奖学金"
+    )
+    statement = str(
+        select(DocumentChunk.id)
+        .where(predicate)
+        .compile(dialect=postgresql.dialect())
+    )
+
+    assert "LIKE" in statement
 
 
 def test_evidence_projector_importable():

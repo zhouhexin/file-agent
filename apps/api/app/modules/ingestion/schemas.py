@@ -189,6 +189,13 @@ class IngestItemResponse(BaseModel):
     final_document_id: str | None
     final_version_id: str | None
     final_working_copy_id: str | None
+    # 导入完成名称是不可变审计快照；当前名称与状态来自工作副本实时投影。
+    ingest_final_filename: str | None
+    current_filename: str | None
+    current_file_status: str
+    current_file_available: bool
+    current_working_copy_revision: int | None
+    current_document_version_id: str | None
     error: dict
     result: dict
     created_at: datetime

@@ -418,6 +418,13 @@ def test_items_are_paginated_and_other_users_cannot_read_batch() -> None:
 
         assert first_page.status_code == 200
         assert len(first_page.json()["items"]) == 2
+        pending_item = first_page.json()["items"][0]
+        assert pending_item["ingest_final_filename"] is None
+        assert pending_item["current_filename"] is None
+        assert pending_item["current_file_status"] == "NOT_PUBLISHED"
+        assert pending_item["current_file_available"] is False
+        assert pending_item["current_working_copy_revision"] is None
+        assert pending_item["current_document_version_id"] is None
         assert next_cursor
         assert second_page.status_code == 200
         assert len(second_page.json()["items"]) == 1
@@ -2192,5 +2199,116 @@ def test_wait_and_reuse_reports_primary_failure_without_fallback_or_user_task(
                 IngestRequestExecution.batch_id == batch_id
             ).all()
             assert all(items[1]["id"] not in execution.item_ids_json for execution in executions)
+    finally:
+        clear_overrides()
+
+
+def test_batch_items_separate_ingest_filename_snapshot_from_current_file_state(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """批次回执保留导入名称，同时实时投影改名、回收站和关联失效状态。"""
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "uploads"))
+    monkeypatch.setenv("MANAGED_ROOT_ARCHIVE_WRITE_PATH", str(tmp_path / "originals"))
+    monkeypatch.setenv("WORKING_COPY_STORAGE_ROOT", str(tmp_path / "working"))
+    monkeypatch.setenv("TRASH_STORAGE_ROOT", str(tmp_path / "trash"))
+    monkeypatch.setenv("MANAGED_ROOT_RECONCILE_ON_STARTUP", "false")
+    monkeypatch.setenv("INTEGRATION_EXTERNAL_OCR_ENABLED", "false")
+    monkeypatch.setenv("EMBEDDING_ENABLED", "false")
+    get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    content = "请假材料，用于验证批次历史名称与当前名称分离。".encode()
+    try:
+        _, token = _register_and_login(client, "ingest-current-filename")
+        batch_id, item_id, payload = _create_sealed_content_item(
+            client,
+            token,
+            content=content,
+        )
+        uploaded = client.put(
+            f"/api/integrations/v1/ingest-batches/{batch_id}/items/{item_id}/content",
+            headers=_headers(token),
+            files={"file": (payload["original_filename"], content, "text/plain")},
+        )
+        assert uploaded.status_code == 202
+        processed = 0
+        while process_next_filesystem_job(
+            session_factory=SessionLocal,
+            worker_id="ingest-current-filename-worker",
+        ):
+            processed += 1
+            assert processed < 12
+        client.get(
+            f"/api/integrations/v1/ingest-batches/{batch_id}",
+            headers=_headers(token),
+        )
+        initial = client.get(
+            f"/api/integrations/v1/ingest-batches/{batch_id}/items",
+            headers=_headers(token),
+        ).json()["items"][0]
+        ingest_name = initial["result"]["final_filename"]
+        assert initial["result"]["ingest_final_filename"] == ingest_name
+        assert initial["ingest_final_filename"] == ingest_name
+        assert initial["current_filename"] == ingest_name
+        assert initial["current_file_status"] == "ACTIVE"
+        assert initial["current_file_available"] is True
+        assert initial["current_working_copy_revision"] is not None
+        assert initial["current_document_version_id"] == initial["final_version_id"]
+
+        renamed = "重命名后的请假材料.txt"
+        with SessionLocal() as db:
+            item = db.get(IngestItem, item_id)
+            assert item is not None and item.final_working_copy_id
+            working_copy = db.get(WorkingCopy, item.final_working_copy_id)
+            assert working_copy is not None
+            # 模拟旧批次只持久化 final_filename，验证兼容读取不会把当前名称写回快照。
+            legacy_result = dict(item.result_json or {})
+            legacy_result.pop("ingest_final_filename", None)
+            item.result_json = legacy_result
+            working_copy.filename = renamed
+            working_copy.revision += 1
+            db.commit()
+
+        after_rename = client.get(
+            f"/api/integrations/v1/ingest-batches/{batch_id}/items",
+            headers=_headers(token),
+        ).json()["items"][0]
+        assert after_rename["result"]["final_filename"] == ingest_name
+        assert after_rename["ingest_final_filename"] == ingest_name
+        assert after_rename["current_filename"] == renamed
+        assert after_rename["current_file_status"] == "ACTIVE"
+        assert after_rename["current_file_available"] is True
+        assert after_rename["current_working_copy_revision"] > initial["current_working_copy_revision"]
+
+        with SessionLocal() as db:
+            item = db.get(IngestItem, item_id)
+            working_copy = db.get(WorkingCopy, item.final_working_copy_id)
+            working_copy.status = "TRASHED"
+            working_copy.revision += 1
+            db.commit()
+
+        trashed = client.get(
+            f"/api/integrations/v1/ingest-batches/{batch_id}/items",
+            headers=_headers(token),
+        ).json()["items"][0]
+        assert trashed["ingest_final_filename"] == ingest_name
+        assert trashed["current_filename"] == renamed
+        assert trashed["current_file_status"] == "TRASHED"
+        assert trashed["current_file_available"] is False
+
+        with SessionLocal() as db:
+            item = db.get(IngestItem, item_id)
+            item.final_working_copy_id = None
+            db.commit()
+
+        unavailable = client.get(
+            f"/api/integrations/v1/ingest-batches/{batch_id}/items",
+            headers=_headers(token),
+        ).json()["items"][0]
+        assert unavailable["ingest_final_filename"] == ingest_name
+        assert unavailable["current_filename"] is None
+        assert unavailable["current_file_status"] == "UNAVAILABLE"
+        assert unavailable["current_file_available"] is False
     finally:
         clear_overrides()

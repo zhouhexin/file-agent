@@ -463,9 +463,87 @@ class Stage1DocumentRecallService:
         seen_working_copy_ids = {
             str(item.get("working_copy_id") or "") for item in results
         }
-        # 历史瘦投影可能只含文件名和摘要，而正文 Chunk 已经完整建立。短人名
-        # 必须同时从带 pg_trgm 索引的 Chunk 连续召回，否则“正文有该人员”仍会
-        # 被第一阶段挡掉，第二阶段没有机会验证证据。
+        # 两个汉字夹在 ``%...%`` 中时，PostgreSQL 的 pg_trgm 通常提取不出
+        # 足以收敛候选的 trigram，会退化为扫描整张 document_chunks。先用
+        # search_vector GIN 与 pg_trgm word-similarity GIN 取得候选，再校验连续
+        # 字面命中；文件名/摘要已经命中时，不再为普通主题搜索扫描全部正文。
+        if len(normalized) == 2 and self._supports_indexed_short_phrase_candidates():
+            chunk_rows = self._short_phrase_chunk_rows(
+                phrase=normalized,
+                scope=scope,
+                unbounded_candidates=unbounded_candidates,
+                indexed_only=True,
+            )
+            requires_complete_body_scan = (
+                unbounded_candidates
+                or getattr(parsed_query, "relation_mode", "UNSPECIFIED") == "LITERAL"
+                or (not results and not chunk_rows)
+            )
+            if requires_complete_body_scan:
+                chunk_rows = self._short_phrase_chunk_rows(
+                    phrase=normalized,
+                    scope=scope,
+                    unbounded_candidates=unbounded_candidates,
+                    indexed_only=False,
+                )
+        else:
+            # 三、四字短语能够由 pg_trgm 提取有效 trigram，继续使用用连续匹配
+            # 覆盖可能被 Jieba 合并进更长词项的人名或业务实体。
+            chunk_rows = self._short_phrase_chunk_rows(
+                phrase=normalized,
+                scope=scope,
+                unbounded_candidates=unbounded_candidates,
+                indexed_only=False,
+            )
+        for row in chunk_rows:
+            if str(row.working_copy_id) in seen_working_copy_ids:
+                continue
+            results.append(
+                {
+                    "working_copy_id": row.working_copy_id,
+                    "document_id": row.document_id,
+                    "document_version_id": row.document_version_id,
+                    "_score": 1.4,
+                    "_hit_source": "exact_short_phrase_chunk",
+                }
+            )
+        return results
+
+    def _supports_indexed_short_phrase_candidates(self) -> bool:
+        """仅在 PostgreSQL 上启用 pg_trgm 与全文索引候选召回。"""
+
+        bind = self.db.get_bind()
+        return bind.dialect.name == "postgresql"
+
+    def _short_phrase_chunk_rows(
+        self,
+        *,
+        phrase: str,
+        scope: Any,
+        unbounded_candidates: bool,
+        indexed_only: bool,
+    ) -> list[Any]:
+        """查询正文短语候选；两字普通搜索优先使用可索引谓词缩小范围。
+
+        ``indexed_only`` 只影响候选召回方式，最终仍要求 ``search_text`` 包含
+        完整短语。显式“正文包含”或无任何索引候选时，上层会选择完整连续匹配，
+        避免把性能优化变成静默漏检。
+        """
+
+        import sqlalchemy as sa
+
+        predicates: list[Any] = [DocumentChunk.search_text.contains(phrase)]
+        if indexed_only:
+            phrase_query = sa.func.plainto_tsquery("simple", phrase)
+            predicates.insert(
+                0,
+                sa.or_(
+                    DocumentChunk.search_vector.op("@@")(phrase_query),
+                    # ``phrase <% search_text`` 使用现有 pg_trgm GIN 的词相似度
+                    # 候选能力，可覆盖部分被 Jieba 合并进较长词项的两字短语。
+                    sa.literal(phrase).bool_op("<%")(DocumentChunk.search_text),
+                ),
+            )
         chunk_query = (
             self.db.query(
                 WorkingCopy.id.label("working_copy_id"),
@@ -484,7 +562,7 @@ class Stage1DocumentRecallService:
                 WorkingCopy.workspace_id == self.workspace_id,
                 WorkingCopy.status == "ACTIVE",
                 DocumentIndexRun.status == "COMPLETED",
-                DocumentChunk.search_text.contains(phrase),
+                *predicates,
                 *self._working_copy_scope_predicates(scope),
             )
             .group_by(
@@ -497,20 +575,7 @@ class Stage1DocumentRecallService:
             chunk_query = chunk_query.limit(
                 self.config.retrieval_document_candidate_limit
             )
-        chunk_rows = chunk_query.all()
-        for row in chunk_rows:
-            if str(row.working_copy_id) in seen_working_copy_ids:
-                continue
-            results.append(
-                {
-                    "working_copy_id": row.working_copy_id,
-                    "document_id": row.document_id,
-                    "document_version_id": row.document_version_id,
-                    "_score": 1.4,
-                    "_hit_source": "exact_short_phrase_chunk",
-                }
-            )
-        return results
+        return chunk_query.all()
 
     def _gin_search(
         self,

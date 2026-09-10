@@ -5,7 +5,7 @@ description = "WorkBuddy 本地文件导入的 File Agent MCP 适配器。"
 requires-python = ">=3.11"
 dependencies = [
   "httpx>=0.28.0",
-  "mcp>=1.0.0",
+  "mcp>=1.28,<2",
 ]
 
 [project.scripts]

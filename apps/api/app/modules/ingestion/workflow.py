@@ -249,6 +249,10 @@ class IngestionWorkflow:
                 item.final_document_id = working_copy.document_id
                 item.final_version_id = working_copy.current_version_id
                 item.final_working_copy_id = working_copy.id
+                self._capture_ingest_filename_snapshot(
+                    item=item,
+                    working_copy=working_copy,
+                )
         elif review is not None and review.status == "RESOLVED" and review.decision == "WAIT_AND_REUSE":
             self._synchronize_wait_and_reuse(item=item, review=review, archive=archive)
         elif archive is not None and archive.status == "FAILED":
@@ -294,6 +298,7 @@ class IngestionWorkflow:
                 item.final_working_copy_id = working_copy.id
                 item.result_json = {
                     **dict(item.result_json or {}),
+                    "ingest_final_filename": working_copy.filename,
                     "final_filename": working_copy.filename,
                     "original_filename": item.original_filename,
                     "rename_status": (
@@ -391,6 +396,16 @@ class IngestionWorkflow:
                 "reused_from_ingest_item_id": primary.id,
                 "new_logical_file_created": False,
             }
+            working_copy = (
+                self.db.get(WorkingCopy, item.final_working_copy_id)
+                if item.final_working_copy_id
+                else None
+            )
+            self._capture_ingest_filename_snapshot(
+                item=item,
+                working_copy=working_copy,
+                fallback_result=dict(primary.result_json or {}),
+            )
             self._schedule_waiting_copy_cleanup(item=item, review=review, archive=archive)
             return
         if primary.status in {"FAILED", "CANCELLED", "EXPIRED"}:
@@ -406,6 +421,31 @@ class IngestionWorkflow:
         item.status = "WAITING_EXISTING_RESULT"
         item.stage = "WAIT_EXISTING"
         item.current_job_id = primary.current_job_id
+
+    @staticmethod
+    def _capture_ingest_filename_snapshot(
+        *,
+        item: IngestItem,
+        working_copy: WorkingCopy | None,
+        fallback_result: dict | None = None,
+    ) -> None:
+        """首次完成导入时固定名称快照，后续文件生命周期操作不得覆盖。"""
+
+        result = dict(item.result_json or {})
+        fallback = dict(fallback_result or {})
+        snapshot = str(
+            result.get("ingest_final_filename")
+            or result.get("final_filename")
+            or fallback.get("ingest_final_filename")
+            or fallback.get("final_filename")
+            or (working_copy.filename if working_copy is not None else "")
+        ).strip()
+        if not snapshot:
+            return
+        result.setdefault("ingest_final_filename", snapshot)
+        # 兼容现有 MCP/WorkBuddy；该旧字段继续表示导入完成快照，不是当前名称。
+        result.setdefault("final_filename", snapshot)
+        item.result_json = result
 
     def _schedule_waiting_copy_cleanup(
         self,

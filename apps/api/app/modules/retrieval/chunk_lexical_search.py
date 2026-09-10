@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import func, or_
+from sqlalchemy import func, literal, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import Document, DocumentChunk, DocumentIndexRun, WorkingCopy
@@ -306,10 +306,16 @@ class DocumentChunkLexicalSearchService:
             .filter(DocumentIndexRun.status == "COMPLETED")
         )
         if exact_search_text:
+            # 两个汉字不足以组成普通 trigram，``LIKE '%短语%'`` 在全局补召回中会
+            # 扫描全部 Chunk。改用已有 GIN 支持的全文匹配与 word-similarity 取得
+            # 小候选集，随后仍由下方正文连续包含校验保证返回结果是真实字面命中。
+            exact_search_candidate = self._exact_search_candidate_predicate(
+                exact_search_text
+            )
             ranked_query = ranked_query.filter(
                 or_(
                     DocumentChunk.search_vector.op("@@")(exact_candidate_query),
-                    DocumentChunk.search_text.contains(exact_search_text),
+                    exact_search_candidate,
                 )
             )
         else:
@@ -352,6 +358,16 @@ class DocumentChunkLexicalSearchService:
             )
 
         return list(version_map.values())
+
+    @staticmethod
+    def _exact_search_candidate_predicate(exact_search_text: str):
+        """为短语正文校验生成可索引的 PostgreSQL 候选条件。"""
+
+        if len(exact_search_text) == 2:
+            return literal(exact_search_text).bool_op("<%")(
+                DocumentChunk.search_text
+            )
+        return DocumentChunk.search_text.contains(exact_search_text)
 
     def _fallback_deterministic(
         self, *, tokens: list[str], workspace_id: str,

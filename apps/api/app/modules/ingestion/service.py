@@ -26,6 +26,7 @@ from app.db.models import (
     UploadArchiveRecord,
     UploadDuplicateCandidate,
     User,
+    WorkingCopy,
     utcnow,
 )
 from app.modules.ingestion.repository import IngestionRepository
@@ -74,6 +75,7 @@ class IngestionService:
         self.db = db
         self.repository = IngestionRepository(db)
         self._execution_status_cache: dict[str, dict[str, str]] = {}
+        self._working_copy_cache: dict[str, WorkingCopy | None] = {}
 
     def create_batch(
         self,
@@ -236,7 +238,7 @@ class IngestionService:
             )
         return IngestItemsAppendResponse(
             batch=self._to_batch_response(batch),
-            items=[self._to_item_response(item) for item in ordered_items],
+            items=self._to_item_responses(items=ordered_items, batch=batch),
             created_count=created_count,
             reused_count=len(ordered_items) - created_count,
         )
@@ -289,7 +291,7 @@ class IngestionService:
         page_rows = rows[:limit]
         next_cursor = page_rows[-1].id if has_next and page_rows else None
         return IngestItemsPageResponse(
-            items=[self._to_item_response(item) for item in page_rows],
+            items=self._to_item_responses(items=page_rows, batch=batch),
             next_cursor=next_cursor,
         )
 
@@ -1157,12 +1159,52 @@ class IngestionService:
             updated_at=batch.updated_at,
         )
 
-    def _to_item_response(self, item: IngestItem) -> IngestItemResponse:
+    def _to_item_responses(
+        self,
+        *,
+        items: list[IngestItem],
+        batch: IngestBatch,
+    ) -> list[IngestItemResponse]:
+        """批量加载当前工作副本后投影条目，避免分页读取产生 N+1 查询。"""
+
+        self._prime_working_copy_cache(items=items)
+        return [self._to_item_response(item, batch=batch) for item in items]
+
+    def _prime_working_copy_cache(
+        self,
+        *,
+        items: list[IngestItem],
+    ) -> None:
+        """批量加载批次条目由后端固定关联且尚未缓存的工作副本。"""
+
+        working_copy_ids = {
+            str(item.final_working_copy_id)
+            for item in items
+            if item.final_working_copy_id
+            and str(item.final_working_copy_id) not in self._working_copy_cache
+        }
+        if not working_copy_ids:
+            return
+        working_copies = (
+            self.db.query(WorkingCopy)
+            .filter(WorkingCopy.id.in_(working_copy_ids))
+            .all()
+        )
+        by_id = {working_copy.id: working_copy for working_copy in working_copies}
+        for working_copy_id in working_copy_ids:
+            self._working_copy_cache[working_copy_id] = by_id.get(working_copy_id)
+
+    def _to_item_response(
+        self,
+        item: IngestItem,
+        *,
+        batch: IngestBatch | None = None,
+    ) -> IngestItemResponse:
         """投影单项五阶段结果，明确隐藏内部任务和归档记录 ID。"""
 
         result = dict(item.result_json or {})
         execution_status = self._request_execution_status(item=item)
-        batch = self.db.get(IngestBatch, item.batch_id)
+        batch = batch or self.db.get(IngestBatch, item.batch_id)
         attached_request = str(batch.user_request or "").strip() if batch is not None else ""
         if execution_status is not None:
             user_task_status = execution_status
@@ -1194,6 +1236,43 @@ class IngestionService:
                 else "PENDING"
             )
         published = bool(item.final_working_copy_id and item.status in {"SUCCEEDED", "PARTIAL"})
+        self._prime_working_copy_cache(items=[item])
+        working_copy = (
+            self._working_copy_cache.get(str(item.final_working_copy_id))
+            if item.final_working_copy_id
+            else None
+        )
+        # final_working_copy_id 是后端固定关联；当前架构中批次属于用户默认工作区，最终
+        # 工作副本位于共享工作目录，因此不能用 batch.workspace_id 过滤。这里再次复核
+        # final_document_id，防止损坏或历史异常记录串用另一个文件的实时名称。
+        if (
+            working_copy is not None
+            and item.final_document_id
+            and working_copy.document_id != item.final_document_id
+        ):
+            working_copy = None
+        ingest_final_filename = str(
+            result.get("ingest_final_filename") or result.get("final_filename") or ""
+        ).strip() or None
+        if working_copy is not None:
+            current_file_status = str(working_copy.status or "UNAVAILABLE")
+            current_filename = str(working_copy.filename or "").strip() or None
+            current_working_copy_revision = int(working_copy.revision)
+            current_document_version_id = working_copy.current_version_id
+            current_file_available = bool(
+                current_file_status == "ACTIVE" and current_document_version_id
+            )
+        else:
+            current_file_status = (
+                "UNAVAILABLE"
+                if item.final_working_copy_id
+                or (item.status in {"SUCCEEDED", "PARTIAL"} and item.final_document_id)
+                else "NOT_PUBLISHED"
+            )
+            current_filename = None
+            current_working_copy_revision = None
+            current_document_version_id = None
+            current_file_available = False
 
         return IngestItemResponse(
             id=item.id,
@@ -1233,6 +1312,12 @@ class IngestionService:
             final_document_id=item.final_document_id,
             final_version_id=item.final_version_id,
             final_working_copy_id=item.final_working_copy_id,
+            ingest_final_filename=ingest_final_filename,
+            current_filename=current_filename,
+            current_file_status=current_file_status,
+            current_file_available=current_file_available,
+            current_working_copy_revision=current_working_copy_revision,
+            current_document_version_id=current_document_version_id,
             error=dict(item.error_json or {}),
             result=result,
             created_at=item.created_at,
