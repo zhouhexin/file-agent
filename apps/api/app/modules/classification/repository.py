@@ -52,6 +52,9 @@ class ClassificationRepository:
         classification_summary_id: str | None = None,
         classification_basis: str = "FULL_TEXT",
         summary_status: str = "DISABLED",
+        input_fingerprint: str | None = None,
+        input_manifest: dict[str, Any] | None = None,
+        decision: dict[str, Any] | None = None,
         error_message: str | None = None,
     ) -> DocumentClassificationRun:
         """创建一个文件在本次 AgentRun 中的分类运行记录。"""
@@ -65,6 +68,9 @@ class ClassificationRepository:
             classification_summary_id=classification_summary_id,
             classification_basis=classification_basis,
             summary_status=summary_status,
+            input_fingerprint=input_fingerprint,
+            input_manifest_json=dict(input_manifest or {}),
+            decision_json=dict(decision or {}),
             source=source,
             status=status,
             error_message=error_message,
@@ -97,7 +103,10 @@ class ClassificationRepository:
             confidence=float(category.get("confidence") or 0),
             status=str(category.get("status") or "SUGGESTED"),
             evidence_json=list(category.get("evidence_items") or category.get("evidence") or []),
-            candidate_scores_json=dict(category.get("candidate_scores") or {}),
+            candidate_scores_json={
+                **dict(category.get("candidate_scores") or {}),
+                "relation_role": str(category.get("relation_role") or "SECONDARY"),
+            },
             semantic_evidence_json=dict(category.get("semantic_evidence") or {}),
             source=str(category.get("source") or "rule"),
             rank=rank,

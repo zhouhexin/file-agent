@@ -67,6 +67,29 @@ def persist_document_results_classifications(
                 else "FULL_TEXT_FALLBACK"
             ),
             summary_status=str(result.get("summary_status") or "DISABLED"),
+            input_fingerprint=(
+                str(result.get("content_fingerprint"))
+                if result.get("content_fingerprint")
+                else None
+            ),
+            input_manifest={
+                "document_version_id": document_version_id,
+                "extraction_run_id": str(result.get("extraction_run_id") or ""),
+                "content_fingerprint": str(result.get("content_fingerprint") or ""),
+                "primary_input_fingerprint": str(result.get("input_fingerprint") or ""),
+                "extraction_status": str(result.get("extraction_status") or ""),
+                "purpose_package_status": str(result.get("purpose_package_status") or ""),
+            },
+            decision={
+                "classification_outcome": str(result.get("classification_outcome") or ""),
+                "classification_quality": str(result.get("classification_quality") or ""),
+                "selection_basis": str(result.get("selection_basis") or ""),
+                "reason_codes": list(result.get("reason_codes") or []),
+                "primary_input_fingerprint": str(result.get("input_fingerprint") or ""),
+                "primary_category_id": (
+                    str(categories[0].get("category_id") or "") if categories else ""
+                ),
+            },
             error_message=error_message,
         )
         for rank, category in enumerate(categories, start=1):

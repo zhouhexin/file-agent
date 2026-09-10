@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, event, func, Index, Integer, JSON, String, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, Float, ForeignKey, event, func, Index, Integer, JSON, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.orm.attributes import NEVER_SET, NO_VALUE
@@ -784,6 +784,15 @@ class DocumentClassificationRun(Base):
     taxonomy_key: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     taxonomy_version: Mapped[str] = mapped_column(String(80), nullable=False, default="")
     classifier_version: Mapped[str] = mapped_column(String(80), nullable=False, default="taxonomy-rule-v1")
+    input_fingerprint: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    input_manifest_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    decision_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
     classification_summary_id: Mapped[Optional[str]] = mapped_column(
         String(36),
         ForeignKey("document_classification_summaries.id", ondelete="SET NULL"),
@@ -894,6 +903,15 @@ class DocumentCategoryFeedback(Base):
         String(64), nullable=True, unique=True, index=True
     )
     comment: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    application_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="LEGACY", index=True
+    )
+    placement_operation_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("classification_placement_operations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
@@ -1190,15 +1208,29 @@ class ToolInvocation(Base):
     """ToolInvocation 表，记录每一次白名单 Tool 调用。"""
 
     __tablename__ = "tool_invocations"
+    __table_args__ = (
+        CheckConstraint(
+            "agent_run_id IS NOT NULL OR placement_operation_id IS NOT NULL",
+            name="ck_tool_invocations_audit_owner",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    agent_run_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent_runs.id"), nullable=False, index=True)
+    agent_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     tool_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     input_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     output_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
     changeset_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     operation_plan_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    placement_operation_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("classification_placement_operations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -1343,7 +1375,7 @@ class OperationPlan(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True)
-    conversation_id: Mapped[str] = mapped_column(String(36), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    conversation_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True)
     agent_run_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True, index=True)
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     operation_type: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -1351,6 +1383,12 @@ class OperationPlan(Base):
     risk_level: Mapped[str] = mapped_column(String(20), nullable=False, default="medium")
     reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
     plan_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    authorization_mode: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="CONFIRMATION_REQUIRED", index=True
+    )
+    authorization_context_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
     confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -1377,11 +1415,23 @@ class ChangeSet(Base):
     """
 
     __tablename__ = "change_sets"
+    __table_args__ = (
+        CheckConstraint(
+            "agent_run_id IS NOT NULL OR placement_operation_id IS NOT NULL",
+            name="ck_change_sets_audit_owner",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     workspace_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=True, index=True)
-    conversation_id: Mapped[str] = mapped_column(String(36), ForeignKey("conversations.id"), nullable=False, index=True)
-    agent_run_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent_runs.id"), nullable=False, index=True)
+    conversation_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True)
+    agent_run_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    placement_operation_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("classification_placement_operations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="COMPLETED")
     summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -1711,6 +1761,12 @@ class WorkingCopy(Base):
     is_primary_import: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="IMPORTING", index=True)
     sync_status: Mapped[str] = mapped_column(String(40), nullable=False, default="SYNCED", index=True)
+    placement_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="LEGACY_UNCHECKED", index=True
+    )
+    placement_policy_version: Mapped[Optional[str]] = mapped_column(
+        String(80), nullable=True
+    )
     last_operation_plan_id: Mapped[Optional[str]] = mapped_column(
         String(36), ForeignKey("operation_plans.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -1744,6 +1800,12 @@ class WorkingCopyPathRecord(Base):
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     operation_plan_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("operation_plans.id"), nullable=True, index=True)
     operation_confirmation_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("operation_confirmations.id"), nullable=True, index=True)
+    placement_operation_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("classification_placement_operations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     agent_run_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("agent_runs.id"), nullable=True, index=True)
     tool_invocation_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("tool_invocations.id"), nullable=True, index=True)
     changeset_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("change_sets.id"), nullable=True, index=True)
@@ -1804,9 +1866,177 @@ class DocumentOrganizationDecision(Base):
     path_record_id: Mapped[Optional[str]] = mapped_column(
         String(36), ForeignKey("working_copy_path_records.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    placement_operation_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("classification_placement_operations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False, unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ClassificationPurposePackage(Base):
+    """由受控导入任务冻结的分类用途包快照；已创建记录不可原地修改。"""
+
+    __tablename__ = "classification_purpose_packages"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    root_key: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    source_container_id: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    purpose_category_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    taxonomy_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    taxonomy_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    policy_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    manifest_digest: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    members_json: Mapped[list] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=list
+    )
+    authorization_source: Mapped[str] = mapped_column(String(80), nullable=False)
+    source_request_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+
+class ClassificationPlacementOperation(Base):
+    """一个工作副本的一次冻结分类落位操作。"""
+
+    __tablename__ = "classification_placement_operations"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "actor_user_id",
+            "client_id",
+            "idempotency_key",
+            "working_copy_id",
+            name="uq_classification_placement_idempotency",
+        ),
+        Index(
+            "uq_classification_placement_active_copy",
+            "working_copy_id",
+            unique=True,
+            postgresql_where=text(
+                "state IN ('PREPARED','EXECUTING','FS_APPLIED','RETRYABLE_FAILED','RECONCILING')"
+            ),
+            sqlite_where=text(
+                "state IN ('PREPARED','EXECUTING','FS_APPLIED','RETRYABLE_FAILED','RECONCILING')"
+            ),
+        ),
+        Index("ix_class_place_expected_version", "expected_document_version_id"),
+        Index("ix_class_place_before_primary", "before_primary_relation_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    actor_user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    working_copy_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("working_copies.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    client_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    request_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    operation_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    operation_plan_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("operation_plans.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    job_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("filesystem_jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    changeset_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("change_sets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    authorization_source: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    expected_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expected_document_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_identity_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    before_primary_relation_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_categories.id", ondelete="SET NULL"), nullable=True
+    )
+    before_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    target_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    target_category_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    taxonomy_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    taxonomy_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    taxonomy_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    target_filename: Mapped[str] = mapped_column(Text, nullable=False)
+    container_segments_json: Mapped[list] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=list
+    )
+    decision_snapshot_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    authorization_snapshot_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="PREPARED", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    execution_token: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    error_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    result_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WorkingCopyPathReservation(Base):
+    """分类落位期间持有的规范目标路径占用。"""
+
+    __tablename__ = "working_copy_path_reservations"
+    __table_args__ = (
+        UniqueConstraint(
+            "root_id",
+            "normalized_path_hash",
+            name="uq_working_copy_path_reservation_target",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    root_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("working_copy_roots.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    normalized_path_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    normalized_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    placement_operation_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("classification_placement_operations.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+@event.listens_for(ClassificationPurposePackage, "before_update")
+def _prevent_purpose_package_update(*_: object) -> None:
+    """用途包是不可变授权快照；变更用途或成员必须插入新记录。"""
+
+    raise ValueError("分类用途包不可修改，请创建新的用途包快照")
 
 
 class DocumentSearchProfile(Base):

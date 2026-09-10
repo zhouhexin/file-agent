@@ -197,13 +197,32 @@ class DocumentClassificationService:
                     ingest_original_filename=filename,
                 )
             )
+            primary_fingerprint = build_primary_selection_fingerprint(
+                PrimarySelectionFingerprintInput(
+                    content_fingerprint=content_fingerprint,
+                    purpose_package_digest=(
+                        purpose_package.manifest_digest if purpose_package is not None else ""
+                    ),
+                    existing_human_primary_id=str(
+                        (existing_human_primary or {}).get("category_id") or ""
+                    ),
+                    existing_human_primary_revision=(
+                        (existing_human_primary or {}).get("revision")
+                    ),
+                    explicit_target_category_id=str(
+                        (explicit_target or {}).get("category_id") or ""
+                    ),
+                    explicit_target_revision=(explicit_target or {}).get("revision"),
+                )
+            )
             if not force_reprocess:
-                cached_categories = self._load_cached_categories(
+                cached_categories, cached_decision = self._load_cached_categories(
                     document_id=document_id,
                     document_version_id=resolved_version_id or document_id,
                     taxonomy_key=taxonomy_key,
                     taxonomy_version=taxonomy_version,
                     input_fingerprint=content_fingerprint,
+                    primary_input_fingerprint=primary_fingerprint,
                 )
                 if cached_categories:
                     return {
@@ -229,6 +248,20 @@ class DocumentClassificationService:
                         "graph_mode": self.graph_mode,
                         "classification_reused": True,
                         "classifier_version": self.classifier_version,
+                        "classification_outcome": str(
+                            cached_decision.get("classification_outcome") or ""
+                        ),
+                        "classification_quality": str(
+                            cached_decision.get("classification_quality") or ""
+                        ),
+                        "selection_basis": str(
+                            cached_decision.get("selection_basis") or ""
+                        ),
+                        "reason_codes": list(cached_decision.get("reason_codes") or []),
+                        "input_fingerprint": str(
+                            cached_decision.get("primary_input_fingerprint") or ""
+                        ),
+                        "content_fingerprint": content_fingerprint,
                     }
             base_categories = self._classify_with_unified_taxonomy(
                 filename=filename,
@@ -356,24 +389,6 @@ class DocumentClassificationService:
                     )
                     for category in post_evidence_categories
                 ]
-            primary_fingerprint = build_primary_selection_fingerprint(
-                PrimarySelectionFingerprintInput(
-                    content_fingerprint=content_fingerprint,
-                    purpose_package_digest=(
-                        purpose_package.manifest_digest if purpose_package is not None else ""
-                    ),
-                    existing_human_primary_id=str(
-                        (existing_human_primary or {}).get("category_id") or ""
-                    ),
-                    existing_human_primary_revision=(
-                        (existing_human_primary or {}).get("revision")
-                    ),
-                    explicit_target_category_id=str(
-                        (explicit_target or {}).get("category_id") or ""
-                    ),
-                    explicit_target_revision=(explicit_target or {}).get("revision"),
-                )
-            )
             selection = select_primary_category(
                 taxonomy=taxonomy,
                 candidates=categories,
@@ -629,11 +644,12 @@ class DocumentClassificationService:
         taxonomy_key: str,
         taxonomy_version: str,
         input_fingerprint: str,
-    ) -> list[dict[str, Any]]:
+        primary_input_fingerprint: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """读取同文件、同目录版本和同分类器版本的最近成功建议。"""
 
         if self.db is None or not document_id:
-            return []
+            return [], {}
         run = (
             self.db.query(DocumentClassificationRun)
             .join(
@@ -650,13 +666,18 @@ class DocumentClassificationService:
             .first()
         )
         if run is None:
-            return []
+            return [], {}
         if (
             not hasattr(run, "input_fingerprint")
             or str(getattr(run, "input_fingerprint", "") or "") != input_fingerprint
         ):
             # D3 迁移前关闭旧缓存；不能因 schema 尚未部署而复用 OCR 前结果。
-            return []
+            return [], {}
+        cached_primary_fingerprint = str(
+            (run.input_manifest_json or {}).get("primary_input_fingerprint") or ""
+        )
+        if cached_primary_fingerprint != primary_input_fingerprint:
+            return [], {}
         suggestions = (
             self.db.query(DocumentCategorySuggestion)
             .filter(DocumentCategorySuggestion.classification_run_id == run.id)
@@ -667,7 +688,7 @@ class DocumentClassificationService:
             )
             .all()
         )
-        return [
+        categories = [
             {
                 "name": suggestion.category_name,
                 "category_id": suggestion.category_id,
@@ -694,10 +715,17 @@ class DocumentClassificationService:
                 "taxonomy_key": suggestion.taxonomy_key,
                 "taxonomy_version": suggestion.taxonomy_version,
                 "classifier_version": run.classifier_version,
+                "relation_role": str(
+                    (suggestion.candidate_scores_json or {}).get("relation_role")
+                    or ("PRIMARY" if suggestion.rank == 1 else "SECONDARY")
+                ),
                 "reused_from_suggestion_id": suggestion.id,
             }
             for suggestion in suggestions
         ]
+        decision = dict(run.decision_json or {})
+        decision["primary_input_fingerprint"] = cached_primary_fingerprint
+        return categories, decision
 
     def _default_managed_catalog_service(self) -> GlobalManagedCategoryCatalogService | None:
         """构造请求级全局受管目录服务；无数据库时继续使用预置 taxonomy。"""
