@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from enum import StrEnum
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -17,6 +18,15 @@ _WINDOWS_RESERVED_NAMES = {
 }
 
 
+class CategoryNodeKind(StrEnum):
+    """分类节点用途；节点用途不能再由名称或 ID 后缀猜测。"""
+
+    GROUP = "GROUP"
+    BUSINESS = "BUSINESS"
+    FALLBACK = "FALLBACK"
+    REFERENCE = "REFERENCE"
+
+
 class CategoryNode(BaseModel):
     """配置文件中的一个分类节点。"""
 
@@ -28,6 +38,11 @@ class CategoryNode(BaseModel):
     negative_signals: list[str] = Field(default_factory=list)
     examples: list[str] = Field(default_factory=list)
     organization_path: list[str] = Field(default_factory=list, max_length=20)
+    node_kind: CategoryNodeKind | None = None
+    recall_enabled: bool | None = None
+    primary_enabled: bool | None = None
+    selectable: bool | None = None
+    visible: bool | None = None
     children: list["CategoryNode"] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -65,8 +80,10 @@ class TaxonomyFallbackPolicy(BaseModel):
     """学校/学院、部门和文号驱动的确定性兜底分类策略。"""
 
     department_category_ids: list[str] = Field(default_factory=list)
-    issued: TaxonomyFallbackLeaf
-    other: TaxonomyFallbackLeaf
+    issued: TaxonomyFallbackLeaf | None = None
+    other: TaxonomyFallbackLeaf | None = None
+    target_category_id: str = "system.other"
+    historical_category_ids: list[str] = Field(default_factory=list)
 
 
 class Taxonomy(BaseModel):
@@ -86,20 +103,40 @@ class Taxonomy(BaseModel):
         seen_ids: set[str] = set()
         duplicate_ids: set[str] = set()
 
-        def walk(node: CategoryNode) -> None:
+        invalid_capabilities: list[str] = []
+
+        def walk(node: CategoryNode, *, depth: int) -> None:
             """递归收集分类 id，空 id 表示旧配置或非稳定节点。"""
 
             if node.id:
                 if node.id in seen_ids:
                     duplicate_ids.add(node.id)
                 seen_ids.add(node.id)
+            if node.node_kind is not None:
+                if (
+                    depth == 0
+                    and node.id != "system.other"
+                    and node.node_kind != CategoryNodeKind.GROUP
+                ):
+                    invalid_capabilities.append(f"{node.id or node.name}:根节点必须是 GROUP")
+                if (
+                    node.node_kind in {CategoryNodeKind.GROUP, CategoryNodeKind.FALLBACK}
+                    and node.recall_enabled is not False
+                ):
+                    invalid_capabilities.append(f"{node.id or node.name}:该节点不得参与召回")
+                if node.node_kind == CategoryNodeKind.GROUP and node.primary_enabled is not False:
+                    invalid_capabilities.append(f"{node.id or node.name}:GROUP 不得作为主类")
+                if node.primary_enabled and not node.organization_path:
+                    invalid_capabilities.append(f"{node.id or node.name}:主类缺少 organization_path")
             for child in node.children:
-                walk(child)
+                walk(child, depth=depth + 1)
 
         for category in self.categories:
-            walk(category)
+            walk(category, depth=0)
         if duplicate_ids:
             raise ValueError(f"分类 id 重复：{', '.join(sorted(duplicate_ids))}")
+        if invalid_capabilities:
+            raise ValueError("分类节点能力配置非法：" + "；".join(invalid_capabilities))
         if self.fallback_policy is not None:
             unknown_department_ids = sorted(
                 set(self.fallback_policy.department_category_ids) - seen_ids

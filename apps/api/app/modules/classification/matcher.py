@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
-from app.modules.classification.schemas import CategoryNode, Taxonomy
+from app.modules.classification.schemas import CategoryNode, CategoryNodeKind, Taxonomy
+from app.modules.classification.rule_policy import evaluate_rule_policy
 
 
 _APPOINTMENT_CATEGORY_IDS = {
@@ -107,6 +108,11 @@ class FlattenedCategory:
     positive_signals: list[str] | None = None
     negative_signals: list[str] | None = None
     examples: list[str] | None = None
+    node_kind: CategoryNodeKind | None = None
+    recall_enabled: bool = True
+    primary_enabled: bool = False
+    selectable: bool = True
+    visible: bool = True
 
 
 @dataclass(frozen=True)
@@ -119,6 +125,7 @@ class DocumentFeatures:
     headings: list[str] | None = None
     sheet_names: list[str] | None = None
     source_context: str = ""
+    verified_purpose_category_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +146,10 @@ class CategoryCandidate:
     taxonomy_key: str
     taxonomy_version: str
     order: int
+    business_score: float = 0.0
+    scope_score: float = 0.0
+    purpose_basis: str | None = None
+    evidence_support: float = 0.0
 
 
 def flatten_category_paths(taxonomy: Taxonomy) -> list[FlattenedCategory]:
@@ -161,6 +172,18 @@ def flatten_category_paths(taxonomy: Taxonomy) -> list[FlattenedCategory]:
                 positive_signals=list(node.positive_signals),
                 negative_signals=list(node.negative_signals),
                 examples=list(node.examples),
+                node_kind=(
+                    node.node_kind
+                    or (CategoryNodeKind.BUSINESS if parent_path else CategoryNodeKind.GROUP)
+                ),
+                recall_enabled=(
+                    bool(node.recall_enabled)
+                    if node.recall_enabled is not None
+                    else bool(parent_path)
+                ),
+                primary_enabled=bool(node.primary_enabled),
+                selectable=(node.selectable is not False),
+                visible=(node.visible is not False),
             )
         )
         for child in node.children:
@@ -196,33 +219,29 @@ def recall_category_candidates(
         title_text=title_text,
         body_text=body_text,
     )
-    if title_review_form is None:
-        recruitment_resume = _recruitment_resume_candidate(
-            document_features=document_features,
-            taxonomy=taxonomy,
-            title_text=title_text,
-            body_text=body_text,
-        )
-        if recruitment_resume is not None:
-            return [recruitment_resume]
+    recruitment_resume = _recruitment_resume_candidate(
+        document_features=document_features,
+        taxonomy=taxonomy,
+        title_text=title_text,
+        body_text=body_text,
+    )
     organization_scope = _detect_organization_scope(
         taxonomy=taxonomy,
         title_text=title_text,
         body_text=body_text,
     )
-    candidates: list[CategoryCandidate] = (
-        [title_review_form] if title_review_form is not None else []
-    )
+    candidates: list[CategoryCandidate] = [
+        candidate
+        for candidate in (title_review_form, recruitment_resume)
+        if candidate is not None
+    ]
     for category in flatten_category_paths(taxonomy):
-        if len(category.path) == 1:
+        if not category.recall_enabled or category.node_kind in {
+            CategoryNodeKind.GROUP,
+            CategoryNodeKind.FALLBACK,
+        }:
             continue
         root_name = category.path[0] if category.path else ""
-        if (
-            organization_scope.dominant_root
-            and root_name in organization_scope.scores
-            and root_name != organization_scope.dominant_root
-        ):
-            continue
         (
             score,
             matched_signals,
@@ -242,13 +261,8 @@ def recall_category_candidates(
             continue
         if score <= 0:
             continue
-        scope_score = 0.0
+        scope_score = organization_scope.scores.get(root_name, 0.0)
         if root_name == organization_scope.dominant_root:
-            scope_score = min(
-                0.45,
-                0.25 + organization_scope.scores.get(root_name, 0.0) * 0.35,
-            )
-            score += scope_score
             matched_title_signals = _unique_signals(
                 [
                     *matched_title_signals,
@@ -294,12 +308,122 @@ def recall_category_candidates(
                 taxonomy_key=taxonomy.key,
                 taxonomy_version=taxonomy.version,
                 order=category.order,
+                business_score=round(score, 4),
+                scope_score=round(scope_score, 4),
+                purpose_basis="CONTENT_RULE",
+                evidence_support=_evidence_support(
+                    matched_title_signals=matched_title_signals,
+                    matched_content_signals=matched_content_signals,
+                    negative_signals=negative_signals,
+                ),
             )
         )
 
+    candidates = _merge_versioned_rule_candidates(
+        candidates=candidates,
+        taxonomy=taxonomy,
+        document_features=document_features,
+        organization_scope=organization_scope,
+        title_text=title_text,
+        body_text=body_text,
+    )
+
     candidates = _dedupe_candidates_and_remove_shorter_embedded_matches(candidates)
-    candidates.sort(key=lambda item: (-item.rule_score, item.order))
+    candidates.sort(
+        key=lambda item: (
+            -item.business_score,
+            -item.scope_score,
+            -item.evidence_support,
+            item.order,
+        )
+    )
     return candidates[:max(0, min(limit, 8))]
+
+
+def _merge_versioned_rule_candidates(
+    *,
+    candidates: list[CategoryCandidate],
+    taxonomy: Taxonomy,
+    document_features: DocumentFeatures,
+    organization_scope: "_OrganizationScopeDecision",
+    title_text: str,
+    body_text: str,
+) -> list[CategoryCandidate]:
+    """把版本化强规则合并到候选集，不删除其他组织或正文候选。"""
+
+    categories_by_id = {
+        category.category_id: category
+        for category in flatten_category_paths(taxonomy)
+        if category.category_id and category.recall_enabled
+    }
+    by_id = {candidate.category_id: candidate for candidate in candidates}
+    for policy_match in evaluate_rule_policy(
+        filename=document_features.filename,
+        title=document_features.title,
+        body_text=body_text,
+        organization_root=organization_scope.dominant_root,
+    ):
+        category = categories_by_id.get(policy_match.category_id)
+        if category is None:
+            continue
+        root_name = category.path[0] if category.path else ""
+        scope_score = organization_scope.scores.get(root_name, 0.0)
+        current = by_id.get(category.category_id)
+        if current is not None:
+            updated = replace(
+                current,
+                rule_score=max(current.rule_score, policy_match.business_score),
+                business_score=max(current.business_score, policy_match.business_score),
+                scope_score=max(current.scope_score, scope_score),
+                evidence_support=max(
+                    current.evidence_support,
+                    policy_match.evidence_support,
+                ),
+                matched_signals=_unique_signals(
+                    [*current.matched_signals, *policy_match.matched_signals]
+                ),
+                negative_signals=_unique_signals(
+                    [*current.negative_signals, *policy_match.negative_signals]
+                ),
+                candidate_reason=(
+                    f"{current.candidate_reason}；{policy_match.reason}"
+                    if current.candidate_reason
+                    else policy_match.reason
+                ),
+                purpose_basis="VERSIONED_RULE",
+            )
+            candidates[candidates.index(current)] = updated
+            by_id[category.category_id] = updated
+            continue
+        matched_title = [
+            signal for signal in policy_match.matched_signals if signal in title_text
+        ]
+        matched_body = [
+            signal for signal in policy_match.matched_signals if signal in body_text
+        ]
+        created = CategoryCandidate(
+            category_id=category.category_id,
+            category_path=category.path,
+            name="/".join(category.path),
+            rule_score=policy_match.business_score,
+            matched_signals=list(policy_match.matched_signals),
+            matched_title_signals=matched_title,
+            matched_content_signals=matched_body,
+            negative_signals=list(policy_match.negative_signals),
+            organization_scope=organization_scope.dominant_root,
+            organization_score=scope_score,
+            candidate_reason=policy_match.reason,
+            taxonomy_key=taxonomy.key,
+            taxonomy_version=taxonomy.version,
+            order=category.order,
+            business_score=policy_match.business_score,
+            scope_score=scope_score,
+            purpose_basis="VERSIONED_RULE",
+            evidence_support=policy_match.evidence_support,
+        )
+        candidates.append(created)
+        by_id[category.category_id] = created
+    return candidates
 
 
 def _title_review_form_candidate(
@@ -344,6 +468,10 @@ def _title_review_form_candidate(
         taxonomy_key=taxonomy.key,
         taxonomy_version=taxonomy.version,
         order=category.order,
+        business_score=4.0,
+        scope_score=0.0,
+        purpose_basis="TITLE_FORM",
+        evidence_support=1.0,
     )
 
 
@@ -354,40 +482,45 @@ def _recruitment_resume_candidate(
     title_text: str,
     body_text: str,
 ) -> CategoryCandidate | None:
-    """应聘场景中的简历按文档用途优先归入学院师资招聘。"""
+    """只在局部窗口形成单人简历结构，避免跨章节累积履历词。"""
 
     resume_title_signals = _resume_signals(title_text)
-    resume_body_signals = _resume_signals(body_text)
-    structure_signals, structure_group_count = _resume_structure_signals(body_text)
+    resume_window = _find_resume_structure_window(body_text)
+    resume_body_signals = _resume_signals(resume_window.text) if resume_window else []
+    structure_signals = list(resume_window.signals) if resume_window else []
+    structure_group_count = resume_window.group_count if resume_window else 0
+    verified_recruitment_package = (
+        document_features.verified_purpose_category_id
+        == _FACULTY_RECRUITMENT_CATEGORY_ID
+    )
     research_statement_title_signals = _matched_case_insensitive_signals(
         title_text,
         _RESEARCH_STATEMENT_SIGNALS,
         word_boundary=False,
     )
     research_statement_body_signals = _matched_case_insensitive_signals(
-        body_text,
+        resume_window.text if resume_window else (body_text if verified_recruitment_package else ""),
         _RESEARCH_STATEMENT_SIGNALS,
         word_boundary=False,
     )
-    if (
-        not resume_title_signals
-        and not resume_body_signals
-        and structure_group_count < 3
-        and not research_statement_title_signals
-        and not research_statement_body_signals
-    ):
+    resume_expression = bool(resume_title_signals or resume_body_signals)
+    has_recruitment_material_signal = bool(
+        resume_expression
+        or research_statement_title_signals
+        or research_statement_body_signals
+        or structure_signals
+    )
+    if verified_recruitment_package:
+        if not has_recruitment_material_signal:
+            return None
+    elif structure_group_count < 3 or not resume_expression:
         return None
 
-    source_context = document_features.source_context or ""
     title_context_signals = _matched_signals(title_text, _RECRUITMENT_CONTEXT_SIGNALS)
-    body_context_signals = _matched_signals(body_text, _RECRUITMENT_CONTEXT_SIGNALS)
-    source_context_signals = _matched_signals(
-        source_context,
+    body_context_signals = _matched_signals(
+        resume_window.text if resume_window else "",
         _RECRUITMENT_CONTEXT_SIGNALS,
     )
-    if not title_context_signals and not body_context_signals and not source_context_signals:
-        return None
-
     category = next(
         (
             item
@@ -418,13 +551,13 @@ def _recruitment_resume_candidate(
         [
             *matched_content_signals,
             *matched_title_signals,
-            *source_context_signals,
         ]
     )
+    context_signals = _unique_signals([*title_context_signals, *body_context_signals])
     context_reason = (
-        f"受管源目录命中：{'、'.join(source_context_signals[:3])}"
-        if source_context_signals
-        else f"文件语义命中：{'、'.join(_unique_signals([*title_context_signals, *body_context_signals])[:3])}"
+        "冻结用途包已验证为师资招聘"
+        if verified_recruitment_package
+        else f"文件语义命中：{'、'.join(context_signals[:3])}"
     )
     return CategoryCandidate(
         category_id=category.category_id,
@@ -441,7 +574,53 @@ def _recruitment_resume_candidate(
         taxonomy_key=taxonomy.key,
         taxonomy_version=taxonomy.version,
         order=category.order,
+        business_score=1.0,
+        scope_score=0.45,
+        purpose_basis=(
+            "VERIFIED_PACKAGE" if verified_recruitment_package else "LOCAL_RESUME_WINDOW"
+        ),
+        evidence_support=1.0,
     )
+
+
+@dataclass(frozen=True)
+class _ResumeStructureWindow:
+    """单个可定位窗口内的简历结构证据。"""
+
+    text: str
+    signals: tuple[str, ...]
+    group_count: int
+
+
+def _find_resume_structure_window(text: str) -> _ResumeStructureWindow | None:
+    """在最多 12 段、3,000 字的连续窗口内寻找三组独立履历结构。"""
+
+    paragraphs = [part.strip() for part in re.split(r"[\r\n]+", text) if part.strip()]
+    if not paragraphs and text.strip():
+        paragraphs = [text.strip()]
+    best: _ResumeStructureWindow | None = None
+    for start in range(len(paragraphs)):
+        window_parts: list[str] = []
+        for paragraph in paragraphs[start : start + 12]:
+            candidate_text = "\n".join([*window_parts, paragraph])
+            if len(candidate_text) > 3_000:
+                remaining = 3_000 - len("\n".join(window_parts))
+                if remaining > 0:
+                    window_parts.append(paragraph[:remaining])
+                break
+            window_parts.append(paragraph)
+        window_text = "\n".join(window_parts)
+        signals, group_count = _resume_structure_signals(window_text)
+        candidate = _ResumeStructureWindow(
+            text=window_text,
+            signals=tuple(signals),
+            group_count=group_count,
+        )
+        if best is None or candidate.group_count > best.group_count:
+            best = candidate
+        if group_count >= 3 and _resume_signals(_join_text([paragraphs[start], window_text])):
+            return candidate
+    return best if best is not None and best.group_count >= 3 else None
 
 
 def _resume_signals(text: str) -> list[str]:
@@ -573,6 +752,8 @@ def apply_unclassified_fallback(
 
     policy = taxonomy.fallback_policy
     if policy is None:
+        return matches or [_other_category(taxonomy)]
+    if policy.issued is None or policy.other is None:
         return matches or [_other_category(taxonomy)]
     if matches and all(
         str(item.get("source") or "") == "rule_fallback"
@@ -869,6 +1050,23 @@ def _score_category_candidate(
     )
 
 
+def _evidence_support(
+    *,
+    matched_title_signals: list[str],
+    matched_content_signals: list[str],
+    negative_signals: list[str],
+) -> float:
+    """独立记录证据支持度，避免把组织范围或短词直接当成业务置信度。"""
+
+    positive = min(
+        1.0,
+        0.35 * len(_prefer_specific_signals(matched_title_signals))
+        + 0.2 * len(_prefer_specific_signals(matched_content_signals)),
+    )
+    penalty = min(0.6, 0.15 * len(_prefer_specific_signals(negative_signals)))
+    return round(max(0.0, positive - penalty), 4)
+
+
 def _is_spreadsheet_tutorial(document_features: DocumentFeatures) -> bool:
     """表格函数教程中的示例数据不作为业务分类证据。"""
 
@@ -1007,6 +1205,9 @@ def _candidate_to_category(candidate: CategoryCandidate) -> dict[str, Any]:
         "organization_scope": candidate.organization_scope,
         "candidate_scores": {
             "rule": candidate.rule_score,
+            "business": candidate.business_score,
+            "scope": candidate.scope_score,
+            "evidence_support": candidate.evidence_support,
             "organization": candidate.organization_score,
             "matched_title_signals": candidate.matched_title_signals,
             "matched_content_signals": candidate.matched_content_signals,
@@ -1015,6 +1216,7 @@ def _candidate_to_category(candidate: CategoryCandidate) -> dict[str, Any]:
         "taxonomy_key": candidate.taxonomy_key,
         "taxonomy_version": candidate.taxonomy_version,
         "candidate_reason": candidate.candidate_reason,
+        "purpose_basis": candidate.purpose_basis,
     }
 
 
@@ -1041,6 +1243,31 @@ def _unique_signals(values: list[str]) -> list[str]:
 def _other_category(taxonomy: Taxonomy) -> dict[str, Any]:
     """生成无法命中时的兜底分类建议。"""
 
+    system_other = next(
+        (
+            category
+            for category in flatten_category_paths(taxonomy)
+            if category.category_id
+            == (
+                taxonomy.fallback_policy.target_category_id
+                if taxonomy.fallback_policy is not None
+                else "system.other"
+            )
+        ),
+        None,
+    )
+    if system_other is not None:
+        return {
+            "name": "/".join(system_other.path),
+            "category_id": system_other.category_id,
+            "category_path": system_other.path,
+            "confidence": 0.0,
+            "status": "SUGGESTED",
+            "source": "system_fallback",
+            "evidence": [],
+            "taxonomy_key": taxonomy.key,
+            "taxonomy_version": taxonomy.version,
+        }
     return {
         "name": "其他",
         "category_path": ["其他"],

@@ -3,9 +3,11 @@
 import pytest
 from pydantic import ValidationError
 
-from app.modules.classification.loader import load_default_taxonomy
+import json
+
+from app.modules.classification.loader import load_default_taxonomy, load_taxonomy
 from app.modules.classification.matcher import flatten_category_paths
-from app.modules.classification.schemas import Taxonomy
+from app.modules.classification.schemas import CategoryNodeKind, Taxonomy
 
 
 def test_default_taxonomy_loads_unified_school_file_classification():
@@ -48,6 +50,45 @@ def test_default_taxonomy_all_candidates_have_physical_paths():
     assert union.organization_path == ["学校", "党委相关", "工会"]
     finance_other = next(node for node in candidates if node.id == "school.finance.other")
     assert finance_other.organization_path == ["学校", "财务", "其他"]
+    assert finance_other.node_kind == CategoryNodeKind.FALLBACK
+    assert finance_other.recall_enabled is False
+    assert finance_other.visible is False
+    assert finance_other.selectable is False
+
+
+def test_loader_compiles_top_level_system_other_without_review_node(tmp_path):
+    """T02：新配置只有单一 OTHER 可落位，历史 fallback 只读且不制造复核节点。"""
+
+    payload = {
+        "key": "new",
+        "name": "新分类",
+        "version": "v10",
+        "source": "test",
+        "fallback_policy": {"target_category_id": "system.other"},
+        "categories": [
+            {"id": "school", "name": "学校", "children": []},
+            {
+                "id": "system.other",
+                "name": "其他",
+                "organization_path": ["其他"],
+                "node_kind": "FALLBACK",
+                "recall_enabled": False,
+                "primary_enabled": True,
+                "selectable": True,
+                "visible": True,
+            },
+        ],
+    }
+    path = tmp_path / "taxonomy.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    taxonomy = load_taxonomy(path)
+    by_id = {item.category_id: item for item in flatten_category_paths(taxonomy)}
+
+    assert by_id["system.other"].path == ["其他"]
+    assert by_id["system.other"].node_kind == CategoryNodeKind.FALLBACK
+    assert by_id["system.other"].primary_enabled is True
+    assert "__needs_review__" not in by_id
 
 
 def test_flatten_category_paths_preserves_parent_path():

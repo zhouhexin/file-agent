@@ -1,0 +1,94 @@
+{
+  "policy_id": "workdata-classification",
+  "version": "workdata-v1",
+  "policy_mode": "conservative_rules",
+  "candidate_limit": 8,
+  "resume_window_paragraphs": 12,
+  "resume_window_characters": 3000,
+  "rules": [
+    {
+      "rule_id": "union.health-check",
+      "version": "1",
+      "candidate_category_ids": ["school.party.union"],
+      "subject_signals": {"all_groups": [["女职工", "教职工"]], "any_group": [], "same_section": []},
+      "action_signals": {"all_groups": [["健康检查", "健康体检", "专项体检"]], "any_group": [], "same_section": []},
+      "title_signals": {"all_groups": [], "any_group": [["健康检查", "体检通知"]], "same_section": []},
+      "negative_contexts": ["教学检查", "课堂教学"],
+      "scope_policy": {"preferred_roots": ["学校"], "required": false},
+      "evidence_requirements": {"minimum_groups": 2, "require_body_signal": true},
+      "regression_sample_ids": ["WD-001"]
+    },
+    {
+      "rule_id": "reference.office-guide",
+      "version": "1",
+      "candidate_category_ids": ["reference.office-guides"],
+      "subject_signals": {"all_groups": [["会议记录", "会议纪要"]], "any_group": [], "same_section": []},
+      "action_signals": {"all_groups": [["如何", "写作方法", "撰写方法", "教程"]], "any_group": [], "same_section": []},
+      "title_signals": {"all_groups": [], "any_group": [["如何做好会议记录", "会议纪要写作"]], "same_section": []},
+      "negative_contexts": ["会议时间", "参会人员", "会议决定"],
+      "scope_policy": {"preferred_roots": [], "required": false},
+      "evidence_requirements": {"minimum_groups": 2, "require_body_signal": true},
+      "regression_sample_ids": ["WD-014", "WD-018"]
+    },
+    {
+      "rule_id": "finance.management",
+      "version": "1",
+      "candidate_category_ids": ["school.finance", "college.finance"],
+      "subject_signals": {"all_groups": [], "any_group": [["财务管理", "收入分配", "收费情况", "经费收支", "垫付费用"]], "same_section": []},
+      "action_signals": {"all_groups": [], "any_group": [["修订", "征求意见", "自查", "统计", "管理办法"]], "same_section": []},
+      "title_signals": {"all_groups": [], "any_group": [["财务", "收入", "收费", "经费"]], "same_section": []},
+      "negative_contexts": ["函数教程", "示例数据"],
+      "scope_policy": {"preferred_roots": ["学校", "学院"], "required": false},
+      "evidence_requirements": {"minimum_groups": 2, "require_body_signal": true},
+      "regression_sample_ids": ["WD-004", "WD-005", "WD-010", "WD-012", "WD-013"]
+    },
+    {
+      "rule_id": "audit.special-inspection",
+      "version": "1",
+      "candidate_category_ids": ["school.audit"],
+      "subject_signals": {"all_groups": [["专项监督", "监督检查", "审计"]], "any_group": [], "same_section": []},
+      "action_signals": {"all_groups": [["自查", "检查", "审计"]], "any_group": [], "same_section": []},
+      "title_signals": {"all_groups": [], "any_group": [["专项自查", "监督检查"]], "same_section": []},
+      "negative_contexts": ["普通财务自查"],
+      "scope_policy": {"preferred_roots": ["学校"], "required": false},
+      "evidence_requirements": {"minimum_groups": 2, "require_body_signal": true},
+      "regression_sample_ids": ["WD-011"]
+    },
+    {
+      "rule_id": "digital.network-service",
+      "version": "1",
+      "candidate_category_ids": ["school.digital-services", "college.digital-services"],
+      "subject_signals": {"all_groups": [], "any_group": [["数字化", "网络中心", "上网账号", "信息化"]], "same_section": []},
+      "action_signals": {"all_groups": [], "any_group": [["调研", "申请", "开通", "分配"]], "same_section": []},
+      "title_signals": {"all_groups": [], "any_group": [["数字化", "上网账号", "信息化"]], "same_section": []},
+      "negative_contexts": ["网络安全事件", "课堂教学平台"],
+      "scope_policy": {"preferred_roots": ["学校", "学院"], "required": false},
+      "evidence_requirements": {"minimum_groups": 2, "require_body_signal": true},
+      "regression_sample_ids": ["WD-002", "WD-003"]
+    },
+    {
+      "rule_id": "teaching.program-accreditation",
+      "version": "1",
+      "candidate_category_ids": ["college.teaching.program-accreditation"],
+      "subject_signals": {"all_groups": [["专业认证", "工程教育认证", "认证任务"]], "any_group": [], "same_section": []},
+      "action_signals": {"all_groups": [], "any_group": [["认证", "任务清单", "支撑材料"]], "same_section": []},
+      "title_signals": {"all_groups": [], "any_group": [["专业认证", "工程认证"]], "same_section": []},
+      "negative_contexts": ["新闻报道", "费用统计"],
+      "scope_policy": {"preferred_roots": ["学院"], "required": false},
+      "evidence_requirements": {"minimum_groups": 2, "require_body_signal": true},
+      "regression_sample_ids": ["WD-007", "WD-008", "WD-009", "WD-010"]
+    },
+    {
+      "rule_id": "teaching.quality-evaluation",
+      "version": "1",
+      "candidate_category_ids": ["school.undergraduate-teaching.quality-evaluation", "college.teaching.quality-evaluation"],
+      "subject_signals": {"all_groups": [["本科教学", "教学质量"]], "any_group": [], "same_section": []},
+      "action_signals": {"all_groups": [["评估", "自评报告", "质量评价"]], "any_group": [], "same_section": []},
+      "title_signals": {"all_groups": [], "any_group": [["本科教学工作水平评估", "教学质量评估"]], "same_section": []},
+      "negative_contexts": ["个人简历", "人员介绍"],
+      "scope_policy": {"preferred_roots": ["学校", "学院"], "required": false},
+      "evidence_requirements": {"minimum_groups": 2, "require_body_signal": true},
+      "regression_sample_ids": ["WD-019"]
+    }
+  ]
+}

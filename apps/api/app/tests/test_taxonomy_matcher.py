@@ -242,7 +242,10 @@ def test_recall_candidates_prefers_college_talent_work_for_college_plan():
     )
 
     assert candidates[0].category_id == "college.hr.talent-work"
-    assert school is None
+    # T05：组织范围只参与排序，不能提前删除另一组织分支的业务候选。
+    assert school is not None
+    assert college.business_score >= school.business_score
+    assert college.scope_score > school.scope_score
     assert {"高层次人才引育计划", "人才引育工作", "人才队伍台账"} & set(
         college.matched_signals
     )
@@ -266,7 +269,8 @@ def test_recall_candidates_prefers_college_talent_work_for_necessity_report():
     )
 
     assert candidates[0].category_id == "college.hr.talent-work"
-    assert school is None
+    assert school is not None
+    assert college.scope_score > school.scope_score
     assert "人才引进必要性" in college.matched_signals
     assert "学院拟引进" in college.matched_signals
 
@@ -372,7 +376,7 @@ def test_recall_candidates_resolves_school_scope_before_salary_business_topic():
         item.category_id == "school.hr.salary-social-security"
         for item in candidates
     )
-    assert all(not str(item.category_id).startswith("college.") for item in candidates)
+    assert any(str(item.category_id).startswith("college.") for item in candidates)
 
 
 def test_recall_candidates_recognizes_added_college_hr_categories():
@@ -406,23 +410,21 @@ def test_recruitment_resume_context_overrides_incidental_experience_topics():
                 "参加科研项目，论文研究目标如下。"
             ),
             source_context="外来应聘/2015/李小和简历.doc",
+            verified_purpose_category_id="college.hr.faculty-recruitment",
         ),
         load_default_taxonomy(),
         limit=8,
     )
 
-    assert [item.category_id for item in candidates] == [
-        "college.hr.faculty-recruitment"
-    ]
+    assert candidates[0].category_id == "college.hr.faculty-recruitment"
     incidental_categories = {
         "school.research",
         "school.hr.postdoc",
         "school.admin.development-planning",
     }
-    assert incidental_categories.isdisjoint(
-        {item.category_id for item in candidates}
-    )
-    assert "受管源目录命中" in candidates[0].candidate_reason
+    # D1 取消简历早退：招聘主候选存在，但科研等正文辅助候选不再被吞掉。
+    assert incidental_categories & {item.category_id for item in candidates}
+    assert "冻结用途包" in candidates[0].candidate_reason
 
 
 def test_recruitment_resume_semantics_work_without_managed_source_context():
@@ -518,6 +520,7 @@ def test_managed_recruitment_resume_structure_overrides_generic_filename(
             filename=filename,
             full_text=full_text,
             source_context=f"外来应聘/{filename}",
+            verified_purpose_category_id="college.hr.faculty-recruitment",
         ),
         load_default_taxonomy(),
         limit=8,
@@ -534,6 +537,7 @@ def test_managed_research_statement_is_faculty_recruitment_material():
             filename="Statement of Research Interest.pdf",
             full_text="Statement of Research Interest\nQian Zhang\nPresent Research",
             source_context="外来应聘/Statement of Research Interest.pdf",
+            verified_purpose_category_id="college.hr.faculty-recruitment",
         ),
         load_default_taxonomy(),
         limit=8,
@@ -660,3 +664,48 @@ def test_unclassified_fallback_uses_primary_root_after_evidence_review():
 
     assert matches[0]["category_id"] == "school.other"
     assert matches[0]["category_path"] == ["学校", "其他"]
+
+
+def test_fallback_nodes_never_enter_ordinary_recall():
+    """T01：正文只有“其他”和学院名称时，普通候选不得出现历史 fallback。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename="其他事项.docx",
+            full_text="计算机学院其他临时说明。",
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert all(
+        candidate.category_id not in {"college.other", "school.other"}
+        and not str(candidate.category_id).endswith((".other", ".issued"))
+        for candidate in candidates
+    )
+
+
+def test_scattered_resume_terms_do_not_override_teaching_evaluation():
+    """T03：跨章节散落履历词不能拼成简历，教学评估业务仍进入候选。"""
+
+    paragraphs = ["本科教学工作水平评估自评报告", "学校开展本科教学质量评估。"]
+    paragraphs.extend(f"第{i}章 教学条件与质量保障" for i in range(15))
+    paragraphs.extend(["人员介绍：姓名", "教育经历", "工作经历", "联系方式"])
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename="校评估报告.pdf",
+            title="本科教学工作水平评估自评报告",
+            full_text="\n".join(paragraphs),
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert all(
+        candidate.category_id != "college.hr.faculty-recruitment"
+        for candidate in candidates
+    )
+    assert any(
+        candidate.category_id == "school.undergraduate-teaching"
+        for candidate in candidates
+    )
