@@ -214,18 +214,19 @@ def recall_category_candidates(
         ]
     )
     body_text = document_features.full_text or ""
+    organization_scope = _detect_organization_scope(
+        taxonomy=taxonomy,
+        title_text=title_text,
+        body_text=body_text,
+    )
     title_review_form = _title_review_form_candidate(
         taxonomy=taxonomy,
         title_text=title_text,
         body_text=body_text,
+        organization_scope=organization_scope.dominant_root,
     )
     recruitment_resume = _recruitment_resume_candidate(
         document_features=document_features,
-        taxonomy=taxonomy,
-        title_text=title_text,
-        body_text=body_text,
-    )
-    organization_scope = _detect_organization_scope(
         taxonomy=taxonomy,
         title_text=title_text,
         body_text=body_text,
@@ -431,19 +432,27 @@ def _title_review_form_candidate(
     taxonomy: Taxonomy,
     title_text: str,
     body_text: str,
+    organization_scope: str | None,
 ) -> CategoryCandidate | None:
-    """明确职称评审表题名优先于正文中的学科、科研或履历字段。"""
+    """明确职称表单可形成强候选，但不能自行猜测学校或学院范围。"""
 
     title_signals = _matched_signals(title_text, _TITLE_REVIEW_FORM_SIGNALS)
     leading_body = body_text[:1_500]
     body_signals = _matched_signals(leading_body, _TITLE_REVIEW_FORM_SIGNALS)
     if not title_signals and not body_signals:
         return None
+    if organization_scope not in {"学校", "学院"}:
+        return None
+    category_id = (
+        "school.hr.title-review"
+        if organization_scope == "学校"
+        else "college.hr.title-review"
+    )
     category = next(
         (
             item
             for item in flatten_category_paths(taxonomy)
-            if item.category_id == _TITLE_REVIEW_CATEGORY_ID
+            if item.category_id == category_id
         ),
         None,
     )
@@ -459,8 +468,8 @@ def _title_review_form_candidate(
         matched_title_signals=title_signals,
         matched_content_signals=body_signals,
         negative_signals=[],
-        organization_scope="学校",
-        organization_score=0.0,
+        organization_scope=organization_scope,
+        organization_score=1.0,
         candidate_reason=(
             "文件名、标题或正文首页明确包含职称评审表单题名："
             f"{'、'.join(matched_signals)}"
@@ -469,7 +478,7 @@ def _title_review_form_candidate(
         taxonomy_version=taxonomy.version,
         order=category.order,
         business_score=4.0,
-        scope_score=0.0,
+        scope_score=1.0,
         purpose_basis="TITLE_FORM",
         evidence_support=1.0,
     )
@@ -1111,7 +1120,9 @@ def _detect_organization_scope(
     for root in taxonomy.categories:
         if root.name not in {"学校", "学院"}:
             continue
-        positive_signals = _unique_signals([*root.aliases, *root.positive_signals])
+        positive_signals = _unique_signals(
+            [root.name, *root.aliases, *root.positive_signals]
+        )
         negative_signals = _unique_signals(root.negative_signals)
         matched_title = _prefer_specific_signals(
             [signal for signal in positive_signals if signal in title_text]

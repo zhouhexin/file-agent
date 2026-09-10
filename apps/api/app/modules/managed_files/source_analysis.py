@@ -42,9 +42,6 @@ from app.db.models import (
 from app.modules.chunks.service import DocumentIndexService, INDEX_VERSION
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
 from app.modules.classification.runtime_factory import ClassificationRuntimeFactory
-from app.modules.classification.classifier_service import (
-    is_managed_source_recruitment_package,
-)
 from app.modules.classification.freshness import (
     ClassificationFreshness,
     current_classification_identity,
@@ -320,7 +317,8 @@ class ManagedSourceAnalysisService:
             )
             metadata_only = bool(extraction.get("metadata_only"))
             source_context = f"{Path(root.container_path).name}/{managed_file.relative_path}"
-            if metadata_only and not is_managed_source_recruitment_package(source_context):
+            # 目录名不能替代不可变用途包授权；metadata-only 文件保持只读分析结果。
+            if metadata_only:
                 identity = current_classification_identity(
                     db=self.db,
                     settings=self.settings,

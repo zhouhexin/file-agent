@@ -10,6 +10,7 @@ from app.modules.classification.matcher import (
     match_document_text,
     recall_category_candidates,
 )
+from app.modules.classification.primary_selection import select_primary_category
 
 
 def test_matcher_returns_specific_school_category_path():
@@ -22,7 +23,7 @@ def test_matcher_returns_specific_school_category_path():
     assert matches[0]["name"] == "学校/人事师资/职称"
     assert matches[0]["category_path"] == ["学校", "人事师资", "职称"]
     assert matches[0]["taxonomy_key"] == "unified_school_file_classification"
-    assert matches[0]["taxonomy_version"] == "2026-09-v9"
+    assert matches[0]["taxonomy_version"] == "2026-09-v10"
     assert "职称" in matches[0]["evidence"]
 
 
@@ -84,12 +85,14 @@ def test_matcher_returns_other_when_no_taxonomy_keywords_match():
     assert matches == [
         {
             "name": "其他",
+            "category_id": "system.other",
             "category_path": ["其他"],
-            "confidence": 0.2,
+            "confidence": 0.0,
             "status": "SUGGESTED",
+            "source": "system_fallback",
             "evidence": [],
             "taxonomy_key": "unified_school_file_classification",
-            "taxonomy_version": "2026-09-v9",
+            "taxonomy_version": "2026-09-v10",
         }
     ]
 
@@ -150,8 +153,8 @@ def test_spreadsheet_function_tutorial_uses_default_organization_fallback():
         default_organization_root="学院",
     )
 
-    assert matches[0]["category_id"] == "college.other"
-    assert matches[0]["category_path"] == ["学院", "其他"]
+    assert matches[0]["category_id"] == "system.other"
+    assert matches[0]["category_path"] == ["其他"]
 
 
 def test_matcher_uses_document_number_department_as_parent_category_signal():
@@ -589,27 +592,27 @@ def test_match_document_text_uses_recall_candidates_for_rule_only_output():
 @pytest.mark.parametrize(
     ("text", "expected_id", "expected_path"),
     [
-        ("校属各单位请知悉本项临时联络事项。", "school.other", ["学校", "其他"]),
+        ("校属各单位请知悉本项临时联络事项。", "system.other", ["其他"]),
         (
             "西安理工校发〔2026〕12号，校属各单位请知悉本项临时联络事项。",
-            "school.issued",
-            ["学校", "发文"],
+            "system.other",
+            ["其他"],
         ),
         (
             "财务处关于“两新”项目配套资金的工作通知。",
-            "school.finance.other",
-            ["学校", "财务", "其他"],
+            "school.finance",
+            ["学校", "财务"],
         ),
         (
             "财务处〔2026〕8号，关于“两新”项目配套资金的工作通知。",
-            "school.finance.issued",
-            ["学校", "财务", "发文"],
+            "school.finance",
+            ["学校", "财务"],
         ),
-        ("计算机科学与工程学院院内临时联络材料。", "college.other", ["学院", "其他"]),
+        ("计算机科学与工程学院院内临时联络材料。", "system.other", ["其他"]),
         (
             "计算机学院〔2026〕3号，关于临时联络事项的说明。",
-            "college.issued",
-            ["学院", "发文"],
+            "system.other",
+            ["其他"],
         ),
     ],
 )
@@ -624,7 +627,7 @@ def test_unclassified_fallback_uses_scope_department_and_document_number(
 
     assert matches[0]["category_id"] == expected_id
     assert matches[0]["category_path"] == expected_path
-    assert matches[0]["source"] == "rule_fallback"
+    assert matches[0]["source"] in {"system_fallback", "rule"}
 
 
 def test_unclassified_fallback_does_not_override_specific_business_category():
@@ -662,8 +665,14 @@ def test_unclassified_fallback_uses_primary_root_after_evidence_review():
         ],
     )
 
-    assert matches[0]["category_id"] == "school.other"
-    assert matches[0]["category_path"] == ["学校", "其他"]
+    selection = select_primary_category(
+        taxonomy=load_default_taxonomy(),
+        candidates=matches,
+        input_fingerprint="review-compatibility",
+    )
+
+    assert selection.primary_candidate["category_id"] == "system.other"
+    assert selection.primary_candidate["category_path"] == ["其他"]
 
 
 def test_fallback_nodes_never_enter_ordinary_recall():

@@ -1,0 +1,137 @@
+{
+  "snapshot_version": "workdata-2026-09-v10",
+  "entries": [],
+  "taxonomy_enrichments": [],
+  "category_additions": [
+    {
+      "parent_category_id": "school",
+      "node": {
+        "id": "school.digital-services",
+        "name": "信息化",
+        "description": "学校层面的数字化建设、网络账号、信息系统与信息服务业务。",
+        "aliases": ["学校信息化", "数字化建设", "网络信息服务"],
+        "positive_signals": ["数字化", "信息化", "网络中心", "上网账号", "信息系统"],
+        "negative_signals": ["网络安全事件", "在线教学课程"],
+        "examples": ["全校数字化专项调研通知", "校级网络账号服务通知"],
+        "organization_path": ["学校", "信息化"]
+      }
+    },
+    {
+      "parent_category_id": "college",
+      "node": {
+        "id": "college.digital-services",
+        "name": "信息化",
+        "description": "学院发起或填报的网络账号、数字化调研和信息服务业务。",
+        "aliases": ["学院信息化", "学院数字化", "网络账号申请"],
+        "positive_signals": ["数字化填报", "上网账号申请", "学院信息系统"],
+        "negative_signals": ["网络安全事件", "在线教学课程"],
+        "examples": ["学院数字化调研问卷", "临时上网账号申请"],
+        "organization_path": ["学院", "信息化"]
+      }
+    },
+    {
+      "parent_category_id": "college.teaching",
+      "node": {
+        "id": "college.teaching.program-accreditation",
+        "name": "专业认证",
+        "description": "学院专业认证、工程教育认证的任务、支撑材料和审核记录。",
+        "aliases": ["工程教育认证", "工程认证", "认证支撑材料"],
+        "positive_signals": ["专业认证", "认证任务", "认证标准", "支撑材料"],
+        "negative_signals": ["认证新闻", "单独费用统计"],
+        "examples": ["工程认证任务清单", "专业认证支撑材料目录"],
+        "organization_path": ["学院", "教学", "专业认证"]
+      }
+    },
+    {
+      "parent_category_id": "college.teaching",
+      "node": {
+        "id": "college.teaching.quality-evaluation",
+        "name": "教学评估",
+        "description": "学院教学质量审核、评估、自评和整改业务。",
+        "aliases": ["教学质量评估", "审核评估", "教学自评"],
+        "positive_signals": ["教学评估", "审核评估", "自评报告", "质量评价"],
+        "negative_signals": ["人员履历", "专业认证"],
+        "examples": ["学院教学质量审核评估材料", "学院教学自评报告"],
+        "organization_path": ["学院", "教学", "教学评估"]
+      }
+    },
+    {
+      "parent_category_id": "school.undergraduate-teaching",
+      "node": {
+        "id": "school.undergraduate-teaching.quality-evaluation",
+        "name": "教学评估",
+        "description": "学校本科教学质量、工作水平评估、自评及整改业务。",
+        "aliases": ["本科教学工作水平评估", "本科教学评估", "校级教学自评"],
+        "positive_signals": ["本科教学", "教学工作水平评估", "自评报告", "质量保障"],
+        "negative_signals": ["个人简历", "人员介绍", "研究生教育评估"],
+        "examples": ["本科教学工作水平评估自评报告", "校级本科教学审核评估材料"],
+        "organization_path": ["学校", "本科教学", "教学评估"]
+      }
+    },
+    {
+      "parent_category_id": null,
+      "node": {
+        "id": "reference",
+        "name": "参考资料",
+        "description": "不代表本校业务事实的知识、教程和工具参考分组。",
+        "organization_path": [],
+        "node_kind": "GROUP",
+        "recall_enabled": false,
+        "primary_enabled": false,
+        "selectable": false,
+        "visible": true
+      }
+    },
+    {
+      "parent_category_id": "reference",
+      "node": {
+        "id": "reference.office-guides",
+        "name": "办公知识与工具",
+        "description": "会议记录写作、表格函数和办公工具教程等参考材料。",
+        "aliases": ["办公指南", "办公教程", "工具说明"],
+        "positive_signals": ["写作方法", "函数教程", "使用说明", "操作指南"],
+        "negative_signals": ["会议决定", "真实业务台账", "正式填报记录"],
+        "examples": ["如何做好会议记录和纪要", "表格函数使用教程"],
+        "organization_path": ["参考资料", "办公知识与工具"],
+        "node_kind": "REFERENCE"
+      }
+    },
+    {
+      "parent_category_id": null,
+      "node": {
+        "id": "system.other",
+        "name": "其他",
+        "description": "无法可靠确定业务主类、组织范围或正文质量不足时的唯一新版兜底。",
+        "aliases": [],
+        "positive_signals": [],
+        "negative_signals": [],
+        "examples": [],
+        "organization_path": ["其他"],
+        "node_kind": "FALLBACK",
+        "recall_enabled": false,
+        "primary_enabled": true,
+        "selectable": true,
+        "visible": true
+      }
+    }
+  ],
+  "fallback_policy_override": {
+    "target_category_id": "system.other",
+    "historical_category_ids": [
+      "school.admin.issued", "school.admin.other", "school.hr.issued", "school.hr.other",
+      "school.finance.issued", "school.finance.other", "school.logistics-assets.issued", "school.logistics-assets.other",
+      "school.undergraduate-teaching.issued", "school.undergraduate-teaching.other", "school.postgraduate.issued", "school.postgraduate.other",
+      "school.discipline.issued", "school.discipline.other", "school.research.issued", "school.research.other",
+      "school.party.issued", "school.party.other", "school.international-cooperation.issued", "school.international-cooperation.other",
+      "school.domestic-cooperation-alumni.issued", "school.domestic-cooperation-alumni.other", "school.audit.issued", "school.audit.other",
+      "school.student-affairs.issued", "school.student-affairs.other", "school.safety-stability.issued", "school.safety-stability.other",
+      "school.laboratory-management.issued", "school.laboratory-management.other", "school.issued", "school.other",
+      "college.party-building.issued", "college.party-building.other", "college.admin.issued", "college.admin.other",
+      "college.hr.issued", "college.hr.other", "college.finance.issued", "college.finance.other",
+      "college.teaching.issued", "college.teaching.other", "college.research.issued", "college.research.other",
+      "college.postgraduate.issued", "college.postgraduate.other", "college.discipline.issued", "college.discipline.other",
+      "college.student-affairs.issued", "college.student-affairs.other", "college.safety-stability.issued", "college.safety-stability.other",
+      "college.issued", "college.other"
+    ]
+  }
+}

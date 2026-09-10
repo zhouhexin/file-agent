@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
+from app.modules.classification.loader import load_taxonomy
 from app.modules.classification.unified_builder import build_unified_taxonomy
 
 
@@ -25,7 +26,8 @@ def main() -> None:
     args = parser.parse_args()
 
     base_path = Path(args.base)
-    payload = json.loads(base_path.read_text(encoding="utf-8"))
+    # 构建输入先经过同一 loader，确保 v9 动态物化的历史 fallback 也进入冻结兼容快照。
+    payload = load_taxonomy(base_path).model_dump(mode="json", exclude_none=True)
     for inventory_value in args.inventory:
         inventory_path = Path(inventory_value)
         payload = build_unified_taxonomy(

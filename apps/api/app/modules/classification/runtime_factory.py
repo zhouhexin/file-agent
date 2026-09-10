@@ -45,6 +45,7 @@ class ClassificationRuntimeFactory:
             graph_top_k=settings.graph_classification_top_k,
             graph_mode=graph_mode,
             semantic_context=self._build_semantic_context(graph_mode=graph_mode),
+            settings=settings,
         )
 
     def graph_mode_for_user(self, *, user_id: str) -> str:

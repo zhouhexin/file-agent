@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.logging import log_event
 from app.db.models import (
     Document,
@@ -17,6 +17,13 @@ from app.db.models import (
     DocumentPage,
 )
 from app.modules.classification.loader import load_default_taxonomy
+from app.modules.classification.input_fingerprint import (
+    ClassificationContentFingerprintInput,
+    PrimarySelectionFingerprintInput,
+    build_content_fingerprint,
+    build_primary_selection_fingerprint,
+    digest_text,
+)
 from app.modules.classification.managed_catalog import GlobalManagedCategoryCatalogService
 from app.modules.classification.matcher import (
     DocumentFeatures,
@@ -27,6 +34,12 @@ from app.modules.classification.summary_service import (
     DocumentSummaryService,
     resolve_document_version_id,
 )
+from app.modules.classification.primary_selection import select_primary_category
+from app.modules.classification.purpose_policy import (
+    PurposePackageSnapshot,
+    evaluate_purpose_package,
+)
+from app.modules.classification.rule_policy import load_rule_policy
 from app.modules.knowledge_graph.candidate_retriever import retrieve_graph_candidates
 from app.modules.knowledge_graph.classification_context import NoOpGraphClassificationContext
 from app.modules.knowledge_graph.managed_path_profile import ManagedPathProfileRegistry
@@ -36,11 +49,20 @@ from app.modules.knowledge_graph.semantic_context import NoOpSemanticClassificat
 
 
 # 分类判定规则发生变化后必须递增版本，避免复用旧分类缓存。
-CLASSIFIER_IMPLEMENTATION_VERSION = "v14"
+CLASSIFIER_IMPLEMENTATION_VERSION = "v15"
 _FACULTY_RECRUITMENT_CATEGORY_ID = "college.hr.faculty-recruitment"
 _MANAGED_SOURCE_RECRUITMENT_PACKAGE_SOURCE = "managed_source_recruitment_package"
 _TITLE_REVIEW_CATEGORY_ID = "school.hr.title-review"
 _MANAGED_SOURCE_TITLE_REVIEW_PACKAGE_SOURCE = "managed_source_title_review_package"
+
+
+def _load_optional_settings() -> Settings | None:
+    """允许无数据库的纯分类调用，同时复用测试或生产已提供的环境配置。"""
+
+    try:
+        return get_settings()
+    except RuntimeError:
+        return None
 
 
 def build_classifier_version(*, mode: str, graph_mode: str, summary_enabled: bool) -> str:
@@ -67,10 +89,14 @@ class DocumentClassificationService:
         semantic_context: Any = None,
         managed_catalog_service: GlobalManagedCategoryCatalogService | None = None,
         summary_service: DocumentSummaryService | None = None,
+        settings: Settings | None = None,
     ) -> None:
         """保存请求级数据库会话；无数据库时仅支持 fallback_text。"""
 
         self.db = db
+        # 无数据库模式只用于纯函数式调用和单元测试，不应为了读取摘要开关强制要求
+        # DATABASE_URL。生产工厂会显式传入同一个 Settings 快照。
+        self.settings = settings or _load_optional_settings()
         self.llm_judge = llm_judge
         self.mode = mode
         self.graph_context = graph_context or NoOpGraphClassificationContext()
@@ -94,6 +120,13 @@ class DocumentClassificationService:
         document_version_id: str = "",
         default_organization_root: str | None = None,
         source_context: str = "",
+        purpose_package: PurposePackageSnapshot | None = None,
+        content_sha256: str = "",
+        managed_file_id: str | None = None,
+        parser_version: str = "unknown",
+        extraction_status: str = "COMPLETED",
+        existing_human_primary: dict[str, Any] | None = None,
+        explicit_target: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """读取完整页面正文并返回分类结果。
 
@@ -119,25 +152,58 @@ class DocumentClassificationService:
                 )
                 if self.summary_service is not None
                 and (
-                    get_settings().document_summary_enabled
-                    or get_settings().llm_classification_summary_enabled
+                    self._document_summary_enabled
+                    or self._classification_summary_enabled
                 )
                 else None
             )
             classification_text = (
                 summaries.classification_text
                 if summaries is not None
-                and get_settings().llm_classification_summary_enabled
+                and self._classification_summary_enabled
                 and summaries.classification_text.strip()
                 else full_text or fallback_text
             )
             taxonomy_key, taxonomy_version = self._taxonomy_identity()
+            taxonomy = load_default_taxonomy()
+            rule_policy = load_rule_policy()
+            effective_content_sha256 = content_sha256 or digest_text(full_text or fallback_text)
+            content_fingerprint = build_content_fingerprint(
+                ClassificationContentFingerprintInput(
+                    document_version_id=resolved_version_id or document_id or extraction_run_id,
+                    content_sha256=effective_content_sha256,
+                    extracted_content_digest=digest_text(full_text or fallback_text),
+                    structure_digest=digest_text(
+                        "\n".join(
+                            f"{page.page_number}:{page.sheet_name or ''}:{len(page.text_content or '')}"
+                            for page in pages
+                        )
+                    ),
+                    parser_version=parser_version,
+                    taxonomy_key=taxonomy_key,
+                    taxonomy_version=taxonomy_version,
+                    taxonomy_content_digest=digest_text(taxonomy.model_dump_json()),
+                    rule_policy_id=rule_policy.policy_id,
+                    rule_policy_version=rule_policy.version,
+                    summary_config_version=(
+                        f"{self._classification_summary_provider}:"
+                        f"{self._classification_summary_prompt_version}:"
+                        f"{self._classification_summary_schema_version}"
+                    ),
+                    semantic_model_version=(
+                        "disabled" if self.graph_mode == "off" else self.classifier_version
+                    ),
+                    graph_policy_version=self.graph_mode,
+                    ingest_original_filename=filename,
+                )
+            )
             if not force_reprocess:
                 cached_categories = self._load_cached_categories(
                     document_id=document_id,
                     document_version_id=resolved_version_id or document_id,
                     taxonomy_key=taxonomy_key,
                     taxonomy_version=taxonomy_version,
+                    input_fingerprint=content_fingerprint,
                 )
                 if cached_categories:
                     return {
@@ -228,19 +294,22 @@ class DocumentClassificationService:
                 classification_text=full_text or fallback_text,
                 rule_categories=categories,
             )
-            package_category = _managed_source_recruitment_package_category(
-                source_context=source_context,
-                taxonomy_key=taxonomy_key,
-                taxonomy_version=taxonomy_version,
-            )
-            if package_category is None:
-                package_category = _managed_source_title_review_package_category(
-                    source_context=source_context,
-                    taxonomy_key=taxonomy_key,
-                    taxonomy_version=taxonomy_version,
+            package_result = (
+                evaluate_purpose_package(
+                    package=purpose_package,
+                    taxonomy=taxonomy,
+                    document_version_id=resolved_version_id or document_id,
+                    content_sha256=effective_content_sha256,
+                    managed_file_id=managed_file_id,
                 )
-            if package_category is not None:
-                categories = [package_category]
+                if purpose_package is not None
+                else None
+            )
+            package_category = (
+                package_result.candidate
+                if package_result is not None and package_result.valid
+                else None
+            )
             categories = apply_unclassified_fallback(
                 document_features=DocumentFeatures(
                     filename=filename,
@@ -260,7 +329,7 @@ class DocumentClassificationService:
                     pages=pages,
                     # 受管目录源分析通常不传短 preview；已加载的完整正文必须作为
                     # 上传链路同等的证据定位兜底，保证部门/文号 fallback 不因入口不同
-                    # 被误标成 NEEDS_REVIEW。
+                    # 保留候选诊断；证据不足由唯一 PRIMARY 选择器回退 OTHER。
                     fallback_text=full_text or fallback_text,
                 )
                 for category in categories
@@ -287,8 +356,43 @@ class DocumentClassificationService:
                     )
                     for category in post_evidence_categories
                 ]
+            primary_fingerprint = build_primary_selection_fingerprint(
+                PrimarySelectionFingerprintInput(
+                    content_fingerprint=content_fingerprint,
+                    purpose_package_digest=(
+                        purpose_package.manifest_digest if purpose_package is not None else ""
+                    ),
+                    existing_human_primary_id=str(
+                        (existing_human_primary or {}).get("category_id") or ""
+                    ),
+                    existing_human_primary_revision=(
+                        (existing_human_primary or {}).get("revision")
+                    ),
+                    explicit_target_category_id=str(
+                        (explicit_target or {}).get("category_id") or ""
+                    ),
+                    explicit_target_revision=(explicit_target or {}).get("revision"),
+                )
+            )
+            selection = select_primary_category(
+                taxonomy=taxonomy,
+                candidates=categories,
+                input_fingerprint=primary_fingerprint,
+                policy_version=rule_policy.version,
+                extraction_status=extraction_status,
+                explicit_target=explicit_target,
+                existing_human_primary=existing_human_primary,
+                purpose_candidate=package_category,
+            )
+            categories = [
+                {**selection.primary_candidate, "relation_role": "PRIMARY"},
+                *[
+                    {**category, "relation_role": "SECONDARY"}
+                    for category in selection.secondary_candidates
+                ],
+            ]
         except Exception as exc:
-            log_event(
+            self._log_event(
                 "classification.failed",
                 level="ERROR",
                 document_id=document_id or None,
@@ -299,7 +403,7 @@ class DocumentClassificationService:
             )
             raise
 
-        log_event(
+        self._log_event(
             "classification.completed",
             document_id=document_id or None,
             status="COMPLETED",
@@ -317,7 +421,7 @@ class DocumentClassificationService:
             "taxonomy_version": taxonomy_version,
             "categories": categories,
             "text_source": "classification_topic_summary" if (
-                summaries is not None and get_settings().llm_classification_summary_enabled
+                summaries is not None and self._classification_summary_enabled
             ) else (
                 "document_pages" if full_text else "fallback"
             ),
@@ -337,6 +441,20 @@ class DocumentClassificationService:
             "graph_mode": self.graph_mode,
             "classification_reused": False,
             "classifier_version": self.classifier_version,
+            "classification_outcome": selection.classification_outcome.value,
+            "classification_quality": selection.classification_quality.value,
+            "selection_basis": selection.selection_basis,
+            "reason_codes": selection.reason_codes,
+            "input_fingerprint": selection.input_fingerprint,
+            "content_fingerprint": content_fingerprint,
+            "purpose_package_status": (
+                "NOT_PROVIDED"
+                if package_result is None
+                else ("VALID" if package_result.valid else "INVALID")
+            ),
+            "purpose_package_reason_codes": (
+                [] if package_result is None else list(package_result.reason_codes)
+            ),
         }
 
     def _load_semantic_candidates(
@@ -374,7 +492,7 @@ class DocumentClassificationService:
     ) -> None:
         """记录候选 ID 排名差异，不记录正文和来源文件身份。"""
 
-        log_event(
+        self._log_event(
             "classification.graph_shadow.compared",
             document_id=document_id or None,
             status="COMPLETED",
@@ -404,7 +522,7 @@ class DocumentClassificationService:
                 limit=self.graph_top_k,
             )
         except Exception as exc:
-            log_event(
+            self._log_event(
                 "classification.graph_query.degraded",
                 level="WARNING",
                 document_id=document_id or None,
@@ -415,7 +533,7 @@ class DocumentClassificationService:
             )
             return GraphClassificationResult(status="DEGRADED", warnings=["GRAPH_UNAVAILABLE"])
         if result.status == "COMPLETED" and result.candidates:
-            log_event(
+            self._log_event(
                 "classification.graph_rerank.completed",
                 document_id=document_id or None,
                 status="COMPLETED",
@@ -452,7 +570,49 @@ class DocumentClassificationService:
         return build_classifier_version(
             mode=self.mode,
             graph_mode=self.graph_mode,
-            summary_enabled=get_settings().llm_classification_summary_enabled,
+            summary_enabled=self._classification_summary_enabled,
+        )
+
+    @property
+    def _document_summary_enabled(self) -> bool:
+        """无部署配置的内存模式默认关闭后台摘要。"""
+
+        return bool(self.settings and self.settings.document_summary_enabled)
+
+    @property
+    def _classification_summary_enabled(self) -> bool:
+        """只有显式部署配置才能开启分类摘要。"""
+
+        return bool(self.settings and self.settings.llm_classification_summary_enabled)
+
+    @property
+    def _classification_summary_provider(self) -> str:
+        """返回参与内容缓存身份的摘要 Provider。"""
+
+        return (
+            self.settings.classification_summary_provider
+            if self.settings is not None
+            else "disabled"
+        )
+
+    @property
+    def _classification_summary_prompt_version(self) -> str:
+        """返回参与内容缓存身份的摘要提示版本。"""
+
+        return (
+            self.settings.llm_classification_summary_prompt_version
+            if self.settings is not None
+            else "disabled"
+        )
+
+    @property
+    def _classification_summary_schema_version(self) -> str:
+        """返回参与内容缓存身份的摘要结构版本。"""
+
+        return (
+            self.settings.classification_summary_schema_version
+            if self.settings is not None
+            else "disabled"
         )
 
     def _taxonomy_identity(self) -> tuple[str, str]:
@@ -468,6 +628,7 @@ class DocumentClassificationService:
         document_version_id: str,
         taxonomy_key: str,
         taxonomy_version: str,
+        input_fingerprint: str,
     ) -> list[dict[str, Any]]:
         """读取同文件、同目录版本和同分类器版本的最近成功建议。"""
 
@@ -489,6 +650,12 @@ class DocumentClassificationService:
             .first()
         )
         if run is None:
+            return []
+        if (
+            not hasattr(run, "input_fingerprint")
+            or str(getattr(run, "input_fingerprint", "") or "") != input_fingerprint
+        ):
+            # D3 迁移前关闭旧缓存；不能因 schema 尚未部署而复用 OCR 前结果。
             return []
         suggestions = (
             self.db.query(DocumentCategorySuggestion)
@@ -537,13 +704,20 @@ class DocumentClassificationService:
 
         if self.db is None:
             return None
-        settings = get_settings()
+        settings = self.settings or get_settings()
         return GlobalManagedCategoryCatalogService(
             db=self.db,
             profile_registry=ManagedPathProfileRegistry.load(
                 settings.managed_path_classification_profile_dir
             ),
         )
+
+    def _log_event(self, event: str, **payload: Any) -> None:
+        """生产运行写结构化日志；无部署配置的内存分类保持纯函数式。"""
+
+        if self.settings is None:
+            return
+        log_event(event, settings=self.settings, **payload)
 
     def _load_pages(self, *, extraction_run_id: str) -> list[DocumentPage]:
         """按解析运行读取完整页面正文。"""
@@ -589,7 +763,12 @@ class DocumentClassificationService:
             source=str(category.get("source") or "rule"),
         )
         if evidence_item is None:
-            return {**category, "status": "NEEDS_REVIEW", "evidence_items": []}
+            return {
+                **category,
+                "status": "SUGGESTED",
+                "evidence_items": [],
+                "diagnostic_reason_codes": ["EVIDENCE_MISSING"],
+            }
         return {**category, "evidence_items": [evidence_item]}
 
     def _judge_categories(

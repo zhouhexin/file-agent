@@ -149,3 +149,50 @@ def test_builder_incrementally_preserves_previous_inventory_signals():
     node = Taxonomy.model_validate(second).categories[0].children[0]
     assert node.aliases == ["人事", "人事处", "教师工作部"]
     assert second["version"] == "v2"
+
+
+def test_builder_reproducibly_adds_v10_nodes_and_compiles_capabilities():
+    """v10 增量输入重复构建必须字节语义一致，且新旧节点能力字段齐全。"""
+
+    inventory = {
+        "snapshot_version": "workdata-v10-test",
+        "entries": [],
+        "category_additions": [
+            {
+                "parent_category_id": None,
+                "node": {
+                    "id": "system.other",
+                    "name": "其他",
+                    "organization_path": ["其他"],
+                    "node_kind": "FALLBACK",
+                    "recall_enabled": False,
+                    "primary_enabled": True,
+                    "selectable": True,
+                    "visible": True,
+                },
+            }
+        ],
+        "fallback_policy_override": {
+            "target_category_id": "system.other",
+            "historical_category_ids": [],
+        },
+    }
+
+    first = build_unified_taxonomy(
+        base_payload=_base_taxonomy(),
+        inventory_payload=inventory,
+        version="v10",
+    )
+    second = build_unified_taxonomy(
+        base_payload=_base_taxonomy(),
+        inventory_payload=inventory,
+        version="v10",
+    )
+
+    assert first == second
+    taxonomy = Taxonomy.model_validate(first)
+    assert taxonomy.categories[0].node_kind == "GROUP"
+    system_other = next(node for node in taxonomy.categories if node.id == "system.other")
+    assert system_other.node_kind == "FALLBACK"
+    assert system_other.recall_enabled is False
+    assert system_other.primary_enabled is True

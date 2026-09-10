@@ -16,16 +16,18 @@ def test_default_taxonomy_loads_unified_school_file_classification():
     taxonomy = load_default_taxonomy()
 
     assert taxonomy.key == "unified_school_file_classification"
-    assert taxonomy.version == "2026-09-v9"
+    assert taxonomy.version == "2026-09-v10"
     assert taxonomy.categories[0].name == "学校"
-    school, college = taxonomy.categories
+    school = next(node for node in taxonomy.categories if node.id == "school")
+    college = next(node for node in taxonomy.categories if node.id == "college")
     assert {"全校", "校属各单位"} <= set(school.positive_signals)
     assert {"计算机学院", "计算机科学与工程学院"} <= set(college.aliases)
     assert "全校" in college.negative_signals
     assert taxonomy.fallback_policy is not None
-    assert "school.finance" in taxonomy.fallback_policy.department_category_ids
-    assert taxonomy.fallback_policy.issued.name == "发文"
-    assert taxonomy.fallback_policy.other.name == "其他"
+    assert taxonomy.fallback_policy.department_category_ids == []
+    assert taxonomy.fallback_policy.issued is None
+    assert taxonomy.fallback_policy.other is None
+    assert taxonomy.fallback_policy.target_category_id == "system.other"
 
 
 def test_default_taxonomy_all_candidates_have_physical_paths():
@@ -44,7 +46,7 @@ def test_default_taxonomy_all_candidates_have_physical_paths():
 
     walk(taxonomy.categories, depth=0)
 
-    assert len(candidates) == 114
+    assert len(candidates) == 120
     assert all(node.organization_path for node in candidates)
     union = next(node for node in candidates if node.id == "school.party.union")
     assert union.organization_path == ["学校", "党委相关", "工会"]
@@ -54,6 +56,11 @@ def test_default_taxonomy_all_candidates_have_physical_paths():
     assert finance_other.recall_enabled is False
     assert finance_other.visible is False
     assert finance_other.selectable is False
+    system_other = next(
+        item for item in flatten_category_paths(taxonomy) if item.category_id == "system.other"
+    )
+    assert system_other.path == ["其他"]
+    assert system_other.primary_enabled is True
 
 
 def test_loader_compiles_top_level_system_other_without_review_node(tmp_path):

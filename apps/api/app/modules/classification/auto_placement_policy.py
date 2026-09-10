@@ -24,12 +24,20 @@ class AutoPlacementPolicyResult:
     top_margin: float | None
     required_margin: float
     feature_snapshot: dict[str, Any] = field(default_factory=dict)
+    classification_outcome: str = "OTHER"
+    classification_quality: str = "INSUFFICIENT"
 
     @property
     def evaluated_decision(self) -> str:
         """返回 Shadow 和真实执行都可复用的候选决策名称。"""
 
-        return "AUTO_ORGANIZED" if self.accepted else "NEEDS_REVIEW"
+        if not self.accepted:
+            return "BLOCKED"
+        return (
+            "APPLIED_BUSINESS"
+            if self.classification_outcome == "CLASSIFIED"
+            else "APPLIED_OTHER"
+        )
 
 
 class AutoPlacementPolicy:
@@ -75,7 +83,7 @@ class AutoPlacementPolicy:
         if primary is None:
             reasons.append("NO_TAXONOMY_CANDIDATE")
         else:
-            if str(primary.get("name") or "") == "其他":
+            if _is_any_other(primary):
                 reasons.append("OTHER_CATEGORY")
             if str(primary.get("source") or "") == "llm_free_path":
                 reasons.append("FREE_PATH_NOT_ALLOWED")
@@ -107,9 +115,16 @@ class AutoPlacementPolicy:
 
         # 原因码是稳定审计接口，必须顺序去重，不能把相同失败重复展示给用户。
         reason_codes = tuple(dict.fromkeys(reasons))
+        blocked = "RISK_CHECK_FAILED" in reason_codes
+        business_accepted = bool(primary is not None and not reason_codes)
+        selected_primary = (
+            primary
+            if business_accepted
+            else _system_other_from_candidate(primary)
+        )
         return AutoPlacementPolicyResult(
-            accepted=not reason_codes,
-            primary_category=primary if not reason_codes else None,
+            accepted=not blocked,
+            primary_category=selected_primary if not blocked else None,
             reason_codes=reason_codes,
             calibrated_confidence=top_score if primary is not None else None,
             required_threshold=self.settings.auto_classification_fallback_threshold,
@@ -139,6 +154,10 @@ class AutoPlacementPolicy:
                     self.settings.auto_classification_global_fallback_policy
                 ),
             },
+            classification_outcome="CLASSIFIED" if business_accepted else "OTHER",
+            classification_quality=(
+                "SUFFICIENT" if business_accepted else "INSUFFICIENT"
+            ),
         )
 
 
@@ -218,3 +237,35 @@ def _is_scoped_other(category: dict[str, Any] | None) -> bool:
         return False
     path = list(category.get("category_path") or [])
     return len(path) > 1 and path[-1] == "其他"
+
+
+def _is_any_other(category: dict[str, Any] | None) -> bool:
+    """识别新版和历史兜底节点，避免把兼容 fallback 当业务分类。"""
+
+    if category is None:
+        return False
+    category_id = str(category.get("category_id") or "")
+    path = list(category.get("category_path") or [])
+    return (
+        category_id == "system.other"
+        or category_id.endswith((".other", ".issued"))
+        or path[-1:] == ["其他"]
+    )
+
+
+def _system_other_from_candidate(category: dict[str, Any] | None) -> dict[str, Any]:
+    """把任何拒识结果归一为单一 OTHER，不生成分类复核状态。"""
+
+    source = category or {}
+    return {
+        "name": "其他",
+        "category_id": "system.other",
+        "category_path": ["其他"],
+        "confidence": 0.0,
+        "status": "SUGGESTED",
+        "source": "system_fallback",
+        "evidence": [],
+        "evidence_items": [],
+        "taxonomy_key": str(source.get("taxonomy_key") or ""),
+        "taxonomy_version": str(source.get("taxonomy_version") or ""),
+    }

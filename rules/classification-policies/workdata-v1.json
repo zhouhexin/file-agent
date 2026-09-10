@@ -7,6 +7,18 @@
   "resume_window_characters": 3000,
   "rules": [
     {
+      "rule_id": "hr.title-review",
+      "version": "1",
+      "candidate_category_ids": ["school.hr.title-review"],
+      "subject_signals": {"all_groups": [], "any_group": [["教师职称", "职称申报", "任职资格"]], "same_section": []},
+      "action_signals": {"all_groups": [], "any_group": [["申报材料", "资格评审", "评审材料", "评审表"]], "same_section": []},
+      "title_signals": {"all_groups": [], "any_group": [["职称申报材料", "任职资格评审", "职称评审"]], "same_section": []},
+      "negative_contexts": ["科研项目评审", "论文评审", "课程评审", "教学成果评审"],
+      "scope_policy": {"preferred_roots": ["学校"], "required": false},
+      "evidence_requirements": {"minimum_groups": 2, "require_body_signal": true},
+      "regression_sample_ids": []
+    },
+    {
       "rule_id": "union.health-check",
       "version": "1",
       "candidate_category_ids": ["school.party.union"],

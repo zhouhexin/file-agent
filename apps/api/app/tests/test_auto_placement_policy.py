@@ -55,7 +55,7 @@ def test_policy_accepts_only_unique_high_confidence_content_candidate() -> None:
     )
 
     assert result.accepted is True
-    assert result.evaluated_decision == "AUTO_ORGANIZED"
+    assert result.evaluated_decision == "APPLIED_BUSINESS"
     assert result.reason_codes == ()
     assert result.top_margin == 0.35
 
@@ -113,8 +113,8 @@ def test_policy_allows_low_score_and_summary_conflict_during_top1_test() -> None
     assert result.calibrated_confidence == 0.62
 
 
-def test_policy_rejects_unlocated_evidence_and_parse_failure() -> None:
-    """无法定位页码/Sheet 的引用和解析失败都进入复核。"""
+def test_policy_routes_unlocated_evidence_and_parse_failure_to_other() -> None:
+    """无法定位证据和解析失败完成为 OTHER，不生成分类复核。"""
 
     result = AutoPlacementPolicy(_settings()).evaluate(
         categories=[
@@ -133,7 +133,9 @@ def test_policy_rejects_unlocated_evidence_and_parse_failure() -> None:
         risk_passed=True,
     )
 
-    assert result.accepted is False
+    assert result.accepted is True
+    assert result.evaluated_decision == "APPLIED_OTHER"
+    assert result.primary_category["category_id"] == "system.other"
     assert "PARSE_FAILED" in result.reason_codes
     assert "EVIDENCE_MISSING" in result.reason_codes
 
@@ -159,7 +161,9 @@ def test_policy_accepts_scoped_other_without_text_quote() -> None:
     )
 
     assert result.accepted is True
-    assert result.reason_codes == ()
+    assert result.reason_codes == ("OTHER_CATEGORY",)
+    assert result.primary_category["category_id"] == "system.other"
+    assert result.evaluated_decision == "APPLIED_OTHER"
 
 
 def test_policy_accepts_trusted_managed_recruitment_container_evidence() -> None:

@@ -5,7 +5,37 @@ from types import SimpleNamespace
 from app.modules.agent.document_classifier import classify_document_text
 from app.core.config import get_settings
 from app.modules.classification.classifier_service import DocumentClassificationService
+from app.modules.classification.input_fingerprint import digest_text
+from app.modules.classification.purpose_policy import (
+    PurposePackageMember,
+    PurposePackageSnapshot,
+)
 from app.modules.classification.runtime_factory import ClassificationRuntimeFactory
+
+
+def _purpose_package(*, category_id: str, content: str) -> PurposePackageSnapshot:
+    """构造绑定当前测试内容的不可变用途包，不能依赖 source_context 路径猜测。"""
+
+    return PurposePackageSnapshot(
+        id=f"package-{category_id}",
+        workspace_id="workspace-1",
+        root_key="managed",
+        source_container_id="container-1",
+        purpose_category_id=category_id,
+        taxonomy_key="unified_school_file_classification",
+        taxonomy_version="2026-09-v10",
+        policy_id="test-package",
+        policy_version="1",
+        manifest_digest=f"manifest-{category_id}",
+        members=(
+            PurposePackageMember(
+                document_version_id="",
+                sha256=digest_text(content),
+            ),
+        ),
+        authorization_source="INITIAL_INGEST_TASK",
+        source_request_id="request-1",
+    )
 
 
 def test_summary_fulltext_conflict_uses_fulltext_primary(monkeypatch):
@@ -31,7 +61,7 @@ def test_summary_fulltext_conflict_uses_fulltext_primary(monkeypatch):
         SimpleNamespace(
             text_content=(
                 "专家鉴定意见表\n申报专业技术职务：教授\n"
-                "教师职务任职资格评审委员会对申报材料进行评审。"
+                "校属各单位教师职务任职资格评审委员会对申报材料进行评审。"
             ),
             page_number=1,
             sheet_name=None,
@@ -58,9 +88,10 @@ def test_managed_title_review_package_overrides_intrinsic_file_topic(monkeypatch
     monkeypatch.setenv("LLM_CLASSIFICATION_SUMMARY_ENABLED", "false")
     get_settings.cache_clear()
     service = DocumentClassificationService(graph_mode="off")
+    content = "本科教学工作量和代表性科研成果。"
     service._load_pages = lambda extraction_run_id: [
         SimpleNamespace(
-            text_content="本科教学工作量和代表性科研成果。",
+            text_content=content,
             page_number=1,
             sheet_name=None,
         )
@@ -71,9 +102,9 @@ def test_managed_title_review_package_overrides_intrinsic_file_topic(monkeypatch
             document_id="",
             extraction_run_id="managed-title-review-package-run",
             filename="5.填表说明及材料要求.doc",
-            source_context=(
-                "人事处/职称评定/2025/教师系列/正常评审/"
-                "下载相关通知、表格、文件/5.填表说明及材料要求.doc"
+            purpose_package=_purpose_package(
+                category_id="school.hr.title-review",
+                content=content,
             ),
         )
     finally:
@@ -81,8 +112,9 @@ def test_managed_title_review_package_overrides_intrinsic_file_topic(monkeypatch
 
     category = result["categories"][0]
     assert category["category_id"] == "school.hr.title-review"
-    assert category["source"] == "managed_source_title_review_package"
-    assert category["evidence_items"][0]["type"] == "managed_source_container"
+    assert category["source"] == "verified_purpose_package"
+    assert category["confidence"] < 1.0
+    assert category["evidence_items"][0]["type"] == "purpose_package_manifest"
 
 
 def test_classifier_returns_taxonomy_category_path_with_evidence():
@@ -113,18 +145,20 @@ def test_classifier_returns_other_when_no_keywords_match():
     assert categories == [
         {
             "name": "其他",
+            "category_id": "system.other",
             "category_path": ["其他"],
-            "confidence": 0.2,
+            "confidence": 0.0,
             "status": "SUGGESTED",
+            "source": "system_fallback",
             "evidence": [],
             "taxonomy_key": "unified_school_file_classification",
-            "taxonomy_version": "2026-09-v9",
+            "taxonomy_version": "2026-09-v10",
         }
     ]
 
 
-def test_classification_service_preserves_department_fallback_in_final_result(monkeypatch):
-    """分类服务完成图谱和判定阶段后，仍应保留部门层级的最终兜底路径。"""
+def test_classification_service_uses_single_other_instead_of_department_fallback(monkeypatch):
+    """部门和文号不足以确认业务时，最终只能使用单一 OTHER。"""
 
     monkeypatch.setenv(
         "DATABASE_URL",
@@ -141,14 +175,14 @@ def test_classification_service_preserves_department_fallback_in_final_result(mo
     finally:
         get_settings.cache_clear()
 
-    assert result["categories"][0]["category_id"] == "school.finance.other"
-    assert result["categories"][0]["category_path"] == ["学校", "财务", "其他"]
-    assert result["categories"][0]["source"] == "rule_fallback"
-    assert result["categories"][0]["evidence_items"]
+    assert result["categories"][0]["category_id"] == "system.other"
+    assert result["categories"][0]["category_path"] == ["其他"]
+    assert result["categories"][0]["source"] == "system_fallback"
+    assert result["classification_outcome"] == "OTHER"
 
 
-def test_managed_source_full_text_is_used_for_fallback_evidence(monkeypatch):
-    """受管源分析未传 fallback_text 时，完整页面正文仍应保留部门兜底证据。"""
+def test_managed_source_full_text_without_business_action_uses_other(monkeypatch):
+    """只有部门名称而没有业务动作时，完整正文也不能制造部门 fallback。"""
 
     monkeypatch.setenv(
         "DATABASE_URL",
@@ -174,13 +208,13 @@ def test_managed_source_full_text_is_used_for_fallback_evidence(monkeypatch):
         get_settings.cache_clear()
 
     category = result["categories"][0]
-    assert category["category_id"] == "school.finance.other"
+    assert category["category_id"] == "system.other"
     assert category["status"] == "SUGGESTED"
-    assert category["evidence_items"]
+    assert category["evidence_items"] == []
 
 
-def test_managed_recruitment_resume_uses_source_context_and_body_evidence(monkeypatch):
-    """受管源应聘目录中的简历应进入学院师资招聘并保留正文证据。"""
+def test_true_resume_uses_local_structure_and_body_evidence(monkeypatch):
+    """真实单人简历依赖局部正文结构，不依赖受管路径继承。"""
 
     monkeypatch.setenv(
         "DATABASE_URL",
@@ -192,7 +226,7 @@ def test_managed_recruitment_resume_uses_source_context_and_body_evidence(monkey
         SimpleNamespace(
             text_content=(
                 "个人简历\n姓名：李小和\n教育经历：博士后。"
-                "参加科研项目，论文研究目标如下。"
+                "工作经历：参加科研项目。联系方式：example@example.com。"
             ),
             page_number=1,
             sheet_name=None,
@@ -204,8 +238,6 @@ def test_managed_recruitment_resume_uses_source_context_and_body_evidence(monkey
             document_id="",
             extraction_run_id="managed-resume-run",
             filename="李小和简历.doc",
-            default_organization_root="学院",
-            source_context="外来应聘/李小和简历.doc",
         )
     finally:
         get_settings.cache_clear()
@@ -223,9 +255,10 @@ def test_managed_recruitment_package_overrides_intrinsic_document_topic(monkeypa
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://test:test@localhost/test")
     get_settings.cache_clear()
     service = DocumentClassificationService(graph_mode="off")
+    content = "国家自然科学基金项目研究成果及代表性论文。"
     service._load_pages = lambda extraction_run_id: [
         SimpleNamespace(
-            text_content="国家自然科学基金项目研究成果及代表性论文。",
+            text_content=content,
             page_number=1,
             sheet_name=None,
         )
@@ -236,16 +269,22 @@ def test_managed_recruitment_package_overrides_intrinsic_document_topic(monkeypa
             document_id="",
             extraction_run_id="managed-package-run",
             filename="代表性论文.pdf",
-            default_organization_root="学院",
-            source_context="外来应聘/2014/张三/代表性论文.pdf",
+            purpose_package=_purpose_package(
+                category_id="college.hr.faculty-recruitment",
+                content=content,
+            ),
         )
     finally:
         get_settings.cache_clear()
 
     category = result["categories"][0]
     assert category["category_id"] == "college.hr.faculty-recruitment"
-    assert category["source"] == "managed_source_recruitment_package"
-    assert category["evidence_items"][0]["type"] == "managed_source_container"
+    assert category["source"] == "verified_purpose_package"
+    assert category["evidence_items"][0]["type"] == "purpose_package_manifest"
+    assert any(
+        item["category_id"] in {"school.research", "college.research"}
+        for item in result["categories"][1:]
+    )
 
 
 def test_managed_recruitment_root_loose_file_still_uses_document_content(monkeypatch):
@@ -273,7 +312,7 @@ def test_managed_recruitment_root_loose_file_still_uses_document_content(monkeyp
     finally:
         get_settings.cache_clear()
 
-    assert result["categories"][0]["source"] != "managed_source_recruitment_package"
+    assert result["categories"][0]["source"] != "verified_purpose_package"
 
 
 def test_runtime_factory_classifier_identity_matches_created_service(monkeypatch):

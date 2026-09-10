@@ -1,45 +1,8 @@
 {
   "key": "unified_school_file_classification",
   "name": "学校文件统一分类体系",
-  "version": "2026-09-v9",
-  "source": "文件归类(1).xlsx + managed-directory-inventory@managed-downloads-2026-07-15-v1 + managed-directory-inventory@managed-downloads-2026-07-18-v2 + physical-path-completion@2026-08-27-v3 + college-talent-work-samples@workdata-2026-08-28-v4 + college-taxonomy-workdata-samples@workdata-2026-08-28-v5 + organization-scope-signals@workdata-2026-08-29-v6 + organization-department-document-number-fallback@2026-09-01-v7 + fallback-node-materialization@2026-09-01-v8 + title-review-form-signals@workdata-2026-09-05-v9",
-  "fallback_policy": {
-    "department_category_ids": [
-      "school.admin",
-      "school.hr",
-      "school.finance",
-      "school.logistics-assets",
-      "school.undergraduate-teaching",
-      "school.postgraduate",
-      "school.discipline",
-      "school.research",
-      "school.party",
-      "school.international-cooperation",
-      "school.domestic-cooperation-alumni",
-      "school.audit",
-      "school.student-affairs",
-      "school.safety-stability",
-      "school.laboratory-management",
-      "college.party-building",
-      "college.admin",
-      "college.hr",
-      "college.finance",
-      "college.teaching",
-      "college.research",
-      "college.postgraduate",
-      "college.discipline",
-      "college.student-affairs",
-      "college.safety-stability"
-    ],
-    "issued": {
-      "id_suffix": "issued",
-      "name": "发文"
-    },
-    "other": {
-      "id_suffix": "other",
-      "name": "其他"
-    }
-  },
+  "version": "2026-09-v10",
+  "source": "文件归类(1).xlsx + managed-directory-inventory@managed-downloads-2026-07-15-v1 + managed-directory-inventory@managed-downloads-2026-07-18-v2 + physical-path-completion@2026-08-27-v3 + college-talent-work-samples@workdata-2026-08-28-v4 + college-taxonomy-workdata-samples@workdata-2026-08-28-v5 + organization-scope-signals@workdata-2026-08-29-v6 + organization-department-document-number-fallback@2026-09-01-v7 + fallback-node-materialization@2026-09-01-v8 + title-review-form-signals@workdata-2026-09-05-v9 + managed-directory-inventory@workdata-2026-09-v10",
   "categories": [
     {
       "id": "school",
@@ -81,16 +44,41 @@
         "校属各单位工作安排",
         "中共西安理工大学委员会文件"
       ],
+      "organization_path": [],
+      "node_kind": "GROUP",
+      "recall_enabled": false,
+      "primary_enabled": false,
+      "selectable": true,
+      "visible": true,
       "children": [
         {
           "id": "school.admin",
           "name": "行政综合管理类",
-          "organization_path": ["学校", "行政综合管理类"],
+          "description": "",
+          "aliases": [
+            "校办",
+            "校长办公室",
+            "学校办公室"
+          ],
+          "positive_signals": [
+            "校办",
+            "校长办公室"
+          ],
+          "negative_signals": [],
+          "examples": [],
+          "organization_path": [
+            "学校",
+            "行政综合管理类"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
           "children": [
             {
               "id": "school.admin.development-planning",
               "name": "发展规划",
-              "organization_path": ["学校", "行政综合管理类", "发展规划"],
               "description": "与学校中长期发展、专项规划、战略部署、改革方案相关的通知、方案、报告和支撑材料。",
               "aliases": [
                 "规划",
@@ -119,12 +107,22 @@
                 "学校事业发展规划",
                 "专项建设规划编制通知",
                 "十四五规划中期评估报告"
-              ]
+              ],
+              "organization_path": [
+                "学校",
+                "行政综合管理类",
+                "发展规划"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "school.admin.annual-plan-summary",
               "name": "年度计划、总结",
-              "organization_path": ["学校", "行政综合管理类", "年度计划总结"],
               "description": "与学校年度工作计划、年度总结、重点任务台账、阶段性总结相关的文件。",
               "aliases": [
                 "年度计划",
@@ -149,12 +147,22 @@
                 "学校年度工作总结",
                 "年度重点工作任务安排",
                 "年度计划报送通知"
-              ]
+              ],
+              "organization_path": [
+                "学校",
+                "行政综合管理类",
+                "年度计划总结"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "school.admin.rules",
               "name": "规章制度",
-              "organization_path": ["学校", "行政综合管理类", "规章制度"],
               "description": "与学校层面制度、办法、规定、细则、管理办法修订和发布相关的正式文件。",
               "aliases": [
                 "制度",
@@ -180,12 +188,22 @@
                 "收入分配管理办法",
                 "教育服务收入分配管理办法",
                 "规章制度修订通知"
-              ]
+              ],
+              "organization_path": [
+                "学校",
+                "行政综合管理类",
+                "规章制度"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "school.admin.meeting-minutes",
               "name": "会议纪要",
-              "organization_path": ["学校", "行政综合管理类", "会议纪要"],
               "description": "与学校党委会、校长办公会、专题会等会议纪要、会议记录和议定事项相关的文件。",
               "aliases": [
                 "纪要",
@@ -211,23 +229,64 @@
                 "校长办公会会议纪要",
                 "党委会会议纪要",
                 "专题会议议定事项"
-              ]
+              ],
+              "organization_path": [
+                "学校",
+                "行政综合管理类",
+                "会议纪要"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
+            },
+            {
+              "id": "school.admin.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "行政综合管理类",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "school.admin.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "行政综合管理类",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
             }
-          ],
-          "aliases": [
-            "校办",
-            "校长办公室",
-            "学校办公室"
-          ],
-          "positive_signals": [
-            "校办",
-            "校长办公室"
           ]
         },
         {
           "id": "school.hr",
           "name": "人事师资",
-          "organization_path": ["学校", "人事师资"],
           "description": "与学校人事、师资管理及人事部门发文相关的文件。",
           "aliases": [
             "人事",
@@ -244,11 +303,19 @@
           "examples": [
             "西安理工人事〔2022〕14号"
           ],
+          "organization_path": [
+            "学校",
+            "人事师资"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
           "children": [
             {
               "id": "school.hr.title-review",
               "name": "职称",
-              "organization_path": ["学校", "人事师资", "职称"],
               "description": "与教师和专业技术人员职称评审、职称申报、岗位等级、评审材料和结果公示相关的文件。",
               "aliases": [
                 "职称评审",
@@ -293,12 +360,22 @@
                 "职称材料审核通知",
                 "专业技术职务评审结果公示",
                 "关于某等同志任职资格的通知"
-              ]
+              ],
+              "organization_path": [
+                "学校",
+                "人事师资",
+                "职称"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "school.hr.appointment-assessment",
               "name": "考核聘任",
-              "organization_path": ["学校", "人事师资", "考核聘任"],
               "description": "与教师岗位聘任、续聘、聘期考核、岗位考核、年度履职考核相关的通知、表格、材料和结果文件。",
               "aliases": [
                 "岗位聘任",
@@ -327,12 +404,22 @@
                 "2025年教师岗位聘期考核工作安排",
                 "专任教师续聘申请表",
                 "教师年度履职考核通知"
-              ]
+              ],
+              "organization_path": [
+                "学校",
+                "人事师资",
+                "考核聘任"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "school.hr.talent-work",
               "name": "人才工作",
-              "organization_path": ["学校", "人事师资", "人才工作"],
               "description": "与高层次人才、人才计划、人才引进、人才项目申报和人才服务保障相关的文件。",
               "aliases": [
                 "人才计划",
@@ -362,12 +449,22 @@
                 "高层次人才引进工作方案",
                 "人才项目申报通知",
                 "人才服务保障材料"
-              ]
+              ],
+              "organization_path": [
+                "学校",
+                "人事师资",
+                "人才工作"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "school.hr.faculty-recruitment",
               "name": "师资招聘",
-              "organization_path": ["学校", "人事师资", "师资招聘"],
               "description": "与教师招聘、岗位需求、招聘公告、面试考核、拟聘人员公示相关的文件。",
               "aliases": [
                 "教师招聘",
@@ -391,12 +488,22 @@
                 "教师招聘岗位需求表",
                 "师资招聘公告",
                 "拟聘人员公示"
-              ]
+              ],
+              "organization_path": [
+                "学校",
+                "人事师资",
+                "师资招聘"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "school.hr.faculty-development",
               "name": "教师发展",
-              "organization_path": ["学校", "人事师资", "教师发展"],
               "description": "与教师培训、教师能力提升、教学发展、进修访学和教师成长支持相关的文件。",
               "aliases": [
                 "教师培训",
@@ -425,12 +532,22 @@
                 "教师教学能力提升培训通知",
                 "青年教师发展计划",
                 "教师访学申请材料"
-              ]
+              ],
+              "organization_path": [
+                "学校",
+                "人事师资",
+                "教师发展"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "school.hr.salary-social-security",
               "name": "劳资社保",
-              "organization_path": ["学校", "人事师资", "劳资社保"],
               "description": "与工资、绩效、社保、公积金、薪酬调整和劳动关系相关的学校人事文件。",
               "aliases": [
                 "工资",
@@ -460,12 +577,22 @@
                 "绩效工资核算表",
                 "社保缴费通知",
                 "薪酬调整说明"
-              ]
+              ],
+              "organization_path": [
+                "学校",
+                "人事师资",
+                "劳资社保"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "school.hr.postdoc",
               "name": "博士后",
-              "organization_path": ["学校", "人事师资", "博士后"],
               "description": "与博士后进站、出站、考核、资助、合作导师和博士后管理相关的文件。",
               "aliases": [
                 "博士后进站",
@@ -491,14 +618,64 @@
                 "博士后进站申请",
                 "博士后出站考核表",
                 "博士后资助申报通知"
-              ]
+              ],
+              "organization_path": [
+                "学校",
+                "人事师资",
+                "博士后"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
+            },
+            {
+              "id": "school.hr.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "人事师资",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "school.hr.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "人事师资",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
             }
           ]
         },
         {
           "id": "school.finance",
           "name": "财务",
-          "organization_path": ["学校", "财务"],
           "description": "与学校预算、决算、经费、收入分配、报销、财务管理和会计核算相关的文件。",
           "aliases": [
             "预算",
@@ -524,12 +701,63 @@
             "教育服务收入分配管理办法",
             "预算执行情况说明",
             "经费报销通知"
+          ],
+          "organization_path": [
+            "学校",
+            "财务"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "school.finance.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "财务",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "school.finance.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "财务",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
           ]
         },
         {
           "id": "school.logistics-assets",
           "name": "后勤资产",
-          "organization_path": ["学校", "后勤资产"],
+          "description": "",
           "aliases": [
             "后勤处",
             "后勤",
@@ -538,12 +766,65 @@
           "positive_signals": [
             "后勤",
             "资产"
+          ],
+          "negative_signals": [],
+          "examples": [],
+          "organization_path": [
+            "学校",
+            "后勤资产"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "school.logistics-assets.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "后勤资产",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "school.logistics-assets.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "后勤资产",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
           ]
         },
         {
           "id": "school.undergraduate-teaching",
           "name": "本科教学",
-          "organization_path": ["学校", "本科教学"],
+          "description": "",
           "aliases": [
             "教务处",
             "教务",
@@ -559,12 +840,100 @@
             "教学评估",
             "教学质量",
             "辅修"
+          ],
+          "negative_signals": [],
+          "examples": [],
+          "organization_path": [
+            "学校",
+            "本科教学"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "school.undergraduate-teaching.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "本科教学",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "school.undergraduate-teaching.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "本科教学",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "school.undergraduate-teaching.quality-evaluation",
+              "name": "教学评估",
+              "description": "学校本科教学质量、工作水平评估、自评及整改业务。",
+              "aliases": [
+                "本科教学工作水平评估",
+                "本科教学评估",
+                "校级教学自评"
+              ],
+              "positive_signals": [
+                "本科教学",
+                "教学工作水平评估",
+                "自评报告",
+                "质量保障"
+              ],
+              "negative_signals": [
+                "个人简历",
+                "人员介绍",
+                "研究生教育评估"
+              ],
+              "examples": [
+                "本科教学工作水平评估自评报告",
+                "校级本科教学审核评估材料"
+              ],
+              "organization_path": [
+                "学校",
+                "本科教学",
+                "教学评估"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
+            }
           ]
         },
         {
           "id": "school.postgraduate",
           "name": "研究生",
-          "organization_path": ["学校", "研究生"],
           "description": "与研究生培养、招生、学位、导师、奖助和研究生教育管理相关的学校文件。",
           "aliases": [
             "研究生培养",
@@ -593,17 +962,122 @@
             "研究生培养方案修订通知",
             "导师遴选材料",
             "研究生奖助工作安排"
+          ],
+          "organization_path": [
+            "学校",
+            "研究生"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "school.postgraduate.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "研究生",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "school.postgraduate.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "研究生",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
           ]
         },
         {
           "id": "school.discipline",
           "name": "学科",
-          "organization_path": ["学校", "学科"]
+          "description": "",
+          "aliases": [],
+          "positive_signals": [],
+          "negative_signals": [],
+          "examples": [],
+          "organization_path": [
+            "学校",
+            "学科"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "school.discipline.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "学科",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "school.discipline.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "学科",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
+          ]
         },
         {
           "id": "school.research",
           "name": "科研",
-          "organization_path": ["学校", "科研"],
           "description": "与科研项目、科研成果、科研平台、论文专利、科研奖励和科研经费管理相关的学校文件。",
           "aliases": [
             "科研项目",
@@ -632,17 +1106,85 @@
             "科研项目申报通知",
             "科研成果资助材料",
             "学院科研成果资助"
+          ],
+          "organization_path": [
+            "学校",
+            "科研"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "school.research.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "科研",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "school.research.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "科研",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
           ]
         },
         {
           "id": "school.party",
           "name": "党委相关",
-          "organization_path": ["学校", "党委相关"],
+          "description": "",
+          "aliases": [
+            "党办",
+            "党委办公室"
+          ],
+          "positive_signals": [
+            "党委办公室"
+          ],
+          "negative_signals": [],
+          "examples": [],
+          "organization_path": [
+            "学校",
+            "党委相关"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
           "children": [
             {
               "id": "school.party.cadre-work",
               "name": "干部工作",
-              "organization_path": ["学校", "党委相关", "干部工作"],
               "description": "与干部选拔任用、干部考核、干部培训、任前公示和干部管理相关的党委文件。",
               "aliases": [
                 "干部任用",
@@ -666,12 +1208,22 @@
                 "干部任前公示",
                 "干部年度考核通知",
                 "干部培训工作安排"
-              ]
+              ],
+              "organization_path": [
+                "学校",
+                "党委相关",
+                "干部工作"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "school.party.organization",
               "name": "组织",
-              "organization_path": ["学校", "党委相关", "组织"],
               "description": "与基层党组织建设、党员发展、组织生活、党费和党内统计相关的文件。",
               "aliases": [
                 "组织工作",
@@ -701,22 +1253,62 @@
                 "党员发展材料",
                 "基层党组织建设通知",
                 "组织生活安排"
-              ]
+              ],
+              "organization_path": [
+                "学校",
+                "党委相关",
+                "组织"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "school.party.publicity",
               "name": "宣传",
-              "organization_path": ["学校", "党委相关", "宣传"]
+              "description": "",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "党委相关",
+                "宣传"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "school.party.united-front",
               "name": "统战",
-              "organization_path": ["学校", "党委相关", "统战"]
+              "description": "",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "党委相关",
+                "统战"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "school.party.discipline-inspection",
               "name": "纪委",
-              "organization_path": ["学校", "党委相关", "纪委"],
               "description": "与纪检监察、廉政教育、监督检查、违纪处理和纪委工作相关的文件。",
               "aliases": [
                 "纪检",
@@ -744,26 +1336,85 @@
                 "廉政风险排查通知",
                 "纪检监察工作安排",
                 "监督检查情况报告"
-              ]
+              ],
+              "organization_path": [
+                "学校",
+                "党委相关",
+                "纪委"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "school.party.union",
               "name": "工会",
-              "organization_path": ["学校", "党委相关", "工会"]
+              "description": "",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "党委相关",
+                "工会"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
+            },
+            {
+              "id": "school.party.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "党委相关",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "school.party.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "党委相关",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
             }
-          ],
-          "aliases": [
-            "党办",
-            "党委办公室"
-          ],
-          "positive_signals": [
-            "党委办公室"
           ]
         },
         {
           "id": "school.international-cooperation",
           "name": "国际合作交流",
-          "organization_path": ["学校", "国际合作交流"],
+          "description": "",
           "aliases": [
             "国际交流处",
             "国际交流",
@@ -772,32 +1423,305 @@
           "positive_signals": [
             "国际交流",
             "国际合作"
+          ],
+          "negative_signals": [],
+          "examples": [],
+          "organization_path": [
+            "学校",
+            "国际合作交流"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "school.international-cooperation.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "国际合作交流",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "school.international-cooperation.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "国际合作交流",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
           ]
         },
         {
           "id": "school.domestic-cooperation-alumni",
           "name": "国内合作、校友",
-          "organization_path": ["学校", "国内合作、校友"]
+          "description": "",
+          "aliases": [],
+          "positive_signals": [],
+          "negative_signals": [],
+          "examples": [],
+          "organization_path": [
+            "学校",
+            "国内合作、校友"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "school.domestic-cooperation-alumni.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "国内合作、校友",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "school.domestic-cooperation-alumni.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "国内合作、校友",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
+          ]
         },
         {
           "id": "school.audit",
           "name": "审计",
-          "organization_path": ["学校", "审计"]
+          "description": "",
+          "aliases": [],
+          "positive_signals": [],
+          "negative_signals": [],
+          "examples": [],
+          "organization_path": [
+            "学校",
+            "审计"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "school.audit.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "审计",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "school.audit.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "审计",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
+          ]
         },
         {
           "id": "school.student-affairs",
           "name": "学生工作",
-          "organization_path": ["学校", "学生工作"]
+          "description": "",
+          "aliases": [],
+          "positive_signals": [],
+          "negative_signals": [],
+          "examples": [],
+          "organization_path": [
+            "学校",
+            "学生工作"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "school.student-affairs.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "学生工作",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "school.student-affairs.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "学生工作",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
+          ]
         },
         {
           "id": "school.safety-stability",
           "name": "安全稳定",
-          "organization_path": ["学校", "安全稳定"]
+          "description": "",
+          "aliases": [],
+          "positive_signals": [],
+          "negative_signals": [],
+          "examples": [],
+          "organization_path": [
+            "学校",
+            "安全稳定"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "school.safety-stability.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "安全稳定",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "school.safety-stability.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "安全稳定",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
+          ]
         },
         {
           "id": "school.laboratory-management",
           "name": "实验室管理",
-          "organization_path": ["学校", "实验室管理"],
+          "description": "",
           "aliases": [
             "实验室工作"
           ],
@@ -806,12 +1730,62 @@
             "实验实习用房"
           ],
           "negative_signals": [],
-          "examples": []
+          "examples": [],
+          "organization_path": [
+            "学校",
+            "实验室管理"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "school.laboratory-management.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "实验室管理",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "school.laboratory-management.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学校",
+                "实验室管理",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
+          ]
         },
         {
           "id": "school.other",
           "name": "其他",
-          "organization_path": ["学校", "其他"],
           "description": "无法明确归入学校既有高频分类，或证据不足需要人工复核的学校层面文件。",
           "aliases": [
             "其他",
@@ -833,7 +1807,71 @@
             "无法判断业务归属的综合材料",
             "来源不明的临时文件",
             "待人工复核文件"
-          ]
+          ],
+          "organization_path": [
+            "学校",
+            "其他"
+          ],
+          "node_kind": "FALLBACK",
+          "recall_enabled": false,
+          "primary_enabled": true,
+          "selectable": false,
+          "visible": false,
+          "children": []
+        },
+        {
+          "id": "school.issued",
+          "name": "发文",
+          "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+          "aliases": [],
+          "positive_signals": [],
+          "negative_signals": [],
+          "examples": [],
+          "organization_path": [
+            "学校",
+            "发文"
+          ],
+          "node_kind": "FALLBACK",
+          "recall_enabled": false,
+          "primary_enabled": true,
+          "selectable": false,
+          "visible": false,
+          "children": []
+        },
+        {
+          "id": "school.digital-services",
+          "name": "信息化",
+          "description": "学校层面的数字化建设、网络账号、信息系统与信息服务业务。",
+          "aliases": [
+            "学校信息化",
+            "数字化建设",
+            "网络信息服务"
+          ],
+          "positive_signals": [
+            "数字化",
+            "信息化",
+            "网络中心",
+            "上网账号",
+            "信息系统"
+          ],
+          "negative_signals": [
+            "网络安全事件",
+            "在线教学课程"
+          ],
+          "examples": [
+            "全校数字化专项调研通知",
+            "校级网络账号服务通知"
+          ],
+          "organization_path": [
+            "学校",
+            "信息化"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": []
         }
       ]
     },
@@ -882,11 +1920,16 @@
         "计算机科学与工程学院党政联席会会议纪要",
         "填报单位为计算机学院的统计表"
       ],
+      "organization_path": [],
+      "node_kind": "GROUP",
+      "recall_enabled": false,
+      "primary_enabled": false,
+      "selectable": true,
+      "visible": true,
       "children": [
         {
           "id": "college.party-building",
           "name": "党建",
-          "organization_path": ["学院", "党建"],
           "description": "与学院党委、党支部建设、党员教育管理、理论学习、巡察整改、党风廉政和统战群团工作相关的文件。",
           "aliases": [
             "学院党建",
@@ -917,17 +1960,102 @@
             "计算机学院党委理论学习中心组学习材料",
             "学院党支部组织生活会记录",
             "学院巡察反馈问题整改情况报告"
+          ],
+          "organization_path": [
+            "学院",
+            "党建"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "college.party-building.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "党建",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "college.party-building.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "党建",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
           ]
         },
         {
           "id": "college.admin",
           "name": "行政管理",
-          "organization_path": ["学院", "行政综合管理"],
+          "description": "与学院综合行政、院务协调、公文印章、合同协议、办公资源和内部运行管理相关的文件。",
+          "aliases": [
+            "学院行政管理",
+            "学院综合行政",
+            "院务管理"
+          ],
+          "positive_signals": [
+            "学院行政工作",
+            "院务管理",
+            "公文处理",
+            "印章管理",
+            "合同协议",
+            "办公用房",
+            "办公资源"
+          ],
+          "negative_signals": [
+            "本科教学",
+            "科研项目",
+            "人事师资",
+            "学生工作",
+            "财务报销"
+          ],
+          "examples": [
+            "学院综合行政工作材料",
+            "学院公章使用管理文件",
+            "学院办公资源分配方案"
+          ],
+          "organization_path": [
+            "学院",
+            "行政综合管理"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
           "children": [
             {
               "id": "college.admin.development-planning",
               "name": "发展规划",
-              "organization_path": ["学院", "行政综合管理", "发展规划"],
               "description": "与学院发展规划、建设目标、改革方案、学科专业布局相关的学院文件。",
               "aliases": [
                 "学院规划",
@@ -962,12 +2090,22 @@
                 "学院发展规划",
                 "学院建设方案",
                 "学院改革任务清单"
-              ]
+              ],
+              "organization_path": [
+                "学院",
+                "行政综合管理",
+                "发展规划"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "college.admin.annual-plan-summary",
               "name": "年度计划、总结",
-              "organization_path": ["学院", "行政综合管理", "年度计划总结"],
               "description": "与学院年度工作计划、年度总结、重点工作、阶段总结和目标责任相关的文件。",
               "aliases": [
                 "学院年度计划",
@@ -997,12 +2135,22 @@
                 "学院年度工作总结",
                 "学院年度工作计划",
                 "目标责任完成情况"
-              ]
+              ],
+              "organization_path": [
+                "学院",
+                "行政综合管理",
+                "年度计划总结"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "college.admin.rules",
               "name": "规章制度",
-              "organization_path": ["学院", "行政综合管理", "规章制度"],
               "description": "与学院内部管理办法、实施细则、规章制度制定和修订相关的文件。",
               "aliases": [
                 "学院制度",
@@ -1030,12 +2178,22 @@
                 "学院科研奖励办法",
                 "学院内部管理规定",
                 "学院制度修订说明"
-              ]
+              ],
+              "organization_path": [
+                "学院",
+                "行政综合管理",
+                "规章制度"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "college.admin.meeting-minutes",
               "name": "会议纪要",
-              "organization_path": ["学院", "行政综合管理", "会议纪要"],
               "description": "与学院党政联席会、院务会、专题会等会议纪要和议定事项相关的文件。",
               "aliases": [
                 "学院会议纪要",
@@ -1064,46 +2222,96 @@
                 "学院党政联席会会议纪要",
                 "学院专题会议纪要",
                 "院务会议定事项"
-              ]
+              ],
+              "organization_path": [
+                "学院",
+                "行政综合管理",
+                "会议纪要"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
+            },
+            {
+              "id": "college.admin.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "行政综合管理",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "college.admin.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "行政综合管理",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
             }
-          ],
-          "description": "与学院综合行政、院务协调、公文印章、合同协议、办公资源和内部运行管理相关的文件。",
-          "aliases": [
-            "学院行政管理",
-            "学院综合行政",
-            "院务管理"
-          ],
-          "positive_signals": [
-            "学院行政工作",
-            "院务管理",
-            "公文处理",
-            "印章管理",
-            "合同协议",
-            "办公用房",
-            "办公资源"
-          ],
-          "negative_signals": [
-            "本科教学",
-            "科研项目",
-            "人事师资",
-            "学生工作",
-            "财务报销"
-          ],
-          "examples": [
-            "学院综合行政工作材料",
-            "学院公章使用管理文件",
-            "学院办公资源分配方案"
           ]
         },
         {
           "id": "college.hr",
           "name": "人事师资",
-          "organization_path": ["学院", "人事师资"],
+          "description": "与学院教职工队伍建设、人事管理、岗位聘用、人才引育、教师发展、薪酬社保和博士后工作相关的文件。",
+          "aliases": [
+            "学院人事",
+            "学院师资",
+            "人事师资工作"
+          ],
+          "positive_signals": [
+            "学院人事工作",
+            "学院师资队伍",
+            "教职工人事材料"
+          ],
+          "negative_signals": [
+            "西安理工人事",
+            "学校人事文件"
+          ],
+          "examples": [
+            "学院人事师资工作汇总材料",
+            "学院师资队伍建设情况表"
+          ],
+          "organization_path": [
+            "学院",
+            "人事师资"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
           "children": [
             {
               "id": "college.hr.title-review",
               "name": "职称",
-              "organization_path": ["学院", "人事师资", "职称"],
               "description": "与学院教师职称申报、材料审核、推荐排序和评审结果相关的文件。",
               "aliases": [
                 "学院职称",
@@ -1137,12 +2345,22 @@
                 "学院职称申报推荐表",
                 "学院职称材料审核通知",
                 "职称推荐排序公示"
-              ]
+              ],
+              "organization_path": [
+                "学院",
+                "人事师资",
+                "职称"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "college.hr.appointment-assessment",
               "name": "考核聘任",
-              "organization_path": ["学院", "人事师资", "考核聘任"],
               "description": "与学院教师考核、岗位聘任、续聘、聘期材料审核和学院推荐相关的文件。",
               "aliases": [
                 "学院考核",
@@ -1172,12 +2390,22 @@
                 "学院教师聘期考核材料",
                 "学院岗位续聘审核表",
                 "教师年度考核汇总"
-              ]
+              ],
+              "organization_path": [
+                "学院",
+                "人事师资",
+                "考核聘任"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "college.hr.talent-work",
               "name": "人才工作",
-              "organization_path": ["学院", "人事师资", "人才工作"],
               "description": "与学院制定和落实人才引育计划、提出高层次人才引进需求、推荐或考察候选人、提交柔性引进与必要性报告、开展人才工作自评及院内人才管理相关的文件。",
               "aliases": [
                 "学院人才工作",
@@ -1230,12 +2458,22 @@
                 "计算机科学与工程学院关于柔性引进高层次人才的报告",
                 "计算机学院人才工作自评表",
                 "学院拟引进高层次人才候选人统计表"
-              ]
+              ],
+              "organization_path": [
+                "学院",
+                "人事师资",
+                "人才工作"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "college.hr.faculty-recruitment",
               "name": "师资招聘",
-              "organization_path": ["学院", "人事师资", "师资招聘"],
               "description": "与学院招聘专任教师、接收应聘材料、资格审查、面试试讲、考察推荐和招聘计划相关的文件。",
               "aliases": [
                 "学院师资招聘",
@@ -1266,12 +2504,22 @@
                 "计算机学院教师招聘计划",
                 "学院应聘教师资格审查表",
                 "师资招聘面试试讲安排"
-              ]
+              ],
+              "organization_path": [
+                "学院",
+                "人事师资",
+                "师资招聘"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "college.hr.faculty-development",
               "name": "教师发展",
-              "organization_path": ["学院", "人事师资", "教师发展"],
               "description": "与学院教师培训、进修访学、岗前培训、助教培养、教学能力提升和青年教师成长支持相关的文件。",
               "aliases": [
                 "学院教师发展",
@@ -1304,12 +2552,22 @@
                 "学院青年教师培养计划",
                 "近三年教师进修情况统计表",
                 "学院教师访学推荐材料"
-              ]
+              ],
+              "organization_path": [
+                "学院",
+                "人事师资",
+                "教师发展"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "college.hr.salary-social-security",
               "name": "劳资社保",
-              "organization_path": ["学院", "人事师资", "劳资社保"],
               "description": "与学院教职工工资、绩效、岗位津贴、奖金补贴、酬金、社会保险、公积金和收入分配自查相关的文件。",
               "aliases": [
                 "学院劳资",
@@ -1352,12 +2610,22 @@
                 "计算机学院规范工资津贴补贴外各项奖金津贴补助发放情况自查表",
                 "学院绩效工资发放汇总表",
                 "学院岗位津贴和酬金结算表"
-              ]
+              ],
+              "organization_path": [
+                "学院",
+                "人事师资",
+                "劳资社保"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "college.hr.postdoc",
               "name": "博士后",
-              "organization_path": ["学院", "人事师资", "博士后"],
               "description": "与学院博士后进站、出站、开题、中期考核、合作导师、流动站和博士后日常管理相关的文件。",
               "aliases": [
                 "学院博士后",
@@ -1386,33 +2654,64 @@
                 "学院博士后进站考察材料",
                 "博士后流动站年度工作报告",
                 "师资博士后中期考核表"
-              ]
+              ],
+              "organization_path": [
+                "学院",
+                "人事师资",
+                "博士后"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
+            },
+            {
+              "id": "college.hr.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "人事师资",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "college.hr.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "人事师资",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
             }
-          ],
-          "description": "与学院教职工队伍建设、人事管理、岗位聘用、人才引育、教师发展、薪酬社保和博士后工作相关的文件。",
-          "aliases": [
-            "学院人事",
-            "学院师资",
-            "人事师资工作"
-          ],
-          "positive_signals": [
-            "学院人事工作",
-            "学院师资队伍",
-            "教职工人事材料"
-          ],
-          "negative_signals": [
-            "西安理工人事",
-            "学校人事文件"
-          ],
-          "examples": [
-            "学院人事师资工作汇总材料",
-            "学院师资队伍建设情况表"
           ]
         },
         {
           "id": "college.request-report",
           "name": "请示报告",
-          "organization_path": ["学院", "请示报告"],
           "description": "学院向学校或职能部门正式报送的请示、情况报告、申请报告、工作汇报和事项说明。",
           "aliases": [
             "学院请示",
@@ -1445,12 +2744,21 @@
             "计算机学院关于报送巡察整改方案的报告",
             "学院关于申请办公用房的请示",
             "学院专项工作情况报告"
-          ]
+          ],
+          "organization_path": [
+            "学院",
+            "请示报告"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": []
         },
         {
           "id": "college.finance",
           "name": "财务管理",
-          "organization_path": ["学院", "财务管理"],
           "description": "与学院预算决算、经费管理、报销报账、票据、差旅、公务卡、采购和财务公开相关的文件。",
           "aliases": [
             "学院财务",
@@ -1486,12 +2794,62 @@
             "计算机学院年度预算报告",
             "学院各类经费收支统计表",
             "学院报销票据及公务卡材料"
+          ],
+          "organization_path": [
+            "学院",
+            "财务管理"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "college.finance.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "财务管理",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "college.finance.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "财务管理",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
           ]
         },
         {
           "id": "college.teaching",
           "name": "教学",
-          "organization_path": ["学院", "教学"],
           "description": "与学院课程建设、教学安排、教学改革、质量评价、教材和实践教学相关的文件。",
           "aliases": [
             "本科教学",
@@ -1529,12 +2887,132 @@
             "学院教学工作安排",
             "课程建设申报材料",
             "教学改革项目通知"
+          ],
+          "organization_path": [
+            "学院",
+            "教学"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "college.teaching.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "教学",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "college.teaching.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "教学",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "college.teaching.program-accreditation",
+              "name": "专业认证",
+              "description": "学院专业认证、工程教育认证的任务、支撑材料和审核记录。",
+              "aliases": [
+                "工程教育认证",
+                "工程认证",
+                "认证支撑材料"
+              ],
+              "positive_signals": [
+                "专业认证",
+                "认证任务",
+                "认证标准",
+                "支撑材料"
+              ],
+              "negative_signals": [
+                "认证新闻",
+                "单独费用统计"
+              ],
+              "examples": [
+                "工程认证任务清单",
+                "专业认证支撑材料目录"
+              ],
+              "organization_path": [
+                "学院",
+                "教学",
+                "专业认证"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
+            },
+            {
+              "id": "college.teaching.quality-evaluation",
+              "name": "教学评估",
+              "description": "学院教学质量审核、评估、自评和整改业务。",
+              "aliases": [
+                "教学质量评估",
+                "审核评估",
+                "教学自评"
+              ],
+              "positive_signals": [
+                "教学评估",
+                "审核评估",
+                "自评报告",
+                "质量评价"
+              ],
+              "negative_signals": [
+                "人员履历",
+                "专业认证"
+              ],
+              "examples": [
+                "学院教学质量审核评估材料",
+                "学院教学自评报告"
+              ],
+              "organization_path": [
+                "学院",
+                "教学",
+                "教学评估"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
+            }
           ]
         },
         {
           "id": "college.research",
           "name": "科研",
-          "organization_path": ["学院", "科研"],
           "description": "与学院科研项目、科研成果、科研平台、成果资助和科研统计相关的文件。",
           "aliases": [
             "学院科研",
@@ -1567,12 +3045,62 @@
             "2019年学院科研成果资助",
             "学院科研项目统计表",
             "学院成果资助申请"
+          ],
+          "organization_path": [
+            "学院",
+            "科研"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "college.research.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "科研",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "college.research.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "科研",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
           ]
         },
         {
           "id": "college.postgraduate",
           "name": "研究生",
-          "organization_path": ["学院", "研究生"],
           "description": "与学院研究生培养、导师管理、学位论文、研究生奖助和研究生教育日常管理相关的文件。",
           "aliases": [
             "研究生培养",
@@ -1605,12 +3133,62 @@
             "学院研究生培养材料",
             "导师招生资格审核",
             "研究生奖助评审通知"
+          ],
+          "organization_path": [
+            "学院",
+            "研究生"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "college.postgraduate.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "研究生",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "college.postgraduate.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "研究生",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
           ]
         },
         {
           "id": "college.discipline",
           "name": "学科",
-          "organization_path": ["学院", "学科"],
           "description": "与学院学科建设、学科评估、学位授权点、双一流建设、学科平台和学科发展规划相关的文件。",
           "aliases": [
             "学院学科",
@@ -1644,12 +3222,62 @@
             "计算机学院学科评估材料",
             "学院一流学科建设任务书",
             "学位授权点申报材料"
+          ],
+          "organization_path": [
+            "学院",
+            "学科"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "college.discipline.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "学科",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "college.discipline.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "学科",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
           ]
         },
         {
           "id": "college.student-affairs",
           "name": "学生工作",
-          "organization_path": ["学院", "学生工作"],
           "description": "与学院学生管理、评奖评优、资助、就业、心理健康、志愿服务和日常学生事务相关的文件。",
           "aliases": [
             "学生管理",
@@ -1685,17 +3313,92 @@
             "学生奖学金评审材料",
             "学生就业工作安排",
             "志愿服务证明"
+          ],
+          "organization_path": [
+            "学院",
+            "学生工作"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "college.student-affairs.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "学生工作",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "college.student-affairs.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "学生工作",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
           ]
         },
         {
           "id": "college.profile",
           "name": "学院情况",
-          "organization_path": ["学院", "学院情况"],
+          "description": "与学院简介、组织机构、师资概况和基础统计信息相关的综合材料。",
+          "aliases": [
+            "学院基本情况",
+            "学院概况材料"
+          ],
+          "positive_signals": [
+            "学院基本情况表",
+            "学院概况材料"
+          ],
+          "negative_signals": [
+            "学院工作总结",
+            "学院新闻稿",
+            "专项统计报表"
+          ],
+          "examples": [
+            "学院基本情况汇总表"
+          ],
+          "organization_path": [
+            "学院",
+            "学院情况"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
           "children": [
             {
               "id": "college.profile.introduction",
               "name": "学院介绍",
-              "organization_path": ["学院", "学院情况", "学院介绍"],
               "description": "与学院概况、历史沿革、办学特色、师资队伍和宣传介绍相关的材料。",
               "aliases": [
                 "学院概况",
@@ -1720,12 +3423,22 @@
                 "学院简介",
                 "学院宣传介绍材料",
                 "学院概况更新稿"
-              ]
+              ],
+              "organization_path": [
+                "学院",
+                "学院情况",
+                "学院介绍"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "college.profile.organization-structure",
               "name": "机构设置",
-              "organization_path": ["学院", "学院情况", "机构设置"],
               "description": "与学院内部机构、系所中心、委员会、岗位职责和组织架构相关的文件。",
               "aliases": [
                 "学院机构设置",
@@ -1753,12 +3466,22 @@
                 "计算机学院机构设置",
                 "学院各委员会及领导小组名单",
                 "学院系室设置与岗位职责"
-              ]
+              ],
+              "organization_path": [
+                "学院",
+                "学院情况",
+                "机构设置"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             },
             {
               "id": "college.profile.faculty-info",
               "name": "教工信息",
-              "organization_path": ["学院", "学院情况", "教工信息"],
               "description": "与学院在岗教职工名册、人员基本信息、师资队伍统计和联系方式相关的文件。",
               "aliases": [
                 "教职工信息",
@@ -1786,31 +3509,24 @@
                 "计算机学院教职工信息表",
                 "学院在岗教师名册",
                 "学院师资队伍情况统计"
-              ]
+              ],
+              "organization_path": [
+                "学院",
+                "学院情况",
+                "教工信息"
+              ],
+              "node_kind": "BUSINESS",
+              "recall_enabled": true,
+              "primary_enabled": true,
+              "selectable": true,
+              "visible": true,
+              "children": []
             }
-          ],
-          "description": "与学院简介、组织机构、师资概况和基础统计信息相关的综合材料。",
-          "aliases": [
-            "学院基本情况",
-            "学院概况材料"
-          ],
-          "positive_signals": [
-            "学院基本情况表",
-            "学院概况材料"
-          ],
-          "negative_signals": [
-            "学院工作总结",
-            "学院新闻稿",
-            "专项统计报表"
-          ],
-          "examples": [
-            "学院基本情况汇总表"
           ]
         },
         {
           "id": "college.cadre-appointment",
           "name": "干部任命",
-          "organization_path": ["学院", "干部任命"],
           "description": "与学院领导干部、系室主任、科级干部任免、换届、宣布和分工调整相关的文件。",
           "aliases": [
             "学院干部任免",
@@ -1839,12 +3555,21 @@
             "计算机学院副院长任命文件",
             "学院系室主任换届工作材料",
             "学院领导班子调整通知"
-          ]
+          ],
+          "organization_path": [
+            "学院",
+            "干部任命"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": []
         },
         {
           "id": "college.news",
           "name": "学院新闻",
-          "organization_path": ["学院", "学院新闻"],
           "description": "与学院活动报道、新闻稿、通讯稿、简报、宣传图片说明和网站新闻发布相关的材料。",
           "aliases": [
             "学院新闻稿",
@@ -1874,12 +3599,21 @@
             "学院举办青年教师沙龙新闻稿",
             "计算机学院校企合作论坛活动报道",
             "学院工作简报"
-          ]
+          ],
+          "organization_path": [
+            "学院",
+            "学院新闻"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": []
         },
         {
           "id": "college.safety-stability",
           "name": "安全稳定",
-          "organization_path": ["学院", "安全稳定"],
           "description": "与学院安全稳定、综合治理、消防、实验室安全、保密、防汛、防疫和突发事件处置相关的文件。",
           "aliases": [
             "学院安全稳定",
@@ -1912,9 +3646,261 @@
             "计算机学院安全稳定工作总结",
             "学院实验室安全检查台账",
             "学院疫情防控应急预案"
+          ],
+          "organization_path": [
+            "学院",
+            "安全稳定"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": [
+            {
+              "id": "college.safety-stability.issued",
+              "name": "发文",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "安全稳定",
+                "发文"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            },
+            {
+              "id": "college.safety-stability.other",
+              "name": "其他",
+              "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+              "aliases": [],
+              "positive_signals": [],
+              "negative_signals": [],
+              "examples": [],
+              "organization_path": [
+                "学院",
+                "安全稳定",
+                "其他"
+              ],
+              "node_kind": "FALLBACK",
+              "recall_enabled": false,
+              "primary_enabled": true,
+              "selectable": false,
+              "visible": false,
+              "children": []
+            }
           ]
+        },
+        {
+          "id": "college.issued",
+          "name": "发文",
+          "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+          "aliases": [],
+          "positive_signals": [],
+          "negative_signals": [],
+          "examples": [],
+          "organization_path": [
+            "学院",
+            "发文"
+          ],
+          "node_kind": "FALLBACK",
+          "recall_enabled": false,
+          "primary_enabled": true,
+          "selectable": false,
+          "visible": false,
+          "children": []
+        },
+        {
+          "id": "college.other",
+          "name": "其他",
+          "description": "未命中更具体业务分类时，由组织层级、部门和文号规则生成的兜底分类。",
+          "aliases": [],
+          "positive_signals": [],
+          "negative_signals": [],
+          "examples": [],
+          "organization_path": [
+            "学院",
+            "其他"
+          ],
+          "node_kind": "FALLBACK",
+          "recall_enabled": false,
+          "primary_enabled": true,
+          "selectable": false,
+          "visible": false,
+          "children": []
+        },
+        {
+          "id": "college.digital-services",
+          "name": "信息化",
+          "description": "学院发起或填报的网络账号、数字化调研和信息服务业务。",
+          "aliases": [
+            "学院信息化",
+            "学院数字化",
+            "网络账号申请"
+          ],
+          "positive_signals": [
+            "数字化填报",
+            "上网账号申请",
+            "学院信息系统"
+          ],
+          "negative_signals": [
+            "网络安全事件",
+            "在线教学课程"
+          ],
+          "examples": [
+            "学院数字化调研问卷",
+            "临时上网账号申请"
+          ],
+          "organization_path": [
+            "学院",
+            "信息化"
+          ],
+          "node_kind": "BUSINESS",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": []
         }
       ]
+    },
+    {
+      "id": "reference",
+      "name": "参考资料",
+      "description": "不代表本校业务事实的知识、教程和工具参考分组。",
+      "aliases": [],
+      "positive_signals": [],
+      "negative_signals": [],
+      "examples": [],
+      "organization_path": [],
+      "node_kind": "GROUP",
+      "recall_enabled": false,
+      "primary_enabled": false,
+      "selectable": false,
+      "visible": true,
+      "children": [
+        {
+          "id": "reference.office-guides",
+          "name": "办公知识与工具",
+          "description": "会议记录写作、表格函数和办公工具教程等参考材料。",
+          "aliases": [
+            "办公指南",
+            "办公教程",
+            "工具说明"
+          ],
+          "positive_signals": [
+            "写作方法",
+            "函数教程",
+            "使用说明",
+            "操作指南"
+          ],
+          "negative_signals": [
+            "会议决定",
+            "真实业务台账",
+            "正式填报记录"
+          ],
+          "examples": [
+            "如何做好会议记录和纪要",
+            "表格函数使用教程"
+          ],
+          "organization_path": [
+            "参考资料",
+            "办公知识与工具"
+          ],
+          "node_kind": "REFERENCE",
+          "recall_enabled": true,
+          "primary_enabled": true,
+          "selectable": true,
+          "visible": true,
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "system.other",
+      "name": "其他",
+      "description": "无法可靠确定业务主类、组织范围或正文质量不足时的唯一新版兜底。",
+      "aliases": [],
+      "positive_signals": [],
+      "negative_signals": [],
+      "examples": [],
+      "organization_path": [
+        "其他"
+      ],
+      "node_kind": "FALLBACK",
+      "recall_enabled": false,
+      "primary_enabled": true,
+      "selectable": true,
+      "visible": true,
+      "children": []
     }
-  ]
+  ],
+  "fallback_policy": {
+    "department_category_ids": [],
+    "target_category_id": "system.other",
+    "historical_category_ids": [
+      "school.admin.issued",
+      "school.admin.other",
+      "school.hr.issued",
+      "school.hr.other",
+      "school.finance.issued",
+      "school.finance.other",
+      "school.logistics-assets.issued",
+      "school.logistics-assets.other",
+      "school.undergraduate-teaching.issued",
+      "school.undergraduate-teaching.other",
+      "school.postgraduate.issued",
+      "school.postgraduate.other",
+      "school.discipline.issued",
+      "school.discipline.other",
+      "school.research.issued",
+      "school.research.other",
+      "school.party.issued",
+      "school.party.other",
+      "school.international-cooperation.issued",
+      "school.international-cooperation.other",
+      "school.domestic-cooperation-alumni.issued",
+      "school.domestic-cooperation-alumni.other",
+      "school.audit.issued",
+      "school.audit.other",
+      "school.student-affairs.issued",
+      "school.student-affairs.other",
+      "school.safety-stability.issued",
+      "school.safety-stability.other",
+      "school.laboratory-management.issued",
+      "school.laboratory-management.other",
+      "school.issued",
+      "school.other",
+      "college.party-building.issued",
+      "college.party-building.other",
+      "college.admin.issued",
+      "college.admin.other",
+      "college.hr.issued",
+      "college.hr.other",
+      "college.finance.issued",
+      "college.finance.other",
+      "college.teaching.issued",
+      "college.teaching.other",
+      "college.research.issued",
+      "college.research.other",
+      "college.postgraduate.issued",
+      "college.postgraduate.other",
+      "college.discipline.issued",
+      "college.discipline.other",
+      "college.student-affairs.issued",
+      "college.student-affairs.other",
+      "college.safety-stability.issued",
+      "college.safety-stability.other",
+      "college.issued",
+      "college.other"
+    ]
+  }
 }

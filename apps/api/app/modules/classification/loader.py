@@ -108,6 +108,7 @@ def _compile_node_capabilities(taxonomy: Taxonomy) -> None:
     historical_fallback_ids: set[str] = set()
     policy = taxonomy.fallback_policy
     if policy is not None:
+        historical_fallback_ids.update(policy.historical_category_ids)
         leaves = [leaf for leaf in (policy.issued, policy.other) if leaf is not None]
         base_ids = {
             *policy.department_category_ids,
