@@ -120,6 +120,39 @@ class PlacementAuthorizationContext(BaseModel):
         return self.model_dump(mode="json")
 
 
+class PlacementSubmissionResponse(BaseModel):
+    """分类落位受理响应；受理成功不代表文件已经移动完成。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation_id: str
+    status: str
+    created: bool
+    working_copy_id: str
+    effective_primary: dict[str, Any] | None = None
+    pending_primary: dict[str, Any] | None = None
+    placement_status: str
+    requires_confirmation: bool = False
+
+
+class PlacementStatusResponse(BaseModel):
+    """当前用户可读取的分类落位进度，不返回任何服务器绝对路径。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation_id: str
+    status: str
+    working_copy_id: str
+    operation_type: PlacementAction
+    job_id: str | None = None
+    operation_plan_id: str | None = None
+    changeset_id: str | None = None
+    placement_status: str
+    result: dict[str, Any] = Field(default_factory=dict)
+    error_code: str | None = None
+    requires_confirmation: bool = False
+
+
 class PlacementOperationState(StrEnum):
     """可恢复落位操作的完整状态机。"""
 

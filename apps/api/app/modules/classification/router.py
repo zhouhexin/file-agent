@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.db.models import User
+from app.db.models import ClassificationPlacementOperation, User, WorkingCopy
 from app.modules.auth.dependencies import get_current_user
 from app.modules.classification.feedback_schemas import (
     ClassificationClarificationResolveRequest,
@@ -33,9 +33,148 @@ from app.modules.classification.organization_schemas import (
     OrganizationFilePageResponse,
     OrganizationTreeResponse,
 )
+from app.modules.classification.placement_authorization import PlacementAuthorizationService
+from app.modules.classification.placement_schemas import (
+    PlacementCommand,
+    PlacementStatusResponse,
+    PlacementSubmissionResponse,
+)
+from app.modules.classification.placement_service import (
+    ClassificationPlacementService,
+    PlacementServiceError,
+)
+from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
 
 router = APIRouter(prefix="/api/classification", tags=["classification"])
+
+
+_PLACEMENT_CONFLICT_CODES = {
+    "IDEMPOTENCY_CONFLICT",
+    "PLACEMENT_IN_PROGRESS",
+    "PLACEMENT_RECONCILIATION_REQUIRED",
+    "TARGET_NAME_CONFLICT",
+    "TAXONOMY_VERSION_STALE",
+    "WORKING_COPY_REVISION_CONFLICT",
+    "WORKING_COPY_VERSION_CONFLICT",
+}
+_PLACEMENT_UNPROCESSABLE_CODES = {
+    "AUTHORIZATION_MODE_INVALID",
+    "CATEGORY_NOT_PLACEABLE",
+    "CONTAINER_CROSSES_CATEGORY_BOUNDARY",
+    "OPERATION_NOT_AUTHORIZED",
+    "TARGET_OUTSIDE_CLASSIFICATION_TREE",
+}
+
+
+def _placement_http_exception(error: PlacementServiceError) -> HTTPException:
+    """将受控落位服务错误映射为统一 HTTP 错误信封。"""
+
+    if error.code == "WORKING_COPY_NOT_FOUND":
+        status_code = status.HTTP_404_NOT_FOUND
+    elif error.code == "FORBIDDEN":
+        status_code = status.HTTP_403_FORBIDDEN
+    elif error.code in _PLACEMENT_UNPROCESSABLE_CODES:
+        status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    elif error.code in _PLACEMENT_CONFLICT_CODES:
+        status_code = status.HTTP_409_CONFLICT
+    else:
+        status_code = status.HTTP_409_CONFLICT
+    return HTTPException(
+        status_code=status_code,
+        detail={"error": {"code": error.code, "message": str(error)}},
+    )
+
+
+def _placement_status_response(
+    operation: ClassificationPlacementOperation,
+) -> PlacementStatusResponse:
+    """投影单个操作的安全状态；仅返回逻辑 ID、状态和受控结果摘要。"""
+
+    result = dict(operation.result_json or {})
+    error = dict(operation.error_json or {})
+    placement_status = str(result.get("placement_status") or "")
+    if not placement_status:
+        placement_status = {
+            "EXECUTING": "APPLYING",
+            "FS_APPLIED": "RECONCILING",
+            "RECONCILING": "RECONCILING",
+            "FAILED": "ERROR",
+        }.get(operation.state, "PENDING")
+    return PlacementStatusResponse(
+        operation_id=operation.id,
+        status=operation.state,
+        working_copy_id=operation.working_copy_id,
+        operation_type=operation.operation_type,
+        job_id=operation.job_id,
+        operation_plan_id=operation.operation_plan_id,
+        changeset_id=operation.changeset_id,
+        placement_status=placement_status,
+        result=result,
+        error_code=str(error["code"]) if error.get("code") else None,
+    )
+
+
+@router.post(
+    "/placements",
+    response_model=PlacementSubmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def submit_classification_placement(
+    command: PlacementCommand,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PlacementSubmissionResponse:
+    """受理明确 SET_PRIMARY/MOVE；只接受稳定 ID，且不需要第二次确认。"""
+
+    shared_workspace_id = get_shared_workspace_id(db)
+    working_copy = db.get(WorkingCopy, str(command.working_copy_id))
+    if (
+        working_copy is None
+        or working_copy.status != "ACTIVE"
+        or working_copy.workspace_id != shared_workspace_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"code": "WORKING_COPY_NOT_FOUND", "message": "活动工作副本不存在"}},
+        )
+    request_id = str(getattr(request.state, "request_id", "") or "classification-api")
+    authorization = PlacementAuthorizationService(db).authorize_structured_request(
+        command=command,
+        current_user=current_user,
+        workspace_id=shared_workspace_id,
+        client_id="classification-api",
+        request_id=request_id,
+        source_event_ref=f"http:{request_id}",
+    )
+    try:
+        submission = ClassificationPlacementService(db).submit(
+            command=command,
+            authorization=authorization,
+        )
+        db.commit()
+    except PlacementServiceError as exc:
+        db.rollback()
+        raise _placement_http_exception(exc) from exc
+    return PlacementSubmissionResponse.model_validate(submission.as_dict())
+
+
+@router.get("/placements/{operation_id}", response_model=PlacementStatusResponse)
+def get_classification_placement_status(
+    operation_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PlacementStatusResponse:
+    """读取本人提交的分类落位操作状态；查询不触发任何文件或分类写入。"""
+
+    operation = db.get(ClassificationPlacementOperation, operation_id)
+    if operation is None or operation.actor_user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"code": "PLACEMENT_NOT_FOUND", "message": "分类落位操作不存在"}},
+        )
+    return _placement_status_response(operation)
 
 
 @router.get("/organization/tree", response_model=OrganizationTreeResponse)

@@ -114,6 +114,8 @@ class WorkingCopyResponse(BaseModel):
     content_sha256: str
     status: str
     sync_status: str
+    revision: int
+    placement_status: str
     created_at: datetime
     updated_at: datetime
 

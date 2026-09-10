@@ -4439,6 +4439,8 @@ class WorkingCopyQueryService:
             content_sha256=copy.content_sha256,
             status=copy.status,
             sync_status=copy.sync_status,
+            revision=copy.revision,
+            placement_status=copy.placement_status,
             created_at=copy.created_at,
             updated_at=copy.updated_at,
         )
