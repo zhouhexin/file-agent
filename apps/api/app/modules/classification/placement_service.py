@@ -97,6 +97,8 @@ class PlacementSubmission:
             "pending_primary": self.pending_primary,
             "placement_status": self.placement_status,
             "requires_confirmation": self.requires_confirmation,
+            # 受理阶段尚未触碰文件系统，不能伪造“已移动”或“未移动”。
+            "file_position_changed": None,
         }
 
 

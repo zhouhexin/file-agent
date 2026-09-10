@@ -97,6 +97,96 @@ class PlacementCommand(BaseModel):
         return hashlib.sha256(encoded).hexdigest()
 
 
+class SetPrimaryCategoryRequest(BaseModel):
+    """路径已固定工作副本的主分类更正请求，客户端不能重复提交对象 ID 或动作。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_revision: int = Field(gt=0)
+    expected_document_version_id: UUID
+    target_category_id: str = Field(min_length=1, max_length=255)
+    taxonomy_version: str = Field(min_length=1, max_length=80)
+    container_segments: list[str] = Field(default_factory=list, max_length=20)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("container_segments")
+    @classmethod
+    def validate_segments(cls, value: list[str]) -> list[str]:
+        """复用跨平台安全目录段校验，禁止在分类容器中注入路径。"""
+
+        for segment in value:
+            if not _is_safe_segment(segment):
+                raise ValueError("目录段不合法")
+        return value
+
+    def to_command(self, *, working_copy_id: str) -> PlacementCommand:
+        """仅由后端路由注入路径中的稳定工作副本 ID，生成统一命令。"""
+
+        return PlacementCommand(
+            working_copy_id=working_copy_id,
+            action=PlacementAction.SET_PRIMARY,
+            expected_revision=self.expected_revision,
+            expected_document_version_id=self.expected_document_version_id,
+            target_category_id=self.target_category_id,
+            taxonomy_version=self.taxonomy_version,
+            container_segments=self.container_segments,
+            idempotency_key=self.idempotency_key,
+        )
+
+
+class MoveWorkingCopyRequest(BaseModel):
+    """路径已固定工作副本的受控 MOVE 请求；目标只能是分类或后端登记目录。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_revision: int = Field(gt=0)
+    expected_document_version_id: UUID
+    target_category_id: str | None = Field(default=None, min_length=1, max_length=255)
+    taxonomy_version: str = Field(min_length=1, max_length=80)
+    container_segments: list[str] = Field(default_factory=list, max_length=20)
+    target_root_key: str | None = Field(default=None, min_length=1, max_length=100)
+    target_directory_segments: list[str] = Field(default_factory=list, max_length=20)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("container_segments", "target_directory_segments")
+    @classmethod
+    def validate_segments(cls, value: list[str]) -> list[str]:
+        """复用跨平台安全目录段校验，禁止宿主传入路径片段。"""
+
+        for segment in value:
+            if not _is_safe_segment(segment):
+                raise ValueError("目录段不合法")
+        return value
+
+    @model_validator(mode="after")
+    def validate_target_mode(self) -> "MoveWorkingCopyRequest":
+        """MOVE 的分类目标和受控目录目标必须互斥，目录目标必须完整。"""
+
+        category_mode = self.target_category_id is not None
+        directory_mode = self.target_root_key is not None
+        if category_mode == directory_mode:
+            raise ValueError("MOVE 必须且只能提供分类目标或受控目录目标之一")
+        if directory_mode and not self.target_directory_segments:
+            raise ValueError("目录形式 MOVE 必须提供完整目标目录段")
+        return self
+
+    def to_command(self, *, working_copy_id: str) -> PlacementCommand:
+        """仅由后端路由注入路径中的稳定工作副本 ID，生成统一命令。"""
+
+        return PlacementCommand(
+            working_copy_id=working_copy_id,
+            action=PlacementAction.MOVE,
+            expected_revision=self.expected_revision,
+            expected_document_version_id=self.expected_document_version_id,
+            target_category_id=self.target_category_id,
+            taxonomy_version=self.taxonomy_version,
+            container_segments=self.container_segments,
+            target_root_key=self.target_root_key,
+            target_directory_segments=self.target_directory_segments,
+            idempotency_key=self.idempotency_key,
+        )
+
+
 class PlacementAuthorizationContext(BaseModel):
     """只由后端构造并传给提交服务的冻结授权事实。"""
 
@@ -133,6 +223,7 @@ class PlacementSubmissionResponse(BaseModel):
     pending_primary: dict[str, Any] | None = None
     placement_status: str
     requires_confirmation: bool = False
+    file_position_changed: bool | None = None
 
 
 class PlacementStatusResponse(BaseModel):

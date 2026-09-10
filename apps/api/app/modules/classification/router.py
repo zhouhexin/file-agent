@@ -35,9 +35,11 @@ from app.modules.classification.organization_schemas import (
 )
 from app.modules.classification.placement_authorization import PlacementAuthorizationService
 from app.modules.classification.placement_schemas import (
+    MoveWorkingCopyRequest,
     PlacementCommand,
     PlacementStatusResponse,
     PlacementSubmissionResponse,
+    SetPrimaryCategoryRequest,
 )
 from app.modules.classification.placement_service import (
     ClassificationPlacementService,
@@ -128,6 +130,23 @@ def submit_classification_placement(
 ) -> PlacementSubmissionResponse:
     """受理明确 SET_PRIMARY/MOVE；只接受稳定 ID，且不需要第二次确认。"""
 
+    return _submit_classification_placement(
+        command=command,
+        request=request,
+        db=db,
+        current_user=current_user,
+    )
+
+
+def _submit_classification_placement(
+    *,
+    command: PlacementCommand,
+    request: Request,
+    db: Session,
+    current_user: User,
+) -> PlacementSubmissionResponse:
+    """复用专用路径和兼容入口的服务端对象校验、授权快照与异步受理。"""
+
     shared_workspace_id = get_shared_workspace_id(db)
     working_copy = db.get(WorkingCopy, str(command.working_copy_id))
     if (
@@ -160,6 +179,50 @@ def submit_classification_placement(
     return PlacementSubmissionResponse.model_validate(submission.as_dict())
 
 
+@router.post(
+    "/working-copies/{working_copy_id}/primary-category",
+    response_model=PlacementSubmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def set_working_copy_primary_category(
+    working_copy_id: str,
+    payload: SetPrimaryCategoryRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PlacementSubmissionResponse:
+    """受理路径指定副本的 SET_PRIMARY；正文没有对象 ID、动作或授权越权字段。"""
+
+    return _submit_classification_placement(
+        command=payload.to_command(working_copy_id=working_copy_id),
+        request=request,
+        db=db,
+        current_user=current_user,
+    )
+
+
+@router.post(
+    "/working-copies/{working_copy_id}/placement",
+    response_model=PlacementSubmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def move_working_copy_by_classification(
+    working_copy_id: str,
+    payload: MoveWorkingCopyRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PlacementSubmissionResponse:
+    """受理路径指定副本的 MOVE；仅允许分类或登记目录的冻结目标。"""
+
+    return _submit_classification_placement(
+        command=payload.to_command(working_copy_id=working_copy_id),
+        request=request,
+        db=db,
+        current_user=current_user,
+    )
+
+
 @router.get("/placements/{operation_id}", response_model=PlacementStatusResponse)
 def get_classification_placement_status(
     operation_id: str,
@@ -175,6 +238,24 @@ def get_classification_placement_status(
             detail={"error": {"code": "PLACEMENT_NOT_FOUND", "message": "分类落位操作不存在"}},
         )
     return _placement_status_response(operation)
+
+
+@router.get(
+    "/placement-operations/{operation_id}",
+    response_model=PlacementStatusResponse,
+)
+def get_classification_placement_operation(
+    operation_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PlacementStatusResponse:
+    """提供文档约定的状态路径，复用同一按发起人隐藏存在性的只读投影。"""
+
+    return get_classification_placement_status(
+        operation_id=operation_id,
+        db=db,
+        current_user=current_user,
+    )
 
 
 @router.get("/organization/tree", response_model=OrganizationTreeResponse)
