@@ -346,6 +346,33 @@ class FileAgentIntegrationClient:
             )
         )
 
+    async def classification_placement_submit(
+        self,
+        *,
+        command: dict[str, Any],
+        request_id: str,
+    ) -> dict[str, Any]:
+        """提交一个已经冻结版本和修订号的分类落位命令，不传递本机路径。"""
+
+        return self._business_json(
+            await self.http.post(
+                "/api/classification/placements",
+                json=command,
+                headers={"X-Request-ID": request_id},
+            )
+        )
+
+    async def classification_placement_status(
+        self,
+        *,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        """读取分类落位的后端事实状态；该请求没有文件写入副作用。"""
+
+        return self._business_json(
+            await self.http.get(f"/api/classification/placements/{_path_segment(operation_id)}")
+        )
+
     async def evidence_answer(
         self,
         *,

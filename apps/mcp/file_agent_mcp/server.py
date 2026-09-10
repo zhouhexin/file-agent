@@ -10,7 +10,11 @@ from mcp.server.fastmcp import FastMCP
 
 from .attachment_transfer import AttachmentTransferService, WorkBuddyAttachmentInput
 from .client import FileAgentIntegrationClient, LocalRootRegistry, WorkBuddyAttachmentRegistry
-from .conversation_tools import ExplicitRenameInput, WorkBuddyConversationService
+from .conversation_tools import (
+    ExplicitClassificationPlacementInput,
+    ExplicitRenameInput,
+    WorkBuddyConversationService,
+)
 from .transfer import BatchTransferService, TransferStateStore
 
 
@@ -212,6 +216,48 @@ async def file_rename(
         return await WorkBuddyConversationService(client).rename(
             conversation_ref=conversation_ref,
             renames=renames,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="classification_placement_submit",
+    description=(
+        "提交用户已明确指定的主分类更正或受控移动。"
+        "必须提供 file_search 返回的 working_copy_id、当前版本、revision 和 taxonomy 目标；"
+        "不接受本机路径，不需要也不能提供二次确认字段。"
+    ),
+    structured_output=True,
+)
+async def classification_placement_submit(
+    command: ExplicitClassificationPlacementInput,
+    request_id: str,
+) -> dict[str, Any]:
+    """转交冻结的 SET_PRIMARY/MOVE 命令；后端负责授权快照、冲突检查和异步执行。"""
+
+    client = _client()
+    try:
+        return await WorkBuddyConversationService(client).submit_classification_placement(
+            command=command,
+            request_id=request_id,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="classification_placement_status",
+    description="查询当前用户先前提交的分类落位操作进度和最终结果；此工具只读，不移动文件。",
+    structured_output=True,
+)
+async def classification_placement_status(operation_id: str) -> dict[str, Any]:
+    """读取后端持久化的落位状态；其他用户的操作按不存在处理。"""
+
+    client = _client()
+    try:
+        return await WorkBuddyConversationService(client).get_classification_placement_status(
+            operation_id=operation_id,
         )
     finally:
         await client.close()

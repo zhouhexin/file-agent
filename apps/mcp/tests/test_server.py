@@ -24,6 +24,8 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
         "file_read",
         "evidence_answer",
         "file_rename",
+        "classification_placement_submit",
+        "classification_placement_status",
         "file_search_clarification_resolve",
         "operation_plan_get",
         "operation_plan_confirm",
@@ -41,6 +43,12 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
     schemas = {tool.name: tool.inputSchema for tool in tools}
     # 结构化子项也必须拒绝多余字段，不能只依赖 handler 内的二次检查。
     assert schemas["file_rename"]["$defs"]["ExplicitRenameInput"]["additionalProperties"] is False
+    assert (
+        schemas["classification_placement_submit"]["$defs"][
+            "ExplicitClassificationPlacementInput"
+        ]["additionalProperties"]
+        is False
+    )
     assert (
         schemas["workbuddy_attachment_ingest"]["$defs"]["WorkBuddyAttachmentInput"][
             "additionalProperties"

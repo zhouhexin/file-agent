@@ -38,6 +38,18 @@ class FakeConversationClient:
         self.calls.append({"method": "evidence_answer", **kwargs})
         return {"task_result": {"response_type": "evidence_answer"}}
 
+    async def classification_placement_submit(self, **kwargs) -> dict:
+        """记录分类落位提交，不执行任何真实网络请求。"""
+
+        self.calls.append({"method": "classification_placement_submit", **kwargs})
+        return {"operation_id": "placement-1", "status": "PREPARED"}
+
+    async def classification_placement_status(self, **kwargs) -> dict:
+        """记录分类落位状态查询。"""
+
+        self.calls.append({"method": "classification_placement_status", **kwargs})
+        return {"operation_id": kwargs["operation_id"], "status": "COMMITTED"}
+
 
 def test_workbuddy_conversation_ref_maps_to_stable_bounded_internal_id() -> None:
     """外部会话引用必须稳定映射，且不能直接成为数据库主键。"""
@@ -187,5 +199,68 @@ def test_explicit_rename_rejects_paths_and_duplicate_targets() -> None:
                         "target_filename": "再次改名.docx",
                     },
                 ],
+            )
+        )
+
+
+def test_classification_placement_forwards_only_stable_ids_and_revision() -> None:
+    """MCP 分类移动只转发冻结对象事实，不能夹带本机路径或客户端授权字段。"""
+
+    client = FakeConversationClient()
+    service = WorkBuddyConversationService(client)
+    result = asyncio.run(
+        service.submit_classification_placement(
+            request_id="workbuddy-placement-1",
+            command={
+                "working_copy_id": "11111111-1111-4111-8111-111111111111",
+                "action": "SET_PRIMARY",
+                "expected_revision": 3,
+                "expected_document_version_id": "22222222-2222-4222-8222-222222222222",
+                "target_category_id": "college.finance",
+                "taxonomy_version": "2026-09-v10",
+                "idempotency_key": "placement-workbuddy-1",
+            },
+        )
+    )
+
+    assert result["operation_id"] == "placement-1"
+    assert client.calls[0] == {
+        "method": "classification_placement_submit",
+        "request_id": "workbuddy-placement-1",
+        "command": {
+            "working_copy_id": "11111111-1111-4111-8111-111111111111",
+            "action": "SET_PRIMARY",
+            "expected_revision": 3,
+            "expected_document_version_id": "22222222-2222-4222-8222-222222222222",
+            "target_category_id": "college.finance",
+            "taxonomy_version": "2026-09-v10",
+            "container_segments": [],
+            "target_root_key": None,
+            "target_directory_segments": [],
+            "idempotency_key": "placement-workbuddy-1",
+        },
+    }
+
+    status = asyncio.run(service.get_classification_placement_status(operation_id="placement-1"))
+    assert status["status"] == "COMMITTED"
+    assert client.calls[1] == {
+        "method": "classification_placement_status",
+        "operation_id": "placement-1",
+    }
+
+    with pytest.raises(ValueError, match="目录段"):
+        asyncio.run(
+            service.submit_classification_placement(
+                request_id="workbuddy-placement-2",
+                command={
+                    "working_copy_id": "11111111-1111-4111-8111-111111111111",
+                    "action": "MOVE",
+                    "expected_revision": 3,
+                    "expected_document_version_id": "22222222-2222-4222-8222-222222222222",
+                    "target_root_key": "shared-working",
+                    "target_directory_segments": ["../outside"],
+                    "taxonomy_version": "2026-09-v10",
+                    "idempotency_key": "placement-workbuddy-2",
+                },
             )
         )

@@ -112,6 +112,68 @@ def test_job_get_returns_structured_error_without_leaking_token(tmp_path) -> Non
     asyncio.run(scenario())
 
 
+def test_classification_placement_client_uses_only_controlled_backend_endpoints(tmp_path) -> None:
+    """分类落位提交和状态查询必须携带认证与请求追踪，但不发送任何本机根目录。"""
+
+    root = tmp_path / "allowed"
+    root.mkdir()
+    requests: list[tuple[str, str, dict, str | None]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        """验证提交体只包含后端 PlacementCommand 字段。"""
+
+        payload = json.loads((await request.aread()).decode("utf-8")) if request.content else {}
+        requests.append((request.method, request.url.path, payload, request.headers.get("x-request-id")))
+        if request.method == "POST":
+            return httpx.Response(202, json={"operation_id": "placement-1", "status": "PREPARED"})
+        return httpx.Response(200, json={"operation_id": "placement-1", "status": "COMMITTED"})
+
+    async def scenario() -> None:
+        """调用一次提交和一次只读状态查询。"""
+
+        client = FileAgentIntegrationClient(
+            base_url="http://file-agent.test",
+            access_token="token-value",
+            roots=LocalRootRegistry({"materials": root}),
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            await client.classification_placement_submit(
+                request_id="placement-request-1",
+                command={
+                    "working_copy_id": "copy-1",
+                    "action": "SET_PRIMARY",
+                    "expected_revision": 2,
+                    "expected_document_version_id": "version-1",
+                    "target_category_id": "college.finance",
+                    "taxonomy_version": "2026-09-v10",
+                    "idempotency_key": "placement-key-1",
+                },
+            )
+            await client.classification_placement_status(operation_id="placement-1")
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+    assert requests == [
+        (
+            "POST",
+            "/api/classification/placements",
+            {
+                "working_copy_id": "copy-1",
+                "action": "SET_PRIMARY",
+                "expected_revision": 2,
+                "expected_document_version_id": "version-1",
+                "target_category_id": "college.finance",
+                "taxonomy_version": "2026-09-v10",
+                "idempotency_key": "placement-key-1",
+            },
+            "placement-request-1",
+        ),
+        ("GET", "/api/classification/placements/placement-1", {}, None),
+    ]
+
+
 def test_duplicate_decide_forwards_fixed_review_candidate_and_revision(tmp_path) -> None:
     """MCP 必须原样转发结构化选择，不能只发送一段自然语言决定。"""
 

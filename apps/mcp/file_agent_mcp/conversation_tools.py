@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import PurePath
-from typing import Any
+from typing import Any, Literal
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .client import FileAgentIntegrationClient
 
@@ -19,6 +20,65 @@ class ExplicitRenameInput(BaseModel):
     document_id: str = Field(min_length=1, max_length=100)
     source_filename: str = Field(min_length=1, max_length=255)
     target_filename: str = Field(min_length=1, max_length=255)
+
+
+class ExplicitClassificationPlacementInput(BaseModel):
+    """WorkBuddy 分类主类更正/移动的受限结构化命令，不接受物理路径或权限字段。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    working_copy_id: UUID
+    action: Literal["SET_PRIMARY", "MOVE"]
+    expected_revision: int = Field(gt=0)
+    expected_document_version_id: UUID
+    target_category_id: str | None = Field(default=None, min_length=1, max_length=255)
+    taxonomy_version: str = Field(min_length=1, max_length=80)
+    container_segments: list[str] = Field(default_factory=list, max_length=20)
+    target_root_key: str | None = Field(default=None, min_length=1, max_length=100)
+    target_directory_segments: list[str] = Field(default_factory=list, max_length=20)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("container_segments", "target_directory_segments")
+    @classmethod
+    def validate_segments(cls, values: list[str]) -> list[str]:
+        """目录目标仅由安全逻辑段构成，不能携带绝对路径或跨目录标记。"""
+
+        normalized: list[str] = []
+        for value in values:
+            segment = str(value or "").strip()
+            if (
+                not segment
+                or segment in {".", ".."}
+                or segment != value
+                or segment.startswith(".")
+                or "/" in segment
+                or "\\" in segment
+                or "\x00" in segment
+            ):
+                raise ValueError("目录段必须是单个安全名称")
+            normalized.append(segment)
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_target_mode(self) -> "ExplicitClassificationPlacementInput":
+        """SET_PRIMARY 固定分类目标；MOVE 只能在分类或受控目录两种目标中二选一。"""
+
+        category_mode = self.target_category_id is not None
+        directory_mode = self.target_root_key is not None
+        if self.action == "SET_PRIMARY":
+            if not category_mode or directory_mode or self.target_directory_segments:
+                raise ValueError("SET_PRIMARY 只能提供 target_category_id")
+            return self
+        if category_mode == directory_mode:
+            raise ValueError("MOVE 必须且只能提供分类目标或受控目录目标之一")
+        if directory_mode and not self.target_directory_segments:
+            raise ValueError("目录形式 MOVE 必须提供完整 target_directory_segments")
+        return self
+
+    def command_payload(self) -> dict[str, Any]:
+        """序列化为后端 PlacementCommand 所需的 JSON，不增加任何宿主本地信息。"""
+
+        return self.model_dump(mode="json")
 
 
 def conversation_id_for_workbuddy(conversation_ref: str) -> str:
@@ -145,6 +205,32 @@ class WorkBuddyConversationService:
             document_ids=document_ids,
         )
 
+    async def submit_classification_placement(
+        self,
+        *,
+        command: ExplicitClassificationPlacementInput | dict[str, Any],
+        request_id: str,
+    ) -> dict[str, Any]:
+        """向后端提交用户明确的分类落位，不经聊天文本或任意本机文件路径。"""
+
+        parsed = (
+            command
+            if isinstance(command, ExplicitClassificationPlacementInput)
+            else ExplicitClassificationPlacementInput.model_validate(command)
+        )
+        return await self.client.classification_placement_submit(
+            command=parsed.command_payload(),
+            request_id=_validate_request_id(request_id),
+        )
+
+    async def get_classification_placement_status(self, *, operation_id: str) -> dict[str, Any]:
+        """读取一次已提交分类落位的真实后端状态，不触发文件移动或分类写入。"""
+
+        normalized = str(operation_id or "").strip()
+        if not normalized or len(normalized) > 100 or "/" in normalized or "\\" in normalized:
+            raise ValueError("operation_id 格式不合法")
+        return await self.client.classification_placement_status(operation_id=normalized)
+
 
 def _validate_text(value: str, *, label: str, max_length: int) -> str:
     """限制对话文本长度并拒绝控制字符，正文仍只被当作用户数据处理。"""
@@ -154,4 +240,13 @@ def _validate_text(value: str, *, label: str, max_length: int) -> str:
         raise ValueError(f"{label} 不能为空且长度不能超过 {max_length}")
     if any(ord(character) < 32 and character not in {"\n", "\t"} for character in normalized):
         raise ValueError(f"{label} 不能包含控制字符")
+    return normalized
+
+
+def _validate_request_id(value: str) -> str:
+    """约束 MCP 请求追踪标识，避免把多行文本或路径写入后端授权审计。"""
+
+    normalized = str(value or "").strip()
+    if not normalized or len(normalized) > 120 or any(ord(item) < 32 for item in normalized):
+        raise ValueError("request_id 必须是 1-120 位的非控制字符标识")
     return normalized
