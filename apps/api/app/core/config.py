@@ -91,6 +91,10 @@ DEFAULT_AUTO_CLASSIFICATION_TARGET_PRECISION = 0.99
 DEFAULT_AUTO_CLASSIFICATION_GLOBAL_FALLBACK_POLICY = "conservative-v1"
 DEFAULT_AUTO_CLASSIFICATION_FALLBACK_THRESHOLD = 0.90
 DEFAULT_AUTO_CLASSIFICATION_FALLBACK_MARGIN = 0.20
+DEFAULT_CLASSIFICATION_POLICY_BUNDLE_VERSION = "workdata-v1"
+DEFAULT_CLASSIFICATION_FALLBACK_CATEGORY_ID = "system.other"
+DEFAULT_CLASSIFICATION_QUALITY_MODE = "conservative_rules"
+DEFAULT_CLASSIFICATION_DIRECTORY_POLICY = "CATEGORY_WITH_OPTIONAL_CONTAINER"
 DEFAULT_UPLOAD_MAX_FILE_SIZE_MB = 1024
 DEFAULT_UPLOAD_CHUNK_SIZE_BYTES = 1024 * 1024
 DEFAULT_INTEGRATION_MAX_BATCH_FILES = 1000
@@ -206,6 +210,15 @@ class Settings(BaseModel):
     )
     auto_classification_fallback_threshold: float = DEFAULT_AUTO_CLASSIFICATION_FALLBACK_THRESHOLD
     auto_classification_fallback_margin: float = DEFAULT_AUTO_CLASSIFICATION_FALLBACK_MARGIN
+    # 新版分类 bundle 是生产分类策略的唯一语义入口；旧 AUTO_* 字段保留为
+    # 兼容与紧急回退边界，配置加载时会明确校验两者是否冲突。
+    classification_policy_bundle_version: str = DEFAULT_CLASSIFICATION_POLICY_BUNDLE_VERSION
+    classification_fallback_category_id: str = DEFAULT_CLASSIFICATION_FALLBACK_CATEGORY_ID
+    classification_quality_mode: str = DEFAULT_CLASSIFICATION_QUALITY_MODE
+    classification_directory_policy: str = DEFAULT_CLASSIFICATION_DIRECTORY_POLICY
+    classification_placement_enabled: bool = True
+    classification_direct_request_enabled: bool = True
+    classification_reconcile_enabled: bool = False
     upload_max_file_size_mb: int = DEFAULT_UPLOAD_MAX_FILE_SIZE_MB
     upload_chunk_size_bytes: int = DEFAULT_UPLOAD_CHUNK_SIZE_BYTES
     upload_allowed_extensions: tuple[str, ...] = DEFAULT_UPLOAD_ALLOWED_EXTENSIONS
@@ -391,6 +404,24 @@ class Settings(BaseModel):
     trash_retention_days: int = DEFAULT_TRASH_RETENTION_DAYS
     trash_auto_purge_enabled: bool = False
 
+    @property
+    def classification_shadow_mode_effective(self) -> bool:
+        """新版 quality mode 优先，旧 shadow 开关继续作为安全回退。"""
+
+        return (
+            self.classification_quality_mode == "shadow"
+            or self.auto_classification_shadow_mode
+        )
+
+    @property
+    def classification_placement_permitted(self) -> bool:
+        """集中表达新版 placement 开关与历史自动归档开关的共同边界。"""
+
+        return bool(
+            self.classification_placement_enabled
+            and not self.classification_shadow_mode_effective
+        )
+
 
 def find_dotenv_file() -> Path | None:
     """从当前目录开始向上查找 `.env`，兼容项目根目录和 apps/api 目录启动。"""
@@ -482,11 +513,136 @@ def _bounded_int_env(
     return value
 
 
+def _classification_quality_mode_from_env(*, legacy_shadow_mode: bool) -> str:
+    """加载新版模式，并拒绝与旧 shadow 开关语义冲突的部署配置。"""
+
+    configured = os.getenv("CLASSIFICATION_QUALITY_MODE")
+    if configured is None:
+        return "shadow" if legacy_shadow_mode else DEFAULT_CLASSIFICATION_QUALITY_MODE
+    mode = configured.strip().lower()
+    if mode not in {"shadow", "conservative_rules", "calibrated"}:
+        raise RuntimeError(
+            "CLASSIFICATION_QUALITY_MODE must be shadow, conservative_rules, or calibrated"
+        )
+    if legacy_shadow_mode and mode != "shadow":
+        raise RuntimeError(
+            "CLASSIFICATION_QUALITY_MODE conflicts with AUTO_CLASSIFICATION_SHADOW_MODE"
+        )
+    return mode
+
+
+def _classification_fallback_category_id_from_env() -> str:
+    """新策略只允许唯一的可落位兜底，不兼容旧 scoped-other 作为新目标。"""
+
+    category_id = os.getenv(
+        "CLASSIFICATION_FALLBACK_CATEGORY_ID",
+        DEFAULT_CLASSIFICATION_FALLBACK_CATEGORY_ID,
+    ).strip()
+    if category_id != DEFAULT_CLASSIFICATION_FALLBACK_CATEGORY_ID:
+        raise RuntimeError("CLASSIFICATION_FALLBACK_CATEGORY_ID must be system.other")
+    return category_id
+
+
+def _classification_directory_policy_from_env() -> str:
+    policy = os.getenv(
+        "CLASSIFICATION_DIRECTORY_POLICY",
+        DEFAULT_CLASSIFICATION_DIRECTORY_POLICY,
+    ).strip()
+    if policy != DEFAULT_CLASSIFICATION_DIRECTORY_POLICY:
+        raise RuntimeError(
+            "CLASSIFICATION_DIRECTORY_POLICY must be CATEGORY_WITH_OPTIONAL_CONTAINER"
+        )
+    return policy
+
+
+def _boolean_env(name: str, default: bool) -> bool:
+    """只接受 true/false，避免拼写错误静默改变文件落位策略。"""
+
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized not in {"true", "false"}:
+        raise RuntimeError(f"{name} must be true or false")
+    return normalized == "true"
+
+
+def _classification_placement_enabled_from_env(
+    *, legacy_auto_primary_enabled: bool, legacy_auto_initial_placement_enabled: bool
+) -> bool:
+    """新开关优先；旧开关仅在新开关未配置时映射为同一个有效值。"""
+
+    configured = os.getenv("CLASSIFICATION_PLACEMENT_ENABLED")
+    legacy_configured = (
+        os.getenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED") is not None
+        or os.getenv("AUTO_INITIAL_PLACEMENT_ENABLED") is not None
+    )
+    legacy_effective = (
+        legacy_auto_primary_enabled and legacy_auto_initial_placement_enabled
+    )
+    if configured is None:
+        return legacy_effective
+    placement_enabled = _boolean_env("CLASSIFICATION_PLACEMENT_ENABLED", True)
+    if legacy_configured and placement_enabled != legacy_effective:
+        raise RuntimeError(
+            "CLASSIFICATION_PLACEMENT_ENABLED conflicts with legacy AUTO_* classification flags"
+        )
+    return placement_enabled
+
+
+def validate_classification_runtime_settings(settings: Settings) -> None:
+    """在启动期校验新版 bundle 的唯一兜底确实存在且可以作为主类落位。"""
+
+    from app.modules.classification.loader import load_default_taxonomy
+    from app.modules.classification.matcher import flatten_category_paths
+
+    fallback = next(
+        (
+            node
+            for node in flatten_category_paths(load_default_taxonomy())
+            if node.category_id == settings.classification_fallback_category_id
+        ),
+        None,
+    )
+    if fallback is None or not fallback.primary_enabled:
+        raise RuntimeError(
+            "classification fallback category must exist, be primary-enabled, and have an organization path"
+        )
+
+
 @lru_cache
 def get_settings() -> Settings:
     """读取环境变量并返回缓存后的配置对象。"""
 
     load_dotenv_file()
+    legacy_auto_primary_enabled = _boolean_env(
+        "AUTO_PRIMARY_CLASSIFICATION_ENABLED", True
+    )
+    legacy_auto_initial_placement_enabled = _boolean_env(
+        "AUTO_INITIAL_PLACEMENT_ENABLED", True
+    )
+    legacy_shadow_mode = _boolean_env("AUTO_CLASSIFICATION_SHADOW_MODE", False)
+    classification_quality_mode = _classification_quality_mode_from_env(
+        legacy_shadow_mode=legacy_shadow_mode
+    )
+    classification_placement_enabled = _classification_placement_enabled_from_env(
+        legacy_auto_primary_enabled=legacy_auto_primary_enabled,
+        legacy_auto_initial_placement_enabled=legacy_auto_initial_placement_enabled,
+    )
+    calibration_version = (
+        os.getenv(
+            "AUTO_CLASSIFICATION_CALIBRATION_VERSION",
+            DEFAULT_AUTO_CLASSIFICATION_CALIBRATION_VERSION,
+        ).strip()
+        or DEFAULT_AUTO_CLASSIFICATION_CALIBRATION_VERSION
+    )
+    if (
+        classification_quality_mode == "calibrated"
+        and calibration_version == DEFAULT_AUTO_CLASSIFICATION_CALIBRATION_VERSION
+    ):
+        raise RuntimeError(
+            "CLASSIFICATION_QUALITY_MODE=calibrated requires a published calibration version"
+        )
 
     return Settings(
         database_url=require_postgresql_database_url(),
@@ -630,23 +786,14 @@ def get_settings() -> Settings:
                 ),
             ),
         ),
-        auto_primary_classification_enabled=os.getenv(
-            "AUTO_PRIMARY_CLASSIFICATION_ENABLED", "true"
-        ).lower() == "true",
-        auto_initial_placement_enabled=os.getenv(
-            "AUTO_INITIAL_PLACEMENT_ENABLED", "true"
-        ).lower() == "true",
-        auto_classification_shadow_mode=os.getenv(
-            "AUTO_CLASSIFICATION_SHADOW_MODE", "false"
-        ).lower() == "true",
+        auto_primary_classification_enabled=legacy_auto_primary_enabled,
+        auto_initial_placement_enabled=legacy_auto_initial_placement_enabled,
+        auto_classification_shadow_mode=legacy_shadow_mode,
         auto_classification_policy_version=os.getenv(
             "AUTO_CLASSIFICATION_POLICY_VERSION",
             DEFAULT_AUTO_CLASSIFICATION_POLICY_VERSION,
         ).strip() or DEFAULT_AUTO_CLASSIFICATION_POLICY_VERSION,
-        auto_classification_calibration_version=os.getenv(
-            "AUTO_CLASSIFICATION_CALIBRATION_VERSION",
-            DEFAULT_AUTO_CLASSIFICATION_CALIBRATION_VERSION,
-        ).strip() or DEFAULT_AUTO_CLASSIFICATION_CALIBRATION_VERSION,
+        auto_classification_calibration_version=calibration_version,
         auto_classification_target_precision=max(
             0.0,
             min(
@@ -689,6 +836,21 @@ def get_settings() -> Settings:
                     )
                 ),
             ),
+        ),
+        classification_policy_bundle_version=os.getenv(
+            "CLASSIFICATION_POLICY_BUNDLE_VERSION",
+            DEFAULT_CLASSIFICATION_POLICY_BUNDLE_VERSION,
+        ).strip()
+        or DEFAULT_CLASSIFICATION_POLICY_BUNDLE_VERSION,
+        classification_fallback_category_id=_classification_fallback_category_id_from_env(),
+        classification_quality_mode=classification_quality_mode,
+        classification_directory_policy=_classification_directory_policy_from_env(),
+        classification_placement_enabled=classification_placement_enabled,
+        classification_direct_request_enabled=_boolean_env(
+            "CLASSIFICATION_DIRECT_REQUEST_ENABLED", True
+        ),
+        classification_reconcile_enabled=_boolean_env(
+            "CLASSIFICATION_RECONCILE_ENABLED", False
         ),
         upload_max_file_size_mb=max(
             1,

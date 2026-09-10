@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "File Agent Classification Evaluation Gold Label",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["sample_id", "should_abstain", "adjudication_status"],
+  "properties": {
+    "sample_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "gold_primary_category_id": {
+      "type": "string"
+    },
+    "acceptable_secondary_category_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "should_abstain": {
+      "type": "boolean"
+    },
+    "adjudication_status": {
+      "type": "string",
+      "enum": ["ADJUDICATED", "UNRESOLVED"]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "should_abstain": {
+            "const": false
+          }
+        },
+        "required": ["should_abstain"]
+      },
+      "then": {
+        "required": ["gold_primary_category_id"]
+      }
+    }
+  ]
+}

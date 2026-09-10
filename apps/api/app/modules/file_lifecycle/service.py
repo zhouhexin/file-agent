@@ -2732,15 +2732,11 @@ class FileLifecycleJobProcessor:
             working_copy.status == "ORGANIZING"
             and (
                 auto_organize_authorized
-                or (
-                    self.settings.auto_primary_classification_enabled
-                    and self.settings.auto_initial_placement_enabled
-                    and not self.settings.auto_classification_shadow_mode
-                )
+                or self.settings.classification_placement_permitted
             )
         )
         shadow_only = not actual_placement
-        if not actual_placement and not self.settings.auto_classification_shadow_mode:
+        if not actual_placement and not self.settings.classification_shadow_mode_effective:
             return None
 
         before_revision = working_copy.revision
@@ -4195,9 +4191,7 @@ class FileLifecycleJobProcessor:
                 )
                 or source_materialization
             )
-            and self.settings.auto_primary_classification_enabled
-            and self.settings.auto_initial_placement_enabled
-            and not self.settings.auto_classification_shadow_mode
+            and self.settings.classification_placement_permitted
         )
 
     @staticmethod

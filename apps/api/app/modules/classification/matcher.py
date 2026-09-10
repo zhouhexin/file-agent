@@ -7,7 +7,10 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from app.modules.classification.schemas import CategoryNode, CategoryNodeKind, Taxonomy
-from app.modules.classification.rule_policy import evaluate_rule_policy
+from app.modules.classification.rule_policy import (
+    ClassificationRulePolicy,
+    evaluate_rule_policy,
+)
 
 
 _APPOINTMENT_CATEGORY_IDS = {
@@ -199,6 +202,7 @@ def recall_category_candidates(
     taxonomy: Taxonomy,
     *,
     limit: int = 5,
+    rule_policy: ClassificationRulePolicy | None = None,
 ) -> list[CategoryCandidate]:
     """根据分类名、别名、正负信号召回 Top N 分类候选。"""
 
@@ -327,6 +331,7 @@ def recall_category_candidates(
         organization_scope=organization_scope,
         title_text=title_text,
         body_text=body_text,
+        rule_policy=rule_policy,
     )
 
     candidates = _dedupe_candidates_and_remove_shorter_embedded_matches(candidates)
@@ -349,6 +354,7 @@ def _merge_versioned_rule_candidates(
     organization_scope: "_OrganizationScopeDecision",
     title_text: str,
     body_text: str,
+    rule_policy: ClassificationRulePolicy | None,
 ) -> list[CategoryCandidate]:
     """把版本化强规则合并到候选集，不删除其他组织或正文候选。"""
 
@@ -363,6 +369,7 @@ def _merge_versioned_rule_candidates(
         title=document_features.title,
         body_text=body_text,
         organization_root=organization_scope.dominant_root,
+        policy=rule_policy,
     ):
         category = categories_by_id.get(policy_match.category_id)
         if category is None:
@@ -708,13 +715,20 @@ def _matched_case_insensitive_signals(
     return matched
 
 
-def match_document_text(text: str, taxonomy: Taxonomy) -> list[dict[str, Any]]:
+def match_document_text(
+    text: str,
+    taxonomy: Taxonomy,
+    *,
+    limit: int = 5,
+    rule_policy: ClassificationRulePolicy | None = None,
+) -> list[dict[str, Any]]:
     """基于候选召回生成 rule-only 分类建议，保留旧调用入口。"""
 
     candidates = recall_category_candidates(
         DocumentFeatures(full_text=text or ""),
         taxonomy,
-        limit=5,
+        limit=limit,
+        rule_policy=rule_policy,
     )
     matches = [_candidate_to_category(candidate) for candidate in candidates]
     return apply_unclassified_fallback(
@@ -727,10 +741,18 @@ def match_document_text(text: str, taxonomy: Taxonomy) -> list[dict[str, Any]]:
 def match_document_features(
     document_features: DocumentFeatures,
     taxonomy: Taxonomy,
+    *,
+    limit: int = 5,
+    rule_policy: ClassificationRulePolicy | None = None,
 ) -> list[dict[str, Any]]:
     """按文件名和正文分离的特征生成建议，供自动落位区分证据来源。"""
 
-    candidates = recall_category_candidates(document_features, taxonomy, limit=5)
+    candidates = recall_category_candidates(
+        document_features,
+        taxonomy,
+        limit=limit,
+        rule_policy=rule_policy,
+    )
     matches = _dedupe_and_remove_shorter_embedded_matches(
         [_candidate_to_category(candidate) for candidate in candidates]
     )

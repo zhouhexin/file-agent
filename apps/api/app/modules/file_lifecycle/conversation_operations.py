@@ -287,9 +287,12 @@ class ConversationalWorkingCopyPlanService:
             )
             reason_codes = list(policy_result.reason_codes)
             operational_reason_codes: list[str] = []
+            # 用户在本轮已明确提交“重新分类并整理位置”；这是直接请求链路，
+            # 不应受只针对首次自动归档的 AUTO_INITIAL_PLACEMENT_ENABLED 影响。
             if (
-                not settings.auto_primary_classification_enabled
-                or settings.auto_classification_shadow_mode
+                not settings.classification_direct_request_enabled
+                or not settings.auto_primary_classification_enabled
+                or settings.classification_shadow_mode_effective
             ):
                 operational_reason_codes.append("AUTO_RECLASSIFICATION_DISABLED")
 

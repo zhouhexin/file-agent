@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "File Agent Classification Evaluation Manifest",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["dataset_id", "gold_labels", "samples"],
+  "properties": {
+    "dataset_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "gold_labels": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A separate JSON or JSONL file, resolved relative to this manifest."
+    },
+    "samples": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["sample_id"],
+        "properties": {
+          "sample_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "family_id": {
+            "type": "string"
+          },
+          "duplicate_of": {
+            "type": "string"
+          },
+          "out_of_scope": {
+            "type": "boolean"
+          },
+          "filename": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "text_path": {
+            "type": "string"
+          },
+          "headings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sheet_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "oneOf": [
+          {
+            "required": ["text"],
+            "not": {
+              "required": ["text_path"]
+            }
+          },
+          {
+            "required": ["text_path"],
+            "not": {
+              "required": ["text"]
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.api_errors import internal_error_response, register_api_error_handlers
-from app.core.config import get_settings
+from app.core.config import get_settings, validate_classification_runtime_settings
 from app.core.database import SessionLocal, init_database
 from app.core.logging import cleanup_old_logs, log_context, log_event, new_request_id
 from app.modules.agent.router import (
@@ -49,6 +49,8 @@ async def lifespan(app: FastAPI):
     正式部署应先执行 Alembic migration；这里保证当前本地原型服务可直接运行。
     """
 
+    settings = get_settings()
+    validate_classification_runtime_settings(settings)
     init_database()
     cleanup_old_logs()
     # 部署启动时先校验 SkillManifest 与代码白名单交叉引用；Catalog 无效时
@@ -58,7 +60,6 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         get_or_create_shared_workspace(db)
         db.commit()
-    settings = get_settings()
     if settings.managed_root_reconcile_on_startup and settings.filesystem_async_jobs_enabled:
         # 启动钩子只提交持久化任务；全量扫描、归档和复制由独立 worker 完成。
         with SessionLocal() as db:

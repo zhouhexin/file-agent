@@ -174,6 +174,13 @@ def test_settings_default_uploads_to_classified_initial_placement(monkeypatch, t
         "AUTO_PRIMARY_CLASSIFICATION_ENABLED",
         "AUTO_INITIAL_PLACEMENT_ENABLED",
         "AUTO_CLASSIFICATION_SHADOW_MODE",
+        "CLASSIFICATION_POLICY_BUNDLE_VERSION",
+        "CLASSIFICATION_FALLBACK_CATEGORY_ID",
+        "CLASSIFICATION_QUALITY_MODE",
+        "CLASSIFICATION_DIRECTORY_POLICY",
+        "CLASSIFICATION_PLACEMENT_ENABLED",
+        "CLASSIFICATION_DIRECT_REQUEST_ENABLED",
+        "CLASSIFICATION_RECONCILE_ENABLED",
     ):
         monkeypatch.delenv(name, raising=False)
     _reset_settings_cache()
@@ -183,6 +190,52 @@ def test_settings_default_uploads_to_classified_initial_placement(monkeypatch, t
     assert settings.auto_primary_classification_enabled is True
     assert settings.auto_initial_placement_enabled is True
     assert settings.auto_classification_shadow_mode is False
+    assert settings.classification_policy_bundle_version == "workdata-v1"
+    assert settings.classification_fallback_category_id == "system.other"
+    assert settings.classification_quality_mode == "conservative_rules"
+    assert settings.classification_placement_permitted is True
+
+
+def test_legacy_classification_shadow_flag_maps_to_new_quality_mode(monkeypatch, tmp_path):
+    """未配置新版模式时，旧 shadow 开关必须保持原有安全回退语义。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.setenv("AUTO_CLASSIFICATION_SHADOW_MODE", "true")
+    monkeypatch.delenv("CLASSIFICATION_QUALITY_MODE", raising=False)
+    _reset_settings_cache()
+
+    settings = config.get_settings()
+
+    assert settings.classification_quality_mode == "shadow"
+    assert settings.classification_shadow_mode_effective is True
+    assert settings.classification_placement_permitted is False
+
+
+def test_conflicting_new_and_legacy_classification_placement_fails_closed(monkeypatch, tmp_path):
+    """两个同义开关给出不同值时不能静默挑一个继续运行。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "false")
+    monkeypatch.setenv("CLASSIFICATION_PLACEMENT_ENABLED", "true")
+    _reset_settings_cache()
+
+    with pytest.raises(RuntimeError, match="conflicts with legacy"):
+        config.get_settings()
+
+
+def test_calibrated_quality_mode_requires_published_calibration(monkeypatch, tmp_path):
+    """没有校准产物时不得把策略伪装成 calibrated。"""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg2://user:pass@127.0.0.1:5432/fileAgent")
+    monkeypatch.setenv("CLASSIFICATION_QUALITY_MODE", "calibrated")
+    monkeypatch.delenv("AUTO_CLASSIFICATION_CALIBRATION_VERSION", raising=False)
+    _reset_settings_cache()
+
+    with pytest.raises(RuntimeError, match="requires a published calibration"):
+        config.get_settings()
 
 
 def test_settings_defaults_background_summaries_to_local_extractive_provider(monkeypatch, tmp_path):
