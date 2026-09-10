@@ -352,7 +352,7 @@ class ConversationalWorkingCopyPlanService:
                     classification_run=classification_run,
                     primary_suggestion=primary_suggestion,
                     policy_result=policy_result,
-                    policy_version=settings.auto_classification_policy_version,
+                    policy_version=settings.classification_policy_bundle_version,
                     calibration_version=(
                         settings.auto_classification_calibration_version
                     ),
@@ -381,7 +381,7 @@ class ConversationalWorkingCopyPlanService:
                     classification_run=classification_run,
                     primary_suggestion=primary_suggestion,
                     policy_result=policy_result,
-                    policy_version=settings.auto_classification_policy_version,
+                    policy_version=settings.classification_policy_bundle_version,
                     calibration_version=(
                         settings.auto_classification_calibration_version
                     ),

@@ -2744,7 +2744,8 @@ class FileLifecycleJobProcessor:
             "WORKBUDDY_INGEST_POLICY" if auto_organize_authorized else "LEGACY_CONFIGURATION"
         )
         effective_policy_version = (
-            organization_policy_version or self.settings.auto_classification_policy_version
+            organization_policy_version
+            or self.settings.classification_policy_bundle_version
         )
         categories = organization_decision.categories if organization_decision is not None else []
         risk_status = self._initial_organization_risk_status(

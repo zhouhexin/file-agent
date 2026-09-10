@@ -441,6 +441,7 @@ def test_default_upload_is_classified_then_first_published_to_taxonomy_path(monk
         assert relation.relation_role == "PRIMARY"
         assert relation.source == "auto_placement_policy"
         assert decision.decision == "APPLIED_BUSINESS"
+        assert decision.policy_version == "workdata-v1"
         assert decision.feature_snapshot_json["shadow_only"] is False
         assert path_record.operation_type == "INITIAL_AUTO_PLACEMENT"
         assert (tmp_path / "working" / version.storage_path).read_bytes() == content
@@ -520,6 +521,7 @@ def test_rejected_auto_classification_publishes_active_other_copy(monkeypatch, t
         assert working_copy.status == "ACTIVE"
         assert working_copy.relative_path == "其他/普通材料.txt"
         assert decision.decision == "APPLIED_OTHER"
+        assert decision.policy_version == "workdata-v1"
         assert "OTHER_CATEGORY" in decision.reason_codes_json
         relations = db.query(DocumentCategory).filter_by(working_copy_id=working_copy.id).all()
         assert len(relations) == 1

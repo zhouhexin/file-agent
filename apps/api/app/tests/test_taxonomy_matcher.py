@@ -694,6 +694,35 @@ def test_fallback_nodes_never_enter_ordinary_recall():
     )
 
 
+def test_legacy_fallback_and_review_candidates_converge_to_system_other():
+    """历史分支兜底和旧复核建议只能兼容读取，不能成为新请求的分类结果。"""
+
+    matches = apply_unclassified_fallback(
+        document_features=DocumentFeatures(
+            filename="临时通知.docx",
+            full_text="请相关单位知悉。",
+        ),
+        taxonomy=load_default_taxonomy(),
+        matches=[
+            {
+                "category_id": "school.issued",
+                "category_path": ["学校", "发文"],
+                "status": "SUGGESTED",
+                "source": "rule_fallback",
+            },
+            {
+                "category_id": "school.international-cooperation",
+                "category_path": ["学校", "国际合作交流"],
+                "status": "NEEDS_REVIEW",
+                "source": "rule",
+            },
+        ],
+    )
+
+    assert [item["category_id"] for item in matches] == ["system.other"]
+    assert matches[0]["status"] == "SUGGESTED"
+
+
 def test_scattered_resume_terms_do_not_override_teaching_evaluation():
     """T03：跨章节散落履历词不能拼成简历，教学评估业务仍进入候选。"""
 

@@ -763,15 +763,6 @@ def match_document_features(
     )
 
 
-_DOCUMENT_NUMBER_PATTERNS = (
-    re.compile(
-        r"[\u4e00-\u9fffA-Za-z]{1,20}?\s*[〔\[（(【]"
-        r"(?:19|20)\d{2}[〕\]）)】]\s*\d{1,6}\s*号"
-    ),
-    re.compile(r"(?:19|20)\d{2}\s*年\s*第\s*\d{1,6}\s*号"),
-)
-
-
 def apply_unclassified_fallback(
     *,
     document_features: DocumentFeatures,
@@ -779,202 +770,36 @@ def apply_unclassified_fallback(
     matches: list[dict[str, Any]],
     default_organization_root: str | None = None,
 ) -> list[dict[str, Any]]:
-    """仅在没有具体业务分类时按组织、部门和文号生成兜底建议。"""
+    """将不合格或历史 fallback 候选统一收敛为 ``system.other``。
 
-    policy = taxonomy.fallback_policy
-    if policy is None:
-        return matches or [_other_category(taxonomy)]
-    if policy.issued is None or policy.other is None:
-        return matches or [_other_category(taxonomy)]
-    if matches and all(
-        str(item.get("source") or "") == "rule_fallback"
-        for item in matches
-    ):
-        return matches
-    department_ids = set(policy.department_category_ids)
-    title_text = _join_text(
-        [
-            document_features.filename,
-            document_features.title,
-            *(document_features.headings or []),
-            *(document_features.sheet_names or []),
-        ]
-    )
-    body_text = document_features.full_text or ""
-    document_number, document_number_source = _find_document_number(
-        filename=document_features.filename,
-        title_text=title_text,
-        body_text=body_text,
-    )
-    department = next(
-        (
-            item
-            for item in matches
-            if str(item.get("category_id") or "") in department_ids
-            and _is_department_keyword_match(
-                category=item,
-                text=_join_text([title_text, body_text]),
-                document_number=document_number,
-            )
-        ),
-        None,
-    )
-    primary_needs_review = bool(matches) and str(
-        matches[0].get("status") or ""
-    ) == "NEEDS_REVIEW"
+    ``.other``、``.issued`` 及 ``NEEDS_REVIEW`` 都只允许读取历史记录，不能作为
+    新一轮召回、建议或目录落位的结果。组织范围、目录和文号仍会保留在运行时特征中，
+    但不能代替正文业务证据生成新的分支“其他”。保留 ``default_organization_root``
+    参数仅为旧调用方兼容，不能再影响新的分类结论。
+    """
+
+    _ = document_features, default_organization_root
     concrete_matches = [
         item
         for item in matches
-        if not primary_needs_review
-        and (
-            department is None
-            or str(item.get("category_id") or "") not in department_ids
-        )
-        and list(item.get("category_path") or [])[-1:] != ["其他"]
-        and str(item.get("source") or "") != "rule_fallback"
-        and str(item.get("status") or "") != "NEEDS_REVIEW"
+        if _is_current_business_candidate(item)
     ]
-    if concrete_matches:
-        return [
-            item
-            for item in matches
-            if str(item.get("source") or "") != "rule_fallback"
-        ]
+    return concrete_matches or [_other_category(taxonomy)]
 
-    scope = _detect_organization_scope(
-        taxonomy=taxonomy,
-        title_text=title_text,
-        body_text=body_text,
+
+def _is_current_business_candidate(candidate: dict[str, Any]) -> bool:
+    """过滤新版分类流程不得新建的历史、兜底和复核候选。"""
+
+    category_id = str(candidate.get("category_id") or "")
+    path = list(candidate.get("category_path") or [])
+    return bool(
+        category_id
+        and category_id != "system.other"
+        and not category_id.endswith((".other", ".issued"))
+        and path[-1:] != ["其他"]
+        and str(candidate.get("source") or "") != "rule_fallback"
+        and str(candidate.get("status") or "") != "NEEDS_REVIEW"
     )
-    if department is not None:
-        base_path = [str(value) for value in department.get("category_path", [])]
-        base_id = str(department.get("category_id") or "")
-        evidence = [
-            str(value)
-            for value in department.get("evidence", [])
-            if str(value)
-        ]
-    else:
-        fallback_root = (
-            scope.dominant_root
-            or _unambiguous_match_root(matches)
-            or default_organization_root
-        )
-        root = next(
-            (
-                node
-                for node in taxonomy.categories
-                if node.name == fallback_root
-            ),
-            None,
-        )
-        if root is None or not root.id:
-            return matches or [_other_category(taxonomy)]
-        base_path = [root.name]
-        base_id = root.id
-        evidence = _unique_signals(
-            [
-                *scope.matched_title_signals.get(root.name, []),
-                *scope.matched_content_signals.get(root.name, []),
-            ]
-        )
-    leaf = policy.issued if document_number else policy.other
-    category_path = [*base_path, leaf.name]
-    evidence = _unique_signals([*evidence, document_number])
-    evidence_items = []
-    if document_number:
-        evidence_items.append(
-            {
-                "type": "metadata" if document_number_source == "filename" else "text_quote",
-                "page_number": None,
-                "sheet_name": None,
-                "quote": document_number,
-                "signals": [document_number],
-                "source": document_number_source,
-            }
-        )
-    return [
-        {
-            "name": "/".join(category_path),
-            "category_id": f"{base_id}.{leaf.id_suffix}",
-            "category_path": category_path,
-            "confidence": 0.62 if department is not None else 0.52,
-            "status": "SUGGESTED",
-            "source": "rule_fallback",
-            "evidence": evidence[:5],
-            "evidence_items": evidence_items,
-            "matched_signals": evidence[:5],
-            "matched_title_signals": [],
-            "matched_content_signals": evidence[:5],
-            "negative_signals": [],
-            "organization_scope": base_path[0],
-            "candidate_scores": {
-                "fallback": 1.0,
-                "organization": scope.scores.get(base_path[0], 0.0),
-                "department": 1.0 if department is not None else 0.0,
-                "document_number": 1.0 if document_number else 0.0,
-            },
-            "taxonomy_key": taxonomy.key,
-            "taxonomy_version": taxonomy.version,
-            "candidate_reason": "无法命中具体业务分类，按组织层级、部门和文号执行兜底规则。",
-        }
-    ]
-
-
-_DEPARTMENT_SUFFIXES = ("处", "部", "办", "科", "室", "中心", "委员会", "工会", "团委")
-
-
-def _is_department_keyword_match(
-    *,
-    category: dict[str, Any],
-    text: str,
-    document_number: str,
-) -> bool:
-    """只有原文或文号出现真实部门表达时，才把业务父节点视为部门。"""
-
-    signals = _unique_signals(
-        [
-            *[str(value) for value in category.get("evidence", [])],
-            *[str(value) for value in category.get("matched_signals", [])],
-        ]
-    )
-    for signal in signals:
-        if any(signal.endswith(suffix) and signal in text for suffix in _DEPARTMENT_SUFFIXES):
-            return True
-        if any(f"{signal}{suffix}" in text for suffix in _DEPARTMENT_SUFFIXES):
-            return True
-        if document_number and signal in document_number:
-            return True
-    return False
-
-
-def _find_document_number(
-    *,
-    filename: str,
-    title_text: str,
-    body_text: str,
-) -> tuple[str, str]:
-    """从文件名或正文识别正式文号，并返回可审计来源。"""
-
-    for source, text in (
-        ("filename", filename),
-        ("document_text", _join_text([title_text, body_text])),
-    ):
-        for pattern in _DOCUMENT_NUMBER_PATTERNS:
-            match = pattern.search(text or "")
-            if match:
-                return match.group(0).strip(), source
-    return "", ""
-
-
-def _unambiguous_match_root(matches: list[dict[str, Any]]) -> str | None:
-    """具体候选证据不足时，复用最高排名候选指向的学校或学院一级分支。"""
-
-    for item in matches:
-        path = list(item.get("category_path") or [])
-        if path and str(path[0]) in {"学校", "学院"}:
-            return str(path[0])
-    return None
 
 
 def _dedupe_and_remove_shorter_embedded_matches(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
