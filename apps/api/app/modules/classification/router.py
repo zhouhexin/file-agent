@@ -144,6 +144,8 @@ def _submit_classification_placement(
     request: Request,
     db: Session,
     current_user: User,
+    client_id: str = "classification-api",
+    source_event_prefix: str = "http",
 ) -> PlacementSubmissionResponse:
     """复用专用路径和兼容入口的服务端对象校验、授权快照与异步受理。"""
 
@@ -163,9 +165,9 @@ def _submit_classification_placement(
         command=command,
         current_user=current_user,
         workspace_id=shared_workspace_id,
-        client_id="classification-api",
+        client_id=client_id,
         request_id=request_id,
-        source_event_ref=f"http:{request_id}",
+        source_event_ref=f"{source_event_prefix}:{request_id}",
     )
     try:
         submission = ClassificationPlacementService(db).submit(

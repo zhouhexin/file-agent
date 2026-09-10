@@ -354,10 +354,20 @@ class FileAgentIntegrationClient:
     ) -> dict[str, Any]:
         """提交一个已经冻结版本和修订号的分类落位命令，不传递本机路径。"""
 
+        working_copy_id = str(command.get("working_copy_id") or "").strip()
+        action = str(command.get("action") or "").strip()
+        if not working_copy_id or action not in {"SET_PRIMARY", "MOVE"}:
+            raise ValueError("分类落位命令缺少稳定 working_copy_id 或合法 action")
+        payload = {
+            key: value
+            for key, value in command.items()
+            if key not in {"working_copy_id", "action"}
+        }
+        suffix = "primary-category" if action == "SET_PRIMARY" else "placement"
         return self._business_json(
             await self.http.post(
-                "/api/classification/placements",
-                json=command,
+                f"/api/integrations/v1/working-copies/{_path_segment(working_copy_id)}/{suffix}",
+                json=payload,
                 headers={"X-Request-ID": request_id},
             )
         )
@@ -370,7 +380,9 @@ class FileAgentIntegrationClient:
         """读取分类落位的后端事实状态；该请求没有文件写入副作用。"""
 
         return self._business_json(
-            await self.http.get(f"/api/classification/placements/{_path_segment(operation_id)}")
+            await self.http.get(
+                f"/api/integrations/v1/placement-operations/{_path_segment(operation_id)}"
+            )
         )
 
     async def evidence_answer(

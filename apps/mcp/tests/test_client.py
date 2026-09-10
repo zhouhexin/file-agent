@@ -158,10 +158,8 @@ def test_classification_placement_client_uses_only_controlled_backend_endpoints(
     assert requests == [
         (
             "POST",
-            "/api/classification/placements",
+            "/api/integrations/v1/working-copies/copy-1/primary-category",
             {
-                "working_copy_id": "copy-1",
-                "action": "SET_PRIMARY",
                 "expected_revision": 2,
                 "expected_document_version_id": "version-1",
                 "target_category_id": "college.finance",
@@ -170,7 +168,12 @@ def test_classification_placement_client_uses_only_controlled_backend_endpoints(
             },
             "placement-request-1",
         ),
-        ("GET", "/api/classification/placements/placement-1", {}, None),
+        (
+            "GET",
+            "/api/integrations/v1/placement-operations/placement-1",
+            {},
+            None,
+        ),
     ]
 
 

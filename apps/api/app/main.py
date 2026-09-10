@@ -25,6 +25,9 @@ from app.modules.auth.router import router as auth_router
 from app.modules.changesets.router import router as changesets_router
 from app.modules.chunks.router import router as chunks_router
 from app.modules.classification.router import router as classification_router
+from app.modules.classification.integration_router import (
+    router as classification_integration_router,
+)
 from app.modules.conversations.router import router as conversations_router
 from app.modules.files.router import router as files_router
 from app.modules.file_rename.router import router as file_rename_router
@@ -146,6 +149,7 @@ app.include_router(auth_router)
 app.include_router(changesets_router)
 app.include_router(chunks_router)
 app.include_router(classification_router)
+app.include_router(classification_integration_router)
 app.include_router(conversations_router)
 app.include_router(files_router)
 app.include_router(file_rename_router)

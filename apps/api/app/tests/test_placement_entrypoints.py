@@ -144,6 +144,40 @@ def test_path_bound_set_primary_reuses_placement_coordinator(monkeypatch, tmp_pa
         db.close()
 
 
+def test_integration_path_uses_workbuddy_client_identity(monkeypatch, tmp_path):
+    """外部连接器路径应复用协调器，但审计来源必须与普通 API 可区分。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, session_factory = client_with_database()
+    headers = _auth(client, "placement-http-integration")
+    _upload(client, headers, "连接器归档材料.txt", b"integration placement")
+    _drain(session_factory)
+    working_copy_id, payload = _path_payload_from_public_metadata(client, headers)
+
+    submission = client.post(
+        f"/api/integrations/v1/working-copies/{working_copy_id}/primary-category",
+        headers=headers,
+        json=payload,
+    )
+
+    assert submission.status_code == 202
+    operation_id = submission.json()["operation_id"]
+    status_response = client.get(
+        f"/api/integrations/v1/placement-operations/{operation_id}",
+        headers=headers,
+    )
+    assert status_response.status_code == 200
+    db = session_factory()
+    try:
+        operation = db.get(ClassificationPlacementOperation, operation_id)
+        assert operation.client_id == "workbuddy-mcp"
+        assert operation.authorization_snapshot_json["source_event_ref"].startswith(
+            "integration:workbuddy-mcp:"
+        )
+    finally:
+        db.close()
+
+
 def test_http_placement_rejects_client_authorization_injection_before_writes(monkeypatch, tmp_path):
     """公开入口拒绝权限注入字段，且在参数校验阶段不创建审计或任务。"""
 
