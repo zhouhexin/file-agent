@@ -183,7 +183,20 @@ class FileLifecycleStorageService:
                 staged.unlink(missing_ok=True)
                 return target, False
             raise FileExistsError("最终工作副本路径已存在，禁止覆盖")
-        os.replace(staged, target)
+        try:
+            # 工作副本最终发布必须不覆盖。硬链接在同一文件系统内以 EEXIST 原子失败，
+            # 仅在目标链接成功后才删除内部暂存文件；中断时两个路径同 inode，重试可验证收敛。
+            os.link(staged, target)
+        except FileExistsError:
+            if target.is_file() and self.sha256_file(target) == expected_sha256:
+                staged.unlink(missing_ok=True)
+                return target, False
+            raise FileExistsError("最终工作副本路径已存在，禁止覆盖")
+        except OSError as exc:
+            if exc.errno == getattr(os, "EXDEV", 18):
+                raise RuntimeError("工作副本发布只支持同一文件系统") from exc
+            raise RuntimeError("当前文件系统不支持安全的无覆盖工作副本发布") from exc
+        staged.unlink()
         return target, True
 
     @staticmethod

@@ -80,6 +80,10 @@ from app.modules.file_lifecycle.schemas import (
     TrashEntryResponse,
 )
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
+from app.modules.file_lifecycle.working_copy_executor import (
+    WorkingCopyExecutionError,
+    WorkingCopyExecutor,
+)
 from app.modules.file_lifecycle.risk import inspect_basic_file_risks
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.path_policy import resolve_managed_relative_path
@@ -1002,6 +1006,7 @@ class FileLifecycleJobProcessor:
             "RECONCILE_UPLOAD_ARCHIVES": self._reconcile_upload_archives,
             "RECONCILE_MANAGED_ROOT": self._reconcile_managed_root,
             "REPAIR_WORKING_COPY_LAYOUT": self._repair_working_copy_layout,
+            "EXECUTE_CLASSIFICATION_PLACEMENT": self._execute_classification_placement,
         }
         handler = handlers.get(job.job_type)
         if handler is None:
@@ -1029,6 +1034,29 @@ class FileLifecycleJobProcessor:
             item_id = str(review.ingest_item_id or "") if review is not None else ""
         item = self.db.get(IngestItem, item_id) if item_id else None
         return item if item is not None and item.status == "CANCELLED" else None
+
+    def _execute_classification_placement(self, job: FilesystemJob) -> None:
+        """执行已冻结的分类落位；worker 只传 operation ID 和自己的租约令牌。
+
+        任何路径、文件名、分类或授权信息都由持久化 operation 重新读取，不能从
+        FilesystemJob payload 注入。服务内部会在文件动作前后分别提交阶段事实。
+        """
+
+        from app.modules.classification.placement_service import (
+            ClassificationPlacementService,
+        )
+
+        operation_id = str((job.payload_json or {}).get("placement_operation_id") or "")
+        if not operation_id:
+            raise RuntimeError("EXECUTE_CLASSIFICATION_PLACEMENT 缺少 placement_operation_id")
+        result = ClassificationPlacementService(
+            self.db,
+            storage=self.storage,
+        ).execute(
+            operation_id=operation_id,
+            execution_token=str(job.execution_token or "") or None,
+        )
+        FilesystemJobQueue(self.db).mark_completed(job=job, result=result)
 
     def _run_ingest_extra_request(self, job: FilesystemJob) -> None:
         """执行批次附带请求并保存可由 batch_get 恢复的安全回执。"""
@@ -1072,6 +1100,7 @@ class FileLifecycleJobProcessor:
             "RECONCILE_UPLOAD_ARCHIVES",
             "RECONCILE_MANAGED_ROOT",
             "REPAIR_WORKING_COPY_LAYOUT",
+            "EXECUTE_CLASSIFICATION_PLACEMENT",
         }
 
     def record_failure(self, *, job: FilesystemJob, error_message: str, retrying: bool) -> None:
@@ -2769,6 +2798,8 @@ class FileLifecycleJobProcessor:
                     "content_rule": "verified_image_container",
                     "semantic_college_detection_skipped": True,
                 },
+                classification_outcome="CLASSIFIED",
+                classification_quality="SUFFICIENT",
             )
         else:
             assert policy_result is not None
@@ -2796,29 +2827,56 @@ class FileLifecycleJobProcessor:
                 date_label=str(image_date_label),
                 target_filename=target_filename,
             )
-        elif (
-            placement_mode == "BY_CATEGORY"
-            and policy_result.accepted
-            and classification_run is not None
-            and primary_suggestion is not None
-        ):
+        elif placement_mode == "BY_CATEGORY" and policy_result.accepted:
             try:
+                selected_primary = dict(policy_result.primary_category or {})
+                selected_category_id = str(selected_primary.get("category_id") or "")
+                selected_taxonomy_key = str(
+                    selected_primary.get("taxonomy_key")
+                    or (classification_run.taxonomy_key if classification_run else "")
+                )
+                selected_taxonomy_version = str(
+                    selected_primary.get("taxonomy_version")
+                    or (classification_run.taxonomy_version if classification_run else "")
+                )
+                if selected_category_id == "system.other":
+                    current_taxonomy = load_default_taxonomy()
+                    selected_taxonomy_key = current_taxonomy.key
+                    selected_taxonomy_version = current_taxonomy.version
+                if not selected_category_id:
+                    raise CategoryOrganizationPathError("首次整理缺少有效主分类")
                 target = CategoryOrganizationPathResolver(self.storage).resolve_category(
-                    category_id=primary_suggestion.category_id,
-                    taxonomy_key=classification_run.taxonomy_key,
-                    taxonomy_version=classification_run.taxonomy_version,
+                    category_id=selected_category_id,
+                    taxonomy_key=selected_taxonomy_key,
+                    taxonomy_version=selected_taxonomy_version,
                     working_copy=working_copy,
                     working_root=working_root,
                 )
-                target_filename = self._initial_organization_filename(
-                    decision=organization_decision,
-                    fallback=working_copy.filename,
+                target_filename = (
+                    self.storage.sanitize_filename(working_copy.filename)
+                    if selected_category_id == "system.other"
+                    else self._initial_organization_filename(
+                        decision=organization_decision,
+                        fallback=working_copy.filename,
+                    )
                 )
                 target_parent = (
                     Path(target.target_relative_path).parent
-                    / self._managed_source_container_path(managed_file)
+                    / (
+                        Path()
+                        if selected_category_id == "system.other"
+                        else self._managed_source_container_path(managed_file)
+                    )
                 )
-                if self._is_personal_resume_rename(organization_decision):
+                if selected_category_id == "system.other":
+                    target_relative_path = self._available_initial_other_relative_path(
+                        working_copy=working_copy,
+                        working_root=working_root,
+                        managed_file=managed_file,
+                        version=version,
+                        target_filename=target_filename,
+                    )
+                elif self._is_personal_resume_rename(organization_decision):
                     target_relative_path = self._available_initial_resume_relative_path(
                         working_copy=working_copy,
                         working_root=working_root,
@@ -2884,11 +2942,12 @@ class FileLifecycleJobProcessor:
                             reasons.append("TARGET_NAME_CONFLICT")
             except CategoryOrganizationPathError:
                 reasons.append("TARGET_PATH_UNAVAILABLE")
-        elif placement_mode == "BY_CATEGORY" and policy_result.accepted:
-            reasons.append("NO_TAXONOMY_CANDIDATE")
-
         reasons = list(dict.fromkeys(reasons))
-        evaluated_decision = "AUTO_ORGANIZED" if not reasons else "NEEDS_REVIEW"
+        evaluated_decision = (
+            policy_result.evaluated_decision
+            if policy_result.accepted and target_relative_path
+            else "BLOCKED"
+        )
         if shadow_only:
             taxonomy = load_default_taxonomy() if image_date_rule_applied else None
             return repository.create_or_update_decision(
@@ -2902,7 +2961,7 @@ class FileLifecycleJobProcessor:
                 calibration_version=self.settings.auto_classification_calibration_version,
                 decision=evaluated_decision,
                 reason_codes=reasons,
-                target_relative_path=target_relative_path if not reasons else None,
+                target_relative_path=target_relative_path,
                 shadow_only=True,
                 decision_scope=(
                     "initial-image-date-organization"
@@ -2925,7 +2984,7 @@ class FileLifecycleJobProcessor:
                 after_revision=before_revision,
             )
 
-        if not reasons and target_relative_path:
+        if policy_result.accepted and target_relative_path:
             final_relative_path = target_relative_path
             operation_type = (
                 "INITIAL_IMAGE_DATE_PLACEMENT"
@@ -2933,27 +2992,57 @@ class FileLifecycleJobProcessor:
                 else "INITIAL_AUTO_PLACEMENT"
             )
         else:
-            neutral = self._neutral_initial_path_resolution(
+            # 新分类策略不再创建中性/待复核落点。只要业务主类不足以可靠
+            # 确认，首次发布仍完成，并由唯一 system.other PRIMARY 表示事实。
+            # 真正的文件系统冲突仍在执行器中失败，不能被此兜底掩盖。
+            current_taxonomy = load_default_taxonomy()
+            other_target = CategoryOrganizationPathResolver(self.storage).resolve_category(
+                category_id="system.other",
+                taxonomy_key=current_taxonomy.key,
+                taxonomy_version=current_taxonomy.version,
+                working_copy=working_copy,
+                working_root=working_root,
+            )
+            target_filename = self.storage.sanitize_filename(working_copy.filename)
+            final_relative_path = self._available_initial_other_relative_path(
+                working_copy=working_copy,
                 working_root=working_root,
                 managed_file=managed_file,
                 version=version,
+                target_filename=target_filename,
             )
-            target_filename = self._initial_organization_filename(
-                decision=organization_decision,
-                fallback=neutral.filename,
-            )
-            final_relative_path = (
-                Path(neutral.relative_path).parent / target_filename
-            ).as_posix()
-            operation_type = "INITIAL_NEUTRAL_PLACEMENT"
+            # 解析调用是对 system.other 可落位性的显式校验；路径值本身由
+            # 同名安全策略生成，避免任何未校验的用户路径进入发布器。
+            if other_target.category_id != "system.other":
+                raise RuntimeError("system.other 分类目录配置无效")
+            evaluated_decision = "APPLIED_OTHER"
+            reasons = list(dict.fromkeys([*reasons, "OTHER_CATEGORY"]))
+            operation_type = "INITIAL_OTHER_PLACEMENT"
 
         final_storage_path = f"{working_root.relative_storage_path}/{final_relative_path}"
-        self.storage.publish_working_copy(
-            staged_relative_path=version.storage_path,
-            target_relative_path=final_storage_path,
-            expected_sha256=version.sha256,
-            staged_hash_verified=False,
-        )
+        root_prefix = f"{working_root.relative_storage_path}/"
+        if not version.storage_path.startswith(root_prefix):
+            raise RuntimeError("首次发布暂存文件不属于当前工作副本根")
+        executor = WorkingCopyExecutor(self.storage)
+        try:
+            executor_operation_id = f"initial-{changeset.id}"
+            source_relative_path = version.storage_path[len(root_prefix) :]
+            expected_identity = executor.capture_or_recover_source_identity(
+                operation_id=executor_operation_id,
+                root_relative_path=working_root.relative_storage_path,
+                source_relative_path=source_relative_path,
+                target_relative_path=final_relative_path,
+            )
+            executor.apply_move(
+                operation_id=executor_operation_id,
+                working_copy_id=working_copy.id,
+                root_relative_path=working_root.relative_storage_path,
+                source_relative_path=source_relative_path,
+                target_relative_path=final_relative_path,
+                expected_identity=expected_identity,
+            )
+        except WorkingCopyExecutionError as exc:
+            raise RuntimeError(f"首次工作副本发布失败：{exc.code}") from exc
         before_relative_path = managed_file.relative_path
         working_copy.relative_path = final_relative_path
         working_copy.relative_path_hash = hashlib.sha256(
@@ -2962,6 +3051,10 @@ class FileLifecycleJobProcessor:
         working_copy.filename = Path(final_relative_path).name
         working_copy.extension = Path(final_relative_path).suffix.lower()
         working_copy.status = "ACTIVE"
+        working_copy.placement_status = (
+            "IN_SYNC" if evaluated_decision in {"APPLIED_BUSINESS", "APPLIED_OTHER"} else "ERROR"
+        )
+        working_copy.placement_policy_version = effective_policy_version
         working_copy.revision += 1
         version.storage_path = final_storage_path
         version.filename = working_copy.filename
@@ -3029,7 +3122,7 @@ class FileLifecycleJobProcessor:
         decision_row.path_record_id = path_record.id
 
         applied_relation = None
-        if evaluated_decision == "AUTO_ORGANIZED" and image_date_rule_applied and taxonomy:
+        if evaluated_decision == "APPLIED_BUSINESS" and image_date_rule_applied and taxonomy:
             applied_relation = repository.create_system_primary(
                 working_copy=working_copy,
                 category_id=IMAGE_DATE_CATEGORY_ROOT_ID,
@@ -3048,7 +3141,7 @@ class FileLifecycleJobProcessor:
                 ],
             )
         elif (
-            evaluated_decision == "AUTO_ORGANIZED"
+            evaluated_decision == "APPLIED_BUSINESS"
             and classification_run
             and primary_suggestion
         ):
@@ -3057,6 +3150,53 @@ class FileLifecycleJobProcessor:
                 classification_run=classification_run,
                 suggestion=primary_suggestion,
             )
+        elif evaluated_decision == "APPLIED_BUSINESS":
+            # 受控图像日期规则及后续可复用的规则 Provider 都可能没有写入
+            # classification_run。首次发布仍必须保留唯一 PRIMARY，不能只移动
+            # 文件而留下“无正式主类”的不完整投影。
+            selected_primary = dict(policy_result.primary_category or {})
+            category_id = str(selected_primary.get("category_id") or "")
+            category_path = list(selected_primary.get("category_path") or [])
+            taxonomy_for_primary = load_default_taxonomy()
+            if not category_id or not category_path:
+                raise RuntimeError("首次业务分类缺少可持久化的主类快照")
+            applied_relation = repository.create_system_primary(
+                working_copy=working_copy,
+                category_id=category_id,
+                category_path=category_path,
+                taxonomy_key=str(
+                    selected_primary.get("taxonomy_key") or taxonomy_for_primary.key
+                ),
+                taxonomy_version=str(
+                    selected_primary.get("taxonomy_version") or taxonomy_for_primary.version
+                ),
+                classifier_version="initial-auto-placement-v1",
+                source="auto_placement_policy",
+                evidence=[],
+            )
+        elif evaluated_decision == "APPLIED_OTHER":
+            current_taxonomy = load_default_taxonomy()
+            if (
+                classification_run is not None
+                and primary_suggestion is not None
+                and primary_suggestion.category_id == "system.other"
+            ):
+                applied_relation = repository.create_auto_applied_primary(
+                    working_copy=working_copy,
+                    classification_run=classification_run,
+                    suggestion=primary_suggestion,
+                )
+            else:
+                applied_relation = repository.create_system_primary(
+                    working_copy=working_copy,
+                    category_id="system.other",
+                    category_path=["其他"],
+                    taxonomy_key=current_taxonomy.key,
+                    taxonomy_version=current_taxonomy.version,
+                    classifier_version="initial-other-placement-v1",
+                    source="auto_placement_policy",
+                    evidence=[],
+                )
         if applied_relation is not None:
             self.db.add(
                 ChangeItem(
@@ -3117,8 +3257,8 @@ class FileLifecycleJobProcessor:
                 target_document_id=document.id,
                 change_type=(
                     "WORKING_COPY_AUTO_ORGANIZED"
-                    if evaluated_decision == "AUTO_ORGANIZED"
-                    else "AUTO_ORGANIZATION_REVIEW_REQUIRED"
+                    if evaluated_decision == "APPLIED_BUSINESS"
+                    else "WORKING_COPY_AUTO_OTHER_APPLIED"
                 ),
                 before_value_json={"relative_path": before_relative_path, "status": "ORGANIZING"},
                 after_value_json={
@@ -3248,6 +3388,49 @@ class FileLifecycleJobProcessor:
                 # 文件系统发布成功、数据库事务尚未提交时，重试必须复用原目标。
                 return relative_path
         raise RuntimeError("图片日期目录无法分配可用文件名")
+
+    def _available_initial_other_relative_path(
+        self,
+        *,
+        working_copy: WorkingCopy,
+        working_root: WorkingCopyRoot,
+        managed_file: ManagedFile,
+        version: DocumentVersion,
+        target_filename: str,
+    ) -> str:
+        """首次 OTHER 发布保留原名；同名时落入受控 ``_items`` 容器。
+
+        容器 ID 来自不可变 managed_file，而不是用户输入的路径或文件名，因此不会
+        形成新的 taxonomy 节点，也不会为了同名文件改名或覆盖既有工作副本。
+        """
+
+        filename = self.storage.sanitize_filename(target_filename)
+        primary_relative_path = (Path("其他") / filename).as_posix()
+        staged_path = self.storage.working_copy_path(version.storage_path)
+        primary_target = self.storage.working_copy_path(
+            f"{working_root.relative_storage_path}/{primary_relative_path}"
+        )
+        if not primary_target.exists():
+            return primary_relative_path
+        if (
+            not staged_path.exists()
+            and primary_target.is_file()
+            and self.storage.sha256_file(primary_target) == version.sha256
+        ):
+            return primary_relative_path
+        item_relative_path = (Path("其他") / "_items" / managed_file.id / filename).as_posix()
+        item_target = self.storage.working_copy_path(
+            f"{working_root.relative_storage_path}/{item_relative_path}"
+        )
+        if not item_target.exists():
+            return item_relative_path
+        if (
+            not staged_path.exists()
+            and item_target.is_file()
+            and self.storage.sha256_file(item_target) == version.sha256
+        ):
+            return item_relative_path
+        raise RuntimeError("其他目录中的初始文件目标已被占用")
 
     def _managed_source_container_path(self, managed_file: ManagedFile) -> Path:
         """按硬编码材料包策略选择性保留源文件父目录。"""

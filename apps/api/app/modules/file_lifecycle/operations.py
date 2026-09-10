@@ -44,6 +44,10 @@ from app.modules.classification.organization_path import (
 from app.modules.file_lifecycle.repository import FileLifecycleRepository
 from app.modules.file_lifecycle.service import create_lifecycle_audit
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
+from app.modules.file_lifecycle.working_copy_executor import (
+    WorkingCopyExecutionError,
+    WorkingCopyExecutor,
+)
 from app.modules.operations.repository import OperationPlanRepository
 from app.modules.operations.schemas import OperationPlanCreateRequest
 from app.modules.retrieval.search_profile import DocumentSearchProfileService
@@ -70,6 +74,7 @@ class WorkingCopyOperationService:
         self.repository = FileLifecycleRepository(db)
         self.plan_repository = OperationPlanRepository(db)
         self.storage = FileLifecycleStorageService()
+        self.executor = WorkingCopyExecutor(self.storage)
 
     def find_active_filename_conflicts(
         self,
@@ -850,6 +855,14 @@ class WorkingCopyOperationService:
                 item=item,
             )
             return {**result, "operation_type": operation_type}
+        root_prefix = f"{root.relative_storage_path}/"
+        if not version.storage_path.startswith(root_prefix):
+            raise RuntimeError("工作副本当前版本不属于当前工作副本根")
+        source_relative_path = version.storage_path[len(root_prefix) :]
+        source_identity = self.executor.capture_source_identity(
+            root_relative_path=root.relative_storage_path,
+            source_relative_path=source_relative_path,
+        )
         after_relative_path = str(after.get("relative_path") or "")
         target_filename = PurePosixPath(after_relative_path).name
         conflicts = self.find_active_filename_conflicts(
@@ -863,10 +876,6 @@ class WorkingCopyOperationService:
                 f"共享工作目录已存在同名文件“{target_filename}”，请重新选择冲突处理方式"
             )
         after_storage_path = f"{root.relative_storage_path}/{after_relative_path}"
-        target = self.storage.working_copy_path(after_storage_path)
-        if target.exists():
-            raise FileExistsError("目标工作副本路径已存在")
-        target.parent.mkdir(parents=True, exist_ok=True)
         record = self.db.get(WorkingCopyPathRecord, item.get("working_copy_path_record_id"))
         if record is None or record.status != "PLANNED":
             raise RuntimeError("工作副本路径记录不存在或状态异常")
@@ -874,7 +883,22 @@ class WorkingCopyOperationService:
         record.operation_confirmation_id = confirmation.id if confirmation else None
         record.executed_by = current_user.id
         self.db.flush()
-        os.replace(source, target)
+        # 已确认的历史重命名和移动同样复用无覆盖执行器。数据库外部的
+        # 同名抢占由 link 的原子 EEXIST 处理，不能依赖先检查 target.exists。
+        executor_operation_id = hashlib.sha256(
+            f"legacy-working-copy:{plan.id}:{record.id}".encode("utf-8")
+        ).hexdigest()
+        try:
+            self.executor.apply_move(
+                operation_id=executor_operation_id,
+                working_copy_id=working_copy.id,
+                root_relative_path=root.relative_storage_path,
+                source_relative_path=source_relative_path,
+                target_relative_path=after_relative_path,
+                expected_identity=source_identity,
+            )
+        except WorkingCopyExecutionError as exc:
+            raise RuntimeError(f"工作副本受控移动失败：{exc.code}") from exc
         operation_time = utcnow()
         working_copy.relative_path = after_relative_path
         working_copy.relative_path_hash = hashlib.sha256(after_relative_path.encode("utf-8")).hexdigest()

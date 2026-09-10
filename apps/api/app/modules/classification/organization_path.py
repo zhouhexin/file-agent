@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+import re
 
 from app.db.models import DocumentCategory, WorkingCopy, WorkingCopyRoot
 from app.modules.classification.loader import load_default_taxonomy
@@ -29,6 +30,7 @@ class CategoryOrganizationTarget:
     organization_path: tuple[str, ...]
     target_relative_path: str
     target_storage_path: str
+    container_segments: tuple[str, ...] = ()
 
 
 class CategoryOrganizationPathResolver:
@@ -74,6 +76,7 @@ class CategoryOrganizationPathResolver:
         taxonomy_version: str,
         working_copy: WorkingCopy,
         working_root: WorkingCopyRoot,
+        container_segments: tuple[str, ...] | list[str] = (),
     ) -> CategoryOrganizationTarget:
         """从经过策略门槛的稳定分类 ID 解析首次发布目标。"""
 
@@ -92,8 +95,11 @@ class CategoryOrganizationPathResolver:
             raise CategoryOrganizationPathError(
                 "该分类只作为标签使用，尚未配置整理目录。"
             )
+        normalized_container = _validate_container_segments(container_segments)
         category_path = PurePosixPath(*node.organization_path)
-        target_relative_path = (category_path / working_copy.filename).as_posix()
+        target_relative_path = (
+            category_path / PurePosixPath(*normalized_container) / working_copy.filename
+        ).as_posix()
         target_storage_path = (
             PurePosixPath(working_root.relative_storage_path)
             / target_relative_path
@@ -108,6 +114,52 @@ class CategoryOrganizationPathResolver:
             organization_path=tuple(node.organization_path),
             target_relative_path=target_relative_path,
             target_storage_path=target_storage_path,
+            container_segments=normalized_container,
+        )
+
+    def reverse_resolve_directory(
+        self,
+        *,
+        target_root_key: str,
+        target_directory_segments: tuple[str, ...] | list[str],
+        working_root: WorkingCopyRoot,
+    ) -> CategoryOrganizationTarget:
+        """反向解析受控目录到最深 taxonomy 主类和可选收纳段。
+
+        目录仅按完整路径段比较，禁止 ``startswith`` 造成“教学”匹配到
+        “教学管理”一类的跨分类误归位。调用方仍须将返回 category_id 写入冻结命令。
+        """
+
+        if target_root_key != working_root.root_key:
+            raise CategoryOrganizationPathError("目标根不属于当前工作副本。")
+        normalized = _validate_container_segments(target_directory_segments)
+        if not normalized:
+            raise CategoryOrganizationPathError("目标目录不能为空。")
+        taxonomy = load_default_taxonomy()
+        matches: list[tuple[CategoryNode, tuple[str, ...]]] = []
+        for node in _iter_categories(taxonomy.categories):
+            if not node.primary_enabled or not node.organization_path:
+                continue
+            organization_path = tuple(node.organization_path)
+            if tuple(normalized[: len(organization_path)]) == organization_path:
+                matches.append((node, organization_path))
+        if not matches:
+            raise CategoryOrganizationPathError("目标目录不属于已注册分类目录。")
+        node, organization_path = max(matches, key=lambda item: len(item[1]))
+        containers = normalized[len(organization_path) :]
+        target_relative_path = (
+            PurePosixPath(*normalized) / "__filename_resolved_by_command__"
+        ).as_posix()
+        return CategoryOrganizationTarget(
+            category_id=node.id,
+            taxonomy_key=taxonomy.key,
+            taxonomy_version=taxonomy.version,
+            organization_path=organization_path,
+            target_relative_path=target_relative_path,
+            target_storage_path=(
+                PurePosixPath(working_root.relative_storage_path) / target_relative_path
+            ).as_posix(),
+            container_segments=containers,
         )
 
 
@@ -123,3 +175,46 @@ def _find_category(
         if found is not None:
             return found
     return None
+
+
+def _iter_categories(nodes: list[CategoryNode]):
+    """按 taxonomy 快照顺序遍历节点，不引入显示名匹配。"""
+
+    for node in nodes:
+        yield node
+        yield from _iter_categories(node.children)
+
+
+_UNSAFE_SEGMENT = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_WINDOWS_RESERVED = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
+
+
+def _validate_container_segments(
+    raw_segments: tuple[str, ...] | list[str],
+) -> tuple[str, ...]:
+    """校验附加收纳段，不允许路径穿越、隐藏目录或跨平台保留名。"""
+
+    if len(raw_segments) > 20:
+        raise CategoryOrganizationPathError("收纳目录层级过深。")
+    normalized: list[str] = []
+    for value in raw_segments:
+        segment = str(value).strip()
+        if (
+            not segment
+            or segment != value
+            or segment in {".", ".."}
+            or segment.startswith(".")
+            or segment.rstrip(" .") != segment
+            or _UNSAFE_SEGMENT.search(segment)
+            or segment.split(".", 1)[0].upper() in _WINDOWS_RESERVED
+        ):
+            raise CategoryOrganizationPathError("收纳目录段不合法。")
+        normalized.append(segment)
+    return tuple(normalized)

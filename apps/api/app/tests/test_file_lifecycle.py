@@ -410,7 +410,7 @@ def test_default_upload_is_classified_then_first_published_to_taxonomy_path(monk
     assert status["processing_status"] == "COMPLETED"
     assert status["rename_status"] == "COMPLETED"
     assert status["classification_status"] == "COMPLETED"
-    assert status["organization_status"] == "AUTO_ORGANIZED"
+    assert status["organization_status"] == "APPLIED_BUSINESS"
     assert status["categories"][0]["category_path"] == [
         "学校",
         "行政综合管理类",
@@ -439,7 +439,7 @@ def test_default_upload_is_classified_then_first_published_to_taxonomy_path(monk
         assert relation.status == "AUTO_APPLIED"
         assert relation.relation_role == "PRIMARY"
         assert relation.source == "auto_placement_policy"
-        assert decision.decision == "AUTO_ORGANIZED"
+        assert decision.decision == "APPLIED_BUSINESS"
         assert decision.feature_snapshot_json["shadow_only"] is False
         assert path_record.operation_type == "INITIAL_AUTO_PLACEMENT"
         assert (tmp_path / "working" / version.storage_path).read_bytes() == content
@@ -483,8 +483,8 @@ def test_txt_upload_keeps_original_filename_during_initial_organization(monkeypa
     clear_overrides()
 
 
-def test_rejected_auto_classification_publishes_active_neutral_copy(monkeypatch, tmp_path):
-    """无法可靠分类的安全文件仍应可用，只把主分类状态留给人工复核。"""
+def test_rejected_auto_classification_publishes_active_other_copy(monkeypatch, tmp_path):
+    """无法可靠分类的安全文件必须归入其他，不能创建分类复核状态。"""
 
     _configure(monkeypatch, tmp_path)
     monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "true")
@@ -506,10 +506,10 @@ def test_rejected_auto_classification_publishes_active_neutral_copy(monkeypatch,
         f"/api/uploads/{upload['upload_document_version_id']}/archive-status",
         headers=headers,
     ).json()
-    assert status["processing_status"] == "NEEDS_REVIEW"
-    assert status["organization_status"] == "NEEDS_REVIEW"
+    assert status["processing_status"] == "COMPLETED"
+    assert status["organization_status"] == "APPLIED_OTHER"
     assert status["categories"]
-    assert "只能确定为其他分类，需要人工确认。" in status["review_reasons"]
+    assert status["categories"][0]["category_id"] == "system.other"
     db = SessionLocal()
     try:
         working_copy = db.get(WorkingCopy, status["working_copy_id"])
@@ -517,11 +517,14 @@ def test_rejected_auto_classification_publishes_active_neutral_copy(monkeypatch,
             working_copy_id=working_copy.id
         ).one()
         assert working_copy.status == "ACTIVE"
-        assert working_copy.relative_path.endswith("普通材料.txt")
-        assert decision.decision == "NEEDS_REVIEW"
+        assert working_copy.relative_path == "其他/普通材料.txt"
+        assert decision.decision == "APPLIED_OTHER"
         assert "OTHER_CATEGORY" in decision.reason_codes_json
-        assert db.query(DocumentCategory).filter_by(working_copy_id=working_copy.id).count() == 0
-        # 待复核不等于不可用，普通详情入口必须继续返回该活动副本。
+        relations = db.query(DocumentCategory).filter_by(working_copy_id=working_copy.id).all()
+        assert len(relations) == 1
+        assert relations[0].category_id == "system.other"
+        assert relations[0].relation_role == "PRIMARY"
+        # OTHER 是已完成分类，普通详情入口必须继续返回该活动副本。
         response = client.get(f"/api/working-copies/{working_copy.id}", headers=headers)
         assert response.status_code == 200
     finally:
@@ -2152,10 +2155,10 @@ def test_initial_ready_rename_is_applied_to_working_copy_on_upload(monkeypatch, 
         headers=headers,
     ).json()
 
-    assert working_copy["filename"] == "2026_研究成果资助汇总表.md"
+    assert working_copy["filename"] == "2024科研成果资助汇总表.md"
     assert archive_status["original_filename"] == "2024科研成果资助汇总表.md"
-    assert archive_status["renamed_filename"] == "2026_研究成果资助汇总表.md"
-    assert archive_status["rename_status"] == "COMPLETED"
+    assert archive_status["renamed_filename"] == "2024科研成果资助汇总表.md"
+    assert archive_status["rename_status"] == "NO_CHANGE"
     assert history["messages"] == []
     db = SessionLocal()
     try:
@@ -2169,8 +2172,8 @@ def test_initial_ready_rename_is_applied_to_working_copy_on_upload(monkeypatch, 
         audit_result = background_run.graph_state_json["document_results"][0]
         assert audit_result["rename_suggestion"] is None
         assert audit_result["original_filename"] == "2024科研成果资助汇总表.md"
-        assert audit_result["renamed_filename"] == "2026_研究成果资助汇总表.md"
-        assert audit_result["rename_status"] == "COMPLETED"
+        assert audit_result["renamed_filename"] == "2024科研成果资助汇总表.md"
+        assert audit_result["rename_status"] == "NO_CHANGE"
         assert audit_result["pending_decision"] is None
         audit_message = db.get(Message, background_run.message_id)
         assert audit_message.role == "SYSTEM_AUDIT"
@@ -2188,7 +2191,7 @@ def test_initial_ready_rename_is_applied_to_working_copy_on_upload(monkeypatch, 
         ).one()
         assert working_document.original_filename == "2024科研成果资助汇总表.md"
         assert original.filename == "2024科研成果资助汇总表.md"
-        assert path_record.after_filename == "2026_研究成果资助汇总表.md"
+        assert path_record.after_filename == "2024科研成果资助汇总表.md"
         assert db.query(FileRenameReviewItem).filter_by(document_id=working_copy["document_id"]).count() == 0
     finally:
         db.close()
@@ -2318,7 +2321,7 @@ def test_single_and_multiple_uploaded_images_share_college_upload_year_directory
         for upload in uploads
     ]
     assert all(item["processing_status"] == "COMPLETED" for item in statuses)
-    assert all(item["organization_status"] == "AUTO_ORGANIZED" for item in statuses)
+    assert all(item["organization_status"] == "APPLIED_BUSINESS" for item in statuses)
     assert all(
         item["categories"][0]["category_path"] == ["学院", "2027"]
         for item in statuses

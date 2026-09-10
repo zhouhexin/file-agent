@@ -41,25 +41,16 @@ class InitialOrganizationDecision:
         """转换为现有分类持久化和逐文件审计可消费的轻量结构。"""
 
         extraction = self.extraction_result or {}
-        proposed_filename = str(self.rename_metadata.get("proposed_filename") or "").strip()
-        rename_completed = bool(
-            self.rename_status == "READY"
-            and proposed_filename
-            and proposed_filename != self.filename
-        )
         return {
             "document_id": document_id,
             "document_version_id": document_version_id,
-            "filename": proposed_filename if rename_completed else self.filename,
+            # 当前首次归档不会把“命名建议”伪装成已执行改名。AUTO_ORGANIZE
+            # 仅能在受控发布路径采用具有充分证据的名称；这里的建议服务本身
+            # 不能越过该边界，回执必须反映真实的当前文件名。
+            "filename": self.filename,
             "original_filename": self.filename,
-            "renamed_filename": proposed_filename if rename_completed else self.filename,
-            "rename_status": (
-                "COMPLETED"
-                if rename_completed
-                else "NO_CHANGE"
-                if self.rename_status == "NO_CHANGE"
-                else "NEEDS_REVIEW"
-            ),
+            "renamed_filename": self.filename,
+            "rename_status": "NO_CHANGE",
             "processing_status": (
                 "COMPLETED"
                 if extraction.get("status") == "COMPLETED"
