@@ -18,6 +18,7 @@ from app.db.models import (
     DocumentVersion,
     FilesystemJob,
     IngestBatch,
+    UploadDuplicateCandidate,
     IngestDuplicateGroup,
     IngestItem,
     IngestRequestExecution,
@@ -2199,6 +2200,103 @@ def test_wait_and_reuse_reports_primary_failure_without_fallback_or_user_task(
                 IngestRequestExecution.batch_id == batch_id
             ).all()
             assert all(items[1]["id"] not in execution.item_ids_json for execution in executions)
+    finally:
+        clear_overrides()
+
+
+def test_duplicate_comparison_reads_only_the_fixed_candidate_snapshot(monkeypatch, tmp_path) -> None:
+    """固定候选只允许其所有者读取元数据和受控内容，且不创建新的导入任务。"""
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("INTEGRATION_REVIEW_WEB_BASE_URL", "http://127.0.0.1:5173")
+    get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    content = b"fixed duplicate comparison content"
+    try:
+        _, token = _register_and_login(client, "ingest-duplicate-comparison")
+        batch_id, item_id, payload = _create_sealed_content_item(client, token, content=content)
+        accepted = client.put(
+            f"/api/integrations/v1/ingest-batches/{batch_id}/items/{item_id}/content",
+            headers=_headers(token),
+            files={"file": (payload["original_filename"], content, "text/plain")},
+        )
+        assert accepted.status_code == 202
+        with SessionLocal() as db:
+            item = db.get(IngestItem, item_id)
+            assert item and item.upload_document_version_id
+            version = db.get(DocumentVersion, item.upload_document_version_id)
+            review = db.query(UploadDuplicateReview).filter(
+                UploadDuplicateReview.upload_document_version_id == item.upload_document_version_id
+            ).one()
+            assert version is not None
+            review.status = "WAITING_CONFIRMATION"
+            candidate = UploadDuplicateCandidate(
+                duplicate_review_id=review.id,
+                candidate_ingest_item_id=item.id,
+                compared_version_id=version.id,
+                compared_sha256=version.sha256,
+                match_type="EXACT_SHA256",
+                match_scope="SAME_BATCH",
+                similarity_score=1.0,
+                match_evidence_json={},
+                user_visible_summary_json={"filename": version.filename},
+                rank=1,
+            )
+            db.add(candidate)
+            db.flush()
+            review.decision_scope_json = {"candidate_ids": [candidate.id]}
+            db.commit()
+            review_id, candidate_id, review_revision = review.id, candidate.id, review.revision
+
+        response = client.get(
+            f"/api/integrations/v1/ingest-items/{item_id}/duplicate-comparison",
+            headers=_headers(token),
+            params={"review_id": review_id, "review_revision": review_revision, "candidate_id": candidate_id},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["verdict"] == "EXACT_CONTENT"
+        assert body["comparison_url"].startswith("http://127.0.0.1:5173/duplicate-comparison?")
+
+        unknown_parameter = client.get(
+            f"/api/integrations/v1/ingest-items/{item_id}/duplicate-comparison",
+            headers=_headers(token),
+            params={"review_id": review_id, "review_revision": review_revision, "candidate_id": candidate_id, "path": "C:/not-allowed"},
+        )
+        assert unknown_parameter.status_code == 422
+
+        with SessionLocal() as db:
+            jobs_before_preview = db.query(FilesystemJob).count()
+        unavailable_preview = client.get(
+            f"/api/integrations/v1/ingest-items/{item_id}/duplicate-comparison/preview",
+            headers=_headers(token),
+            params={
+                "review_id": review_id,
+                "review_revision": review_revision,
+                "candidate_id": candidate_id,
+                "snapshot_id": body["snapshot_id"],
+                "side": "UPLOAD",
+            },
+        )
+        assert unavailable_preview.status_code == 409
+        assert unavailable_preview.json()["error"]["code"] == "PREVIEW_NOT_AVAILABLE"
+        with SessionLocal() as db:
+            assert db.query(FilesystemJob).count() == jobs_before_preview
+
+        content_response = client.get(
+            f"/api/integrations/v1/ingest-items/{item_id}/duplicate-comparison/content",
+            headers=_headers(token),
+            params={
+                "review_id": review_id,
+                "review_revision": review_revision,
+                "candidate_id": candidate_id,
+                "snapshot_id": body["snapshot_id"],
+                "side": "UPLOAD",
+            },
+        )
+        assert content_response.status_code == 200
+        assert content_response.content == content
+        assert content_response.headers["x-comparison-snapshot"] == body["snapshot_id"]
     finally:
         clear_overrides()
 

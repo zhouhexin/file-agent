@@ -283,6 +283,86 @@ class IngestDuplicateCandidateResponse(BaseModel):
     similarity_score: float
     summary: dict
     existing_document_id: str | None = None
+    comparison_available: bool = False
+    comparison_unavailable_reason: str | None = None
+    comparison_url: str | None = None
+
+
+class IngestDuplicateComparisonQuery(BaseModel):
+    """重复候选查看的固定身份参数，拒绝文件路径和自由 URL。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    review_id: str = Field(min_length=1, max_length=36)
+    review_revision: int = Field(ge=1)
+    candidate_id: str = Field(min_length=1, max_length=36)
+    group_revision: int | None = Field(default=None, ge=1)
+
+
+class IngestDuplicateContentQuery(IngestDuplicateComparisonQuery):
+    """重复候选二进制读取参数，只允许固定侧别和本次快照。"""
+
+    side: Literal["UPLOAD", "CANDIDATE"]
+    snapshot_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    disposition: Literal["inline", "attachment"] = "attachment"
+
+
+class IngestDuplicatePreviewQuery(IngestDuplicateComparisonQuery):
+    """重复候选正文预览参数，正文永远受限于当前快照。"""
+
+    side: Literal["UPLOAD", "CANDIDATE"]
+    snapshot_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    max_chars: int = Field(default=100_000, ge=1, le=100_000)
+
+
+class IngestDuplicatePreviewSection(BaseModel):
+    """重复候选预览的一个已持久化页面或工作表区段。"""
+
+    page_number: int | None = None
+    sheet_name: str | None = None
+    text: str
+
+
+class IngestDuplicateComparisonSide(BaseModel):
+    """重复对比一侧的脱敏能力投影。"""
+
+    filename: str
+    source_kind: Literal["UPLOAD", "WORKING_COPY", "SAME_BATCH_UPLOAD", "MANAGED_SOURCE"]
+    size_bytes: int | None = None
+    content_type: str | None = None
+    preview_status: Literal["AVAILABLE", "UNAVAILABLE"]
+    preview_mode: Literal["IMAGE", "PDF", "TEXT", "DOCX", "XLSX", "SECTIONS", "NONE"]
+    download_available: bool
+    reason_code: str | None = None
+
+
+class IngestDuplicateComparisonResponse(BaseModel):
+    """MCP 与浏览器共用的候选固定快照，不携带正文或存储路径。"""
+
+    item_id: str
+    review_id: str
+    review_revision: int
+    candidate_id: str
+    group_revision: int | None = None
+    snapshot_id: str
+    status: Literal["READY", "PARTIAL", "UNAVAILABLE"]
+    verdict: Literal["EXACT_CONTENT", "SIMILAR_CONTENT", "SAME_NAME", "UNKNOWN"]
+    comparison_url: str | None = None
+    upload: IngestDuplicateComparisonSide
+    candidate: IngestDuplicateComparisonSide
+
+
+class IngestDuplicatePreviewResponse(BaseModel):
+    """固定候选版本的受控正文预览，不能作为 MCP 正文输出。"""
+
+    item_id: str
+    review_id: str
+    candidate_id: str
+    snapshot_id: str
+    side: Literal["UPLOAD", "CANDIDATE"]
+    filename: str
+    sections: list[IngestDuplicatePreviewSection] = Field(default_factory=list)
+    truncated: bool = False
 
 
 class IngestDuplicateReviewResponse(BaseModel):

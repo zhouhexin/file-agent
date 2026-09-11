@@ -1875,6 +1875,9 @@ GET  /api/integrations/v1/ingest-batches/{batch_id}
 GET  /api/integrations/v1/ingest-batches/{batch_id}/items?cursor=...&limit=100
 PUT  /api/integrations/v1/ingest-batches/{batch_id}/items/{item_id}/content
 GET  /api/integrations/v1/ingest-items/{item_id}/duplicate-review
+GET  /api/integrations/v1/ingest-items/{item_id}/duplicate-comparison
+GET  /api/integrations/v1/ingest-items/{item_id}/duplicate-comparison/content
+GET  /api/integrations/v1/ingest-items/{item_id}/duplicate-comparison/preview
 POST /api/integrations/v1/ingest-items/{item_id}/duplicate-decision
 POST /api/integrations/v1/ingest-items/{item_id}/retry
 POST /api/integrations/v1/ingest-items/{item_id}/cancel

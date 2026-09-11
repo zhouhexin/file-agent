@@ -6,7 +6,7 @@ Tool/worker 边界。上传、重复确认、OCR 回写、取消和重试均保�
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -22,6 +22,11 @@ from app.modules.ingestion.schemas import (
     IngestDuplicateDecisionRequest,
     IngestDuplicateDecisionResponse,
     IngestDuplicateReviewResponse,
+    IngestDuplicateComparisonQuery,
+    IngestDuplicateComparisonResponse,
+    IngestDuplicateContentQuery,
+    IngestDuplicatePreviewQuery,
+    IngestDuplicatePreviewResponse,
     IngestItemsAppendRequest,
     IngestItemsAppendResponse,
     IngestItemsPageResponse,
@@ -30,6 +35,7 @@ from app.modules.ingestion.schemas import (
 )
 from app.modules.ingestion.service import IngestionService
 from app.modules.ingestion.duplicate_service import IngestionDuplicateService
+from app.modules.ingestion.comparison_service import IngestDuplicateComparisonService
 from app.modules.external_extraction.schemas import (
     ExternalExtractionClaimRequest,
     ExternalExtractionClaimResponse,
@@ -51,6 +57,17 @@ def require_integration_ingest_enabled() -> None:
                 "code": "INTEGRATION_INGEST_DISABLED",
                 "message": "WorkBuddy 本地导入通道当前未启用。",
             },
+        )
+
+
+def _require_known_query_parameters(request: Request, allowed: set[str]) -> None:
+    """拒绝重复对比接口的未知查询参数，防止客户端误以为自由对象 ID 或路径会生效。"""
+
+    unknown = sorted(set(request.query_params) - allowed)
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_QUERY_PARAMETER", "message": f"Unsupported query parameter: {unknown[0]}"},
         )
 
 
@@ -192,6 +209,30 @@ def get_ingest_duplicate_review(
     """返回绑定条目和修订的重复候选，供 WorkBuddy 恢复选择。"""
 
     return IngestionDuplicateService(db).get_review(item_id=item_id, current_user=current_user)
+
+
+@router.get("/ingest-items/{item_id}/duplicate-comparison", response_model=IngestDuplicateComparisonResponse)
+def get_ingest_duplicate_comparison(item_id: str, request: Request, query: IngestDuplicateComparisonQuery = Depends(), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> IngestDuplicateComparisonResponse:
+    """读取固定重复候选的脱敏对比元数据，不改变确认或导入状态。"""
+
+    _require_known_query_parameters(request, {"review_id", "review_revision", "candidate_id", "group_revision"})
+    return IngestDuplicateComparisonService(db).comparison(item_id=item_id, query=query, current_user=current_user)
+
+
+@router.get("/ingest-items/{item_id}/duplicate-comparison/content", response_class=FileResponse)
+def get_ingest_duplicate_comparison_content(item_id: str, request: Request, query: IngestDuplicateContentQuery = Depends(), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> FileResponse:
+    """在当前快照仍有效时下载一侧文件，客户端不能指定路径或任意 Document。"""
+
+    _require_known_query_parameters(request, {"review_id", "review_revision", "candidate_id", "group_revision", "snapshot_id", "side", "disposition"})
+    return IngestDuplicateComparisonService(db).content(item_id=item_id, query=query, current_user=current_user)
+
+
+@router.get("/ingest-items/{item_id}/duplicate-comparison/preview", response_model=IngestDuplicatePreviewResponse)
+def get_ingest_duplicate_comparison_preview(item_id: str, request: Request, query: IngestDuplicatePreviewQuery = Depends(), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> IngestDuplicatePreviewResponse:
+    """读取固定版本已有正文页；预览缺失不能在 GET 中启动解析或其他任务。"""
+
+    _require_known_query_parameters(request, {"review_id", "review_revision", "candidate_id", "group_revision", "snapshot_id", "side", "max_chars"})
+    return IngestDuplicateComparisonService(db).preview(item_id=item_id, query=query, current_user=current_user)
 
 
 @router.post(

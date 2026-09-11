@@ -11,6 +11,7 @@ import { CapabilitySuggestionsPage } from './features/admin/CapabilitySuggestion
 import { AgentRunsPage } from './features/admin/AgentRunsPage';
 import { ChatPage } from './features/chat/ChatPage';
 import { ClassificationFilesPage } from './features/files/ClassificationFilesPage';
+import { IngestDuplicateComparisonPage } from './features/chat/IngestDuplicateComparisonPage';
 import { OnboardingPage } from './features/onboarding/OnboardingPage';
 import './features/chat/chat.css';
 import type { User } from './types';
@@ -20,6 +21,7 @@ type AppPath =
   | '/chat'
   | '/getting-started'
   | '/files'
+  | '/duplicate-comparison'
   | '/admin/failed-files'
   | '/admin/agent-runs'
   | '/admin/capability-suggestions';
@@ -36,6 +38,7 @@ function readInitialPath(): AppPath {
   if (pathname === '/files') {
     return '/files';
   }
+  if (pathname === '/duplicate-comparison') return '/duplicate-comparison';
   if (pathname === '/admin/failed-files') {
     return '/admin/failed-files';
   }
@@ -64,6 +67,10 @@ export function App() {
   const [authChecked, setAuthChecked] = useState(false);
   const [currentPath, setCurrentPath] = useState<AppPath>(() => readInitialPath());
   const [pendingExample, setPendingExample] = useState('');
+  // 未登录直接打开固定快照链接时，只暂存站内目标；令牌从不进入 URL 或本地状态。
+  const [returnAfterAuth, setReturnAfterAuth] = useState<string | null>(() => (
+    readInitialPath() === '/duplicate-comparison' ? `${window.location.pathname}${window.location.search}` : null
+  ));
 
   useEffect(() => {
     // 监听浏览器前进后退，确保用户使用返回键也能回到正确页面。
@@ -91,6 +98,9 @@ export function App() {
         }
       })
       .catch(() => {
+        if (readInitialPath() === '/duplicate-comparison') {
+          setReturnAfterAuth(`${window.location.pathname}${window.location.search}`);
+        }
         clearToken();
         setToken(null);
         setCurrentUser(null);
@@ -121,8 +131,7 @@ export function App() {
       return;
     }
 
-    replacePath('/chat');
-    setCurrentPath('/chat');
+    openReturnTargetOrChat();
   }
 
   function handleLogout() {
@@ -137,6 +146,16 @@ export function App() {
   function openChat() {
     replacePath('/chat');
     setCurrentPath('/chat');
+  }
+
+  function openReturnTargetOrChat() {
+    if (returnAfterAuth) {
+      window.history.replaceState(null, '', returnAfterAuth);
+      setCurrentPath('/duplicate-comparison');
+      setReturnAfterAuth(null);
+      return;
+    }
+    openChat();
   }
 
   function openOnboarding() {
@@ -172,7 +191,7 @@ export function App() {
   function completeOnboarding() {
     markOnboardingCompleted();
     setPendingExample('');
-    openChat();
+    openReturnTargetOrChat();
   }
 
   function openChatWithExample(example: string) {
@@ -203,6 +222,9 @@ export function App() {
 
   if (currentPath === '/files') {
     return <ClassificationFilesPage token={token} onBack={openChat} />;
+  }
+  if (currentPath === '/duplicate-comparison') {
+    return <IngestDuplicateComparisonPage token={token} query={new URLSearchParams(window.location.search)} onBack={openChat} />;
   }
 
   if (

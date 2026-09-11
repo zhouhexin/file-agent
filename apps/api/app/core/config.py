@@ -150,6 +150,32 @@ def resolve_configured_path(value: str) -> str:
     return str((base_dir / candidate).resolve())
 
 
+def _integration_review_web_base_url_from_env() -> str:
+    """校验部署者提供的重复确认网页根地址，拒绝由请求或客户端推断地址。"""
+
+    from urllib.parse import urlparse
+
+    value = os.getenv("INTEGRATION_REVIEW_WEB_BASE_URL", "").strip().rstrip("/")
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError("INTEGRATION_REVIEW_WEB_BASE_URL 的端口无效") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise ValueError("INTEGRATION_REVIEW_WEB_BASE_URL 必须是无路径、查询和凭证的 http/https 地址")
+    return value
+
+
 class Settings(BaseModel):
     """File Agent 后端运行配置。"""
 
@@ -229,6 +255,8 @@ class Settings(BaseModel):
     integration_user_quota_bytes: int = DEFAULT_INTEGRATION_USER_QUOTA_BYTES
     integration_external_ocr_enabled: bool = True
     integration_allow_partial_extraction: bool = True
+    # 重复确认网页地址只由部署者配置，MCP 不能根据请求 Host 或本机地址猜测。
+    integration_review_web_base_url: str = ""
     external_extraction_lease_seconds: int = DEFAULT_EXTERNAL_EXTRACTION_LEASE_SECONDS
     external_page_retention_hours: int = DEFAULT_EXTERNAL_PAGE_RETENTION_HOURS
     retrieval_mode: str = "lexical"
@@ -911,6 +939,7 @@ def get_settings() -> Settings:
         integration_allow_partial_extraction=(
             os.getenv("INTEGRATION_ALLOW_PARTIAL_EXTRACTION", "true").lower() == "true"
         ),
+        integration_review_web_base_url=_integration_review_web_base_url_from_env(),
         external_extraction_lease_seconds=max(
             30,
             min(

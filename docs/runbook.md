@@ -1267,7 +1267,7 @@ export LOCAL_EXTRACTION_PAGE_DIR="$HOME/.file-agent/extraction-pages"
 ```
 
 MCP 已暴露 `file_ingest`、`file_batch_ingest`、`workbuddy_attachment_ingest`、`batch_resume`、`batch_get`、`job_get`、
-`duplicate_review_get`、`duplicate_decide`、`extraction_claim`、`extraction_renew`、
+`duplicate_review_get`、`duplicate_comparison_get`、`duplicate_decide`、`extraction_claim`、`extraction_renew`、
 `extraction_submit`、`ingest_retry`、`ingest_cancel`、`file_search`、`file_read`、
 `evidence_answer`、`file_search_clarification_resolve`、`file_rename`、`operation_plan_get`和
 `operation_plan_confirm`。批量工具会枚举用户明确
@@ -1304,6 +1304,12 @@ EXTERNAL_PAGE_RETENTION_HOURS=24
 `INTEGRATION_INGEST_ENABLED` 默认是 `false`。只有已经配置独立试点归档根、工作副本根、授权用户和
 对应 worker 后才可开启；关闭时整个 `/api/integrations/v1` 接口面返回
 `INTEGRATION_INGEST_DISABLED`，不会仅靠 MCP 工具隐藏来充当安全边界。
+
+重复候选的查看和分别下载使用浏览器页面。部署者设置
+`INTEGRATION_REVIEW_WEB_BASE_URL=http://<浏览器可达的Web地址>` 后，WorkBuddy 调用
+`duplicate_comparison_get` 获得不含令牌、路径或文件名的链接。用户在浏览器登录 File Agent 后查看两侧，
+再回到 WorkBuddy 使用原有 `duplicate_decide` 选择处理方式。此功能不新增 worker；更新 API、Web 和
+客户端 MCP 后重连 WorkBuddy 即可。
 
 外部OCR页图只在有效租约内下载；部分页面失败时成功页保留，批次最终显示`PARTIAL`及失败页范围。
 服务器渲染的PDF页图超过保留期后由`FILE_OPERATION`队列清理，任务、页摘要、错误和Agent审计继续保留。

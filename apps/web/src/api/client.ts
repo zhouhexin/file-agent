@@ -402,6 +402,57 @@ export async function getDuplicateReview(
   return request<DuplicateReview>(`/uploads/${uploadVersionId}/duplicate-review`, { token });
 }
 
+export async function getIngestDuplicateComparison(
+  token: string,
+  itemId: string,
+  query: { review_id: string; review_revision: number; candidate_id: string; group_revision?: number | null },
+): Promise<import('../types').IngestDuplicateComparison> {
+  const params = new URLSearchParams({ review_id: query.review_id, review_revision: String(query.review_revision), candidate_id: query.candidate_id });
+  if (query.group_revision !== null && query.group_revision !== undefined) params.set('group_revision', String(query.group_revision));
+  return request(`/integrations/v1/ingest-items/${encodeURIComponent(itemId)}/duplicate-comparison?${params}`, { token });
+}
+
+export async function fetchIngestDuplicateComparisonBlob(
+  token: string, itemId: string, query: { review_id: string; review_revision: number; candidate_id: string; group_revision?: number | null; snapshot_id: string; side: 'UPLOAD' | 'CANDIDATE' },
+  signal?: AbortSignal,
+): Promise<Blob> {
+  const params = new URLSearchParams({ review_id: query.review_id, review_revision: String(query.review_revision), candidate_id: query.candidate_id, snapshot_id: query.snapshot_id, side: query.side, disposition: 'attachment' });
+  if (query.group_revision !== null && query.group_revision !== undefined) params.set('group_revision', String(query.group_revision));
+  const response = await fetch(`${API_BASE_URL}/integrations/v1/ingest-items/${encodeURIComponent(itemId)}/duplicate-comparison/content?${params}`, { headers: { Authorization: `Bearer ${token}` }, signal });
+  if (!response.ok) throw await readApiError(response, '无法下载重复候选文件');
+  const contentLength = Number(response.headers.get('content-length') || 0);
+  if (Number.isFinite(contentLength) && contentLength > 128 * 1024 * 1024) {
+    throw new Error('文件超过 128 MB 的浏览器读取上限，请使用受控下载后在本地查看。');
+  }
+  if (!response.body) throw new Error('浏览器不支持受控文件流读取。');
+  const reader = response.body.getReader();
+  const chunks: BlobPart[] = [];
+  let received = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > 128 * 1024 * 1024) throw new Error('文件超过 128 MB 的浏览器读取上限，请使用其他受控客户端查看。');
+      // 复制到新的 ArrayBuffer，避免 TypedArray 泛型携带 SharedArrayBuffer 类型进入 Blob。
+      chunks.push(new Uint8Array(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return new Blob(chunks, { type: response.headers.get('content-type') || 'application/octet-stream' });
+}
+
+export async function getIngestDuplicateComparisonPreview(
+  token: string,
+  itemId: string,
+  query: { review_id: string; review_revision: number; candidate_id: string; group_revision?: number | null; snapshot_id: string; side: 'UPLOAD' | 'CANDIDATE' },
+): Promise<import('../types').IngestDuplicatePreview> {
+  const params = new URLSearchParams({ review_id: query.review_id, review_revision: String(query.review_revision), candidate_id: query.candidate_id, snapshot_id: query.snapshot_id, side: query.side, max_chars: '100000' });
+  if (query.group_revision !== null && query.group_revision !== undefined) params.set('group_revision', String(query.group_revision));
+  return request(`/integrations/v1/ingest-items/${encodeURIComponent(itemId)}/duplicate-comparison/preview?${params}`, { token });
+}
+
 export async function getUploadArchiveStatus(
   token: string,
   uploadVersionId: string,

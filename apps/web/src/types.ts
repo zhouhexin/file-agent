@@ -708,6 +708,42 @@ export type UploadArchiveStatus = {
   error_message: string | null;
 };
 
+export type IngestDuplicateComparisonSide = {
+  filename: string;
+  source_kind: 'UPLOAD' | 'WORKING_COPY' | 'SAME_BATCH_UPLOAD' | 'MANAGED_SOURCE';
+  size_bytes: number | null;
+  content_type: string | null;
+  preview_status: 'AVAILABLE' | 'UNAVAILABLE';
+  preview_mode: 'IMAGE' | 'PDF' | 'TEXT' | 'DOCX' | 'XLSX' | 'SECTIONS' | 'NONE';
+  download_available: boolean;
+  reason_code: string | null;
+};
+
+export type IngestDuplicateComparison = {
+  item_id: string;
+  review_id: string;
+  review_revision: number;
+  candidate_id: string;
+  group_revision: number | null;
+  snapshot_id: string;
+  status: 'READY' | 'PARTIAL' | 'UNAVAILABLE';
+  verdict: 'EXACT_CONTENT' | 'SIMILAR_CONTENT' | 'SAME_NAME' | 'UNKNOWN';
+  comparison_url: string | null;
+  upload: IngestDuplicateComparisonSide;
+  candidate: IngestDuplicateComparisonSide;
+};
+
+export type IngestDuplicatePreview = {
+  item_id: string;
+  review_id: string;
+  candidate_id: string;
+  snapshot_id: string;
+  side: 'UPLOAD' | 'CANDIDATE';
+  filename: string;
+  sections: FilePreviewSection[];
+  truncated: boolean;
+};
+
 export type UploadProcessingStart = {
   upload_document_version_id: string;
   document_id: string;

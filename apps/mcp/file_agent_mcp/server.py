@@ -396,6 +396,26 @@ async def duplicate_review_get(item_id: str) -> dict[str, Any]:
 
 
 @mcp.tool(
+    name="duplicate_comparison_get",
+    description="读取一个重复候选的预览/分别下载浏览器链接和两侧安全元数据；不会读取正文或提交决定。",
+    structured_output=True,
+)
+async def duplicate_comparison_get(
+    item_id: str, review_id: str, review_revision: int, candidate_id: str, group_revision: int | None = None,
+) -> dict[str, Any]:
+    """只转发当前候选稳定身份，模型不能传路径、URL 或正文。"""
+
+    client = _client()
+    try:
+        return await client.duplicate_comparison_get(
+            item_id=item_id, review_id=review_id, review_revision=review_revision,
+            candidate_id=candidate_id, group_revision=group_revision,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
     name="duplicate_decide",
     description="提交用户明确选择的重复候选和处理决定。",
     structured_output=True,

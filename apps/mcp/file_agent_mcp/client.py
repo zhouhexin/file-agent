@@ -455,6 +455,18 @@ class FileAgentIntegrationClient:
         )
         return self._business_json(response)
 
+    async def duplicate_comparison_get(
+        self, *, item_id: str, review_id: str, review_revision: int, candidate_id: str, group_revision: int | None = None
+    ) -> dict[str, Any]:
+        """读取重复候选的脱敏对比入口，不下载正文或替用户提交决定。"""
+
+        params: dict[str, Any] = {"review_id": review_id, "review_revision": review_revision, "candidate_id": candidate_id}
+        if group_revision is not None:
+            params["group_revision"] = group_revision
+        return self._business_json(await self.http.get(
+            f"/api/integrations/v1/ingest-items/{_path_segment(item_id)}/duplicate-comparison", params=params
+        ))
+
     async def duplicate_decide(
         self,
         *,

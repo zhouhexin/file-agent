@@ -24,6 +24,7 @@ from app.db.models import (
     WorkingCopy,
     utcnow,
 )
+from app.core.config import get_settings
 from app.modules.file_lifecycle.schemas import DuplicateDecisionRequest
 from app.modules.file_lifecycle.service import UploadLifecycleService
 from app.modules.ingestion.repository import IngestionRepository
@@ -302,6 +303,9 @@ class IngestionDuplicateService:
         """返回候选 ID 和脱敏摘要，不暴露上传版本或本地路径。"""
 
         legacy = self.lifecycle.to_review_response(review)
+        scope = dict(review.decision_scope_json or {})
+        group_id = str(scope.get("duplicate_group_id") or "") or None
+        group = self.db.get(IngestDuplicateGroup, group_id) if group_id else None
         candidates = [
             IngestDuplicateCandidateResponse(
                 candidate_id=candidate.id,
@@ -317,15 +321,23 @@ class IngestionDuplicateService:
                     ),
                     None,
                 ),
+                comparison_available=bool(get_settings().integration_review_web_base_url),
+                comparison_unavailable_reason=(
+                    None if get_settings().integration_review_web_base_url else "REVIEW_WEB_URL_NOT_CONFIGURED"
+                ),
+                comparison_url=self._comparison_url(
+                    item_id=item.id,
+                    review_id=review.id,
+                    review_revision=review.revision,
+                    candidate_id=candidate.id,
+                    group_revision=group.revision if group is not None else None,
+                ),
             )
             for candidate in self._candidates(review_id=review.id)
         ]
         allowed = list(legacy.allowed_decisions)
         if any(candidate.candidate_ingest_item_id for candidate in self._candidates(review_id=review.id)):
             allowed.append("WAIT_AND_REUSE")
-        scope = dict(review.decision_scope_json or {})
-        group_id = str(scope.get("duplicate_group_id") or "") or None
-        group = self.db.get(IngestDuplicateGroup, group_id) if group_id else None
         members = (
             self.db.query(IngestDuplicateGroupMember)
             .filter(IngestDuplicateGroupMember.group_id == group.id)
@@ -350,6 +362,22 @@ class IngestionDuplicateService:
             allowed_decisions=allowed,
             candidates=candidates,
         )
+
+    @staticmethod
+    def _comparison_url(*, item_id: str, review_id: str, review_revision: int, candidate_id: str, group_revision: int | None) -> str | None:
+        """为已冻结候选添加部署者配置的浏览器入口，绝不从请求 Host 或客户端路径推断地址。"""
+
+        from urllib.parse import urlencode
+
+        base = get_settings().integration_review_web_base_url
+        if not base:
+            return None
+        values: dict[str, str | int] = {
+            "item_id": item_id, "review_id": review_id, "review_revision": review_revision, "candidate_id": candidate_id,
+        }
+        if group_revision is not None:
+            values["group_revision"] = group_revision
+        return f"{base}/duplicate-comparison?{urlencode(values)}"
 
     def _candidates(self, *, review_id: str) -> list[UploadDuplicateCandidate]:
         """按稳定 rank 和 ID 返回固定候选集。"""

@@ -34,6 +34,7 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
         "batch_get",
         "job_get",
         "duplicate_review_get",
+        "duplicate_comparison_get",
         "duplicate_decide",
         "extraction_claim",
         "extraction_renew",

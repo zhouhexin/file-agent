@@ -13,7 +13,8 @@ import type { DuplicateCandidate, DuplicateReview, FilePreviewSection } from '..
 import { StructuredSpreadsheetPreview } from './StructuredSpreadsheetPreview';
 import { XLSX_MAX_LOCAL_BYTES } from './xlsxPreview';
 
-type PreviewSide = {
+// 供 WorkBuddy 的独立只读页面复用，保证两处的预览格式和安全策略一致。
+export type PreviewSide = {
   filename: string;
   size: number | null;
   status: 'loading' | 'ready' | 'unavailable' | 'error';
@@ -39,8 +40,8 @@ type DuplicateComparisonDialogProps = {
   ) => void;
 };
 
-const TEXT_EXTENSIONS = new Set(['txt', 'md', 'csv', 'tsv', 'json', 'xml', 'log']);
-const MAX_LOCAL_DOCX_BYTES = 20 * 1024 * 1024;
+export const TEXT_EXTENSIONS = new Set(['txt', 'md', 'csv', 'tsv', 'json', 'xml', 'log']);
+export const MAX_LOCAL_DOCX_BYTES = 20 * 1024 * 1024;
 const DOCX_FRAME_HTML = `<!doctype html>
 <html><head>
 <meta charset="utf-8">
@@ -293,7 +294,7 @@ async function loadSide(
   }
 }
 
-function PreviewPane({ title, side }: { title: string; side: PreviewSide }) {
+export function PreviewPane({ title, side }: { title: string; side: PreviewSide }) {
   return (
     <article className="duplicate-comparison-pane">
       <header>
