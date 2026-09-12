@@ -42,6 +42,11 @@ from app.db.models import (
 from app.modules.chunks.service import DocumentIndexService, INDEX_VERSION
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
 from app.modules.classification.runtime_factory import ClassificationRuntimeFactory
+from app.modules.classification.purpose_inference import (
+    ManagedPurposePackageInferenceService,
+    PurposePackageResolution,
+)
+from app.modules.classification.purpose_repository import PurposePackageRepository
 from app.modules.classification.freshness import (
     ClassificationFreshness,
     current_classification_identity,
@@ -225,6 +230,14 @@ class ManagedSourceAnalysisService:
                     managed_file_revision_id=revision.id,
                     message="原始文件解析配置已变化，将重新生成正文和检索资料",
                 )
+            elif not self.settings.managed_source_classification_enabled:
+                # 解析资料仍然有效，但当前部署明确禁止写入或刷新分类事实。
+                return {
+                    "status": "READY",
+                    "idempotent": True,
+                    "revision_id": revision.id,
+                    "classification_skipped": True,
+                }
             else:
                 identity = current_classification_identity(
                     db=self.db,
@@ -316,40 +329,10 @@ class ManagedSourceAnalysisService:
                 elements=list(extraction.get("elements") or []),
             )
             metadata_only = bool(extraction.get("metadata_only"))
-            source_context = f"{Path(root.container_path).name}/{managed_file.relative_path}"
-            # 目录名不能替代不可变用途包授权；metadata-only 文件保持只读分析结果。
-            if metadata_only:
-                identity = current_classification_identity(
-                    db=self.db,
-                    settings=self.settings,
-                    user_id=str(owner_id),
-                )
-                classification = {
-                    "status": "SKIPPED_METADATA_ONLY",
-                    "categories": [],
-                    "warnings": list(extraction.get("warnings") or []),
-                    "taxonomy_key": identity.taxonomy_key,
-                    "taxonomy_version": identity.taxonomy_version,
-                    "classifier_version": identity.classifier_version,
-                    "source": "managed_source_metadata_only",
-                }
-                index_result = {
-                    "ok": True,
-                    "status": "SKIPPED_METADATA_ONLY",
-                    "index_run_id": None,
-                }
-            else:
-                classification = ClassificationRuntimeFactory(self.settings).create(
-                    db=self.db,
-                    user_id=str(owner_id),
-                ).classify(
-                    document_id=document.id,
-                    document_version_id=version.id,
-                    extraction_run_id=run.id,
-                    filename=managed_file.filename,
-                    default_organization_root="学院",
-                    source_context=source_context,
-                )
+            classification: dict[str, Any] | None = None
+            purpose_resolution: PurposePackageResolution | None = None
+            if not self.settings.managed_source_classification_enabled:
+                # 解析期不触及分类器、taxonomy 身份或用途材料包；这些都是分类事实的一部分。
                 if metadata_only:
                     index_result = {
                         "ok": True,
@@ -368,6 +351,73 @@ class ManagedSourceAnalysisService:
                             str(error.get("code") or "SOURCE_INDEX_FAILED"),
                             str(error.get("message") or "原始文件索引失败"),
                         )
+            else:
+                source_context = f"{Path(root.container_path).name}/{managed_file.relative_path}"
+                from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
+
+                # 空正文图片也可能是材料包最后完成的成员，因此必须参与冻结清单解析；
+                # 没有合法包时仍不允许仅凭来源路径继承业务用途。
+                purpose_resolution = ManagedPurposePackageInferenceService(self.db).resolve(
+                    managed_file=managed_file,
+                    current_revision=revision,
+                    workspace_id=get_shared_workspace_id(self.db),
+                    root_key=root.root_key,
+                    current_document_version_id=version.id,
+                    current_sha256=sha256,
+                )
+                if metadata_only and purpose_resolution.snapshot is None:
+                    identity = current_classification_identity(
+                        db=self.db,
+                        settings=self.settings,
+                        user_id=str(owner_id),
+                    )
+                    classification = {
+                        "status": "SKIPPED_METADATA_ONLY",
+                        "categories": [],
+                        "warnings": list(extraction.get("warnings") or []),
+                        "taxonomy_key": identity.taxonomy_key,
+                        "taxonomy_version": identity.taxonomy_version,
+                        "classifier_version": identity.classifier_version,
+                        "source": "managed_source_metadata_only",
+                    }
+                    index_result = {
+                        "ok": True,
+                        "status": "SKIPPED_METADATA_ONLY",
+                        "index_run_id": None,
+                    }
+                else:
+                    classification = ClassificationRuntimeFactory(self.settings).create(
+                        db=self.db,
+                        user_id=str(owner_id),
+                    ).classify(
+                        document_id=document.id,
+                        document_version_id=version.id,
+                        extraction_run_id=run.id,
+                        filename=managed_file.filename,
+                        default_organization_root="学院",
+                        source_context=source_context,
+                        purpose_package=purpose_resolution.snapshot,
+                        content_sha256=sha256,
+                        managed_file_id=managed_file.id,
+                    )
+                    if metadata_only:
+                        index_result = {
+                            "ok": True,
+                            "status": "SKIPPED_METADATA_ONLY",
+                            "index_run_id": None,
+                        }
+                    else:
+                        index_result = DocumentIndexService(db=self.db, settings=self.settings).build(
+                            document_id=document.id,
+                            document_version_id=version.id,
+                            extraction_run_id=run.id,
+                        )
+                        if not index_result.get("ok"):
+                            error = dict(index_result.get("error") or {})
+                            raise SourceAnalysisBusinessError(
+                                str(error.get("code") or "SOURCE_INDEX_FAILED"),
+                                str(error.get("message") or "原始文件索引失败"),
+                            )
             after = path.stat()
             if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                 raise SourceAnalysisBusinessError("SOURCE_CHANGED_DURING_ANALYSIS", "原始文件在只读分析期间发生变化")
@@ -384,14 +434,15 @@ class ManagedSourceAnalysisService:
                 relative_path=managed_file.relative_path,
                 metadata_notice=str(extraction.get("metadata_notice") or ""),
             )
-            self._persist_source_classification(
-                owner_id=str(owner_id),
-                revision=revision,
-                managed_file=managed_file,
-                document=document,
-                version=version,
-                classification=classification,
-            )
+            if classification is not None:
+                self._persist_source_classification(
+                    owner_id=str(owner_id),
+                    revision=revision,
+                    managed_file=managed_file,
+                    document=document,
+                    version=version,
+                    classification=classification,
+                )
             # 逻辑源侧版本也必须指向本次分析运行，方便后续物化副本、审计和
             # 索引重建都精确追溯到同一份原始文件修订，不能只靠最新记录猜测。
             version.source_analysis_run_id = analysis.id
@@ -407,6 +458,13 @@ class ManagedSourceAnalysisService:
             analysis.converter_version = str(extraction.get("conversion_converter_version") or "")
             analysis.finished_at = utcnow()
             self._sync_working_copy_status(managed_file=managed_file, source_sha256=sha256)
+            if purpose_resolution is not None and purpose_resolution.created:
+                self._enqueue_purpose_package_refreshes(
+                    resolution=purpose_resolution,
+                    current_revision_id=revision.id,
+                    owner_id=str(owner_id),
+                    root_id=root.id,
+                )
             self.db.flush()
             log_event(
                 "managed_source.analysis.completed",
@@ -425,6 +483,7 @@ class ManagedSourceAnalysisService:
                 "analysis_run_id": analysis.id,
                 "index_run_id": analysis.index_run_id,
                 "classification": classification,
+                "classification_skipped": classification is None,
                 "warnings": list(extraction.get("warnings") or []),
             }
         except Exception as exc:
@@ -454,6 +513,7 @@ class ManagedSourceAnalysisService:
         *,
         revision_id: str,
         user_id: str | None = None,
+        purpose_package_id: str | None = None,
     ) -> dict[str, Any]:
         """复用持久化页面按当前运行时身份刷新分类，不重新解析原文件。"""
 
@@ -466,6 +526,16 @@ class ManagedSourceAnalysisService:
             return {"status": "STALE", "idempotent": True, "revision_id": revision_id}
         if not revision.analysis_document_id or not revision.analysis_document_version_id:
             raise RuntimeError("源分类刷新缺少已持久化分析文档")
+        if not self.settings.managed_source_classification_enabled:
+            return {
+                "status": "READY",
+                "revision_id": revision.id,
+                "document_id": revision.analysis_document_id,
+                "document_version_id": revision.analysis_document_version_id,
+                "classification_refreshed": False,
+                "classification_skipped": True,
+                "reused_extraction": True,
+            }
         path = resolve_managed_relative_path(
             root_path=Path(root.container_path),
             relative_path=managed_file.relative_path,
@@ -478,6 +548,11 @@ class ManagedSourceAnalysisService:
         owner_id = user_id or root.created_by or self._fallback_user_id()
         if not owner_id:
             raise RuntimeError("源分类刷新缺少可审计用户")
+        purpose_package = None
+        if purpose_package_id:
+            record = PurposePackageRepository(self.db).get(purpose_package_id)
+            if record is not None:
+                purpose_package = PurposePackageRepository.to_snapshot(record)
         identity = current_classification_identity(
             db=self.db,
             settings=self.settings,
@@ -488,7 +563,25 @@ class ManagedSourceAnalysisService:
             revision=revision,
             identity=identity,
         )
-        if freshness is ClassificationFreshness.CURRENT:
+        purpose_resolution = PurposePackageResolution(
+            snapshot=purpose_package,
+            created=False,
+        )
+        if purpose_package is None and revision.content_sha256:
+            from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
+
+            # 分类器版本升级触发的刷新也必须重新尝试冻结材料包。否则首次分析时
+            # 因锚点规则尚未覆盖真实题名而漏建的包，会永久停留在单文件分类。
+            purpose_resolution = ManagedPurposePackageInferenceService(self.db).resolve(
+                managed_file=managed_file,
+                current_revision=revision,
+                workspace_id=get_shared_workspace_id(self.db),
+                root_key=root.root_key,
+                current_document_version_id=revision.analysis_document_version_id,
+                current_sha256=str(revision.content_sha256),
+            )
+            purpose_package = purpose_resolution.snapshot
+        if freshness is ClassificationFreshness.CURRENT and purpose_package is None:
             return {
                 "status": "READY",
                 "revision_id": revision.id,
@@ -528,6 +621,9 @@ class ManagedSourceAnalysisService:
             source_context=(
                 f"{Path(root.container_path).name}/{managed_file.relative_path}"
             ),
+            purpose_package=purpose_package,
+            content_sha256=str(revision.content_sha256 or ""),
+            managed_file_id=managed_file.id,
         )
         self._persist_source_classification(
             owner_id=str(owner_id),
@@ -537,6 +633,13 @@ class ManagedSourceAnalysisService:
             version=version,
             classification=classification,
         )
+        if purpose_resolution.created:
+            self._enqueue_purpose_package_refreshes(
+                resolution=purpose_resolution,
+                current_revision_id=revision.id,
+                owner_id=str(owner_id),
+                root_id=root.id,
+            )
         self.db.flush()
         log_event(
             "managed_source.classification.refreshed",
@@ -559,6 +662,54 @@ class ManagedSourceAnalysisService:
             "reused_extraction": True,
             "classification": classification,
         }
+
+    def _enqueue_purpose_package_refreshes(
+        self,
+        *,
+        resolution: PurposePackageResolution,
+        current_revision_id: str,
+        owner_id: str,
+        root_id: str,
+    ) -> None:
+        """新快照创建后刷新较早完成的成员，使整包主用途最终一致。"""
+
+        snapshot = resolution.snapshot
+        if snapshot is None:
+            return
+        version_ids = [member.document_version_id for member in snapshot.members]
+        revisions = (
+            self.db.query(ManagedFileRevision)
+            .filter(
+                ManagedFileRevision.analysis_document_version_id.in_(version_ids),
+                ManagedFileRevision.is_current.is_(True),
+                ManagedFileRevision.status == "READY",
+            )
+            .all()
+        )
+        # 延迟导入避免分类模块在初始化时反向加载 worker。
+        from app.modules.managed_files.jobs import FilesystemJobQueue
+
+        queue = FilesystemJobQueue(self.db)
+        for member_revision in revisions:
+            if member_revision.id == current_revision_id:
+                continue
+            queue.create_job(
+                job_type="REFRESH_MANAGED_SOURCE_CLASSIFICATION",
+                queue_name="SOURCE_ANALYSIS",
+                root_id=root_id,
+                created_by=owner_id,
+                deduplication_key=(
+                    f"purpose-package-refresh:{member_revision.id}:"
+                    f"{snapshot.manifest_digest}"
+                ),
+                max_attempts=3,
+                reuse_completed=True,
+                payload={
+                    "managed_file_revision_id": member_revision.id,
+                    "purpose_package_id": snapshot.id,
+                    "user_id": owner_id,
+                },
+            )
 
     def _persist_source_classification(
         self,

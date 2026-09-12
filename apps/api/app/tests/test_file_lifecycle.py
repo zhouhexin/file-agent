@@ -83,6 +83,10 @@ def _configure(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "false")
     monkeypatch.setenv("AUTO_INITIAL_PLACEMENT_ENABLED", "false")
     monkeypatch.setenv("AUTO_CLASSIFICATION_SHADOW_MODE", "true")
+    # 新配置未显式设置时应从同一用例的 legacy 开关推导；隔离开发机环境值，
+    # 同时允许专项用例在调用本函数后切换 legacy 开关而不产生伪冲突。
+    monkeypatch.delenv("CLASSIFICATION_QUALITY_MODE", raising=False)
+    monkeypatch.delenv("CLASSIFICATION_PLACEMENT_ENABLED", raising=False)
     config.get_settings.cache_clear()
 
 
@@ -196,6 +200,40 @@ def test_managed_source_image_date_overrides_scoped_other_fallback():
         ],
         policy_result=type("PolicyResult", (), {"accepted": True})(),
     )
+
+
+def test_initial_organization_receipt_preserves_classification_decision_snapshot():
+    """源分类复用到工作副本时，主类结果和原因码必须完整进入新运行审计。"""
+
+    decision = InitialOrganizationDecision(
+        filename="人才申报表.xlsx",
+        extraction_result={"status": "COMPLETED"},
+        categories=[],
+        primary_category=None,
+        document_summary_id=None,
+        classification_summary_id=None,
+        summary_status="REUSED",
+        rename_status="DISABLED",
+        rename_metadata={},
+        summary_metadata={},
+        classification_outcome="OTHER",
+        classification_quality="INSUFFICIENT",
+        selection_basis="FALLBACK",
+        reason_codes=["LOW_QUALITY"],
+        input_fingerprint="primary-fingerprint",
+        classifier_version="taxonomy-rule-v2",
+    )
+
+    result = decision.document_result(
+        document_id="document-id",
+        document_version_id="version-id",
+    )
+
+    assert result["classification_outcome"] == "OTHER"
+    assert result["classification_quality"] == "INSUFFICIENT"
+    assert result["selection_basis"] == "FALLBACK"
+    assert result["reason_codes"] == ["LOW_QUALITY"]
+    assert result["input_fingerprint"] == "primary-fingerprint"
 
 
 def test_personal_resume_initial_organization_template_is_explicit():

@@ -16,17 +16,20 @@ def test_default_taxonomy_loads_unified_school_file_classification():
     taxonomy = load_default_taxonomy()
 
     assert taxonomy.key == "unified_school_file_classification"
-    assert taxonomy.version == "2026-09-v10"
+    assert taxonomy.version == "2026-09-v13"
     assert taxonomy.categories[0].name == "学校"
     school = next(node for node in taxonomy.categories if node.id == "school")
     college = next(node for node in taxonomy.categories if node.id == "college")
     assert {"全校", "校属各单位"} <= set(school.positive_signals)
     assert {"计算机学院", "计算机科学与工程学院"} <= set(college.aliases)
+    assert {"软件工程", "计算机技术", "网络安全"} <= set(college.aliases)
+    assert {"教务处", "人事处", "信息化处"} <= set(school.positive_signals)
     assert "全校" in college.negative_signals
     assert taxonomy.fallback_policy is not None
-    assert taxonomy.fallback_policy.department_category_ids == []
-    assert taxonomy.fallback_policy.issued is None
-    assert taxonomy.fallback_policy.other is None
+    assert "school.hr" in taxonomy.fallback_policy.department_category_ids
+    assert "college.teaching" in taxonomy.fallback_policy.department_category_ids
+    assert taxonomy.fallback_policy.issued is not None
+    assert taxonomy.fallback_policy.other is not None
     assert taxonomy.fallback_policy.target_category_id == "system.other"
 
 
@@ -54,8 +57,8 @@ def test_default_taxonomy_all_candidates_have_physical_paths():
     assert finance_other.organization_path == ["学校", "财务", "其他"]
     assert finance_other.node_kind == CategoryNodeKind.FALLBACK
     assert finance_other.recall_enabled is False
-    assert finance_other.visible is False
-    assert finance_other.selectable is False
+    assert finance_other.visible is True
+    assert finance_other.selectable is True
     system_other = next(
         item for item in flatten_category_paths(taxonomy) if item.category_id == "system.other"
     )

@@ -611,11 +611,26 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
             raise ValueError(
                 "REFRESH_MANAGED_SOURCE_CLASSIFICATION 缺少 managed_file_revision_id"
             )
+        if not get_settings().managed_source_classification_enabled:
+            FilesystemJobQueue(db).mark_completed(
+                job=job,
+                result={
+                    "status": "READY",
+                    "revision_id": revision_id,
+                    "classification_refreshed": False,
+                    "classification_skipped": True,
+                    "reused_extraction": True,
+                },
+            )
+            return
         result = ManagedSourceAnalysisService(db=db).refresh_classification(
             revision_id=revision_id,
             user_id=(
                 str((job.payload_json or {}).get("user_id") or job.created_by or "")
                 or None
+            ),
+            purpose_package_id=(
+                str((job.payload_json or {}).get("purpose_package_id") or "") or None
             ),
         )
         if result.get("status") == "READY":
@@ -748,7 +763,14 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
                 created_by=(
                     str(root.created_by)
                     if root.created_by
-                    else str(db.query(User.id).order_by(User.created_at.asc()).scalar() or "") or None
+                    else str(
+                        db.query(User.id)
+                        .order_by(User.created_at.asc())
+                        .limit(1)
+                        .scalar()
+                        or ""
+                    )
+                    or None
                 ),
             )
             repair_job_ids = _enqueue_import_jobs_for_files(
@@ -915,7 +937,15 @@ def _enqueue_import_jobs_for_files(*, db: Session, root_id: str, files: list[Man
     fallback_user = (
         str(root.created_by)
         if root is not None and root.created_by
-        else (str(db.query(User.id).order_by(User.created_at.asc()).scalar() or ""))
+        else (
+            str(
+                db.query(User.id)
+                .order_by(User.created_at.asc())
+                .limit(1)
+                .scalar()
+                or ""
+            )
+        )
     )
     managed_file_ids = [managed_file.id for managed_file in files]
     existing_rows = (
@@ -1095,16 +1125,26 @@ def _enqueue_source_analysis_jobs_for_revisions(
     fallback_user = (
         str(root.created_by)
         if root is not None and root.created_by
-        else str(db.query(User.id).order_by(User.created_at.asc()).scalar() or "")
+        else str(
+            db.query(User.id)
+            .order_by(User.created_at.asc())
+            .limit(1)
+            .scalar()
+            or ""
+        )
     )
     if not fallback_user:
         return []
     queue = FilesystemJobQueue(db)
     job_ids: list[str] = []
-    identity = current_classification_identity(
-        db=db,
-        settings=settings,
-        user_id=fallback_user,
+    identity = (
+        current_classification_identity(
+            db=db,
+            settings=settings,
+            user_id=fallback_user,
+        )
+        if settings.managed_source_classification_enabled
+        else None
     )
     for revision in revisions:
         if not revision.is_current:
@@ -1141,6 +1181,9 @@ def _enqueue_source_analysis_jobs_for_revisions(
                     message="OCR 或解析配置已变化，已重新提交原始文件只读分析任务",
                 )
                 continue
+            if not settings.managed_source_classification_enabled:
+                continue
+            assert identity is not None
             freshness = inspect_managed_source_classification(
                 db=db,
                 revision=revision,
@@ -1203,7 +1246,10 @@ def _enqueue_background_materialization_jobs_for_revisions(
     """
 
     settings = get_settings()
-    if not settings.materialize_all_managed_files:
+    if (
+        not settings.materialize_all_managed_files
+        or not settings.managed_source_classification_enabled
+    ):
         return []
     workspace_id = get_shared_workspace_id(db)
     queue = FilesystemJobQueue(db)
@@ -1216,7 +1262,7 @@ def _enqueue_background_materialization_jobs_for_revisions(
         classification_user_id = str(
             (root.created_by if root is not None else "")
             or created_by
-            or db.query(User.id).order_by(User.created_at.asc()).scalar()
+            or db.query(User.id).order_by(User.created_at.asc()).limit(1).scalar()
             or ""
         )
         if not classification_user_id or root is None:

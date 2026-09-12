@@ -747,9 +747,9 @@ document_organization_decisions
 
 ### 4.19.1 Classification v10 and placement compatibility
 
-本节优先于本文件中对 `document_organization_decisions.decision=NEEDS_REVIEW` 的旧分类语义。新分类结果的唯一兜底为 `system.other`，`classification_outcome` 只能投影为 `CLASSIFIED` 或 `OTHER`；证据不足、冲突或范围不明不是新的分类复核状态。历史 `NEEDS_REVIEW` 行只读兼容，不参与新候选、新 PRIMARY 或用户分类队列。
+本节优先于本文件中对 `document_organization_decisions.decision=NEEDS_REVIEW` 的旧分类语义。`classification_outcome` 只能投影为 `CLASSIFIED` 或 `OTHER`；证据不足、冲突或范围不明不是新的分类复核状态。具体业务不足但组织范围和部门可靠时，PRIMARY 可为不可召回的部门 `.issued/.other`，并记录 `CLASSIFIED + SCOPED_FALLBACK`；文件名严格文号唯一映射受控部门时也可产生该部门 `.issued`，其 evidence 保存为 `filename_document_number` 元数据来源。组织或部门也不可靠时才使用 `system.other + OTHER`。
 
-`document_category_suggestions` 继续保存多个 `SUGGESTED` 候选和定位证据；`document_categories` 只保存已生效的 PRIMARY/SECONDARY/RELATED 关系。当前版本每个工作副本最多一个活跃 PRIMARY（`AUTO_APPLIED` 或 `CONFIRMED`），新 OTHER PRIMARY 的 `category_id=system.other`。`document_category_feedback` 的 PRIMARY `REJECT` 仅记录负反馈，不删除已经生效的 PRIMARY；撤销当前主类是明确 `SET_PRIMARY(system.other)`；仅“撤回我此前的确认”只撤回该用户自己的来源，不能删除其他用户或自动来源。
+`document_category_suggestions` 继续保存多个 `SUGGESTED` 候选和定位证据；`document_categories` 只保存已生效的 PRIMARY/SECONDARY/RELATED 关系。当前版本每个工作副本最多一个活跃 PRIMARY（`AUTO_APPLIED` 或 `CONFIRMED`）；范围 fallback 与 `system.other` 都保存真实稳定 category_id，不能在查询时伪造替换。`document_category_feedback` 的 PRIMARY `REJECT` 仅记录负反馈，不删除已经生效的 PRIMARY；撤销当前主类是明确 `SET_PRIMARY(system.other)`；仅“撤回我此前的确认”只撤回该用户自己的来源，不能删除其他用户或自动来源。
 
 直接 `SET_PRIMARY` 和 `MOVE` 创建的 placement operation 必须保存 `working_copy_id`、`document_id`、`document_version_id`、revision、taxonomy key/version/digest、目标 category、before/target relative path、授权快照、决策快照和幂等键。它们有内部 OperationPlan 与 ChangeSet，但 `authorization_mode=EXPLICIT_REQUEST`、状态 `AUTHORIZED`，不写 `operation_confirmations` 假行，也不填 `confirmed_at`。执行状态、文件系统状态和数据库提交状态必须分别可恢复。
 

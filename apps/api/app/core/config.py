@@ -273,6 +273,8 @@ class Settings(BaseModel):
     # 受管原始目录先建立只读检索索引；分析完成后再由独立队列全量同步工作副本。
     managed_file_initialization_mode: str = DEFAULT_MANAGED_FILE_INITIALIZATION_MODE
     managed_source_analysis_enabled: bool = True
+    # 受管源解析与分类建议分离：关闭时仍持久化正文和索引，后续可复用正文单独分类。
+    managed_source_classification_enabled: bool = True
     managed_source_analysis_background_priority: int = DEFAULT_MANAGED_SOURCE_ANALYSIS_BACKGROUND_PRIORITY
     managed_source_analysis_on_demand_priority: int = DEFAULT_MANAGED_SOURCE_ANALYSIS_ON_DEMAND_PRIORITY
     managed_source_analysis_batch_size: int = DEFAULT_MANAGED_SOURCE_ANALYSIS_BATCH_SIZE
@@ -1001,6 +1003,9 @@ def get_settings() -> Settings:
         ),
         managed_source_analysis_enabled=os.getenv(
             "MANAGED_SOURCE_ANALYSIS_ENABLED", "true"
+        ).lower() == "true",
+        managed_source_classification_enabled=os.getenv(
+            "MANAGED_SOURCE_CLASSIFICATION_ENABLED", "true"
         ).lower() == "true",
         managed_source_analysis_background_priority=_bounded_int_env(
             "MANAGED_SOURCE_ANALYSIS_BACKGROUND_PRIORITY",

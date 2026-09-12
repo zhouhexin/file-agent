@@ -169,7 +169,7 @@ def _command(*, key: str = "submit-1", category_id: str = "college.finance"):
         expected_revision=1,
         expected_document_version_id=UUID(VERSION_ID),
         target_category_id=category_id,
-        taxonomy_version="2026-09-v10",
+        taxonomy_version="2026-09-v13",
         idempotency_key=key,
     )
 

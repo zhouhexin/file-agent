@@ -32,7 +32,8 @@ def inspect_and_enqueue(*, root_key: str, enqueue: bool) -> dict[str, object]:
         root = db.query(ManagedRoot).filter(ManagedRoot.root_key == root_key).one()
         user_id = str(
             root.created_by
-            or db.query(User.id).order_by(User.created_at.asc()).scalar()
+            # 只取最早用户作为缺省审计主体；未限制结果集时 scalar() 会在多用户库报错。
+            or db.query(User.id).order_by(User.created_at.asc()).limit(1).scalar()
             or ""
         )
         if not user_id:

@@ -106,6 +106,7 @@ def _compile_node_capabilities(taxonomy: Taxonomy) -> None:
     """把旧 taxonomy 编译成显式节点能力，同时保留历史 fallback ID 查询。"""
 
     historical_fallback_ids: set[str] = set()
+    active_fallback_ids: set[str] = set()
     policy = taxonomy.fallback_policy
     if policy is not None:
         historical_fallback_ids.update(policy.historical_category_ids)
@@ -118,11 +119,16 @@ def _compile_node_capabilities(taxonomy: Taxonomy) -> None:
                 if root.id and root.name in {"学校", "学院"}
             ],
         }
-        historical_fallback_ids = {
+        generated_fallback_ids = {
             f"{base_id}.{leaf.id_suffix}"
             for base_id in base_ids
             for leaf in leaves
         }
+        if policy.department_category_ids and leaves:
+            # v13 恢复的组织兜底节点不参加普通业务召回，但必须能够作为
+            # PRIMARY 落位并在分类树中展示；未被当前政策启用的旧 ID 仍只读。
+            active_fallback_ids = generated_fallback_ids
+        historical_fallback_ids = set(policy.historical_category_ids) - active_fallback_ids
 
     def walk(node: CategoryNode, *, depth: int) -> None:
         """配置显式值优先；仅对缺失字段应用可复现的兼容编译规则。"""
@@ -153,6 +159,12 @@ def _compile_node_capabilities(taxonomy: Taxonomy) -> None:
             node.selectable = not is_historical_fallback or is_system_other
         if node.visible is None:
             node.visible = not is_historical_fallback or is_system_other
+        if node.id in active_fallback_ids:
+            node.node_kind = CategoryNodeKind.FALLBACK
+            node.recall_enabled = False
+            node.primary_enabled = bool(node.organization_path)
+            node.selectable = True
+            node.visible = True
         for child in node.children:
             walk(child, depth=depth + 1)
 

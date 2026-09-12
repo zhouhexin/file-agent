@@ -138,7 +138,7 @@ def _seed(db, monkeypatch, tmp_path: Path):
             relation_role="PRIMARY",
             status="AUTO_APPLIED",
             taxonomy_key="unified_school_file_classification",
-            taxonomy_version="2026-09-v10",
+            taxonomy_version="2026-09-v13",
             classifier_version="fixture",
             source="fixture",
             evidence_json=[],
@@ -157,7 +157,7 @@ def _command(*, revision: int, key: str, action: str = "SET_PRIMARY", **target):
         "action": action,
         "expected_revision": revision,
         "expected_document_version_id": UUID(VERSION_ID),
-        "taxonomy_version": "2026-09-v10",
+        "taxonomy_version": "2026-09-v13",
         "idempotency_key": key,
         **target,
     }

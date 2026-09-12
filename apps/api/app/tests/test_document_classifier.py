@@ -23,7 +23,7 @@ def _purpose_package(*, category_id: str, content: str) -> PurposePackageSnapsho
         source_container_id="container-1",
         purpose_category_id=category_id,
         taxonomy_key="unified_school_file_classification",
-        taxonomy_version="2026-09-v10",
+        taxonomy_version="2026-09-v13",
         policy_id="test-package",
         policy_version="1",
         manifest_digest=f"manifest-{category_id}",
@@ -137,6 +137,34 @@ def test_classifier_returns_college_category_path_with_evidence():
     assert "年度计划、总结" in categories[0]["evidence"]
 
 
+def test_full_university_college_name_produces_college_primary():
+    """校名与计算机学院全称同时出现时，最终 PRIMARY 必须保持学院根。"""
+
+    service = DocumentClassificationService(graph_mode="off")
+    service._load_pages = lambda **_kwargs: [
+        SimpleNamespace(
+            text_content=(
+                "西安理工大学计算机科学与工程学院软件工程专业建设方案。"
+                "本方案用于软件工程专业培养方案修订、课程体系建设和专业认证工作。"
+            ),
+            page_number=1,
+            sheet_name=None,
+        )
+    ]
+
+    result = service.classify(
+        document_id="",
+        extraction_run_id="university-college-scope-v11",
+        filename="西安理工大学计算机科学与工程学院专业建设方案.docx",
+    )
+
+    primary = result["categories"][0]
+    assert result["classification_outcome"] == "CLASSIFIED"
+    assert primary["category_id"] == "college.teaching"
+    assert primary["category_path"][0] == "学院"
+    assert primary["organization_scope"] == "学院"
+
+
 def test_classifier_returns_other_when_no_keywords_match():
     """无法命中规则时应返回其他分类，避免空分类影响回执。"""
 
@@ -152,13 +180,13 @@ def test_classifier_returns_other_when_no_keywords_match():
             "source": "system_fallback",
             "evidence": [],
             "taxonomy_key": "unified_school_file_classification",
-            "taxonomy_version": "2026-09-v10",
+            "taxonomy_version": "2026-09-v13",
         }
     ]
 
 
-def test_classification_service_uses_single_other_instead_of_department_fallback(monkeypatch):
-    """部门和文号不足以确认业务时，最终只能使用单一 OTHER。"""
+def test_classification_service_uses_department_other_fallback(monkeypatch):
+    """部门明确但没有正式文号时，应落到学校/部门/其他。"""
 
     monkeypatch.setenv(
         "DATABASE_URL",
@@ -175,14 +203,14 @@ def test_classification_service_uses_single_other_instead_of_department_fallback
     finally:
         get_settings.cache_clear()
 
-    assert result["categories"][0]["category_id"] == "system.other"
-    assert result["categories"][0]["category_path"] == ["其他"]
-    assert result["categories"][0]["source"] == "system_fallback"
-    assert result["classification_outcome"] == "OTHER"
+    assert result["categories"][0]["category_id"] == "school.finance.other"
+    assert result["categories"][0]["category_path"] == ["学校", "财务", "其他"]
+    assert result["categories"][0]["source"] == "rule_fallback"
+    assert result["classification_outcome"] == "CLASSIFIED"
 
 
-def test_managed_source_full_text_without_business_action_uses_other(monkeypatch):
-    """只有部门名称而没有业务动作时，完整正文也不能制造部门 fallback。"""
+def test_managed_source_full_text_without_business_action_uses_department_other(monkeypatch):
+    """只有明确部门而没有具体业务动作时，使用部门级其他而非全局其他。"""
 
     monkeypatch.setenv(
         "DATABASE_URL",
@@ -208,9 +236,9 @@ def test_managed_source_full_text_without_business_action_uses_other(monkeypatch
         get_settings.cache_clear()
 
     category = result["categories"][0]
-    assert category["category_id"] == "system.other"
+    assert category["category_id"] == "school.finance.other"
     assert category["status"] == "SUGGESTED"
-    assert category["evidence_items"] == []
+    assert category["source"] == "rule_fallback"
 
 
 def test_true_resume_uses_local_structure_and_body_evidence(monkeypatch):

@@ -134,8 +134,8 @@ def test_policy_routes_unlocated_evidence_and_parse_failure_to_other() -> None:
     )
 
     assert result.accepted is True
-    assert result.evaluated_decision == "APPLIED_OTHER"
     assert result.primary_category["category_id"] == "system.other"
+    assert result.evaluated_decision == "APPLIED_OTHER"
     assert "PARSE_FAILED" in result.reason_codes
     assert "EVIDENCE_MISSING" in result.reason_codes
 
@@ -161,9 +161,10 @@ def test_policy_accepts_scoped_other_without_text_quote() -> None:
     )
 
     assert result.accepted is True
-    assert result.reason_codes == ("OTHER_CATEGORY",)
-    assert result.primary_category["category_id"] == "system.other"
-    assert result.evaluated_decision == "APPLIED_OTHER"
+    assert result.reason_codes == ()
+    assert result.primary_category["category_id"] == "school.other"
+    assert result.classification_outcome == "CLASSIFIED"
+    assert result.evaluated_decision == "APPLIED_BUSINESS"
 
 
 def test_policy_accepts_trusted_managed_recruitment_container_evidence() -> None:

@@ -1,4 +1,4 @@
-"""未分类工作副本维护脚本的 v10 分类边界测试。"""
+"""未分类工作副本维护脚本的当前分类边界测试。"""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def test_parse_failure_other_is_applied_instead_of_classification_review() -> No
                 "category_id": "system.other",
                 "category_path": ["其他"],
                 "taxonomy_key": "school-file-classification",
-                "taxonomy_version": "2026-09-v10",
+                "taxonomy_version": "2026-09-v11",
                 "status": "SUGGESTED",
                 "source": "system_fallback",
                 "evidence_items": [],

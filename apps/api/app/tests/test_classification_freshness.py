@@ -46,7 +46,7 @@ def test_t12_same_facts_reuse_and_ocr_policy_or_model_change_invalidates():
         extracted_content_digest=digest_text("第一页正文\nOCR 补出的第二页")
     ) != baseline
     assert _content_fingerprint(rule_policy_version="workdata-v2") != baseline
-    assert _content_fingerprint(taxonomy_version="2026-09-v11") != baseline
+    assert _content_fingerprint(taxonomy_version="2026-09-v12") != baseline
     assert _content_fingerprint(semantic_model_version="embedding-v2") != baseline
 
 

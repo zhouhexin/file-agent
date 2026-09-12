@@ -79,6 +79,7 @@ def persist_document_results_classifications(
                 "primary_input_fingerprint": str(result.get("input_fingerprint") or ""),
                 "extraction_status": str(result.get("extraction_status") or ""),
                 "purpose_package_status": str(result.get("purpose_package_status") or ""),
+                "purpose_package_digest": str(result.get("purpose_package_digest") or ""),
             },
             decision={
                 "classification_outcome": str(result.get("classification_outcome") or ""),

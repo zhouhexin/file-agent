@@ -1270,6 +1270,17 @@ class FileLifecycleJobProcessor:
 
         if not job.root_id:
             raise RuntimeError("RECONCILE_MANAGED_ROOT 缺少 root_id")
+        # A reconciliation job is created every scheduler cycle, so its result
+        # cannot be the source of truth for a root-wide scan generation.
+        # Lock the root while checking active scans and allocating a new one.
+        root = (
+            self.db.query(ManagedRoot)
+            .filter(ManagedRoot.id == job.root_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if root is None:
+            raise RuntimeError(f"RECONCILE_MANAGED_ROOT root not found: {job.root_id}")
         child = (
             self.db.query(FilesystemJob)
             .filter(
@@ -1280,18 +1291,21 @@ class FileLifecycleJobProcessor:
             .order_by(FilesystemJob.created_at.desc())
             .first()
         )
-        previous_result = dict(job.result_json or {})
-        try:
-            previous_generation = max(
-                0,
-                int(previous_result.get("scan_generation") or 0),
-            )
-        except (TypeError, ValueError):
-            previous_generation = 0
-        scan_generation = previous_generation
         scan_reused = child is not None
         if child is None:
-            scan_generation += 1
+            historical_scans = (
+                self.db.query(FilesystemJob)
+                .filter(
+                    FilesystemJob.root_id == job.root_id,
+                    FilesystemJob.job_type == "SCAN_MANAGED_ROOT",
+                )
+                .all()
+            )
+            scan_generation = 1 + max(
+                (self._scan_generation(scan) for scan in historical_scans),
+                default=0,
+            )
+            expected_key = f"managed-root-scan:{job.root_id}:{scan_generation}"
             child = FilesystemJobQueue(self.db).create_job(
                 job_type="SCAN_MANAGED_ROOT",
                 # 扫描与 IMPORT 使用独立队列；部署时由不同 worker 消费，避免大目录
@@ -1301,22 +1315,57 @@ class FileLifecycleJobProcessor:
                 created_by=job.created_by,
                 # 每个协调周期使用独立代次。已完成或失败的历史扫描保持终态，
                 # 不会被重置，也不会阻断配置修复或服务重启后的下一轮扫描。
-                deduplication_key=(
-                    f"managed-root-scan:{job.root_id}:{scan_generation}"
-                ),
+                deduplication_key=expected_key,
                 payload={
                     "reconcile_job_id": job.id,
                     "scan_generation": scan_generation,
                 },
             )
+        else:
+            scan_generation = self._scan_generation(child)
+            expected_key = f"managed-root-scan:{job.root_id}:{scan_generation}"
+
+        child_generation = self._scan_generation(child)
+        child_is_valid = (
+            child.root_id == job.root_id
+            and child.job_type == "SCAN_MANAGED_ROOT"
+            and child.status in {"PENDING", "RUNNING"}
+            and child_generation == scan_generation
+            and child.deduplication_key == expected_key
+        )
+        if not child_is_valid:
+            FilesystemJobQueue(self.db).mark_failed(
+                job=job,
+                error_message="RECONCILE_CHILD_SCAN_INVALID",
+                event_details={
+                    "root_id": job.root_id,
+                    "child_job_id": child.id,
+                    "child_status": child.status,
+                    "expected_scan_generation": scan_generation,
+                    "actual_scan_generation": child_generation,
+                    "expected_deduplication_key": expected_key,
+                    "actual_deduplication_key": child.deduplication_key,
+                },
+            )
+            return
         FilesystemJobQueue(self.db).mark_completed(
             job=job,
             result={
                 "scan_job_id": child.id,
                 "scan_generation": scan_generation,
                 "scan_reused": scan_reused,
+                "child_created": not scan_reused,
             },
         )
+
+    @staticmethod
+    def _scan_generation(job: FilesystemJob) -> int:
+        """Read current and legacy scan generations defensively."""
+
+        try:
+            return max(0, int((job.payload_json or {}).get("scan_generation") or 0))
+        except (TypeError, ValueError):
+            return 0
 
     def _repair_working_copy_layout(self, job: FilesystemJob) -> None:
         """迁移旧共享根和历史待整理路径，不触碰受管原始目录。"""
@@ -2396,7 +2445,9 @@ class FileLifecycleJobProcessor:
         )
         if source_run is None:
             categories: list[dict[str, Any]] = []
+            source_decision: dict[str, Any] = {}
         else:
+            source_decision = dict(source_run.decision_json or {})
             suggestions = (
                 self.db.query(DocumentCategorySuggestion)
                 .filter(
@@ -2435,6 +2486,24 @@ class FileLifecycleJobProcessor:
                             "summary_status": "REUSED",
                             "categories": categories,
                             "source": "managed-source-classification-reuse",
+                            # 工作副本复用源分类时必须同时复制主类选择快照，避免
+                            # 审计界面把真实 LOW_QUALITY/AMBIGUOUS 原因丢成空值。
+                            "classification_outcome": str(
+                                source_decision.get("classification_outcome") or ""
+                            ),
+                            "classification_quality": str(
+                                source_decision.get("classification_quality") or ""
+                            ),
+                            "selection_basis": str(
+                                source_decision.get("selection_basis") or ""
+                            ),
+                            "reason_codes": list(
+                                source_decision.get("reason_codes") or []
+                            ),
+                            "input_fingerprint": str(
+                                source_decision.get("primary_input_fingerprint") or ""
+                            ),
+                            "classifier_version": source_run.classifier_version,
                         }
                     ],
                 )
@@ -2449,6 +2518,18 @@ class FileLifecycleJobProcessor:
             rename_status="DISABLED",
             rename_metadata={},
             summary_metadata={},
+            classification_outcome=str(
+                source_decision.get("classification_outcome") or ""
+            ),
+            classification_quality=str(
+                source_decision.get("classification_quality") or ""
+            ),
+            selection_basis=str(source_decision.get("selection_basis") or ""),
+            reason_codes=list(source_decision.get("reason_codes") or []),
+            input_fingerprint=str(
+                source_decision.get("primary_input_fingerprint") or ""
+            ),
+            classifier_version=(source_run.classifier_version if source_run else ""),
         )
 
     @staticmethod

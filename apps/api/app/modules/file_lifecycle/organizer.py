@@ -31,6 +31,12 @@ class InitialOrganizationDecision:
     rename_status: str
     rename_metadata: dict[str, Any]
     summary_metadata: dict[str, Any]
+    classification_outcome: str = ""
+    classification_quality: str = ""
+    selection_basis: str = ""
+    reason_codes: list[str] | None = None
+    input_fingerprint: str = ""
+    classifier_version: str = ""
 
     def document_result(
         self,
@@ -60,6 +66,12 @@ class InitialOrganizationDecision:
             "extraction_run_id": extraction.get("extraction_run_id"),
             "extractor": extraction.get("extractor"),
             "categories": self.categories,
+            "classification_outcome": self.classification_outcome,
+            "classification_quality": self.classification_quality,
+            "selection_basis": self.selection_basis,
+            "reason_codes": list(self.reason_codes or []),
+            "input_fingerprint": self.input_fingerprint,
+            "classifier_version": self.classifier_version,
             "document_summary_id": self.document_summary_id,
             "classification_summary_id": self.classification_summary_id,
             "summary_status": self.summary_status,
@@ -176,6 +188,16 @@ class InitialWorkingCopyOrganizer:
                 db=self.db,
                 classification_summary_id=classification_result.get("classification_summary_id"),
             ),
+            classification_outcome=str(
+                classification_result.get("classification_outcome") or ""
+            ),
+            classification_quality=str(
+                classification_result.get("classification_quality") or ""
+            ),
+            selection_basis=str(classification_result.get("selection_basis") or ""),
+            reason_codes=list(classification_result.get("reason_codes") or []),
+            input_fingerprint=str(classification_result.get("input_fingerprint") or ""),
+            classifier_version=str(classification_result.get("classifier_version") or ""),
         )
 
 
@@ -187,13 +209,17 @@ def _select_primary_category(
     """只选择有原文证据的高置信度固定 taxonomy 分类作为物理主目录。"""
 
     for category in categories:
+        scoped_fallback = (
+            category.get("source") == "rule_fallback"
+            and list(category.get("category_path") or [])[-1:] in (["发文"], ["其他"])
+        )
         if category.get("name") == "其他" or category.get("source") == "llm_free_path":
             continue
         if str(category.get("status") or "") == "NEEDS_REVIEW":
             continue
         if float(category.get("confidence") or 0) < minimum_confidence:
             continue
-        if not category.get("evidence_items"):
+        if not category.get("evidence_items") and not scoped_fallback:
             continue
         return category
     return None

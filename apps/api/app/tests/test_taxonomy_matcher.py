@@ -6,11 +6,177 @@ from app.modules.classification.loader import load_default_taxonomy
 from app.modules.classification.matcher import (
     DocumentFeatures,
     apply_unclassified_fallback,
+    detect_structured_document_purpose,
     match_document_features,
     match_document_text,
     recall_category_candidates,
 )
 from app.modules.classification.primary_selection import select_primary_category
+
+
+def test_structured_professional_construction_form_builds_specific_purpose():
+    """精确题名和成组字段共同命中时，可直接形成专业建设结构锚点。"""
+
+    category_id = detect_structured_document_purpose(
+        filename="2024_计算机科学与技术专业建设方案.docx",
+        full_text=(
+            "计算机科学与技术专业建设方案\n"
+            "专业名称：计算机科学与技术\n专业代码：080901\n"
+            "培养目标：面向行业培养工程人才\n课程体系：由基础课和专业核心课组成"
+        ),
+    )
+
+    assert category_id == "college.teaching"
+
+
+def test_real_talent_application_title_builds_material_package_anchor():
+    """带计划层级和人才类型的真实申报书题名仍应识别为人才材料锚点。"""
+
+    category_id = detect_structured_document_purpose(
+        filename="陕西省“高层次人才特殊支持计划”科技创新领军人才申报书-黑新宏.doc",
+        full_text=(
+            "陕西省高层次人才特殊支持计划科技创新领军人才申报书\n"
+            "姓名：黑新宏\n申报类别：科技创新领军人才\n"
+            "所在单位：西安理工大学计算机科学与工程学院"
+        ),
+    )
+
+    assert category_id == "college.hr.talent-work"
+
+
+def test_talent_recommendation_rule_outweighs_research_background():
+    """人才项目推荐意见的标题和正文用途应压过履历中的科研背景词。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename="推荐意见-罗靖.docx",
+            title="推荐意见-罗靖",
+            full_text=(
+                "陕西省高层次人才特殊支持计划青年拔尖人才项目申报推荐意见\n"
+                "计算机科学与工程学院推荐罗靖申报。候选人长期从事科研项目研究，"
+                "学院认为其符合青年拔尖人才推荐条件。"
+            ),
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert candidates[0].category_id == "college.hr.talent-work"
+    assert candidates[0].business_score > next(
+        item.business_score
+        for item in candidates
+        if item.category_id == "college.research"
+    )
+
+
+@pytest.mark.parametrize(
+    ("filename", "full_text", "expected_id"),
+    [
+        (
+            "西安理工大学教师职务聘期任务书（2022年）-杨志海.doc",
+            (
+                "教师职务聘期任务书\n受\n聘\n期\n间\n拟\n承\n担\n的\n工\n作\n任\n务\n"
+                "完成教学、科研和公共事务工作。"
+            ),
+            "school.hr.faculty-recruitment",
+        ),
+        (
+            "附件4：西安理工大学教职工离职审批表.docx",
+            (
+                "西安理工大学教职工离职审批表\n申请人：    年 月 日\n"
+                "所在单位意见\n负责人：（盖章）\n人事处审核意见\n"
+                "备注：请附本人亲笔签名的辞职申请书原件。"
+            ),
+            "school.hr",
+        ),
+    ],
+)
+def test_explicit_hr_structured_titles_map_to_requested_categories(
+    filename: str,
+    full_text: str,
+    expected_id: str,
+):
+    """明确的人事表单题名与字段结构应直接形成用户指定的人事业务候选。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(filename=filename, title=filename, full_text=full_text),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert candidates[0].category_id == expected_id
+    assert candidates[0].purpose_basis == "STRUCTURED_FORM"
+
+
+def test_generic_application_form_does_not_build_structured_purpose():
+    """只有泛化文种、缺少精确题名和字段组时不得猜测材料用途。"""
+
+    assert (
+        detect_structured_document_purpose(
+            filename="申请表.docx",
+            full_text="申请表\n姓名：张三\n联系电话：13800000000",
+        )
+        is None
+    )
+
+
+def test_conflicting_structured_forms_disable_package_anchor():
+    """同一文件同时形成不同业务结构锚点时关闭式拒绝用途继承。"""
+
+    category_id = detect_structured_document_purpose(
+        filename="材料汇总.docx",
+        full_text=(
+            "高层次人才申报表\n姓名：张三\n申报类别：领军人才\n所在单位：计算机学院\n"
+            "科研项目申报书\n项目名称：可信软件\n项目负责人：张三\n"
+            "研究内容：软件验证\n经费预算：20万元"
+        ),
+    )
+
+    assert category_id is None
+
+
+def test_strict_filename_document_number_creates_unique_department_issued_fallback():
+    """严格文号前缀唯一映射到人事部门时，可以决定学校人事发文落位。"""
+
+    matches = match_document_features(
+        DocumentFeatures(
+            filename="西安理工人事〔2026〕8号_普通材料.txt",
+            full_text="这是一份没有明确单位、部门或业务主题的普通材料。",
+        ),
+        load_default_taxonomy(),
+    )
+
+    assert matches[-1]["category_id"] == "school.hr.issued"
+    assert matches[-1]["category_path"] == ["学校", "人事师资", "发文"]
+    assert matches[-1]["evidence_items"][0]["source"] == "filename_document_number"
+
+
+def test_nonstandard_filename_number_cannot_create_department_issued_fallback():
+    """机构关键词加近似编号不满足严格文号格式，仍不得决定部门发文。"""
+
+    matches = match_document_features(
+        DocumentFeatures(
+            filename="西安理工人事2026-8号_普通材料.txt",
+            full_text="这是一份没有明确单位、部门或业务主题的普通材料。",
+        ),
+        load_default_taxonomy(),
+    )
+
+    assert matches[-1]["category_id"] == "system.other"
+
+
+def test_strict_filename_number_with_competing_departments_does_not_guess():
+    """严格文号前缀同时命中多个受控部门时，也不能任选一个部门发文。"""
+
+    matches = match_document_features(
+        DocumentFeatures(
+            filename="西安理工人事财务〔2026〕8号_普通材料.txt",
+            full_text="这是一份没有明确业务主题的普通材料。",
+        ),
+        load_default_taxonomy(),
+    )
+
+    assert matches[-1]["category_id"] == "system.other"
 
 
 def test_matcher_returns_specific_school_category_path():
@@ -23,8 +189,18 @@ def test_matcher_returns_specific_school_category_path():
     assert matches[0]["name"] == "学校/人事师资/职称"
     assert matches[0]["category_path"] == ["学校", "人事师资", "职称"]
     assert matches[0]["taxonomy_key"] == "unified_school_file_classification"
-    assert matches[0]["taxonomy_version"] == "2026-09-v10"
+    assert matches[0]["taxonomy_version"] == "2026-09-v13"
     assert "职称" in matches[0]["evidence"]
+
+
+def test_matcher_preserves_whitespace_variant_as_original_evidence():
+    """taxonomy 信号有全角空白时仍可召回，后续 quote 必须保留原文片段。"""
+
+    taxonomy = load_default_taxonomy()
+    matches = match_document_text("学校教师职　称申报材料。", taxonomy)
+
+    assert matches[0]["category_id"] == "school.hr.title-review"
+    assert "职　称" in matches[0]["evidence"]
 
 
 def test_title_review_form_signals_override_generic_discipline_and_research_terms():
@@ -92,7 +268,7 @@ def test_matcher_returns_other_when_no_taxonomy_keywords_match():
             "source": "system_fallback",
             "evidence": [],
             "taxonomy_key": "unified_school_file_classification",
-            "taxonomy_version": "2026-09-v10",
+                "taxonomy_version": "2026-09-v13",
         }
     ]
 
@@ -296,7 +472,172 @@ def test_recall_candidates_keeps_school_talent_notice_at_school_level():
     )
 
     assert candidates[0].category_id == "school.hr.talent-work"
-    assert college is None or school.rule_score > college.rule_score
+    assert college is None or school.scope_score > college.scope_score
+
+
+def test_organization_scope_prefers_full_college_name_over_university_name():
+    """“西安理工大学计算机科学与工程学院”必须按学院组织范围处理。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename="西安理工大学计算机科学与工程学院专业建设方案.docx",
+            title="西安理工大学计算机科学与工程学院专业建设方案",
+            full_text="软件工程专业培养方案用于学院专业建设和课程体系优化。",
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert candidates
+    assert candidates[0].organization_scope == "学院"
+    assert candidates[0].organization_score >= 0.85
+
+
+@pytest.mark.parametrize(
+    "major",
+    ["软件工程", "计算机", "计算机技术", "网络安全", "物联网工程"],
+)
+def test_computing_major_terms_select_college_scope(major):
+    """workdata 中计算机学院所属专业词只决定学院根，不替代业务证据。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename=f"2024年{major}专业建设方案.docx",
+            title=f"2024年{major}专业建设方案",
+            full_text=f"本方案用于{major}专业培养方案修订和课程体系建设。",
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert candidates
+    assert candidates[0].organization_scope == "学院"
+
+
+def test_college_submission_to_school_department_stays_college_scope():
+    """教务处作为报送接收方时不得覆盖计算机学院这一文件主体。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename="计算机学院专业建设方案.docx",
+            title="计算机学院专业建设方案",
+            full_text="本院修订软件工程专业培养方案，并将结果报送教务处。",
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert candidates
+    assert candidates[0].organization_scope == "学院"
+
+
+def test_school_department_as_publisher_selects_school_scope():
+    """校级部门明确发布或部署时，通用专业词不得反向改成学院主体。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename="教务处关于软件工程专业建设工作的通知.docx",
+            title="教务处关于软件工程专业建设工作的通知",
+            full_text="教务处下发通知，请各学院组织开展专业培养方案修订。",
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert candidates
+    assert candidates[0].organization_scope == "学校"
+
+
+@pytest.mark.parametrize(
+    ("filename", "full_text", "expected_id"),
+    [
+        (
+            "2021人才项目学校推荐申报情况.txt",
+            "高层次人才项目推荐申报情况，包括人才类别、推荐单位和获批情况。",
+            "school.hr.talent-work",
+        ),
+        (
+            "陕西省高层次人才引进计划申报人选情况汇总表-计算机学院.xls",
+            "陕西省高层次人才引进计划申报人选情况汇总表\n推荐单位：计算机学院",
+            "college.hr.talent-work",
+        ),
+        (
+            "20220318师资引进申请报告-李院.docx",
+            "师资引进申请报告\n人事处：计算机学院拟引进高层次人才，以加强学院师资队伍。",
+            "college.hr.talent-work",
+        ),
+        (
+            "教务处教学管理文件汇编.pdf",
+            "教务处教学管理文件汇编\n本科专业建设、人才培养方案和课程体系管理办法。",
+            "school.undergraduate-teaching",
+        ),
+    ],
+)
+def test_document_theme_signals_prefer_specific_business_leaf(
+    filename: str,
+    full_text: str,
+    expected_id: str,
+):
+    """真实标题和正文开头的业务短语应优先落到具体叶子分类。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(filename=filename, title=filename, full_text=full_text),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert candidates[0].category_id == expected_id
+    assert candidates[0].business_score >= 0.38
+    assert candidates[0].title_theme_score >= 0.16
+
+
+def test_background_digital_terms_do_not_override_talent_report_theme():
+    """人才引进报告中的数字化背景描述不得制造信息化主类。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename="20220318师资引进申请报告-李院.docx",
+            title="师资引进申请报告",
+            full_text=(
+                "师资引进申请报告\n人事处：计算机学院拟引进高层次人才。"
+                "随着数字化、网络化、智能化时代发展，学院需要补充师资队伍。"
+            ),
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert candidates[0].category_id == "college.hr.talent-work"
+    digital = next(
+        (item for item in candidates if item.category_id == "college.digital-services"),
+        None,
+    )
+    assert digital is None or digital.business_score < candidates[0].business_score
+
+
+def test_contract_task_mentions_do_not_override_appointment_assessment_theme():
+    """合同任务书中的专业认证和科研任务只是考核指标，不是文件主旨。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename="西安理工大学预聘制博士师资合同期考核目标和任务书-计算机学院.xlsx",
+            title="预聘制博士师资合同期考核目标和任务书",
+            full_text=(
+                "预聘制博士师资合同期考核目标和任务书\n"
+                "完成学院安排的教学任务，参与专业建设、专业认证，并主持科研项目。"
+            ),
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert candidates[0].category_id == "college.hr.appointment-assessment"
+    accreditation = next(
+        item
+        for item in candidates
+        if item.category_id == "college.teaching.program-accreditation"
+    )
+    assert candidates[0].business_score > accreditation.business_score
 
 
 def test_recall_candidates_recognizes_workdata_college_talent_filenames():
@@ -592,11 +933,11 @@ def test_match_document_text_uses_recall_candidates_for_rule_only_output():
 @pytest.mark.parametrize(
     ("text", "expected_id", "expected_path"),
     [
-        ("校属各单位请知悉本项临时联络事项。", "system.other", ["其他"]),
+        ("校属各单位请知悉本项临时联络事项。", "school.other", ["学校", "其他"]),
         (
             "西安理工校发〔2026〕12号，校属各单位请知悉本项临时联络事项。",
-            "system.other",
-            ["其他"],
+            "school.issued",
+            ["学校", "发文"],
         ),
         (
             "财务处关于“两新”项目配套资金的工作通知。",
@@ -608,11 +949,11 @@ def test_match_document_text_uses_recall_candidates_for_rule_only_output():
             "school.finance",
             ["学校", "财务"],
         ),
-        ("计算机科学与工程学院院内临时联络材料。", "system.other", ["其他"]),
+        ("计算机科学与工程学院院内临时联络材料。", "college.other", ["学院", "其他"]),
         (
             "计算机学院〔2026〕3号，关于临时联络事项的说明。",
-            "system.other",
-            ["其他"],
+            "college.issued",
+            ["学院", "发文"],
         ),
     ],
 )
@@ -627,7 +968,7 @@ def test_unclassified_fallback_uses_scope_department_and_document_number(
 
     assert matches[0]["category_id"] == expected_id
     assert matches[0]["category_path"] == expected_path
-    assert matches[0]["source"] in {"system_fallback", "rule"}
+    assert matches[0]["source"] in {"system_fallback", "rule", "rule_fallback"}
 
 
 def test_unclassified_fallback_does_not_override_specific_business_category():
@@ -643,8 +984,8 @@ def test_unclassified_fallback_does_not_override_specific_business_category():
     assert "school.hr.issued" not in category_ids
 
 
-def test_unclassified_fallback_uses_primary_root_after_evidence_review():
-    """最高排名具体候选缺少正文证据时，应按其学校分支回退到其他。"""
+def test_unclassified_fallback_does_not_infer_root_from_unlocated_candidates():
+    """候选缺少正文组织证据时不得仅按候选路径捏造学校范围。"""
 
     matches = apply_unclassified_fallback(
         document_features=DocumentFeatures(filename="国际合作统计表.xls"),
@@ -694,8 +1035,8 @@ def test_fallback_nodes_never_enter_ordinary_recall():
     )
 
 
-def test_legacy_fallback_and_review_candidates_converge_to_system_other():
-    """历史分支兜底和旧复核建议只能兼容读取，不能成为新请求的分类结果。"""
+def test_enabled_scoped_fallback_is_reused_without_duplicate_generation():
+    """当前启用的组织兜底可以复用，但旧复核业务候选不得进入结果。"""
 
     matches = apply_unclassified_fallback(
         document_features=DocumentFeatures(
@@ -719,7 +1060,7 @@ def test_legacy_fallback_and_review_candidates_converge_to_system_other():
         ],
     )
 
-    assert [item["category_id"] for item in matches] == ["system.other"]
+    assert [item["category_id"] for item in matches] == ["school.issued"]
     assert matches[0]["status"] == "SUGGESTED"
 
 

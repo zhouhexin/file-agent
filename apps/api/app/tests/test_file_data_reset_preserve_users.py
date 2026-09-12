@@ -190,11 +190,15 @@ def test_file_domain_reset_requires_external_import_to_be_stopped(tmp_path: Path
         assert db.query(Document).count() == 1
 
 
-@pytest.mark.parametrize("classification_is_current", [True, False])
+@pytest.mark.parametrize(
+    ("classification_is_current", "force_source_reclassification"),
+    [(True, False), (False, False), (True, True)],
+)
 def test_working_copy_reset_refreshes_stale_classification_before_materialization(
     monkeypatch,
     tmp_path: Path,
     classification_is_current: bool,
+    force_source_reclassification: bool,
 ):
     """重置必须让当前分类直接物化，让任意旧分类先进入刷新队列。"""
 
@@ -218,6 +222,16 @@ def test_working_copy_reset_refreshes_stale_classification_before_materializatio
         )
         db.add(user)
         db.flush()
+        if force_source_reclassification:
+            db.add(
+                User(
+                    username="reset-classification-second-user",
+                    password_hash="hash",
+                    display_name="第二个测试用户",
+                    role="user",
+                )
+            )
+            db.flush()
         workspace = Workspace(
             name="shared",
             owner_id=user.id,
@@ -230,7 +244,7 @@ def test_working_copy_reset_refreshes_stale_classification_before_materializatio
             root_key="school_files",
             display_name="学校文件",
             container_path=str(source_root.resolve()),
-            created_by=user.id,
+            created_by=(None if force_source_reclassification else user.id),
         )
         source_document = Document(
             user_id=user.id,
@@ -285,6 +299,14 @@ def test_working_copy_reset_refreshes_stale_classification_before_materializatio
             settings=settings,
             user_id=user.id,
         )
+        pending_analysis_job = FilesystemJob(
+            job_type="ANALYZE_MANAGED_FILE_REVISION",
+            queue_name="SOURCE_ANALYSIS",
+            root_id=root.id,
+            created_by=user.id,
+            status="PENDING",
+            payload_json={"managed_file_revision_id": revision.id},
+        )
         db.add_all(
             [
                 DocumentClassificationRun(
@@ -309,15 +331,19 @@ def test_working_copy_reset_refreshes_stale_classification_before_materializatio
                     payload_json={"managed_file_revision_id": revision.id},
                     result_json={"status": "READY"},
                 ),
+                pending_analysis_job,
             ]
         )
         db.commit()
+        pending_analysis_job_id = pending_analysis_job.id
 
         result = reset_working_copy_materializations(
             db=db,
             settings=settings,
             project_root=project_root,
             root_key="school_files",
+            force_source_reclassification=force_source_reclassification,
+            clear_related_active_jobs=force_source_reclassification,
         )
 
         materialization = db.query(FilesystemJob).filter_by(
@@ -326,7 +352,15 @@ def test_working_copy_reset_refreshes_stale_classification_before_materializatio
         refresh_jobs = db.query(FilesystemJob).filter_by(
             job_type="REFRESH_MANAGED_SOURCE_CLASSIFICATION"
         ).all()
-        if classification_is_current:
+        if force_source_reclassification:
+            assert materialization.status == "COMPLETED"
+            assert len(refresh_jobs) == 1
+            assert refresh_jobs[0].status == "PENDING"
+            assert db.get(FilesystemJob, pending_analysis_job_id) is None
+            assert db.query(DocumentClassificationRun).count() == 0
+            assert result["classification_freshness"] == {"MISSING": 1}
+            assert result["source_after_reset"]["source_classification_runs"] == 0
+        elif classification_is_current:
             assert materialization.status == "PENDING"
             assert refresh_jobs == []
         else:
@@ -336,10 +370,11 @@ def test_working_copy_reset_refreshes_stale_classification_before_materializatio
             )
             assert len(refresh_jobs) == 1
             assert refresh_jobs[0].status == "PENDING"
-        assert db.query(DocumentClassificationRun).count() == 1
-        assert result["classification_freshness"] == {
-            "CURRENT" if classification_is_current else "STALE": 1
-        }
+        if not force_source_reclassification:
+            assert db.query(DocumentClassificationRun).count() == 1
+            assert result["classification_freshness"] == {
+                "CURRENT" if classification_is_current else "STALE": 1
+            }
         assert list(working_target.iterdir()) == []
 
 

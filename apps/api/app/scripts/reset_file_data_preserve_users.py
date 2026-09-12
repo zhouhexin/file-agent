@@ -43,6 +43,8 @@ FILE_DOMAIN_TABLES = frozenset(
         "change_sets",
         "classification_clarifications",
         "classification_graph_outbox",
+        "classification_placement_operations",
+        "classification_purpose_packages",
         "conversations",
         "document_artifacts",
         "document_categories",
@@ -104,6 +106,7 @@ FILE_DOMAIN_TABLES = frozenset(
         "upload_duplicate_reviews",
         "working_copies",
         "working_copy_path_records",
+        "working_copy_path_reservations",
         "working_copy_roots",
     }
 )

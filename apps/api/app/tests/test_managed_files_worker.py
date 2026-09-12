@@ -447,6 +447,16 @@ def test_worker_processes_scan_job_and_persists_files(tmp_path: Path, capsys):
     """worker 应能领取扫描任务、执行扫描并输出不含路径的控制台状态。"""
 
     client, SessionLocal = client_with_database()
+    for username in ("scan-fallback-first", "scan-fallback-second"):
+        registered = client.post(
+            "/api/auth/register",
+            json={
+                "username": username,
+                "password": "password123",
+                "display_name": username,
+            },
+        )
+        assert registered.status_code == 200
     db = SessionLocal()
     try:
         managed_dir = tmp_path / "student-affairs"
@@ -482,6 +492,17 @@ def test_worker_processes_scan_job_and_persists_files(tmp_path: Path, capsys):
         managed_file = db.query(ManagedFile).filter(ManagedFile.root_id == root.id).one_or_none()
         assert managed_file is not None
         assert managed_file.relative_path == "notice.pdf"
+        source_job = (
+            db.query(FilesystemJob)
+            .filter(
+                FilesystemJob.job_type == "ANALYZE_MANAGED_FILE_REVISION",
+                FilesystemJob.root_id == root.id,
+            )
+            .one()
+        )
+        first_user = db.query(User).order_by(User.created_at.asc()).first()
+        assert first_user is not None
+        assert source_job.created_by == first_user.id
         console_output = capsys.readouterr().out
         assert "任务开始" in console_output
         assert "任务完成" in console_output
@@ -619,12 +640,12 @@ def test_scan_publishes_source_analysis_jobs_by_batch_before_full_root_completio
         (
             "学校会议纪要研究决定议题.txt",
             "学校会议纪要。会议围绕议题进行研究，研究决定通过有关事项。",
-            "AUTO_ORGANIZED",
+            "APPLIED_BUSINESS",
         ),
         (
             "普通材料.txt",
             "这是一份没有明确业务主题的普通材料。",
-            "AUTO_ORGANIZED",
+            "APPLIED_OTHER",
         ),
     ],
 )
@@ -827,31 +848,20 @@ def test_scan_waits_for_source_analysis_before_materializing_working_copy(
                 }
             ]
             assert decision.decision == expected_decision
-            if expected_decision == "AUTO_ORGANIZED":
-                relation = db.query(DocumentCategory).filter_by(
-                    working_copy_id=working_copy.id
-                ).one()
-                if working_copy.relative_path.startswith("学校/"):
-                    assert working_copy.relative_path == (
-                        "学校/行政综合管理类/会议纪要/"
-                        f"{expected_working_filename}"
-                    )
-                    assert relation.category_id == "school.admin.meeting-minutes"
-                else:
-                    assert working_copy.relative_path == (
-                        f"学院/其他/{expected_working_filename}"
-                    )
-                    assert relation.category_id == "college.other"
-                assert relation.status == "AUTO_APPLIED"
-                assert relation.relation_role == "PRIMARY"
-            else:
-                assert working_copy.relative_path.startswith(".internal/neutral/")
-                assert working_copy.relative_path.endswith(
-                    f"/{expected_working_filename}"
+            relation = db.query(DocumentCategory).filter_by(
+                working_copy_id=working_copy.id
+            ).one()
+            if expected_decision == "APPLIED_BUSINESS":
+                assert working_copy.relative_path == (
+                    "学校/行政综合管理类/会议纪要/"
+                    f"{expected_working_filename}"
                 )
-                assert db.query(DocumentCategory).filter_by(
-                    working_copy_id=working_copy.id
-                ).count() == 0
+                assert relation.category_id == "school.admin.meeting-minutes"
+            else:
+                assert working_copy.relative_path == f"其他/{expected_working_filename}"
+                assert relation.category_id == "system.other"
+            assert relation.status == "AUTO_APPLIED"
+            assert relation.relation_role == "PRIMARY"
             assert target_suggestions
             assert physical_copy.read_text(encoding="utf-8") == content
             assert source.read_text(encoding="utf-8") == content
@@ -1170,19 +1180,10 @@ def test_metadata_only_image_analysis_materializes_searchable_working_copy(
             working_profile = db.query(DocumentSearchProfile).one()
             assert working_profile.working_copy_id == working_copy.id
             assert "应聘" in str(working_profile.metadata_search_text)
-            suggestions = db.query(DocumentCategorySuggestion).all()
-            assert suggestions
-            assert all(
-                suggestion.category_id == "college.hr.faculty-recruitment"
-                for suggestion in suggestions
-            )
-            assert any(
-                suggestion.source == "managed_source_recruitment_package"
-                for suggestion in suggestions
-            )
-            assert working_copy.relative_path.startswith(
-                "学院/人事师资/师资招聘/2014应聘人员/张三/照片/"
-            )
+            # 单张无正文图片不能只因来源路径含“应聘”就伪造招聘用途；只有进入
+            # 冻结材料包清单后才允许继承。本例没有结构锚点，因此使用全局其他。
+            assert db.query(DocumentCategorySuggestion).count() == 0
+            assert working_copy.relative_path.startswith("其他/")
             pages = db.query(DocumentPage).filter(
                 DocumentPage.document_id == working_copy.document_id
             ).all()
@@ -1401,6 +1402,114 @@ def test_reconciliation_creates_new_generation_after_failed_scan(tmp_path: Path)
         assert preserved_failure.status == "FAILED"
         assert preserved_failure.attempt_count == 3
         assert preserved_failure.error_message == "确定性测试失败"
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_new_reconciliation_parent_does_not_reuse_historical_failed_scan(tmp_path: Path):
+    """A service restart creates a new parent and must allocate a root-wide generation."""
+
+    _client, session_factory = client_with_database()
+    db = session_factory()
+    try:
+        root_dir = tmp_path / "restart-after-failure-root"
+        root_dir.mkdir()
+        root = ManagedRoot(
+            root_key="restart_after_failure",
+            display_name="restart recovery root",
+            container_path=str(root_dir),
+        )
+        db.add(root)
+        db.flush()
+        first_parent = FilesystemJob(
+            job_type="RECONCILE_MANAGED_ROOT",
+            root_id=root.id,
+            status="RUNNING",
+            payload_json={},
+            result_json={},
+        )
+        db.add(first_parent)
+        db.flush()
+        processor = FileLifecycleJobProcessor(db)
+        assert processor.process(first_parent) is True
+        failed_scan = db.get(FilesystemJob, first_parent.result_json["scan_job_id"])
+        assert failed_scan is not None
+        failed_scan.status = "FAILED"
+        failed_scan.attempt_count = 3
+        failed_scan.error_message = "historical scan failure"
+
+        restarted_parent = FilesystemJob(
+            job_type="RECONCILE_MANAGED_ROOT",
+            root_id=root.id,
+            status="RUNNING",
+            payload_json={},
+            result_json={},
+        )
+        db.add(restarted_parent)
+        db.flush()
+
+        assert processor.process(restarted_parent) is True
+        replacement_scan = db.get(
+            FilesystemJob,
+            restarted_parent.result_json["scan_job_id"],
+        )
+        assert replacement_scan is not None
+        assert restarted_parent.status == "COMPLETED"
+        assert replacement_scan.id != failed_scan.id
+        assert replacement_scan.status == "PENDING"
+        assert replacement_scan.payload_json["scan_generation"] == 2
+        assert replacement_scan.deduplication_key.endswith(":2")
+        assert failed_scan.status == "FAILED"
+        assert failed_scan.attempt_count == 3
+    finally:
+        db.close()
+        clear_overrides()
+
+
+def test_reconciliation_fails_when_queue_returns_terminal_child(monkeypatch, tmp_path: Path):
+    """A terminal child can never be reported as a successful reconciliation."""
+
+    _client, session_factory = client_with_database()
+    db = session_factory()
+    try:
+        root_dir = tmp_path / "terminal-child-root"
+        root_dir.mkdir()
+        root = ManagedRoot(
+            root_key="terminal_child_root",
+            display_name="terminal child root",
+            container_path=str(root_dir),
+        )
+        db.add(root)
+        db.flush()
+        parent = FilesystemJob(
+            job_type="RECONCILE_MANAGED_ROOT",
+            root_id=root.id,
+            status="RUNNING",
+            payload_json={},
+            result_json={},
+        )
+        terminal_child = FilesystemJob(
+            job_type="SCAN_MANAGED_ROOT",
+            root_id=root.id,
+            status="FAILED",
+            deduplication_key="terminal-child",
+            payload_json={"scan_generation": 99},
+            result_json={},
+        )
+        db.add_all([parent, terminal_child])
+        db.flush()
+
+        monkeypatch.setattr(
+            FilesystemJobQueue,
+            "create_job",
+            lambda _queue, **_kwargs: terminal_child,
+        )
+        assert FileLifecycleJobProcessor(db).process(parent) is True
+
+        assert parent.status == "FAILED"
+        assert parent.error_message == "RECONCILE_CHILD_SCAN_INVALID"
+        assert parent.result_json == {}
     finally:
         db.close()
         clear_overrides()

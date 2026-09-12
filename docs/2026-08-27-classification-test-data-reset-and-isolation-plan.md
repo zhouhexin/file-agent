@@ -220,6 +220,23 @@ python -m app.scripts.reset_managed_root_working_copies `
 算法发生变化后的效果。执行前仍必须停止 API、scheduler、watcher 和全部 worker；目标工作副本路径
 必须位于 `WORKING_COPY_STORAGE_ROOT` 内且不能与外部受管原目录重叠。
 
+如果 taxonomy 或关键词匹配已经变化，但源正文、OCR 和索引仍可复用，使用强制源分类重置模式：
+
+```powershell
+python -m app.scripts.reset_managed_root_working_copies `
+  --root-key test_library `
+  --force-source-reclassification `
+  --clear-related-active-jobs `
+  --confirm-reset-working-copies `
+  --confirm-writers-stopped
+```
+
+该模式额外删除目标受管根的旧 `document_classification_runs`、
+`document_category_suggestions` 及其反馈，删除该根和其修订关联的 `PENDING/RUNNING`
+文件任务，再为每个当前 `READY` 修订创建唯一的当前 taxonomy 分类刷新任务。它必须继续保留
+`managed_files`、`managed_file_revisions`、源分析 Document/Version、`document_pages`、摘要、
+`document_chunks` 和 `document_index_runs`；刷新任务成功后再按当前分类结果提交工作副本物化。
+
 ### 4.1 首轮：干净基线测试
 
 在保留用户身份数据的前提下，首轮采用：

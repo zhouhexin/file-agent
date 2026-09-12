@@ -1218,7 +1218,7 @@ Shadow 会写 `document_organization_decisions`，但不会移动已有 `ACTIVE`
 
 ## Classification v10 evaluation, pilot, and rollback
 
-本节优先于本文件中较早的 top1 测试阈值、分类 `NEEDS_REVIEW` 和分支 `.other` 自动兜底描述。新策略固定使用 `system.other`；无法可靠细分时仍完成归档到“其他”，不等待人工分类，不建立分类待复核目录。历史待复核、分支 `.other/.issued` 只用于查询兼容和审计。
+本节优先于本文件中较早的 top1 测试阈值和分类 `NEEDS_REVIEW` 描述。新策略先在正文已可靠确定学校/学院和部门时使用该部门 `.issued/.other` 范围 fallback；有可定位正式文号进入“发文”，否则进入“其他”。文件名严格文号中的机关前缀唯一映射受控部门时，也可直接进入该部门“发文”；近似编号、普通机构词或部门竞争不得应用。组织范围或部门也不可靠时使用 `system.other`。所有情况均完成归档，不建立分类待复核目录。
 
 部署配置必须显式核验：
 

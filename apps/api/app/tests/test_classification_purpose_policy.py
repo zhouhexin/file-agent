@@ -18,7 +18,7 @@ def _package() -> PurposePackageSnapshot:
         source_container_id="container-1",
         purpose_category_id="college.hr.faculty-recruitment",
         taxonomy_key="unified_school_file_classification",
-        taxonomy_version="2026-09-v10",
+        taxonomy_version="2026-09-v13",
         policy_id="recruitment-package",
         policy_version="1",
         manifest_digest="manifest-1",

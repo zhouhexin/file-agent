@@ -1796,9 +1796,9 @@ GET /api/classification/organization/files?category_id={stable_id}&scope=descend
 
 本节优先于本文件中较早的“分类待复核”“`__needs_review__` 虚拟节点”及“SET_PRIMARY/MOVE 必须确认”的历史描述。
 
-分类输出只对新流程公开 `CLASSIFIED` 或 `OTHER`。`OTHER` 的稳定 ID 固定为 `system.other`，显示路径和物理目录均为“其他”；正文证据不足、组织范围不明、候选冲突或解析不完整时都进入该结果，不创建新的分类 `NEEDS_REVIEW` 状态、分类待办或虚拟树节点。历史 `NEEDS_REVIEW`、`.other`、`.issued` 仅用于兼容读取和审计，不能作为新候选召回或新 PRIMARY。
+分类输出只对新流程公开 `CLASSIFIED` 或 `OTHER`，不创建新的分类 `NEEDS_REVIEW` 状态、分类待办或虚拟树节点。正文不足以形成具体业务类、但能可靠确定学校/学院和部门时，可把 PRIMARY 设置为该部门不可召回的 `.issued/.other` 范围 fallback；有可定位正式文号进入 `.issued`，否则进入 `.other`。文件名严格文号中的机关前缀若唯一映射到受控部门，也可作为窄范围元数据例外进入该部门 `.issued`；它不得生成具体业务叶类。组织范围或部门也无法可靠确定时才返回 `system.other` 与 `OTHER`。
 
-`GET /api/classification/organization/tree` 返回 `schema_version=2`、业务节点计数和聚合的 `other` 节点；不得再返回 `__needs_review__`。`GET /api/classification/organization/files` 对 `category_id=system.other` 返回该唯一兜底下的文件，不接受 `__needs_review__` 作为新查询参数。树与列表响应都应同时区分 `effective_primary`、`pending_placement`、`classification_outcome`、`legacy_location` 和与分类无关的 `pending_decision`，避免把重复、风险、重命名或冲突处理误显示为分类复核。
+`GET /api/classification/organization/tree` 返回 `schema_version=2`、业务及范围 fallback 节点计数和全局 `other` 节点；不得再返回 `__needs_review__`。`GET /api/classification/organization/files` 接受公开树中可落位的范围 fallback 或 `system.other`，不接受 `__needs_review__`。树与列表响应都应同时区分 `effective_primary`、`pending_placement`、`classification_outcome`、`legacy_location` 和与分类无关的 `pending_decision`，避免把重复、风险、重命名或冲突处理误显示为分类复核。
 
 下列直接请求是单次明确授权，不调用 `/confirm`，也不插入伪造的 `OperationConfirmation`：
 

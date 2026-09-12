@@ -179,8 +179,10 @@ def reset_working_copy_materializations(
     root_key: str,
     reason_code: str | None = None,
     source_path_prefix: str | None = None,
+    force_source_reclassification: bool = False,
+    clear_related_active_jobs: bool = False,
 ) -> dict[str, object]:
-    """删除指定受管根的工作副本事实和文件，并重新排队物化任务。"""
+    """删除指定受管根的工作副本事实和文件，并重新排队分类/物化任务。"""
 
     managed_root = db.query(ManagedRoot).filter(ManagedRoot.root_key == root_key).one()
     working_roots = (
@@ -294,9 +296,109 @@ def reset_working_copy_materializations(
         raise RuntimeError("工作副本 Version 与源分析 Version 重叠，拒绝清理")
 
     before_source = _source_snapshot(db, root_id=managed_root.id)
+    expected_source_after = dict(before_source)
     counts: Counter[str] = Counter()
 
+    if force_source_reclassification and source_document_ids:
+        suggestions = _table("document_category_suggestions")
+        suggestion_ids = list(
+            db.execute(
+                select(suggestions.c.id).where(
+                    suggestions.c.document_id.in_(source_document_ids)
+                )
+            ).scalars()
+        )
+        if suggestion_ids:
+            feedback = _table("document_category_feedback")
+            _delete(
+                db,
+                "document_category_feedback",
+                feedback.c.suggestion_id.in_(suggestion_ids),
+                counts,
+            )
+        _delete(
+            db,
+            "document_category_suggestions",
+            suggestions.c.document_id.in_(source_document_ids),
+            counts,
+        )
+        classification_runs = _table("document_classification_runs")
+        _delete(
+            db,
+            "document_classification_runs",
+            classification_runs.c.document_id.in_(source_document_ids),
+            counts,
+        )
+        expected_source_after["source_classification_runs"] = 0
+
+    if clear_related_active_jobs:
+        jobs_table = _table("filesystem_jobs")
+        revision_id_set = set(revision_ids)
+        related_job_ids = [
+            str(job_id)
+            for job_id, payload, job_root_id in db.execute(
+                select(
+                    jobs_table.c.id,
+                    jobs_table.c.payload_json,
+                    jobs_table.c.root_id,
+                ).where(
+                    jobs_table.c.status.in_({"PENDING", "RUNNING"}),
+                    or_(
+                        jobs_table.c.root_id == managed_root.id,
+                        jobs_table.c.root_id.is_(None),
+                    ),
+                )
+            ).all()
+            if (
+                str(job_id)
+                and (
+                    # root_id 精确命中时无需依赖 payload；root_id 为空的历史
+                    # MATERIALIZE 任务必须用冻结修订 ID 收敛到本受管根。
+                    job_root_id == managed_root.id
+                    or str((payload or {}).get("managed_file_revision_id") or "")
+                    in revision_id_set
+                )
+            )
+        ]
+        if related_job_ids:
+            scan_runs = _table("filesystem_scan_runs")
+            _delete(
+                db,
+                "filesystem_scan_runs",
+                scan_runs.c.job_id.in_(related_job_ids),
+                counts,
+            )
+            _delete(
+                db,
+                "filesystem_jobs",
+                jobs_table.c.id.in_(related_job_ids),
+                counts,
+            )
+
     if copy_ids:
+        placement_operations = _table("classification_placement_operations")
+        placement_operation_ids = list(
+            db.execute(
+                select(placement_operations.c.id).where(
+                    placement_operations.c.working_copy_id.in_(copy_ids)
+                )
+            ).scalars()
+        )
+        if placement_operation_ids:
+            reservations = _table("working_copy_path_reservations")
+            _delete(
+                db,
+                "working_copy_path_reservations",
+                reservations.c.placement_operation_id.in_(placement_operation_ids),
+                counts,
+            )
+        _delete(
+            db,
+            "classification_placement_operations",
+            placement_operations.c.working_copy_id.in_(copy_ids),
+            counts,
+        )
+
         categories = _table("document_categories")
         category_ids = list(
             db.execute(
@@ -448,7 +550,7 @@ def reset_working_copy_materializations(
     # 重置时按当前动态分类身份分流，不能把旧 taxonomy 结果直接重新物化。
     classification_user_id = str(
         managed_root.created_by
-        or db.query(User.id).order_by(User.created_at.asc()).scalar()
+        or db.query(User.id).order_by(User.created_at.asc()).limit(1).scalar()
         or ""
     )
     if not classification_user_id:
@@ -582,9 +684,10 @@ def reset_working_copy_materializations(
     db.flush()
 
     after_source = _source_snapshot(db, root_id=managed_root.id)
-    if after_source != before_source:
+    if after_source != expected_source_after:
         raise RuntimeError(
-            f"源侧事实发生变化，拒绝提交：before={before_source}, after={after_source}"
+            "源侧可复用事实发生变化，拒绝提交："
+            f"expected={expected_source_after}, after={after_source}"
         )
     remaining_copy_query = db.query(WorkingCopy)
     if selection_is_scoped:
@@ -651,6 +754,9 @@ def reset_working_copy_materializations(
         ),
         "classification_refresh_job_ids": refresh_job_ids,
         "source_preserved": before_source,
+        "source_after_reset": after_source,
+        "force_source_reclassification": force_source_reclassification,
+        "clear_related_active_jobs": clear_related_active_jobs,
     }
 
 
@@ -663,6 +769,16 @@ def main() -> None:
     parser.add_argument("--root-key", required=True)
     parser.add_argument("--reason-code")
     parser.add_argument("--source-path-prefix")
+    parser.add_argument(
+        "--force-source-reclassification",
+        action="store_true",
+        help="删除该根旧分类运行/建议并基于保留正文重新分类",
+    )
+    parser.add_argument(
+        "--clear-related-active-jobs",
+        action="store_true",
+        help="删除该根 PENDING/RUNNING 任务后按当前修订重新排队",
+    )
     parser.add_argument("--confirm-reset-working-copies", action="store_true")
     parser.add_argument("--confirm-writers-stopped", action="store_true")
     args = parser.parse_args()
@@ -681,6 +797,8 @@ def main() -> None:
                 root_key=args.root_key,
                 reason_code=args.reason_code,
                 source_path_prefix=args.source_path_prefix,
+                force_source_reclassification=args.force_source_reclassification,
+                clear_related_active_jobs=args.clear_related_active_jobs,
             )
         except Exception:
             db.rollback()

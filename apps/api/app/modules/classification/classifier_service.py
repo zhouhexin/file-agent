@@ -49,7 +49,7 @@ from app.modules.knowledge_graph.semantic_context import NoOpSemanticClassificat
 
 
 # 分类判定规则发生变化后必须递增版本，避免复用旧分类缓存。
-CLASSIFIER_IMPLEMENTATION_VERSION = "v15"
+CLASSIFIER_IMPLEMENTATION_VERSION = "v19"
 _FACULTY_RECRUITMENT_CATEGORY_ID = "college.hr.faculty-recruitment"
 _MANAGED_SOURCE_RECRUITMENT_PACKAGE_SOURCE = "managed_source_recruitment_package"
 _TITLE_REVIEW_CATEGORY_ID = "school.hr.title-review"
@@ -262,6 +262,11 @@ class DocumentClassificationService:
                             cached_decision.get("primary_input_fingerprint") or ""
                         ),
                         "content_fingerprint": content_fingerprint,
+                        "purpose_package_digest": (
+                            purpose_package.manifest_digest
+                            if purpose_package is not None
+                            else ""
+                        ),
                     }
             base_categories = self._classify_with_unified_taxonomy(
                 filename=filename,
@@ -469,6 +474,9 @@ class DocumentClassificationService:
             ),
             "purpose_package_reason_codes": (
                 [] if package_result is None else list(package_result.reason_codes)
+            ),
+            "purpose_package_digest": (
+                purpose_package.manifest_digest if purpose_package is not None else ""
             ),
         }
 
