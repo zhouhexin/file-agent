@@ -92,10 +92,43 @@ class AttachmentTransferService:
             raise ValueError("rule_profile 不是 File Agent 允许的固定规则集")
 
         manifest = [self._resolve_attachment(raw) for raw in attachments]
-        attachment_ids = [item.attachment_id for item in manifest]
+        return await self.ingest_resolved(
+            submission_id=submission_id,
+            attachments=manifest,
+            user_request=user_request,
+            placement_mode=placement_mode,
+            rule_profile=rule_profile,
+        )
+
+    async def ingest_resolved(
+        self,
+        *,
+        submission_id: str,
+        attachments: list[WorkBuddyAttachment],
+        user_request: str | None,
+        placement_mode: str,
+        rule_profile: str,
+    ) -> dict[str, Any]:
+        """传输已由受控入口解析的附件快照。
+
+        仅 ``WorkBuddySubmissionService`` 可在调用前构造此类快照；该方法保留全部
+        批次策略校验和上传前二次哈希校验，不能作为模型可见的 MCP 参数入口。
+        """
+
+        if not _SUBMISSION_ID_PATTERN.fullmatch(submission_id):
+            raise ValueError("submission_id 必须是 WorkBuddy 提交事件的稳定安全标识")
+        if not attachments:
+            raise ValueError("attachments 不能为空")
+        if len(attachments) > 1000:
+            raise ValueError("单次 WorkBuddy 附件数量超过客户端安全上限")
+        if placement_mode not in {"BY_CATEGORY", "NEUTRAL"}:
+            raise ValueError("placement_mode 只能是 BY_CATEGORY 或 NEUTRAL")
+        if rule_profile not in {"content_based", "legacy_school_materials"}:
+            raise ValueError("rule_profile 不是 File Agent 允许的固定规则集")
+        attachment_ids = [item.attachment_id for item in attachments]
         if len(attachment_ids) != len(set(attachment_ids)):
             raise ValueError("同一次提交中的 attachment_id 不能重复")
-        payloads = [item.api_payload() for item in manifest]
+        payloads = [item.api_payload() for item in attachments]
         manifest_digest = self._manifest_digest(
             payloads=payloads,
             user_request=user_request,
@@ -134,7 +167,7 @@ class AttachmentTransferService:
                 server_items.extend(response.get("items", []))
             await self.client.seal_batch(batch_id=batch_id)
         item_map = {str(item["client_item_id"]): item for item in server_items}
-        return await self._upload(batch_id=batch_id, manifest=manifest, item_map=item_map)
+        return await self._upload(batch_id=batch_id, manifest=attachments, item_map=item_map)
 
     def _resolve_attachment(
         self,

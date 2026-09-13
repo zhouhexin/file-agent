@@ -6,8 +6,21 @@ Document.user_id 记录导入审计来源，不能再次切分所有用户共享
 
 from uuid import uuid4
 
-from app.db.models import Document, DocumentSearchProfile, DocumentSummary, DocumentVersion, User, WorkingCopy
+import pytest
+from fastapi import HTTPException
+
+from app.db.models import (
+    Conversation,
+    Document,
+    DocumentSearchProfile,
+    DocumentSummary,
+    DocumentVersion,
+    RelevantFileSet,
+    User,
+    WorkingCopy,
+)
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
+from app.modules.retrieval.router import FileSearchRequest, search_files
 from app.tests.helpers import client_with_database
 
 
@@ -145,3 +158,176 @@ def test_search_api_requires_authentication():
     client, _ = client_with_database()
     response = client.post("/api/search", json={"query": "奖学金"})
     assert response.status_code == 401
+
+
+def test_workbuddy_style_search_creates_owned_conversation_only_for_final_results(monkeypatch):
+    """首次 wb-* 搜索有最终结果时，应先创建会话再写相关文件集合。"""
+
+    client, SessionLocal = client_with_database()
+    user_id, _token = _register_and_login(client, "workbuddy-search-owner")
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        assert user is not None
+        document_id = _add_profile(
+            db,
+            user=user,
+            filename="国家励志奖学金申请.txt",
+            summary_text="奖学金申请材料",
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        assert user is not None
+        working_copy = db.query(WorkingCopy).filter(WorkingCopy.document_id == document_id).one()
+        conversation_id = "wb-1234567890abcdef1234567890abcdef"
+        _force_final_result(monkeypatch, document_id=document_id, working_copy_id=working_copy.id)
+        response = search_files(
+            FileSearchRequest(query="奖学金", conversation_id=conversation_id),
+            db=db,
+            current_user=user,
+        )
+        assert response["total_returned"] == 1
+        repeated_response = search_files(
+            FileSearchRequest(query="奖学金", conversation_id=conversation_id),
+            db=db,
+            current_user=user,
+        )
+        assert repeated_response["total_returned"] == 1
+        db.commit()
+    finally:
+        db.close()
+
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        assert conversation is not None
+        assert conversation.user_id == user_id
+        assert (
+            db.query(Conversation)
+            .filter(Conversation.id == conversation_id)
+            .count()
+            == 1
+        )
+        relevant_file_sets = (
+            db.query(RelevantFileSet)
+            .filter(RelevantFileSet.conversation_id == conversation_id)
+            .all()
+        )
+        assert len(relevant_file_sets) == 2
+        assert all(item.user_id == user_id for item in relevant_file_sets)
+
+
+def test_workbuddy_style_empty_search_does_not_create_conversation():
+    """空搜索不应为了满足外键而创建无意义的 WorkBuddy 会话占位。"""
+
+    client, SessionLocal = client_with_database()
+    _user_id, token = _register_and_login(client, "workbuddy-empty-search")
+    conversation_id = "wb-abcdef1234567890abcdef1234567890"
+
+    response = client.post(
+        "/api/search",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"query": "不会命中的唯一检索词", "conversation_id": conversation_id},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total_returned"] == 0
+    with SessionLocal() as db:
+        assert db.get(Conversation, conversation_id) is None
+        assert (
+            db.query(RelevantFileSet)
+            .filter(RelevantFileSet.conversation_id == conversation_id)
+            .count()
+            == 0
+        )
+
+
+def test_workbuddy_search_rejects_another_users_conversation_before_persisting(monkeypatch):
+    """猜测到其他用户 wb-* ID 时不得新增集合或泄漏会话所有权。"""
+
+    client, SessionLocal = client_with_database()
+    owner_id, _owner_token = _register_and_login(client, "workbuddy-conversation-owner")
+    _other_id, _other_token = _register_and_login(client, "workbuddy-conversation-other")
+    db = SessionLocal()
+    try:
+        owner = db.get(User, owner_id)
+        assert owner is not None
+        document_id = _add_profile(
+            db,
+            user=owner,
+            filename="国家励志奖学金申请.txt",
+            summary_text="奖学金申请材料",
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    conversation_id = "wb-fedcba0987654321fedcba0987654321"
+    db = SessionLocal()
+    try:
+        owner = db.get(User, owner_id)
+        other = db.get(User, _other_id)
+        assert owner is not None
+        assert other is not None
+        working_copy = db.query(WorkingCopy).filter(WorkingCopy.document_id == document_id).one()
+        _force_final_result(monkeypatch, document_id=document_id, working_copy_id=working_copy.id)
+        search_files(
+            FileSearchRequest(query="奖学金", conversation_id=conversation_id),
+            db=db,
+            current_user=owner,
+        )
+        db.commit()
+
+        with pytest.raises(HTTPException) as error:
+            search_files(
+                FileSearchRequest(query="奖学金", conversation_id=conversation_id),
+                db=db,
+                current_user=other,
+            )
+        assert error.value.status_code == 403
+    finally:
+        db.close()
+
+    with SessionLocal() as db:
+        assert (
+            db.query(RelevantFileSet)
+            .filter(RelevantFileSet.conversation_id == conversation_id)
+            .count()
+            == 1
+        )
+
+
+def _force_final_result(monkeypatch, *, document_id: str, working_copy_id: str) -> None:
+    """构造带稳定工作副本 ID 的最终结果，覆盖相关文件集合的外键写入路径。"""
+
+    result = {
+        "query": "奖学金",
+        "total_returned": 1,
+        "supported_count": 1,
+        "possible_count": 0,
+        "partial": False,
+        "results": [
+            {
+                "document_id": document_id,
+                "working_copy_id": working_copy_id,
+                "relevance_tier": "SUPPORTED",
+                "filename": "国家励志奖学金申请.txt",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "app.modules.retrieval.router.TwoStageFileSearchService.search",
+        lambda *_args, **_kwargs: dict(result),
+    )
+    monkeypatch.setattr(
+        "app.modules.retrieval.router.FileSearchPhraseStrategyService.search_with_topic_tiers",
+        lambda *_args, **_kwargs: dict(result),
+    )
+    monkeypatch.setattr(
+        "app.modules.retrieval.router.SearchCompletenessService.attach_safely",
+        lambda _self, *, result, **_kwargs: result,
+    )

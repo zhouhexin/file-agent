@@ -55,7 +55,8 @@
           "required": ["minimum_groups", "require_body_signal"],
           "properties": {
             "minimum_groups": {"type": "integer", "minimum": 1, "maximum": 8},
-            "require_body_signal": {"type": "boolean"}
+            "require_body_signal": {"type": "boolean"},
+            "require_subject_and_action_in_body": {"type": "boolean"}
           }
         },
         "regression_sample_ids": {"type": "array", "items": {"type": "string"}}

@@ -6,7 +6,7 @@ import type { IngestDuplicateComparison, IngestDuplicateComparisonSide } from '.
 import { PreviewPane, type PreviewSide, TEXT_EXTENSIONS, MAX_LOCAL_DOCX_BYTES } from './DuplicateComparisonDialog';
 import { XLSX_MAX_LOCAL_BYTES } from './xlsxPreview';
 
-type Props = { token: string; query: URLSearchParams; onBack: () => void };
+type Props = { query: URLSearchParams; onBack: () => void };
 type Side = 'UPLOAD' | 'CANDIDATE';
 const DOWNLOAD_LIMIT_BYTES = 128 * 1024 * 1024;
 const RAW_PREVIEW_LIMIT_BYTES = 25 * 1024 * 1024;
@@ -35,7 +35,7 @@ function browserPreview(value: IngestDuplicateComparisonSide, blob: Blob): Previ
   return { filename: value.filename, size: blob.size, status: 'unavailable', mode: 'download', objectUrl, message: '该格式没有浏览器安全预览，仍可受控下载后在本地查看。' };
 }
 
-export function IngestDuplicateComparisonPage({ token, query, onBack }: Props) {
+export function IngestDuplicateComparisonPage({ query, onBack }: Props) {
   const itemId = query.get('item_id'); const reviewId = query.get('review_id'); const candidateId = query.get('candidate_id');
   const revision = Number(query.get('review_revision')); const group = query.get('group_revision');
   const [data, setData] = useState<IngestDuplicateComparison | null>(null);
@@ -48,10 +48,10 @@ export function IngestDuplicateComparisonPage({ token, query, onBack }: Props) {
   useEffect(() => () => objectUrls.current.forEach((url) => URL.revokeObjectURL(url)), []);
   useEffect(() => {
     if (!validId(itemId) || !validId(reviewId) || !validId(candidateId) || !Number.isInteger(revision) || revision < 1 || (group !== null && (!Number.isInteger(Number(group)) || Number(group) < 1))) { setError('对比链接无效或已损坏。'); return; }
-    getIngestDuplicateComparison(token, itemId!, { review_id: reviewId!, review_revision: revision, candidate_id: candidateId!, group_revision: group === null ? null : Number(group) })
+    getIngestDuplicateComparison(itemId!, { review_id: reviewId!, review_revision: revision, candidate_id: candidateId!, group_revision: group === null ? null : Number(group) })
       .then((response) => { setData(response); setPreviewSides({ UPLOAD: unavailableSide(response.upload), CANDIDATE: unavailableSide(response.candidate) }); })
       .catch((value) => setError(value instanceof Error ? value.message : '无法读取重复候选。'));
-  }, [token, itemId, reviewId, candidateId, revision, group]);
+  }, [itemId, reviewId, candidateId, revision, group]);
 
   async function loadPreview(side: Side) {
     if (!data) return;
@@ -65,7 +65,7 @@ export function IngestDuplicateComparisonPage({ token, query, onBack }: Props) {
     if (needsStoredPreview) {
       setPreviewSides((current) => ({ ...current, [side]: { filename: value.filename, size: value.size_bytes, status: 'loading', mode: null } }));
       try {
-        const preview = await getIngestDuplicateComparisonPreview(token, data.item_id, { review_id: data.review_id, review_revision: data.review_revision, candidate_id: data.candidate_id, group_revision: data.group_revision, snapshot_id: data.snapshot_id, side });
+        const preview = await getIngestDuplicateComparisonPreview(data.item_id, { review_id: data.review_id, review_revision: data.review_revision, candidate_id: data.candidate_id, group_revision: data.group_revision, snapshot_id: data.snapshot_id, side });
         setPreviewSides((current) => ({ ...current, [side]: { filename: preview.filename, size: value.size_bytes, status: 'ready', mode: 'sections', sections: preview.sections, message: preview.truncated ? '正文较长，当前只展示前 100,000 个字符。' : undefined } }));
       } catch (reason) {
         setPreviewSides((current) => ({ ...current, [side]: { ...unavailableSide(value), mode: 'download', message: reason instanceof Error ? `${reason.message}；可下载后在本地查看。` : '当前没有已有正文预览，可下载后在本地查看。' } }));
@@ -75,7 +75,7 @@ export function IngestDuplicateComparisonPage({ token, query, onBack }: Props) {
     if ((value.size_bytes ?? 0) > DOWNLOAD_LIMIT_BYTES) { setPreviewSides((current) => ({ ...current, [side]: { ...unavailableSide(value), mode: 'download', message: '文件超过 128 MB 的浏览器读取上限，可使用下载按钮保存到本地查看。' } })); return; }
     setPreviewSides((current) => ({ ...current, [side]: { filename: value.filename, size: value.size_bytes, status: 'loading', mode: null } }));
     try {
-      const blob = await fetchIngestDuplicateComparisonBlob(token, data.item_id, { review_id: data.review_id, review_revision: data.review_revision, candidate_id: data.candidate_id, group_revision: data.group_revision, snapshot_id: data.snapshot_id, side });
+      const blob = await fetchIngestDuplicateComparisonBlob(data.item_id, { review_id: data.review_id, review_revision: data.review_revision, candidate_id: data.candidate_id, group_revision: data.group_revision, snapshot_id: data.snapshot_id, side });
       if (blob.size > DOWNLOAD_LIMIT_BYTES) throw new Error('文件超过 128 MB 的浏览器读取上限。');
       const preview = browserPreview(value, blob);
       if (preview.objectUrl) objectUrls.current.push(preview.objectUrl);
@@ -92,7 +92,7 @@ export function IngestDuplicateComparisonPage({ token, query, onBack }: Props) {
     setDownloading(true);
     setActionError('');
     try {
-      const blob = await fetchIngestDuplicateComparisonBlob(token, data.item_id, { review_id: data.review_id, review_revision: data.review_revision, candidate_id: data.candidate_id, group_revision: data.group_revision, snapshot_id: data.snapshot_id, side });
+      const blob = await fetchIngestDuplicateComparisonBlob(data.item_id, { review_id: data.review_id, review_revision: data.review_revision, candidate_id: data.candidate_id, group_revision: data.group_revision, snapshot_id: data.snapshot_id, side });
       const url = URL.createObjectURL(blob); objectUrls.current.push(url);
       const anchor = document.createElement('a'); anchor.href = url; anchor.download = `${side === 'UPLOAD' ? '本次上传_' : '候选_'}${value.filename}`; anchor.click();
     } catch (value) { setActionError(value instanceof Error ? value.message : '下载失败。'); }

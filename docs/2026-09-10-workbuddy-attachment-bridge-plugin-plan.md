@@ -1,5 +1,103 @@
 # WorkBuddy 会话附件到 File Agent MCP 的插件适配方案
 
+> 文档桥接实测与实现补充（2026-09-12，MCP 新版、Hook 仍为 0.1.6）：本机 WorkBuddy 5.5.3
+> 的真实 DOCX、PDF、XLS 提交在固定 transcript 中只有 `input_text`，但宿主在用户正文之前生成
+> `<user_references>` 和 `<additional_data><attached_files>` 两份一致的本轮文件引用。这些标签由
+> WorkBuddy 从 `resource_link` 生成，不是模型参数；MCP 现在仅在固定会话、任务文字、30 秒准备
+> 时间窗和唯一消息 ID 校验后读取宿主区，并要求两份引用完全对应。桥接层以稳定消息 ID、附件顺序和
+> 宿主引用派生附件 ID，把 Word/PDF/Excel 原文件流式快照到已显式授权的插件私有
+> `bridge_state_dir/document-cache`，再复用原有 `AttachmentTransferService`。用户正文中手写路径、
+> 伪造 XML、单边引用、根未配置、非普通文件、超过 200 MiB 或不支持的扩展名均关闭式拒绝。
+> 支持 `.doc/.docx/.pdf/.xls/.xlsx/.txt`；DOC、XLSX、TXT 是自动化覆盖，真实 GUI 尚待验收。
+> 这是 5.5.3 本机记录格式适配，不是官方稳定 Host API；升级 WorkBuddy 后必须复核该格式。
+> 本机已将独立快照根加入 `mcp.json`，需完全重启 WorkBuddy 并重新提交文件测试，旧提交单已过期。
+> 试点版不自动删除文档快照，运维须监控插件私有缓存占用；清理策略应在证明不会影响批次恢复后单独实现。
+
+> 0.1.6 外部 OCR 编排补充（2026-09-12）：图片附件传输成功后，后端按既有设计返回
+> `WAITING_EXTERNAL_EXTRACTION`，插件 Skill 不能再只调用 `batch_get`/`job_get` 等待。Agent 必须使用条目
+> `result.external_extraction_task_id` 调用 `extraction_claim`，逐页调用 WorkBuddy 5.5.3 已安装、已启用的
+> 腾讯文档个人版 `ocr.extract`，再以固定页集合调用 `extraction_submit`。本机工具文档确认
+> `ocr.extract` 返回 `texts`，开启 `with_positions` 后返回 `text_detections`；未声明置信度、Provider 版本
+> 或请求 ID，所以这些字段只能为 `null`。`ocr.toword`/`ocr.toexcel` 仅返回云文件 ID/URL，WorkBuddy 通用
+> `Read` 和图片处理套件也没有可依赖的结构化 OCR 契约，均不作为回填入口。腾讯文档插件已安装且在
+> `settings.json` 中启用，但宿主票据和服务端实际响应仍须升级后用真实会话验收，不能把启用状态称为
+> OCR 已调用成功。MCP 下载页按已验证 MIME 保存 png/jpg/bmp/webp/tiff 后缀；未知格式保留 `.image` 并由
+> OCR 能力明确拒绝。此次不新增后端 OCR Provider，不修改原件、后端提取任务或分类链路。
+> 2026-09-13 中文称呼补充：用户可说“请用文件助手归档并分类本轮附件”，不再要求输入英文产品名。
+> 套件升级为 0.1.7；底层 `file-agent` MCP 名、`FILE_AGENT_*` 配置键与 API 保持兼容。
+> 2026-09-13 TXT 补充：可信宿主文档引用白名单新增 `.txt`，复用后端既有纯文本解析链路；
+> 套件升级为 0.1.8，不调整环境变量、后端 API 或分类流程。
+> 2026-09-13 分类回执补充：批次成功文件投影当前生效 `primary_category` 与
+> `classification_outcome=CLASSIFIED|OTHER`，WorkBuddy 套件 0.1.9 要求逐文件展示；不在该回执增加
+> 分类证据或关键词，也不因查询回执重新执行分类。
+> 2026-09-13 重复对比展示补充：WorkBuddy 套件 0.1.10 在任何
+> `WAITING_DUPLICATE_CONFIRMATION` 状态下，必须先刷新 review、逐个调用 `duplicate_comparison_get` 并在
+> 回复中展示工具返回的 Markdown 对比链接，然后才能询问处理决定。当前宿主只保证主动展示链接，不声明
+> 自动打开外部浏览器；修订冲突只刷新一次，用户明确选择前不得调用 `duplicate_decide`。
+>
+> 交付包升级为 `file-agent-marketplace-0.1.6.zip`；更新套件和本地 MCP 后完全重启 WorkBuddy，API、worker、
+> 数据库和 `mcp.json` 环境变量均无须修改。
+
+> 0.1.5 实测纠正（2026-09-12）：WB-0912-05/06 失败记录中同时存在合法 `image_blob_ref`、
+> 乱码的提交单 `prompt` 和约 5.3～6 秒的消息提前量。0.1.4 所解释的代理项异常实际也可能来自
+> UTF-8 字节被 Windows GBK/surrogateescape 错误解码，仅替换孤立代理项会使错误从写盘失败变为匹配失败。
+> 新版捕获和 PreToolUse Hook 必须从 `sys.stdin.buffer` 严格按 UTF-8 解码，输出 ASCII 转义 JSON；
+> 不得猜测编码或用替换字符恢复已损坏任务。合法 UTF-16 代理对可无损合并，孤立代理项拒绝签发。
+> 消息准备提前量与未来时钟容差分开：前者上限 30 秒，后者仍为 5 秒；提交单 TTL、单一会话记录根、
+> 会话 ID、任务文字、唯一候选、稳定消息 ID 和 blob 授权根检查不变。新增编码拒绝诊断码
+> `PENDING_INPUT_ENCODING_INVALID`。只出现路径文字、没有 `image_blob_ref` 的消息仍不支持导入。
+> 交付包为 `file-agent-marketplace-0.1.5.zip`；必须同时加载新版 MCP，完全重启 WorkBuddy，
+> 无须修改环境变量或重启 API/worker。回归通过真实 GBK 标准流子进程覆盖中文、6 秒准备时间、
+> 时间窗外历史消息、无效 UTF-8/JSON、孤立代理项和唯一性；50 passed、2 skipped。
+> 此次测试为模拟 Hook 到 MCP 的回归，拖拽/左下角添加两种 GUI 上传方式仍待升级后的真实验收。
+
+> 实施状态（2026-09-12）：P0 与 P1（可信提交单、`workbuddy_submission_ingest`、Skill 和 PreToolUse
+> 校验）已实现，且复用既有附件传输、查重和自动整理链路。图片使用 `image_blob_ref`；
+> 文档按上面的 5.5.3 宿主双重引用适配，不把普通用户文字当作附件。根据当前官方插件规范，插件清单目录采用
+> `.codebuddy-plugin/`，替代本文早期草案中的 `.workbuddy-plugin/`；后续阶段仍须先验证 PDF、DOCX、XLSX
+> 的真实 transcript 附件块类型，未知类型不得导入。
+>
+> 交付调整（2026-09-12）：WorkBuddy 图形客户端的标准分发改用
+> `integrations/workbuddy/file-agent-connector/` 的 MCP + Skill 连接器包，详见
+> `docs/2026-09-12-workbuddy-connector-delivery-development-spec.md`。本方案中的 CodeBuddy CLI Hook 目录只保留为
+> 非标准宿主实验，不作为 WorkBuddy 安装路径；标准连接器不具备当前聊天附件提交事件，因此必须隐藏附件导入工具。
+>
+> 本机试点补充（2026-09-12）：WorkBuddy 5.5.3 的本地插件注册表包含套件市场，故新增
+> `integrations/workbuddy/.codebuddy-plugin/marketplace.json`，允许在「技能 → 套件」中尝试安装
+> `file-agent-workbuddy-bridge` Hook 插件。此路径仍须经 WorkBuddy 图形客户端实测；不要将
+> 市场安装成功等同于 PDF/DOCX/XLSX 附件传输成功。
+>
+> 本机安装测试补充：当 WorkBuddy 图形页只接受市场地址时，可将上述本地市场根中的
+> `.codebuddy-plugin` 和 `file-agent-plugin` 两项打包成 ZIP，在 `127.0.0.1` 上临时提供
+> `http://127.0.0.1:8765/file-agent-marketplace.zip`。此路径用于验证 GUI 是否接受完整 ZIP
+> 市场，不代表已发布的长期分发地址；验证失败应记录 WorkBuddy 原始错误，不得把 GitHub
+> 未推送代码的地址告诉用户作为可用市场。
+
+> 本机诊断补充（2026-09-12）：WorkBuddy 5.5.3 中已确认插件配置和 Hook 加载成功，且图片 blob
+> 位于授权缓存根内，但一次真实会话没有生成可信提交单，Agent 错误回退为复制到工作区并调用
+> `file_batch_ingest`。0.1.1 先只加入不含正文、文件名、附件 ID、绝对路径和密钥的捕获状态码；必须取得
+> 真实 Hook 诊断结果后再改本轮消息匹配。若当前消息在 Hook 时尚未写入 transcript，仍遵守第 6 节：
+> 不用 sleep 或扫描整个 WorkBuddy 数据目录猜测附件，改走宿主稳定附件 API 或受控选择入口。
+>
+> 0.1.2 时序修复（2026-09-12）：真实诊断已得到 `SESSION_MESSAGE_MISSING`，并在 Hook 返回后确认同一
+> 固定 transcript 会落盘包含 `input_text`、`image_blob_ref`、会话 ID、消息 ID 和毫秒时间戳的完整用户消息。
+> 因此采用受控延迟解析：Hook 不等待、不轮询、不扫描目录，只签发绑定当前 `session_id`、Hook 提供的固定
+> `transcript_path`、任务文字和创建时间的短时引用；`workbuddy_submission_ingest` 调用时再读取这一个已授权
+> transcript，并要求在窄时间窗内唯一匹配会话和任务文字，之后仍用附件缓存白名单复核 blob。匹配为空或
+> 不唯一一律拒绝。该实现修正了第 6 节所禁止的“等待/全目录猜测”风险，不把 transcript 路径或附件字段交给模型；
+> 宿主正式附件 API 仍是长期优先方案。
+>
+> 0.1.3 前置扫描移除（2026-09-12）：真实图片测试显示 0.1.2 某轮只记录 `PROMPT_MISMATCH`，没有继续
+> 生成 `PENDING_MANIFEST_CREATED`，模型因而没有取得 `submission_ref`。同时确认 WorkBuddy transcript 的
+> `input_text` 会包装为较长的宿主上下文，不能把 Hook 时刻扫描结果作为引用签发前置条件。0.1.3 的 Hook
+> 主路径只校验固定 transcript 路径、会话 ID、非空任务文字和私有状态目录，并立即原子写入待解析引用；
+> transcript 内容读取、时间窗、任务文字、唯一消息、附件块和 blob 根校验全部集中到 MCP 调用阶段。
+>
+> 0.1.4 宿主 Unicode 兼容修复（2026-09-12）：真实 Hook 日志确认 WorkBuddy 的 JSON `prompt` 可能包含
+> UTF-16 代理对；0.1.3 使用 `ensure_ascii=false` 写 UTF-8 提交单时会触发 `UnicodeEncodeError`，导致 Hook
+> 非阻断异常退出且不生成引用。0.1.4 在信任边界把有效代理对还原为 Unicode 标量、把孤立代理项替换为
+> U+FFFD，并在 MCP 任务文字匹配时做同样规范化；不扩大 transcript、附件缓存或 Tool 的授权范围。
+
 ## 1. 结论
 
 仅在 `~/.workbuddy/mcp.json` 中注册 File Agent MCP，能够让 WorkBuddy 发现和调用工具，但不会把“用户在
@@ -12,7 +110,7 @@ Agent；File Agent MCP 再通过新工具读取该清单并执行导入。
 ```text
 用户在 WorkBuddy 中上传附件并发送任务文字
 -> WorkBuddy UserPromptSubmit Hook
--> Hook 从本轮 transcript 中识别附件，生成只读提交清单
+-> Hook 生成绑定固定 transcript、会话、任务文字和时间窗的待解析引用
 -> Hook 向 Agent 上下文注入 submission_ref，不注入绝对路径
 -> Skill 根据用户意图选择 File Agent
 -> Agent 调用 workbuddy_submission_ingest(submission_ref, user_request)
@@ -127,7 +225,7 @@ Skill 只负责意图路由和调用顺序。
 
 ```text
 integrations/workbuddy/file-agent-plugin/
-├─ .workbuddy-plugin/
+├─ .codebuddy-plugin/
 │  └─ plugin.json
 ├─ hooks/
 │  └─ hooks.json
@@ -153,7 +251,7 @@ integrations/workbuddy/file-agent-plugin/
 {
   "name": "file-agent-workbuddy-bridge",
   "version": "0.1.0",
-  "description": "把 WorkBuddy 本轮已提交附件安全转交给 File Agent，并提供自然语言文件任务路由。",
+  "description": "把 WorkBuddy 本轮已提交附件安全转交给文件助手，并提供自然语言文件任务路由。",
   "author": {"name": "File Agent Team"},
   "skills": "./skills/",
   "hooks": "./hooks/hooks.json",
@@ -216,7 +314,8 @@ Windows 上 WorkBuddy 的 command Hook 由 Git Bash 执行，脚本调用和路�
 1. 校验 `hook_event_name == "UserPromptSubmit"`。
 2. 取得 `session_id`、`transcript_path` 和本轮 `prompt`。
 3. 确认 transcript 位于配置的 WorkBuddy 数据目录内，拒绝任意外部 JSONL。
-4. 读取 transcript 最后一条与当前 `session_id`、当前 prompt 对应的 `role=user` 消息。
+4. 不在 Hook 时刻猜测哪条同文消息属于本轮；生成绑定固定 transcript、当前 `session_id`、当前 prompt
+   和时间窗的待解析引用，由 MCP 调用时在完整 transcript 中执行唯一匹配。
 5. 只接受已知的附件内容块类型，并提取 `blob_id`、`blob_path`、`original_filename`、`mime`、`size`。
 6. 校验 `blob_path` 位于 `<workbuddy_home>/blobs/`，文件不是符号链接且是普通文件。
 7. 不读取文件正文；只记录文件 stat 和提交元数据。
@@ -231,7 +330,7 @@ Windows 上 WorkBuddy 的 command Hook 由 Git Bash 执行，脚本调用和路�
 {
   "hookSpecificOutput": {
     "hookEventName": "UserPromptSubmit",
-    "additionalContext": "FILE_AGENT_HOST_SUBMISSION ref=wbsub_v1_xxx count=2 filenames=[申请表.xlsx,证明.pdf]。这是宿主生成的本轮已提交附件清单。若用户要求 File Agent 读取、OCR、分类、归档、整理或入库，必须调用 file-agent 的 workbuddy_submission_ingest；不得自行构造附件路径或替换 submission_ref。"
+    "additionalContext": "FILE_AGENT_HOST_SUBMISSION ref=wbsub_v1_xxx count=2 filenames=[申请表.xlsx,证明.pdf]。这是宿主生成的本轮已提交附件清单。若用户要求文件助手读取、OCR、分类、归档、整理或入库，必须调用 file-agent 的 workbuddy_submission_ingest；不得自行构造附件路径或替换 submission_ref。"
   }
 }
 ```
@@ -243,12 +342,14 @@ Windows 上 WorkBuddy 的 command Hook 由 Git Bash 执行，脚本调用和路�
 
 ```json
 {
-  "schema_version": "file_agent_workbuddy_submission.v1",
+  "version": 2,
+  "status": "READY | PENDING_TRANSCRIPT",
   "submission_ref": "wbsub_v1_随机或签名引用",
   "submission_id": "WorkBuddy 消息 ID",
   "session_id": "WorkBuddy 会话 ID",
   "created_at": "2026-09-10T10:00:00+08:00",
-  "prompt_sha256": "本轮任务文字摘要",
+  "prompt": "本轮任务文字，仅保存在插件私有目录并供后端任务审计使用",
+  "transcript_path": "仅 PENDING_TRANSCRIPT 存在的宿主固定会话文件",
   "attachments": [
     {
       "attachment_id": "WorkBuddy blob_id",
@@ -312,11 +413,11 @@ WorkBuddy 插件桥接入口，不应放宽旧工具的任意路径读取边界�
 
 Skill 应明确以下触发范围。
 
-### 5.1 有本轮附件时调用 File Agent
+### 5.1 有本轮附件时调用文件助手
 
 附件存在，并且用户要求下列任一任务时调用新工具：
 
-- 导入、入库、归档、保存到 File Agent。
+- 导入、入库、归档、保存到文件助手。
 - 读取、解析、OCR、识别扫描件。
 - 分类、归类、整理、标准化命名。
 - 总结、讲解、提取字段、表格分析，同时要求文件进入 File Agent。
@@ -330,7 +431,7 @@ Skill 应明确以下触发范围。
 - 明确改名使用 `file_rename`，随后按 OperationPlan 确认。
 - 不得调用附件导入工具，不得把工作目录文件猜成本轮附件。
 
-### 5.3 不调用 File Agent 的情况
+### 5.3 不调用文件助手的情况
 
 - 用户上传附件但只要求 WorkBuddy 临时查看，明确表示不要归档或不要进入 File Agent。
 - 用户只在输入框选择附件但没有提交消息。
@@ -348,8 +449,11 @@ Skill 应明确以下触发范围。
 绝对路径或凭证。用 PDF、DOCX、XLSX、图片各提交一次，确认非图片附件是否也提供
 `blob_id/blob_path/original_filename`。
 
-如果当前消息在 Hook 执行时还没有写入 transcript，立即停止本方案的 transcript 适配实现，不要通过 sleep
-或扫描整个 `~/.workbuddy` 猜测附件；应改走 WorkBuddy 官方宿主 API 或专用文件选择入口。
+真实试点已确认 WorkBuddy 5.5.3 在当前消息写入 transcript 前触发 Hook，但 Hook 返回后会把完整消息写入
+同一个固定 transcript。采用 0.1.3 的受控延迟解析：Hook 立即生成 `PENDING_TRANSCRIPT` 引用，MCP 调用时
+只读取引用中冻结的 transcript，并按会话 ID、任务文字、创建时间窗和稳定消息 ID 唯一匹配。禁止 sleep、
+轮询、扫描整个 `~/.workbuddy`、选取“最新 blob”或让模型提供路径；无法唯一匹配必须拒绝。正式发布仍应
+优先改用 WorkBuddy 官方附件 Host API 或专用文件选择入口。
 
 ### 第二步：实现可信清单与 MCP 新工具
 
@@ -394,12 +498,17 @@ codebuddy plugin list --json
 实际 `BRIDGE_STATE_DIR` 必须以 WorkBuddy 为该插件解析出的 `${CODEBUDDY_PLUGIN_DATA}` 为准，不能照抄示例猜
 目录。修改 `mcp.json` 后需要完全重启 WorkBuddy，使 MCP 进程取得新环境变量。
 
+0.1.2 及以后版本在标准布局中会从以 `blobs` 结尾的附件授权根推导同级 `projects` 会话记录根，因此不需要重复配置。
+只有 WorkBuddy 数据目录采用非标准布局时，才额外设置
+`FILE_AGENT_WORKBUDDY_TRANSCRIPT_ROOTS='["<projects 目录>"]'`；MCP 仍只读取待解析引用中冻结的单个 JSONL，
+不会扫描该根。
+
 ### 第六步：端到端验收
 
 测试话术：
 
 ```text
-（上传 2 个文件）请用 File Agent 读取并分类这些文件。
+（上传 2 个文件）请用文件助手读取并分类这些文件。
 （上传扫描 PDF）请 OCR 后归档，并告诉我哪些页不清楚。
 （上传 Excel）请整理所有工作表，生成摘要并存入 File Agent。
 （不上传文件）请在 File Agent 中找去年的奖学金材料。

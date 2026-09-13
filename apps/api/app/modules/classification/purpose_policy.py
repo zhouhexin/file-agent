@@ -121,6 +121,7 @@ def evaluate_purpose_package(
                 "quote": package.id,
                 "signals": [package.policy_id, package.policy_version],
                 "source": "verified_purpose_package",
+                "manifest_digest": package.manifest_digest,
             }
         ],
         "candidate_scores": {

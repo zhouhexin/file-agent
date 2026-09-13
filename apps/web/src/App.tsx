@@ -67,10 +67,6 @@ export function App() {
   const [authChecked, setAuthChecked] = useState(false);
   const [currentPath, setCurrentPath] = useState<AppPath>(() => readInitialPath());
   const [pendingExample, setPendingExample] = useState('');
-  // 未登录直接打开固定快照链接时，只暂存站内目标；令牌从不进入 URL 或本地状态。
-  const [returnAfterAuth, setReturnAfterAuth] = useState<string | null>(() => (
-    readInitialPath() === '/duplicate-comparison' ? `${window.location.pathname}${window.location.search}` : null
-  ));
 
   useEffect(() => {
     // 监听浏览器前进后退，确保用户使用返回键也能回到正确页面。
@@ -92,20 +88,20 @@ export function App() {
     getCurrentUser(token)
       .then((user) => {
         setCurrentUser(user);
-        if (!hasCompletedOnboarding() && window.location.pathname !== '/getting-started') {
+        if (!hasCompletedOnboarding() && window.location.pathname !== '/getting-started' && window.location.pathname !== '/duplicate-comparison') {
           replacePath('/getting-started');
           setCurrentPath('/getting-started');
         }
       })
       .catch(() => {
-        if (readInitialPath() === '/duplicate-comparison') {
-          setReturnAfterAuth(`${window.location.pathname}${window.location.search}`);
-        }
         clearToken();
         setToken(null);
         setCurrentUser(null);
-        replacePath('/login');
-        setCurrentPath('/login');
+        // 公开对比页不依赖浏览器登录态；过期令牌不能把分享链接重定向到登录页。
+        if (readInitialPath() !== '/duplicate-comparison') {
+          replacePath('/login');
+          setCurrentPath('/login');
+        }
       })
       .finally(() => setAuthChecked(true));
   }, [token]);
@@ -149,12 +145,6 @@ export function App() {
   }
 
   function openReturnTargetOrChat() {
-    if (returnAfterAuth) {
-      window.history.replaceState(null, '', returnAfterAuth);
-      setCurrentPath('/duplicate-comparison');
-      setReturnAfterAuth(null);
-      return;
-    }
     openChat();
   }
 
@@ -201,6 +191,11 @@ export function App() {
     openChat();
   }
 
+  // 对比链接只开放固定候选的只读页面；普通聊天、管理和重复决定仍走原登录门禁。
+  if (currentPath === '/duplicate-comparison') {
+    return <IngestDuplicateComparisonPage query={new URLSearchParams(window.location.search)} onBack={openChat} />;
+  }
+
   if (route === 'loading') {
     return <p className="screen-center">正在校验登录状态...</p>;
   }
@@ -223,10 +218,6 @@ export function App() {
   if (currentPath === '/files') {
     return <ClassificationFilesPage token={token} onBack={openChat} />;
   }
-  if (currentPath === '/duplicate-comparison') {
-    return <IngestDuplicateComparisonPage token={token} query={new URLSearchParams(window.location.search)} onBack={openChat} />;
-  }
-
   if (
     currentPath === '/admin/failed-files'
     && ['ops', 'admin'].includes(currentUser.role)

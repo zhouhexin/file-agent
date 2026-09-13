@@ -655,6 +655,7 @@ def test_scan_waits_for_source_analysis_before_materializing_working_copy(
     filename: str,
     content: str,
     expected_decision: str,
+    verified_package: bool = False,
 ):
     """源侧正文分类完成后才物化，并按统一门槛落入主分类或中性路径。"""
 
@@ -789,6 +790,31 @@ def test_scan_waits_for_source_analysis_before_materializing_working_copy(
             assert classification_result.get("agent_run_id")
             assert classification_result.get("changeset_id")
             assert db.query(DocumentCategorySuggestion).count() >= 1
+            if verified_package:
+                # 模拟服务端明确用途任务冻结该成员。分类与物化继续走真实生产服务，
+                # 验证无自身正文业务证据的附件不会在落位阶段再次退回其他。
+                from app.modules.classification.purpose_policy import PurposePackageMember
+                from app.modules.classification.purpose_repository import PurposePackageRepository
+                from app.modules.managed_files.source_analysis import ManagedSourceAnalysisService
+                from app.tests.test_classification_purpose_policy import _package
+
+                revision = db.query(ManagedFileRevision).one()
+                snapshot = _package().model_copy(update={
+                    "workspace_id": get_shared_workspace_id(db),
+                    "root_key": "school_files",
+                    "purpose_category_id": "school.admin.meeting-minutes",
+                    "members": (PurposePackageMember(
+                        managed_file_id=revision.managed_file_id,
+                        document_version_id=revision.analysis_document_version_id,
+                        sha256=revision.content_sha256,
+                    ),),
+                })
+                PurposePackageRepository(db).create(snapshot)
+                ManagedSourceAnalysisService(db=db).refresh_classification(
+                    revision_id=revision.id,
+                    user_id=registered.json()["id"],
+                    purpose_package_id=snapshot.id,
+                )
             materialization = (
                 db.query(FilesystemJob)
                 .filter(FilesystemJob.job_type == "MATERIALIZE_WORKING_COPY")
@@ -848,6 +874,9 @@ def test_scan_waits_for_source_analysis_before_materializing_working_copy(
                 }
             ]
             assert decision.decision == expected_decision
+            if verified_package:
+                assert decision.feature_snapshot_json["verified_purpose_package"] is True
+                assert "EVIDENCE_MISSING" not in decision.reason_codes_json
             relation = db.query(DocumentCategory).filter_by(
                 working_copy_id=working_copy.id
             ).one()
@@ -868,6 +897,14 @@ def test_scan_waits_for_source_analysis_before_materializing_working_copy(
     finally:
         get_settings.cache_clear()
         clear_overrides()
+
+
+def test_verified_package_materializes_to_business_with_formal_primary(monkeypatch, tmp_path):
+    """从扫描、解析、用途刷新到正式主类和真实路径，覆盖此前只测分类层的遗漏。"""
+    test_scan_waits_for_source_analysis_before_materializing_working_copy(
+        monkeypatch, tmp_path, "普通附件.txt", "这是一份没有明确业务主题的普通附件。",
+        "APPLIED_BUSINESS", verified_package=True,
+    )
 
 
 def test_ready_revision_without_current_classification_queues_one_refresh_job(

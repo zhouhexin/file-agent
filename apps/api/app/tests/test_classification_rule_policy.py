@@ -12,7 +12,7 @@ def test_rule_policy_is_strict_versioned_and_bounded():
     policy = load_rule_policy()
 
     assert policy.policy_id == "workdata-classification"
-    assert policy.version == "workdata-v3"
+    assert policy.version == "workdata-v4"
     assert policy.policy_mode == "conservative_rules"
     assert policy.candidate_limit == 8
     assert policy.resume_window_paragraphs == 12

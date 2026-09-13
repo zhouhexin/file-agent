@@ -29,7 +29,7 @@ def build_document_results_from_extraction_results(
         char_count = sum(int(page.get("char_count", 0) or 0) for page in pages)
         text_preview = "\n".join(str(page.get("text_preview") or "") for page in pages)
         error = result.get("error") if isinstance(result.get("error"), dict) else None
-    # 分类是默认生成的后台事实；``include_categories`` 只控制本次对话是否向用户展示该结果。
+        # 分类是默认生成的后台事实；``include_categories`` 只控制本次对话是否向用户展示该结果。
         classification_result = (
             classification_service.classify(
                 document_id=document_id,
@@ -69,6 +69,19 @@ def build_document_results_from_extraction_results(
                 "classification_reused": bool(
                     classification_result.get("classification_reused", False)
                 ),
+                # 分类缓存身份必须随逐文件结果进入持久化层；只保留展示字段会导致
+                # 下一轮无法核对 taxonomy、分类器和输入指纹，从而永久重复分类。
+                "taxonomy_key": classification_result.get("taxonomy_key"),
+                "taxonomy_version": classification_result.get("taxonomy_version"),
+                "classifier_version": classification_result.get("classifier_version"),
+                "classification_outcome": classification_result.get("classification_outcome"),
+                "classification_quality": classification_result.get("classification_quality"),
+                "selection_basis": classification_result.get("selection_basis"),
+                "reason_codes": list(classification_result.get("reason_codes") or []),
+                "input_fingerprint": classification_result.get("input_fingerprint"),
+                "content_fingerprint": classification_result.get("content_fingerprint"),
+                "purpose_package_status": classification_result.get("purpose_package_status"),
+                "purpose_package_digest": classification_result.get("purpose_package_digest"),
                 "document_version_id": (
                     classification_result.get("document_version_id") or document_id
                 ),

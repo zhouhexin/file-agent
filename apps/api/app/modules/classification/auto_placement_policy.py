@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.config import Settings
+from app.modules.classification.purpose_policy import PurposePolicyResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +55,7 @@ class AutoPlacementPolicy:
         categories: list[dict[str, Any]],
         extraction_status: str,
         risk_passed: bool = True,
+        verified_purpose: PurposePolicyResult | None = None,
     ) -> AutoPlacementPolicyResult:
         """从按置信度排序的多标签候选中选择唯一主分类，硬门槛失败时拒识。
 
@@ -73,6 +75,23 @@ class AutoPlacementPolicy:
         content_signals = _content_signals(primary)
         evidence_items = _located_evidence(primary)
         scoped_fallback = _is_scoped_fallback(primary)
+        # 用途清单不是正文页；只有调用方重新核验持久化成员后才允许独立证据通道。
+        package_claimed = bool(
+            primary and primary.get("source") == "verified_purpose_package"
+        )
+        package_verified = bool(
+            package_claimed
+            and verified_purpose
+            and verified_purpose.valid
+            and verified_purpose.candidate
+            and verified_purpose.candidate.get("category_id") == primary.get("category_id")
+            and any(
+                item.get("type") == "purpose_package_manifest"
+                and item.get("quote") == verified_purpose.candidate.get("purpose_package_id")
+                for item in primary.get("evidence_items", [])
+                if isinstance(item, dict)
+            )
+        )
         negative_signals = _string_list(primary, "negative_signals")
         reasons: list[str] = []
 
@@ -98,7 +117,9 @@ class AutoPlacementPolicy:
                 primary.get("taxonomy_version") or ""
             ):
                 reasons.append("POLICY_VERSION_UNAVAILABLE")
-            if not evidence_items and not scoped_fallback:
+            if package_claimed and not package_verified:
+                reasons.append("PURPOSE_PLACEMENT_INVALID")
+            if not evidence_items and not scoped_fallback and not package_verified:
                 reasons.append("EVIDENCE_MISSING")
             # Top-1 直接落位测试期间暂时停用以下软拒绝条件。保留原判断，后续完成
             # 人工标注评估和阈值校准后可按版本化策略恢复。
@@ -146,6 +167,7 @@ class AutoPlacementPolicy:
                 ),
                 "soft_gate_mode": "top1_test_disabled",
                 "scoped_fallback": scoped_fallback,
+                "verified_purpose_package": package_verified,
                 "calibration_mode": (
                     "global_conservative_fallback"
                     if self.settings.auto_classification_calibration_version == "unpublished"

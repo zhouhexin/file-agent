@@ -165,6 +165,14 @@ class IngestItemsAppendRequest(BaseModel):
         return self
 
 
+class IngestPrimaryCategoryResponse(BaseModel):
+    """批次成功文件当前生效的主分类；不携带证据、关键词或候选详情。"""
+
+    category_id: str
+    category_path: list[str] = Field(default_factory=list)
+    status: str
+
+
 class IngestItemResponse(BaseModel):
     """对外返回单条业务进度，不包含绝对路径或文件正文。"""
 
@@ -196,6 +204,9 @@ class IngestItemResponse(BaseModel):
     current_file_available: bool
     current_working_copy_revision: int | None
     current_document_version_id: str | None
+    # 只投影当前版本已生效的 PRIMARY 关系及公开结果状态，不扩展到分类证据和关键词。
+    primary_category: IngestPrimaryCategoryResponse | None = None
+    classification_outcome: Literal["CLASSIFIED", "OTHER"] | None = None
     error: dict
     result: dict
     created_at: datetime

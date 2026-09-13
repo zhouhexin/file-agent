@@ -11,7 +11,31 @@ from pathlib import Path
 import httpx
 import pytest
 
-from file_agent_mcp.client import FileAgentIntegrationClient, LocalRootRegistry
+from file_agent_mcp.client import (
+    FileAgentIntegrationClient,
+    LocalRootRegistry,
+    _extraction_page_suffix,
+)
+
+
+@pytest.mark.parametrize(
+    ("content_type", "expected"),
+    [
+        ("image/png", ".png"),
+        ("image/jpeg", ".jpg"),
+        ("image/jpeg; charset=binary", ".jpg"),
+        ("image/bmp", ".bmp"),
+        ("image/webp", ".webp"),
+        ("image/tiff", ".tiff"),
+        ("application/octet-stream", ".image"),
+    ],
+)
+def test_extraction_page_suffix_preserves_verified_image_format(
+    content_type: str, expected: str
+) -> None:
+    """下载页必须保留受控 MIME 对应后缀，宿主 OCR 才能按真实格式读取。"""
+
+    assert _extraction_page_suffix(content_type) == expected
 
 
 def test_local_root_registry_rejects_traversal_and_symlink_escape(tmp_path) -> None:

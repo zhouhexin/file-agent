@@ -153,3 +153,15 @@ class RelevantFileSetService:
             message="最终相关文件集合已固化，源文件工作副本物化任务已入队",
         )
         return {"relevant_file_set_id": record.id, "materialization_job_ids": job_ids}
+
+    @staticmethod
+    def has_final_results(results: list[dict[str, Any]]) -> bool:
+        """判断是否会写入相关文件集合，供调用方在副作用前建立必要会话。"""
+
+        return any(
+            isinstance(item, dict)
+            and str(item.get("relevance_tier") or "")
+            in {"SUPPORTED", "RELATED", "POSSIBLE"}
+            and (item.get("working_copy_id") or item.get("managed_file_revision_id"))
+            for item in results
+        )

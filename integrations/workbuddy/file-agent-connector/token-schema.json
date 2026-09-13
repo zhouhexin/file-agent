@@ -1,0 +1,55 @@
+{
+  "title": "文件助手本机连接配置",
+  "title_en": "File Agent local connection settings",
+  "description": "以下信息仅保存在本机 WorkBuddy 配置中，用于启动本机 MCP 并访问文件助手服务。",
+  "description_en": "These values are stored only in local WorkBuddy configuration and start the local File Agent MCP.",
+  "fields": [
+    {
+      "key": "FILE_AGENT_PYTHON_EXECUTABLE",
+      "label": "Python 可执行文件",
+      "type": "text",
+      "required": true,
+      "placeholder": "D:\\anaconda\\envs\\myenv\\python.exe",
+      "description": "用于启动文件助手 MCP 的完整 Python 路径。"
+    },
+    {
+      "key": "FILE_AGENT_MCP_SOURCE_DIR",
+      "label": "MCP 源码目录",
+      "type": "text",
+      "required": true,
+      "placeholder": "E:\\PycharmProject\\file-agent\\apps\\mcp",
+      "description": "包含 file_agent_mcp 包的目录。"
+    },
+    {
+      "key": "FILE_AGENT_API_BASE_URL",
+      "label": "文件助手 API 地址",
+      "type": "text",
+      "required": true,
+      "defaultValue": "http://127.0.0.1:8000",
+      "description": "本机或内网文件助手后端 API 地址。"
+    },
+    {
+      "key": "FILE_AGENT_ACCESS_TOKEN",
+      "label": "文件助手访问令牌",
+      "type": "password",
+      "required": true,
+      "description": "用于访问文件助手 API 的令牌。"
+    },
+    {
+      "key": "FILE_AGENT_LOCAL_ROOTS",
+      "label": "已授权目录配置",
+      "type": "text",
+      "required": true,
+      "placeholder": "[{\"key\":\"workdata\",\"path\":\"D:\\\\workdata\"}]",
+      "description": "JSON 数组；仅这些目录可被批量导入。"
+    },
+    {
+      "key": "LOCAL_TRANSFER_STATE_DIR",
+      "label": "传输状态目录",
+      "type": "text",
+      "required": true,
+      "placeholder": "E:\\file-agent-state",
+      "description": "保存可恢复批量导入的本机状态。"
+    }
+  ]
+}

@@ -26,7 +26,7 @@ from app.db.models import (
     utcnow,
 )
 from app.modules.file_lifecycle.service import UploadLifecycleService
-from app.modules.managed_files.jobs import FilesystemJobQueue
+from app.modules.managed_files.jobs import FilesystemJobQueue, INGEST_BATCH_ANALYSIS_PRIORITY
 
 
 ACTIVE_PROCESSING_STATUSES = {
@@ -204,6 +204,7 @@ class IngestionWorkflow:
         )
         archive = self.db.get(UploadArchiveRecord, item.archive_record_id) if item.archive_record_id else None
         before = self._snapshot(item)
+        priority_promoted = False
         if review is not None and review.ingest_item_id is None:
             review.ingest_item_id = item.id
         if review is not None and review.status == "WAITING_CONFIRMATION":
@@ -321,6 +322,21 @@ class IngestionWorkflow:
                     else ""
                 )
                 analysis_job = self.db.get(FilesystemJob, analysis_job_id) if analysis_job_id else None
+                if (
+                    analysis_job is not None
+                    and analysis_job.job_type == "ANALYZE_DOCUMENT_VERSION"
+                    and analysis_job.status == "PENDING"
+                    and analysis_job.attempt_count == 0
+                    and analysis_job.priority > INGEST_BATCH_ANALYSIS_PRIORITY
+                    and (analysis_job.payload_json or {}).get("ingest_batch_id") == item.batch_id
+                    and (analysis_job.payload_json or {}).get("ingest_item_id") == item.id
+                ):
+                    # 兼容升级前已排队的批次，GET 只提升身份匹配的任务，不重开终态任务。
+                    FilesystemJobQueue(self.db).promote_pending_job(
+                        job=analysis_job,
+                        priority=INGEST_BATCH_ANALYSIS_PRIORITY,
+                    )
+                    priority_promoted = True
                 item.current_job_id = analysis_job.id if analysis_job is not None else archive.filesystem_job_id
                 item.stage = "ORGANIZE"
                 if analysis_job is not None and analysis_job.status == "FAILED":
@@ -356,7 +372,7 @@ class IngestionWorkflow:
         if self._snapshot(item) != before:
             item.workflow_revision += 1
             return True
-        return False
+        return priority_promoted
 
     def _synchronize_wait_and_reuse(
         self,

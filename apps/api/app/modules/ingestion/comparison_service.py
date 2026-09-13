@@ -73,6 +73,19 @@ class IngestDuplicateComparisonService:
         self.db = db
         self.storage = FileLifecycleStorageService()
 
+    def owner_for_public_link(self, item_id: str) -> User:
+        """匿名对比仅借用固定批次的所有者身份完成既有候选关联校验。
+
+        这不是通用匿名文件读取：仍须提供当前有效 review、候选和修订，且只开放只读对比接口。
+        """
+
+        item = self.db.get(IngestItem, item_id)
+        batch = self.db.get(IngestBatch, item.batch_id) if item else None
+        owner = self.db.get(User, batch.user_id) if batch else None
+        if item is None or batch is None or owner is None:
+            self._error(404, "INGEST_ITEM_NOT_FOUND", "导入条目不存在或无法访问。")
+        return owner
+
     def comparison(
         self,
         *,

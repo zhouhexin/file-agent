@@ -403,22 +403,22 @@ export async function getDuplicateReview(
 }
 
 export async function getIngestDuplicateComparison(
-  token: string,
   itemId: string,
   query: { review_id: string; review_revision: number; candidate_id: string; group_revision?: number | null },
 ): Promise<import('../types').IngestDuplicateComparison> {
+  // 仅这组三个固定候选只读接口允许匿名访问；其他 API 继续按各自登录契约调用。
   const params = new URLSearchParams({ review_id: query.review_id, review_revision: String(query.review_revision), candidate_id: query.candidate_id });
   if (query.group_revision !== null && query.group_revision !== undefined) params.set('group_revision', String(query.group_revision));
-  return request(`/integrations/v1/ingest-items/${encodeURIComponent(itemId)}/duplicate-comparison?${params}`, { token });
+  return request(`/integrations/v1/ingest-items/${encodeURIComponent(itemId)}/duplicate-comparison?${params}`);
 }
 
 export async function fetchIngestDuplicateComparisonBlob(
-  token: string, itemId: string, query: { review_id: string; review_revision: number; candidate_id: string; group_revision?: number | null; snapshot_id: string; side: 'UPLOAD' | 'CANDIDATE' },
+  itemId: string, query: { review_id: string; review_revision: number; candidate_id: string; group_revision?: number | null; snapshot_id: string; side: 'UPLOAD' | 'CANDIDATE' },
   signal?: AbortSignal,
 ): Promise<Blob> {
   const params = new URLSearchParams({ review_id: query.review_id, review_revision: String(query.review_revision), candidate_id: query.candidate_id, snapshot_id: query.snapshot_id, side: query.side, disposition: 'attachment' });
   if (query.group_revision !== null && query.group_revision !== undefined) params.set('group_revision', String(query.group_revision));
-  const response = await fetch(`${API_BASE_URL}/integrations/v1/ingest-items/${encodeURIComponent(itemId)}/duplicate-comparison/content?${params}`, { headers: { Authorization: `Bearer ${token}` }, signal });
+  const response = await fetch(`${API_BASE_URL}/integrations/v1/ingest-items/${encodeURIComponent(itemId)}/duplicate-comparison/content?${params}`, { signal });
   if (!response.ok) throw await readApiError(response, '无法下载重复候选文件');
   const contentLength = Number(response.headers.get('content-length') || 0);
   if (Number.isFinite(contentLength) && contentLength > 128 * 1024 * 1024) {
@@ -444,13 +444,12 @@ export async function fetchIngestDuplicateComparisonBlob(
 }
 
 export async function getIngestDuplicateComparisonPreview(
-  token: string,
   itemId: string,
   query: { review_id: string; review_revision: number; candidate_id: string; group_revision?: number | null; snapshot_id: string; side: 'UPLOAD' | 'CANDIDATE' },
 ): Promise<import('../types').IngestDuplicatePreview> {
   const params = new URLSearchParams({ review_id: query.review_id, review_revision: String(query.review_revision), candidate_id: query.candidate_id, snapshot_id: query.snapshot_id, side: query.side, max_chars: '100000' });
   if (query.group_revision !== null && query.group_revision !== undefined) params.set('group_revision', String(query.group_revision));
-  return request(`/integrations/v1/ingest-items/${encodeURIComponent(itemId)}/duplicate-comparison/preview?${params}`, { token });
+  return request(`/integrations/v1/ingest-items/${encodeURIComponent(itemId)}/duplicate-comparison/preview?${params}`);
 }
 
 export async function getUploadArchiveStatus(

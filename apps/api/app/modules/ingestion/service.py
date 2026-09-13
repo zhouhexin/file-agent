@@ -17,6 +17,7 @@ from app.core.config import get_settings
 from app.db.models import (
     Conversation,
     Document,
+    DocumentCategory,
     DocumentVersion,
     FilesystemJob,
     IngestBatch,
@@ -39,6 +40,7 @@ from app.modules.ingestion.schemas import (
     IngestContentUploadResponse,
     IngestItemCreate,
     IngestItemResponse,
+    IngestPrimaryCategoryResponse,
     IngestItemsAppendRequest,
     IngestItemsAppendResponse,
     IngestItemsPageResponse,
@@ -47,6 +49,8 @@ from app.modules.ingestion.schemas import (
 )
 from app.modules.file_lifecycle.service import UploadLifecycleService
 from app.modules.managed_files.jobs import FilesystemJobQueue
+from app.modules.classification.loader import load_default_taxonomy
+from app.modules.classification.schemas import CategoryNode, CategoryNodeKind
 from app.modules.files.service import FileUploadService, StagedUpload
 
 
@@ -76,6 +80,8 @@ class IngestionService:
         self.repository = IngestionRepository(db)
         self._execution_status_cache: dict[str, dict[str, str]] = {}
         self._working_copy_cache: dict[str, WorkingCopy | None] = {}
+        self._primary_category_cache: dict[str, DocumentCategory | None] = {}
+        self._classification_fallback_ids: set[str] | None = None
 
     def create_batch(
         self,
@@ -1183,16 +1189,97 @@ class IngestionService:
             if item.final_working_copy_id
             and str(item.final_working_copy_id) not in self._working_copy_cache
         }
-        if not working_copy_ids:
-            return
-        working_copies = (
-            self.db.query(WorkingCopy)
-            .filter(WorkingCopy.id.in_(working_copy_ids))
-            .all()
+        if working_copy_ids:
+            working_copies = (
+                self.db.query(WorkingCopy)
+                .filter(WorkingCopy.id.in_(working_copy_ids))
+                .all()
+            )
+            by_id = {working_copy.id: working_copy for working_copy in working_copies}
+            for working_copy_id in working_copy_ids:
+                self._working_copy_cache[working_copy_id] = by_id.get(working_copy_id)
+        self._prime_primary_category_cache(
+            working_copies=[
+                working_copy
+                for working_copy in self._working_copy_cache.values()
+                if working_copy is not None
+            ]
         )
-        by_id = {working_copy.id: working_copy for working_copy in working_copies}
-        for working_copy_id in working_copy_ids:
-            self._working_copy_cache[working_copy_id] = by_id.get(working_copy_id)
+
+    def _prime_primary_category_cache(
+        self,
+        *,
+        working_copies: list[WorkingCopy],
+    ) -> None:
+        """批量读取当前版本已生效的 PRIMARY，避免批次回执逐文件查询。"""
+
+        pending = {
+            working_copy.id: working_copy
+            for working_copy in working_copies
+            if working_copy.id not in self._primary_category_cache
+        }
+        if not pending:
+            return
+        version_ids = {
+            str(working_copy.current_version_id)
+            for working_copy in pending.values()
+            if working_copy.current_version_id
+        }
+        relations = (
+            self.db.query(DocumentCategory)
+            .filter(
+                DocumentCategory.working_copy_id.in_(set(pending)),
+                DocumentCategory.document_version_id.in_(version_ids),
+                DocumentCategory.relation_role == "PRIMARY",
+                DocumentCategory.status.in_(["AUTO_APPLIED", "CONFIRMED"]),
+            )
+            .all()
+            if version_ids
+            else []
+        )
+        by_copy_id = {
+            relation.working_copy_id: relation
+            for relation in relations
+            if str(pending[relation.working_copy_id].current_version_id or "")
+            == relation.document_version_id
+        }
+        for working_copy_id in pending:
+            self._primary_category_cache[working_copy_id] = by_copy_id.get(working_copy_id)
+
+    def _classification_outcome_for_primary(
+        self,
+        relation: DocumentCategory | None,
+    ) -> str:
+        """按当前 taxonomy 区分业务分类与统一 OTHER，不读取或返回分类证据。"""
+
+        if relation is None:
+            # 与分类目录只读投影保持一致：历史活动文件缺少 PRIMARY 时归入 OTHER，
+            # 但 primary_category 仍为 null，不能伪造一条 system.other 关系。
+            return "OTHER"
+        if self._classification_fallback_ids is None:
+            taxonomy = load_default_taxonomy()
+            fallback_ids = {"system.other"}
+            if taxonomy.fallback_policy is not None:
+                fallback_ids.update(
+                    str(value)
+                    for value in taxonomy.fallback_policy.historical_category_ids
+                )
+
+            def collect(nodes: list[CategoryNode]) -> None:
+                """收集显式和策略物化的 FALLBACK 节点稳定 ID。"""
+
+                for node in nodes:
+                    if node.id and node.node_kind == CategoryNodeKind.FALLBACK:
+                        fallback_ids.add(node.id)
+                    collect(node.children)
+
+            collect(taxonomy.categories)
+            self._classification_fallback_ids = fallback_ids
+        return (
+            "OTHER"
+            if relation.category_id in self._classification_fallback_ids
+            else "CLASSIFIED"
+        )
 
     def _to_item_response(
         self,
@@ -1274,6 +1361,26 @@ class IngestionService:
             current_document_version_id = None
             current_file_available = False
 
+        primary_relation = (
+            self._primary_category_cache.get(working_copy.id)
+            if published and working_copy is not None
+            else None
+        )
+        primary_category = (
+            IngestPrimaryCategoryResponse(
+                category_id=primary_relation.category_id,
+                category_path=list(primary_relation.category_path_json or []),
+                status=primary_relation.status,
+            )
+            if primary_relation is not None
+            else None
+        )
+        classification_outcome = (
+            self._classification_outcome_for_primary(primary_relation)
+            if published and working_copy is not None
+            else None
+        )
+
         return IngestItemResponse(
             id=item.id,
             client_item_id=item.client_item_id,
@@ -1318,6 +1425,8 @@ class IngestionService:
             current_file_available=current_file_available,
             current_working_copy_revision=current_working_copy_revision,
             current_document_version_id=current_document_version_id,
+            primary_category=primary_category,
+            classification_outcome=classification_outcome,
             error=dict(item.error_json or {}),
             result=result,
             created_at=item.created_at,

@@ -17,6 +17,7 @@ from app.modules.auth.dependencies import get_current_user
 from app.modules.agent.user_receipt import build_user_task_receipt
 from app.modules.conversations.schemas import SendMessageResponse
 from app.modules.conversations.schemas import MessageAttachment, SendMessageRequest
+from app.modules.conversations.repository import ConversationRepository
 from app.modules.conversations.service import ConversationMessageService
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
 from app.modules.retrieval.query_parser import FileSearchQueryParser
@@ -154,13 +155,22 @@ def search_files(
     )
     # 兼容检索 API 与聊天主入口使用同一相关文件集合规则；只对最终相关文件
     # 入队物化，不能因当前页面的 top_k 截断而遗漏后续结果。
-    RelevantFileSetService(db=db, settings=get_settings()).persist_and_enqueue(
+    relevant_file_sets = RelevantFileSetService(db=db, settings=get_settings())
+    final_results = list(result.get("results") or [])
+    # WorkBuddy 的 conversation_ref 会被映射为稳定 wb-* ID。只在存在需要固化的
+    # 最终结果时创建受控会话记录，避免空搜索创建无意义占位，同时满足外键约束。
+    if request.conversation_id and relevant_file_sets.has_final_results(final_results):
+        ConversationRepository(db).ensure_conversation(
+            conversation_id=request.conversation_id,
+            user_id=current_user.id,
+        )
+    relevant_file_sets.persist_and_enqueue(
         workspace_id=workspace_id,
         user_id=current_user.id,
         conversation_id=request.conversation_id,
         agent_run_id=None,
         query=request.query,
-        results=list(result.get("results") or []),
+        results=final_results,
     )
     files = list(result.get("results") or [])[: request.top_k]
     return {

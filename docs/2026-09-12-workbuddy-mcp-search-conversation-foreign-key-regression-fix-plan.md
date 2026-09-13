@@ -1,7 +1,7 @@
 # WorkBuddy MCP 搜索会话外键回归修复方案
 
 日期：2026-09-12
-状态：待开发；本文只定义修复，不包含代码改动。
+状态：已实现并完成自动化回归；实现记录见第 9 节。
 
 ## 1. 问题与影响
 
@@ -185,3 +185,12 @@ $env:PYTHONPATH='apps/api'
 - 需要更新 API 服务；MCP 客户端代码无变更时不必更新每台 WorkBuddy 的 MCP 包，但重连后应进行一次实际搜索验证。
 - 回退仅恢复 API 到前一版本；不会影响已导入文件、重复确认和工作副本。
 - 禁止通过删除外键、手工删除数据或将 `conversation_id` 永久置空作为应急修复。
+
+## 9. 实现记录（2026-09-12）
+
+- `apps/api/app/modules/retrieval/router.py` 在写入相关文件集合前，复用
+  `ConversationRepository.ensure_conversation()` 建立或校验当前用户的受控会话。
+- `RelevantFileSetService.has_final_results()` 统一了路由预检查与实际持久化的筛选条件：
+  仅 `SUPPORTED`、`RELATED`、`POSSIBLE` 且带稳定工作副本或受管版本 ID 的结果会触发会话创建。
+- 空结果仍不创建会话；已有会话属于其他用户时，后端在写入前返回 403。
+- 未修改 MCP 配置、会话哈希映射、数据库 schema、迁移、查重、分类、重命名或附件导入链路。

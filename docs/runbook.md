@@ -829,6 +829,14 @@ scheduler 和五个合并后的 worker：`RECONCILE,SCAN`，
 `STRUCTURED_EXTRACTION` 和 `GRAPH`。它适合本地开发
 与烟测；生产环境仍可按以下命令基于容量分别部署更多 worker。
 
+WorkBuddy/MCP 固定批次上传后的 `ANALYZE_DOCUMENT_VERSION` 使用优先级 20；普通受管目录
+`SOURCE_ANALYSIS` 后台任务保持优先级 100，用户即时检索依赖仍为 10。两类分析仍由原
+`SOURCE_ANALYSIS,ANALYSIS` worker 消费，不新增队列、worker 或数据库迁移。已有批次的分析任务
+如果仍为 `PENDING` 且尚未尝试，下一次 `batch_get` 会按冻结批次 ID 与条目 ID 校验后幂等提升；
+`RUNNING`、`FAILED` 和带重试退避的任务不会被改动。升级时必须先让正在执行的旧分析任务安全结束，
+关闭旧版 worker 窗口，再按下方脚本启动当前版本 worker，并重启 API；仅重启 WorkBuddy 或重新安装
+插件不会更新后端调度。不要重新上传同一附件来催促旧批次，应继续查询原批次。
+
 Windows 必须从本机仓库根目录使用 Windows 路径执行，例如：
 
 ```cmd
@@ -1216,6 +1224,22 @@ Shadow 会写 `document_organization_decisions`，但不会移动已有 `ACTIVE`
 
 ## 10. WorkBuddy 本地目录与会话附件导入 MCP
 
+图片附件桥接试点 0.1.6 在 0.1.5 的 Windows 中文输入和 Hook 时间窗修复基础上补齐外部 OCR 编排。
+升级 `file-agent-workbuddy-bridge` 套件与本地 `apps/mcp` 代码后，完全退出（含托盘）并重启 WorkBuddy；
+无须更新 `mcp.json` 环境变量或重启 File Agent API/worker。安装包与两种上传方式的验收要求见
+[附件桥接安装说明](../integrations/workbuddy/file-agent-plugin/README.md)。只有 `image_blob_ref` 受支持；
+普通本地路径文字不会触发附件导入。旧乱码提交单不能重用，应重新发送图片和新的测试编号。
+
+图片条目进入 `WAITING_EXTERNAL_EXTRACTION` 后，必须从 `batch_get` 的
+`result.external_extraction_task_id` 取得任务并调用 `extraction_claim`。WorkBuddy 随后使用已安装、已启用的
+腾讯文档个人版 `ocr.extract` 对领取到的本地页逐页识别，按返回顺序拼接 `texts`，把可用的
+`text_detections` 原样作为 blocks，并调用 `extraction_submit`。当前工具契约没有承诺置信度、Provider
+版本或请求 ID，缺失值必须为 `null`，不得让模型估算。提交后用返回的 `filesystem_job_id` 查一次任务，
+完成后再恢复批次状态；无条件重复 `batch_get`/`job_get` 不能推动 OCR。`ocr.toword`/`ocr.toexcel` 只返回
+云文件链接，通用 `Read` 和图片处理套件也没有此链路所需的结构化 OCR 契约，因此都不能用于回填。
+腾讯文档票据和服务可用性必须在 WorkBuddy 宿主内做真实 OCR 验收；失败时保留等待状态并报告原因，不切换
+到 File Agent 后端 OCR。
+
 ## Classification v10 evaluation, pilot, and rollback
 
 本节优先于本文件中较早的 top1 测试阈值和分类 `NEEDS_REVIEW` 描述。新策略先在正文已可靠确定学校/学院和部门时使用该部门 `.issued/.other` 范围 fallback；有可定位正式文号进入“发文”，否则进入“其他”。文件名严格文号中的机关前缀唯一映射受控部门时，也可直接进入该部门“发文”；近似编号、普通机构词或部门竞争不得应用。组织范围或部门也不可靠时使用 `system.other`。所有情况均完成归档，不建立分类待复核目录。
@@ -1266,7 +1290,7 @@ export LOCAL_EXTRACTION_PAGE_DIR="$HOME/.file-agent/extraction-pages"
 /opt/homebrew/anaconda3/envs/py311/bin/python -m file_agent_mcp
 ```
 
-MCP 已暴露 `file_ingest`、`file_batch_ingest`、`workbuddy_attachment_ingest`、`batch_resume`、`batch_get`、`job_get`、
+MCP 已暴露 `file_ingest`、`file_batch_ingest`、`workbuddy_attachment_ingest`、`workbuddy_submission_ingest`、`batch_resume`、`batch_get`、`job_get`、
 `duplicate_review_get`、`duplicate_comparison_get`、`duplicate_decide`、`extraction_claim`、`extraction_renew`、
 `extraction_submit`、`ingest_retry`、`ingest_cancel`、`file_search`、`file_read`、
 `evidence_answer`、`file_search_clarification_resolve`、`file_rename`、`operation_plan_get`和
@@ -1274,6 +1298,12 @@ MCP 已暴露 `file_ingest`、`file_batch_ingest`、`workbuddy_attachment_ingest
 指定的授权根内目录，固定大小、mtime 和 SHA-256，分页登记并 seal 清单，再以默认并发 2 上传；断点文件
 只保存逻辑根、相对路径和快照，不保存令牌或绝对路径。恢复时以后端事实为准，只传输未接收项，不自动
 重试业务失败。重复选择、OCR租约和最终回执都从后端持久化事实恢复，不能依赖聊天气泡或MCP进程内存。
+`batch_get.items[]` 对已发布的 `SUCCEEDED/PARTIAL` 文件返回当前版本生效的 `primary_category` 和
+`classification_outcome`，WorkBuddy 应逐文件展示主分类路径及 `CLASSIFIED/OTHER`；该回执不包含分类
+证据和关键词，且不会为了展示重新执行分类。
+遇到 `WAITING_DUPLICATE_CONFIRMATION` 时，WorkBuddy 套件 0.1.10 必须先调用最新 review 中每个可用候选的
+`duplicate_comparison_get`，逐项展示其 `comparison_url` Markdown 链接，再询问处理决定。插件不会自动
+打开浏览器窗口；若回复只有处理选项而没有链接，应先确认会话实际加载的套件版本是否仍为旧版。
 
 WorkBuddy会话附件入口要求宿主在用户真正提交消息后传入稳定`submission_id`，并为每项传入
 `attachment_id`、原始`filename`和宿主缓存`local_path`。`local_path`必须位于
@@ -1281,11 +1311,23 @@ WorkBuddy会话附件入口要求宿主在用户真正提交消息后传入稳�
 快照后只向后端提交逻辑来源和multipart字节。仅选择而未提交的附件不得调用该工具；调用成功后即使
 `user_request=null`也会按`AUTO_ORGANIZE + BY_CATEGORY`执行默认分类、命名、落位和索引。
 
+WorkBuddy 5.5.3 文档附件补充：该版在真实 DOCX/PDF/XLS 消息中不生成图片 `image_blob_ref`，而在用户正文
+之前的宿主上下文同时生成 `<user_references>` 和 `<attached_files>`。新版本地 MCP 只在固定会话、任务文字、
+时间窗、唯一消息 ID 与双重引用一致后，允许 `.doc/.docx/.pdf/.xls/.xlsx/.txt` 进入插件私有快照缓存；
+用户正文中的手写路径、伪造 XML 或单边引用均不授权。先创建
+`C:\Users\zhouhexin\.workbuddy\file-agent-bridge-state\document-cache`，再将它作为第二个独立根加入本机
+`mcp.json` 的 `FILE_AGENT_WORKBUDDY_ATTACHMENT_ROOTS`，原 `blobs` 根保留。不得添加整个下载目录、工作区
+或 `.workbuddy` 根。修改后完全退出并重启 WorkBuddy，重新附上文件并发送归档指令；旧提交单 10 分钟后失效。
+图片继续走既有 blob 路径。此兼容适配依赖 5.5.3 本机消息格式，升级 WorkBuddy 后先做格式回归；
+DOC、XLSX、TXT 目前只有自动化覆盖，尚需真实 GUI 验收。
+
 对话文件工具必须复用同一WorkBuddy线程的稳定`conversation_ref`。先调用`file_search`取得后端验证过的
 `document_id`，再把ID交给`file_read`、`evidence_answer`或`file_rename`。`file_read`只接受
 `READ/SUMMARY/EXPLAIN`；`file_rename.renames`每项必须同时提供`document_id/source_filename/target_filename`。
 搜索使用只读API，不能把查询文字路由成文件动作；明确重命名仍由后端创建OperationPlan审计并检查当前
-名称与同名冲突。后端若返回待确认计划，必须先用`operation_plan_get`恢复真实状态，只在用户明确确认后
+名称与同名冲突。首次搜索若返回需要固化的相关文件，后端会按当前用户自动创建对应的受控 WorkBuddy 会话
+记录；用户无需手写或预先创建内部会话 ID。空搜索不会创建会话记录。后端若返回待确认计划，必须先用
+`operation_plan_get`恢复真实状态，只在用户明确确认后
 调用`operation_plan_confirm`。
 
 新通道相关后端配置：
@@ -1307,9 +1349,11 @@ EXTERNAL_PAGE_RETENTION_HOURS=24
 
 重复候选的查看和分别下载使用浏览器页面。部署者设置
 `INTEGRATION_REVIEW_WEB_BASE_URL=http://<浏览器可达的Web地址>` 后，WorkBuddy 调用
-`duplicate_comparison_get` 获得不含令牌、路径或文件名的链接。用户在浏览器登录 File Agent 后查看两侧，
-再回到 WorkBuddy 使用原有 `duplicate_decide` 选择处理方式。此功能不新增 worker；更新 API、Web 和
-客户端 MCP 后重连 WorkBuddy 即可。
+`duplicate_comparison_get` 获得不含令牌、路径或文件名的链接。2026-09-13 起，对比页及其三个固定候选
+只读 GET 接口允许匿名访问：持有有效链接且网络可达的任何人均可预览、下载两侧文件，无需浏览器登录。
+部署前应确认这种公开范围符合本次试点授权；普通文件接口、重复确认 `duplicate_decide` 及其他写操作
+仍需登录。重复确认结束、过期或候选修订变化后旧链接不可继续读取。此功能不新增 worker；更新 API、Web
+后须重启 API 并重新发布 Web；客户端 MCP 工具与 mcp.json 均无需因此改动。
 
 外部OCR页图只在有效租约内下载；部分页面失败时成功页保留，批次最终显示`PARTIAL`及失败页范围。
 服务器渲染的PDF页图超过保留期后由`FILE_OPERATION`队列清理，任务、页摘要、错误和Agent审计继续保留。

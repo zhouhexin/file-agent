@@ -280,10 +280,17 @@ class ConversationalWorkingCopyPlanService:
                 continue
 
             categories = [self._policy_category(item) for item in suggestions]
+            # 明确重新整理和首次落位共用同一持久化用途验证边界。
+            from app.modules.classification.purpose_placement import validate_placement_purpose
+
             policy_result = policy.evaluate(
                 categories=categories,
                 extraction_status=classification_run.status,
                 risk_passed=True,
+                verified_purpose=validate_placement_purpose(
+                    self.db, working_copy=working_copy,
+                    candidate=categories[0] if categories else None,
+                ),
             )
             reason_codes = list(policy_result.reason_codes)
             operational_reason_codes: list[str] = []

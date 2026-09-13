@@ -16,6 +16,10 @@ from app.db.models import FilesystemJob, utcnow
 from app.modules.managed_files.repository import FilesystemJobRepository
 
 
+# 用户已提交的 MCP 批次分析优先于后台受管目录扫描，但不抢占优先级 10 的即时检索依赖。
+INGEST_BATCH_ANALYSIS_PRIORITY = 20
+
+
 class FilesystemJobQueue:
     """文件系统任务队列服务。"""
 

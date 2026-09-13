@@ -28,6 +28,7 @@ from app.db.models import (
     WorkingCopy,
     utcnow,
 )
+from app.modules.managed_files.jobs import FilesystemJobQueue, INGEST_BATCH_ANALYSIS_PRIORITY
 from app.modules.managed_files.worker import process_next_filesystem_job
 from app.tests.helpers import clear_overrides, client_with_database
 
@@ -426,6 +427,8 @@ def test_items_are_paginated_and_other_users_cannot_read_batch() -> None:
         assert pending_item["current_file_available"] is False
         assert pending_item["current_working_copy_revision"] is None
         assert pending_item["current_document_version_id"] is None
+        assert pending_item["primary_category"] is None
+        assert pending_item["classification_outcome"] is None
         assert next_cursor
         assert second_page.status_code == 200
         assert len(second_page.json()["items"]) == 1
@@ -834,6 +837,8 @@ def test_failed_analysis_is_projected_and_can_be_retried(monkeypatch, tmp_path) 
             import_job = db.get(FilesystemJob, archive.filesystem_job_id)
             analysis_job = db.get(FilesystemJob, import_job.result_json["analysis_job_id"])
             analysis_job.status = "FAILED"
+            # 失败终态不能因为批次读取而被调度优化重新激活或改写优先级。
+            analysis_job.priority = 100
             analysis_job.error_message = "分析失败"
             analysis_job_id = analysis_job.id
             db.commit()
@@ -849,6 +854,83 @@ def test_failed_analysis_is_projected_and_can_be_retried(monkeypatch, tmp_path) 
             item = db.get(IngestItem, item_id)
             assert item.status == "FAILED"
             assert item.current_job_id == analysis_job_id
+            assert db.get(FilesystemJob, analysis_job_id).priority == 100
+    finally:
+        clear_overrides()
+
+
+def test_ingest_analysis_precedes_background_source_backlog_and_promotes_legacy_pending_job(
+    monkeypatch, tmp_path,
+) -> None:
+    """固定批次分析须越过旧扫描积压，且读取旧批次只提升未领取的同一任务。"""
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "uploads"))
+    monkeypatch.setenv("MANAGED_ROOT_ARCHIVE_WRITE_PATH", str(tmp_path / "originals"))
+    monkeypatch.setenv("WORKING_COPY_STORAGE_ROOT", str(tmp_path / "working"))
+    monkeypatch.setenv("TRASH_STORAGE_ROOT", str(tmp_path / "trash"))
+    monkeypatch.setenv("INTEGRATION_EXTERNAL_OCR_ENABLED", "false")
+    get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    try:
+        _, token = _register_and_login(client, "ingest-priority-owner")
+        content = "批次优先级验证材料".encode()
+        batch_id, item_id, payload = _create_sealed_content_item(client, token, content=content)
+        uploaded = client.put(
+            f"/api/integrations/v1/ingest-batches/{batch_id}/items/{item_id}/content",
+            headers=_headers(token),
+            files={"file": (payload["original_filename"], content, "text/plain")},
+        )
+        assert uploaded.status_code == 202
+        for queue_name in ("DUPLICATE_CHECK", "ARCHIVE", "IMPORT"):
+            assert process_next_filesystem_job(
+                session_factory=SessionLocal,
+                worker_id="ingest-priority-test",
+                queue_names={queue_name},
+            )
+
+        with SessionLocal() as db:
+            item = db.get(IngestItem, item_id)
+            archive = db.get(UploadArchiveRecord, item.archive_record_id)
+            import_job = db.get(FilesystemJob, archive.filesystem_job_id)
+            analysis_job = db.get(FilesystemJob, import_job.result_json["analysis_job_id"])
+            assert analysis_job.priority == INGEST_BATCH_ANALYSIS_PRIORITY
+            assert analysis_job.payload_json["ingest_batch_id"] == batch_id
+            assert analysis_job.payload_json["ingest_item_id"] == item_id
+            analysis_job_id = analysis_job.id
+            # 模拟更早的受管目录待分析任务，确保调度不再只按创建时间阻塞上传。
+            source_job = FilesystemJobQueue(db).create_job(
+                job_type="ANALYZE_MANAGED_FILE_REVISION",
+                queue_name="SOURCE_ANALYSIS",
+                root_id=None,
+                created_by=None,
+                priority=100,
+                payload={},
+            )
+            source_job.created_at = analysis_job.created_at - timedelta(days=1)
+            source_job_id = source_job.id
+            db.commit()
+        with SessionLocal() as db:
+            claimed = FilesystemJobQueue(db).claim_next(
+                worker_id="ingest-priority-claim-test",
+                queue_names={"ANALYSIS", "SOURCE_ANALYSIS"},
+            )
+            assert claimed.id == analysis_job_id
+            db.rollback()
+
+        # 升级前创建的待处理任务仍在旧优先级；批次读取必须幂等提升且不改任务身份。
+        with SessionLocal() as db:
+            db.get(FilesystemJob, analysis_job_id).priority = 100
+            db.commit()
+        first = client.get(f"/api/integrations/v1/ingest-batches/{batch_id}", headers=_headers(token))
+        second = client.get(f"/api/integrations/v1/ingest-batches/{batch_id}", headers=_headers(token))
+        assert first.status_code == second.status_code == 200
+        assert first.json()["result_revision"] == second.json()["result_revision"]
+        with SessionLocal() as db:
+            analysis_job = db.get(FilesystemJob, analysis_job_id)
+            assert analysis_job.priority == INGEST_BATCH_ANALYSIS_PRIORITY
+            assert analysis_job.status == "PENDING"
+            assert analysis_job.attempt_count == 0
+            assert db.get(FilesystemJob, source_job_id).priority == 100
     finally:
         clear_overrides()
 
@@ -1766,6 +1848,7 @@ def test_frozen_batch_policy_drives_initial_organization_when_legacy_flags_are_o
     monkeypatch.setenv("INTEGRATION_EXTERNAL_OCR_ENABLED", "false")
     monkeypatch.setenv("AUTO_PRIMARY_CLASSIFICATION_ENABLED", "false")
     monkeypatch.setenv("AUTO_INITIAL_PLACEMENT_ENABLED", "false")
+    monkeypatch.setenv("CLASSIFICATION_PLACEMENT_ENABLED", "false")
     monkeypatch.setenv("EMBEDDING_ENABLED", "false")
     get_settings.cache_clear()
     client, SessionLocal = client_with_database()
@@ -1800,6 +1883,15 @@ def test_frozen_batch_policy_drives_initial_organization_when_legacy_flags_are_o
         assert projected["organization_status"] == "COMPLETED"
         assert projected["index_status"] == "COMPLETED"
         assert projected["user_task_status"] == "NOT_REQUESTED"
+        assert projected["primary_category"] is not None
+        assert set(projected["primary_category"]) == {
+            "category_id",
+            "category_path",
+            "status",
+        }
+        assert projected["classification_outcome"] in {"CLASSIFIED", "OTHER"}
+        assert "evidence" not in projected["primary_category"]
+        assert "keywords" not in projected["primary_category"]
         assert result["receipt"]["new_file_count"] == 1
         assert result["receipt"]["reused_count"] == 0
         assert result["receipt"]["excluded_count"] == 0
@@ -1809,20 +1901,30 @@ def test_frozen_batch_policy_drives_initial_organization_when_legacy_flags_are_o
             decision = db.query(DocumentOrganizationDecision).filter_by(
                 working_copy_id=working_copy.id
             ).one()
+            primary = db.query(DocumentCategory).filter_by(
+                working_copy_id=working_copy.id,
+                document_version_id=working_copy.current_version_id,
+                relation_role="PRIMARY",
+            ).one()
             assert working_copy.status == "ACTIVE"
             assert ".internal" not in working_copy.relative_path
-            assert working_copy.relative_path.startswith("学校/")
+            assert working_copy.relative_path.startswith("其他/")
             assert item.result_json["rename_status"] in {"NO_CHANGE", "COMPLETED"}
             assert decision.authorization_source == "WORKBUDDY_INGEST_POLICY"
             assert decision.source_request_id == "request-001"
             assert decision.policy_version == "ingest-v1"
             assert decision.after_revision > decision.before_revision
+            assert projected["primary_category"] == {
+                "category_id": primary.category_id,
+                "category_path": list(primary.category_path_json or []),
+                "status": primary.status,
+            }
     finally:
         clear_overrides()
 
 
-def test_legacy_source_rule_profile_applies_only_when_explicitly_selected(monkeypatch, tmp_path) -> None:
-    """显式旧材料规则必须消费冻结来源路径，默认内容规则不能静默继承目录分类。"""
+def test_legacy_source_rule_profile_does_not_replace_body_evidence(monkeypatch, tmp_path) -> None:
+    """显式旧来源上下文可供召回，但不能替代正文证据直接确定业务主类。"""
 
     monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "uploads"))
     monkeypatch.setenv("MANAGED_ROOT_ARCHIVE_WRITE_PATH", str(tmp_path / "originals"))
@@ -1870,8 +1972,8 @@ def test_legacy_source_rule_profile_applies_only_when_explicitly_selected(monkey
             decision = db.query(DocumentOrganizationDecision).filter_by(
                 working_copy_id=working_copy.id
             ).one()
-            assert working_copy.relative_path.startswith("学校/人事师资/职称/")
-            assert decision.category_id == "school.hr.title-review"
+            assert working_copy.relative_path.startswith("其他/")
+            assert decision.category_id == "system.other"
     finally:
         clear_overrides()
 
@@ -1975,11 +2077,29 @@ def test_all_exact_duplicates_can_reuse_existing_without_modifying_it(monkeypatc
         assert final["receipt"]["new_file_count"] == 0
         assert final["receipt"]["reused_count"] == 1
         assert final["receipt"]["retained_file_count"] == 1
+        reused_projection = client.get(
+            f"/api/integrations/v1/ingest-batches/{second_batch}/items",
+            headers=_headers(token),
+        ).json()["items"][0]
         with SessionLocal() as db:
             reused = db.get(IngestItem, second_item)
             existing = db.get(WorkingCopy, existing_id)
+            primary = db.query(DocumentCategory).filter_by(
+                working_copy_id=existing_id,
+                document_version_id=existing.current_version_id,
+                relation_role="PRIMARY",
+            ).one()
             assert reused.final_document_id == existing_document_id
             assert reused.final_working_copy_id == existing_id
+            assert reused_projection["primary_category"] == {
+                "category_id": primary.category_id,
+                "category_path": list(primary.category_path_json or []),
+                "status": primary.status,
+            }
+            assert reused_projection["classification_outcome"] in {
+                "CLASSIFIED",
+                "OTHER",
+            }
             assert existing.filename == existing_name
             assert existing.revision == existing_revision
             assert db.query(DocumentCategory).filter_by(
@@ -2205,7 +2325,7 @@ def test_wait_and_reuse_reports_primary_failure_without_fallback_or_user_task(
 
 
 def test_duplicate_comparison_reads_only_the_fixed_candidate_snapshot(monkeypatch, tmp_path) -> None:
-    """固定候选只允许其所有者读取元数据和受控内容，且不创建新的导入任务。"""
+    """公开链接可匿名读取固定候选；其他导入接口仍鉴权且查看不创建任务。"""
 
     monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "storage"))
     monkeypatch.setenv("INTEGRATION_REVIEW_WEB_BASE_URL", "http://127.0.0.1:5173")
@@ -2258,6 +2378,21 @@ def test_duplicate_comparison_reads_only_the_fixed_candidate_snapshot(monkeypatc
         assert body["verdict"] == "EXACT_CONTENT"
         assert body["comparison_url"].startswith("http://127.0.0.1:5173/duplicate-comparison?")
 
+        # 公开范围仅限有效 review 所固定的候选，不能顺带开放 review 或任意候选读取。
+        public_response = client.get(
+            f"/api/integrations/v1/ingest-items/{item_id}/duplicate-comparison",
+            params={"review_id": review_id, "review_revision": review_revision, "candidate_id": candidate_id},
+        )
+        assert public_response.status_code == 200
+        assert public_response.json()["snapshot_id"] == body["snapshot_id"]
+        assert client.get(f"/api/integrations/v1/ingest-items/{item_id}/duplicate-review").status_code == 401
+        assert client.post(f"/api/integrations/v1/ingest-items/{item_id}/duplicate-decision", json={}).status_code == 401
+        wrong_candidate = client.get(
+            f"/api/integrations/v1/ingest-items/{item_id}/duplicate-comparison",
+            params={"review_id": review_id, "review_revision": review_revision, "candidate_id": item_id},
+        )
+        assert wrong_candidate.status_code == 404
+
         unknown_parameter = client.get(
             f"/api/integrations/v1/ingest-items/{item_id}/duplicate-comparison",
             headers=_headers(token),
@@ -2269,7 +2404,6 @@ def test_duplicate_comparison_reads_only_the_fixed_candidate_snapshot(monkeypatc
             jobs_before_preview = db.query(FilesystemJob).count()
         unavailable_preview = client.get(
             f"/api/integrations/v1/ingest-items/{item_id}/duplicate-comparison/preview",
-            headers=_headers(token),
             params={
                 "review_id": review_id,
                 "review_revision": review_revision,
@@ -2285,7 +2419,6 @@ def test_duplicate_comparison_reads_only_the_fixed_candidate_snapshot(monkeypatc
 
         content_response = client.get(
             f"/api/integrations/v1/ingest-items/{item_id}/duplicate-comparison/content",
-            headers=_headers(token),
             params={
                 "review_id": review_id,
                 "review_revision": review_revision,
@@ -2297,6 +2430,28 @@ def test_duplicate_comparison_reads_only_the_fixed_candidate_snapshot(monkeypatc
         assert content_response.status_code == 200
         assert content_response.content == content
         assert content_response.headers["x-comparison-snapshot"] == body["snapshot_id"]
+        # 分享页两侧均可匿名读取，但必须分别固定 side 并重验相同快照。
+        candidate_response = client.get(
+            f"/api/integrations/v1/ingest-items/{item_id}/duplicate-comparison/content",
+            params={
+                "review_id": review_id,
+                "review_revision": review_revision,
+                "candidate_id": candidate_id,
+                "snapshot_id": body["snapshot_id"],
+                "side": "CANDIDATE",
+            },
+        )
+        assert candidate_response.status_code == 200
+        assert candidate_response.content == content
+        with SessionLocal() as db:
+            db.get(UploadDuplicateReview, review_id).status = "DECIDED"
+            db.commit()
+        # 匿名访问不延长 review 生命周期；已结束的链接与原流程一样失效。
+        closed_response = client.get(
+            f"/api/integrations/v1/ingest-items/{item_id}/duplicate-comparison",
+            params={"review_id": review_id, "review_revision": review_revision, "candidate_id": candidate_id},
+        )
+        assert closed_response.status_code == 410
     finally:
         clear_overrides()
 

@@ -14,6 +14,23 @@ from urllib.parse import quote
 import httpx
 
 
+_EXTRACTION_PAGE_SUFFIXES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/bmp": ".bmp",
+    "image/webp": ".webp",
+    "image/tiff": ".tiff",
+}
+
+
+def _extraction_page_suffix(content_type: object) -> str:
+    """按服务端已验证的图片 MIME 保存扩展名，方便宿主 OCR 工具识别格式。"""
+
+    normalized = str(content_type or "").split(";", 1)[0].strip().lower()
+    return _EXTRACTION_PAGE_SUFFIXES.get(normalized, ".image")
+
+
 class LocalRootRegistry:
     """把逻辑根映射到用户显式授权的本地目录，并阻止路径穿越。"""
 
@@ -115,6 +132,11 @@ class WorkBuddyAttachmentRegistry:
             raise ValueError("FILE_AGENT_WORKBUDDY_ATTACHMENT_ROOTS 必须是路径字符串 JSON 数组")
         return cls([Path(item) for item in parsed])
 
+    def permits_cache_root(self, root: Path) -> bool:
+        """仅允许桥接层写入显式登记的独立缓存根，不能借用整个 WorkBuddy 数据目录。"""
+
+        return not root.is_symlink() and root.resolve() in self._roots
+
     def resolve(self, *, local_path: str, filename: str) -> Path:
         """解析附件缓存文件，并拒绝越权路径、符号链接和特殊文件。"""
 
@@ -137,6 +159,39 @@ class WorkBuddyAttachmentRegistry:
             raise ValueError("WorkBuddy 附件必须是普通文件")
         if resolved.name != filename:
             raise ValueError("WorkBuddy 附件文件名与缓存文件不一致")
+        return resolved
+
+    def resolve_trusted_cache_file(self, *, local_path: str, filename: str) -> Path:
+        """解析受信提交单中的缓存文件。
+
+        该方法只供 ``workbuddy_submission_ingest`` 的本机可信提交单使用。WorkBuddy
+        blob 的物理文件名通常是内容哈希，不能要求它等于用户可见的原始文件名；旧的
+        ``resolve`` 和手写参数入口仍保持同名校验，不能用此方法放宽。
+        """
+
+        if (
+            not filename
+            or len(filename) > 255
+            or filename in {".", ".."}
+            or "/" in filename
+            or "\\" in filename
+            or "\x00" in filename
+        ):
+            raise ValueError("filename 必须是单个安全文件名")
+        if not self._roots:
+            raise ValueError("WorkBuddy 附件入口未配置授权缓存根")
+        raw_path = Path(local_path).expanduser()
+        if not raw_path.is_absolute() or raw_path.is_symlink():
+            raise ValueError("WorkBuddy 附件缓存文件不是允许的普通绝对路径")
+        resolved = raw_path.resolve()
+        if not any(resolved != root and root in resolved.parents for root in self._roots):
+            raise ValueError("WorkBuddy 附件不在已授权缓存根内")
+        try:
+            mode = resolved.stat().st_mode
+        except OSError as exc:
+            raise ValueError("WorkBuddy 附件缓存文件不存在") from exc
+        if not stat.S_ISREG(mode):
+            raise ValueError("WorkBuddy 附件必须是普通文件")
         return resolved
 
 
@@ -549,7 +604,7 @@ class FileAgentIntegrationClient:
             )
             if response.is_error:
                 self._business_json(response)
-            suffix = ".png" if page.get("content_type") == "image/png" else ".image"
+            suffix = _extraction_page_suffix(page.get("content_type"))
             target = task_dir / f"page-{int(page['page_number'])}{suffix}"
             target.write_bytes(response.content)
             os.chmod(target, 0o600)

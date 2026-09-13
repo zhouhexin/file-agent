@@ -1035,8 +1035,8 @@ def test_fallback_nodes_never_enter_ordinary_recall():
     )
 
 
-def test_enabled_scoped_fallback_is_reused_without_duplicate_generation():
-    """当前启用的组织兜底可以复用，但旧复核业务候选不得进入结果。"""
+def test_scoped_fallback_without_current_evidence_is_not_reused():
+    """兜底必须用当前正文重算；过期范围和文号不能从旧候选直接继承。"""
 
     matches = apply_unclassified_fallback(
         document_features=DocumentFeatures(
@@ -1060,7 +1060,7 @@ def test_enabled_scoped_fallback_is_reused_without_duplicate_generation():
         ],
     )
 
-    assert [item["category_id"] for item in matches] == ["school.issued"]
+    assert [item["category_id"] for item in matches] == ["system.other"]
     assert matches[0]["status"] == "SUGGESTED"
 
 

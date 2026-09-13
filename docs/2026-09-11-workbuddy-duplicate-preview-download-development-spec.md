@@ -5,6 +5,7 @@
 - 产品依据：[重复文件预览与下载补充方案](./2026-09-11-workbuddy-duplicate-preview-download-supplement.md)。
 - 适用范围：WorkBuddy 已进入 File Agent 导入链路的重复候选预览、分别下载。
 - 开发方式：严格按本文实施，复用现有能力，限定增量；不扩展附件桥接、分类、查重、文件决定或通用下载功能。
+- 2026-09-13 访问策略补充：当前用户明确要求任何持有链接者免手动登录。本文第 1、2、4、6、7、10、12、13 节中有关对比页和三个对比 GET 必须登录的旧约束，以第 14 节为准；其他接口的鉴权约束不变。
 
 ## 1. 执行约束
 
@@ -369,3 +370,23 @@ npm run build
 - [ ] README、runbook、API 契约与实际启动/限制一致。
 
 所有必要项完成后方可标记本功能“已交付”。只有方案、代码或自动化测试之一完成，必须按实际阶段报告。
+
+## 14. 2026-09-13 公开只读对比补充
+
+本次只改变访问方式：WorkBuddy 仍通过已有登录 MCP 工具取得 `comparison_url`，但浏览器打开
+`/duplicate-comparison` 时不再跳转登录。`GET /duplicate-comparison`、`GET /duplicate-comparison/content`
+和 `GET /duplicate-comparison/preview` 三个集成 API 不再依赖 JWT；任何网络可达且持有当前有效链接的
+人可查看或下载两侧内容。浏览器发出的这三个请求不携带登录令牌。`INTEGRATION_REVIEW_WEB_BASE_URL`
+仍只决定页面地址，不是鉴权开关。
+
+后端按链接中的 item ID 找到固定批次所有者，仅用该身份复用既有 review、candidate、同批关系与快照校验；
+不得据此开放 `duplicate-review`、`duplicate-decision`、普通文件读取或任意 Document ID 下载。
+原有等待确认状态、过期时间、候选修订、组修订、版本、内容指纹、路径和单侧资源校验继续生效。
+对比服务仍只读，不新增表、任务或 worker，不更改查重与归档流程。浏览器没有 File Agent 登录态时，
+离开对比页进入聊天仍显示原登录页。
+
+验收增加：无浏览器 token 的新会话直接打开有效链接，比较元数据与两侧内容均可读取；已失效链接仍
+返回原 404/409/410；`duplicate-review` 和 `duplicate-decision` 匿名调用仍拒绝；有登录用户的普通聊天、
+管理页、现有重复决定不回归。API 与 Web 都需更新并重启/重新发布；若 MCP 工具协议和安装路径未变，
+此次无需更新客户端 MCP。该公开行为有明确数据暴露代价：链接在有效期内被转发给任何可达用户，
+对方即可下载两侧完整文件，局域网并不构成接口鉴权。

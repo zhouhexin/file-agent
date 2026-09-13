@@ -85,7 +85,7 @@ from app.modules.file_lifecycle.working_copy_executor import (
     WorkingCopyExecutor,
 )
 from app.modules.file_lifecycle.risk import inspect_basic_file_risks
-from app.modules.managed_files.jobs import FilesystemJobQueue
+from app.modules.managed_files.jobs import FilesystemJobQueue, INGEST_BATCH_ANALYSIS_PRIORITY
 from app.modules.managed_files.path_policy import resolve_managed_relative_path
 from app.modules.managed_files.source_path_policy import managed_source_container_path
 from app.modules.classification.service import persist_document_results_classifications
@@ -1585,13 +1585,18 @@ class FileLifecycleJobProcessor:
     ) -> FilesystemJob:
         """为已可用工作副本提交独立分析任务，失败终态不会被自动扫描重开。"""
 
-        return FilesystemJobQueue(self.db).create_job(
+        context = self._integration_job_context(dict(job.payload_json or {}))
+        # 只有服务端固定清单绑定的批次才提速；普通聊天上传和受管目录任务保持原调度。
+        batch_bound = bool(context.get("ingest_batch_id") and context.get("ingest_item_id"))
+        priority = min(job.priority, INGEST_BATCH_ANALYSIS_PRIORITY) if batch_bound else job.priority
+        queue = FilesystemJobQueue(self.db)
+        analysis_job = queue.create_job(
             job_type="ANALYZE_DOCUMENT_VERSION",
             queue_name="ANALYSIS",
             root_id=managed_file.root_id,
             created_by=user_id,
             deduplication_key=f"document-analysis:{version.id}",
-            priority=job.priority,
+            priority=priority,
             max_attempts=3,
             payload={
                 "managed_file_id": managed_file.id,
@@ -1600,9 +1605,13 @@ class FileLifecycleJobProcessor:
                 "document_version_id": version.id,
                 "user_id": user_id,
                 # 分析与首次发布必须消费创建批次时已经冻结的同一策略。
-                **self._integration_job_context(dict(job.payload_json or {})),
+                **context,
             },
         )
+        # 去重可能复用升级前已排队的任务；只提升首次待执行任务，不重置失败或退避。
+        if batch_bound and analysis_job.status == "PENDING" and analysis_job.attempt_count == 0:
+            queue.promote_pending_job(job=analysis_job, priority=priority)
+        return analysis_job
 
     def _import_working_copy(self, job: FilesystemJob) -> None:
         """快速复制并登记活动工作副本，把解析、摘要和索引交给 ANALYSIS 队列。
@@ -2852,10 +2861,17 @@ class FileLifecycleJobProcessor:
         image_date_evidence_quote = "按图片上传年份自动归档"
         policy_result = None
         if not image_date_rule_applied:
+            # 包候选必须重新验证持久化清单，不能把无页码的清单引用当作正文缺失。
+            from app.modules.classification.purpose_placement import validate_placement_purpose
+
             policy_result = AutoPlacementPolicy(self.settings).evaluate(
                 categories=categories,
                 extraction_status=extraction_status,
                 risk_passed=risk_status in {"PASS", "WARNING"},
+                verified_purpose=validate_placement_purpose(
+                    self.db, working_copy=working_copy,
+                    candidate=categories[0] if categories else None,
+                ),
             )
             if (
                 placement_mode == "BY_CATEGORY"

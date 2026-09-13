@@ -20,6 +20,7 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
         "file_ingest",
         "file_batch_ingest",
         "workbuddy_attachment_ingest",
+        "workbuddy_submission_ingest",
         "file_search",
         "file_read",
         "evidence_answer",
@@ -42,6 +43,11 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
         "ingest_retry",
         "ingest_cancel",
     }
+    descriptions = {tool.name: tool.description or "" for tool in tools}
+    assert "不能只重复查询状态" in descriptions["workbuddy_submission_ingest"]
+    assert "重复调用本工具不会完成 OCR" in descriptions["batch_get"]
+    assert "不得让 File Agent 后端自行 OCR" in descriptions["extraction_claim"]
+    assert "必须为 null" in descriptions["extraction_submit"]
     schemas = {tool.name: tool.inputSchema for tool in tools}
     # 结构化子项也必须拒绝多余字段，不能只依赖 handler 内的二次检查。
     assert schemas["file_rename"]["$defs"]["ExplicitRenameInput"]["additionalProperties"] is False

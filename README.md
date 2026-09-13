@@ -47,6 +47,16 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m uvicorn app
 cd apps/web && npm install && npm test && npm run build && npm run dev
 ```
 
+WorkBuddy 图片附件桥接试点升级到 0.1.6：图片等待外部提取时，Agent 会领取固定页面、调用 WorkBuddy
+腾讯文档 `ocr.extract` 并回填逐页结果，不再只查询状态；未返回的置信度等字段保持 `null`，后端不改为
+自行 OCR。更新套件与本地 MCP 代码后完全重启 WorkBuddy；API/worker 和环境变量无须调整。
+上传方式及限制见 [附件桥接安装说明](integrations/workbuddy/file-agent-plugin/README.md)。
+
+WorkBuddy 5.5.3 的 Word/PDF/Excel 本地附件现由 MCP 从本轮固定会话记录中的宿主双重引用识别，
+流式快照到插件私有 `document-cache` 后复用同一归档链路；不是让 AI 复制路径。
+需要把该独立缓存目录加入 `FILE_AGENT_WORKBUDDY_ATTACHMENT_ROOTS`，完全重启 WorkBuddy 并重新发送文件。
+本机 DOCX/PDF/XLS 真实消息已验证可识别，实际 GUI 导入结果仍以重新提交后的回执为准。
+
 WorkBuddy 导入适配器位于 `apps/mcp`。当前支持明确授权目录的批次枚举/传输与断点恢复，以及用户已在
 WorkBuddy 消息中明确提交、且位于预配置宿主缓存根内的会话附件导入；同时支持逐文件
 精确/近似重复确认、外部 OCR 页面领取与回写、显式取消/重试，以及整理后附带读取或总结请求。新通道
@@ -54,9 +64,10 @@ WorkBuddy 消息中明确提交、且位于预配置宿主缓存根内的会话�
 和启动命令见 `docs/runbook.md`，客户端绝对路径不会发送给后端。该试点入口默认关闭，部署时必须显式
 配置 `INTEGRATION_INGEST_ENABLED=true`；关闭时整个集成 API 返回受控不可用错误。
 
-重复候选可调用只读 `duplicate_comparison_get` 获取浏览器对比链接，在 File Agent 登录后分别预览或下载两侧
-固定版本。部署者需要配置用户浏览器可访问的 `INTEGRATION_REVIEW_WEB_BASE_URL`；查看完成后仍使用原有
-重复确认工具提交“使用已有文件”或“继续上传”。
+重复候选可调用只读 `duplicate_comparison_get` 获取浏览器对比链接。该链接对应的对比页及两侧预览、下载
+无需浏览器登录；任何能够访问 Web 且持有有效链接的人都能读取两侧文件。部署者需要配置用户浏览器可访问的
+`INTEGRATION_REVIEW_WEB_BASE_URL`；链接只在重复确认仍有效时可用，查看完成后仍使用原有需登录的
+重复确认工具提交“使用已有文件”或“继续上传”。其他文件接口不因此开放匿名访问。
 
 同一MCP还提供已入库文件的只读搜索、固定模式读取、证据问答、搜索澄清恢复、明确重命名以及
 OperationPlan查询/确认。搜索不能执行写操作；读取只允许`READ/SUMMARY/EXPLAIN`；明确重命名必须携带
@@ -106,6 +117,9 @@ worker。预检通过后分别启动 scheduler 和五个合并后的 worker：�
 绝对路径。脚本无论从哪个当前目录调用都会先切换到仓库根，因此相对
 `WORKING_COPY_STORAGE_ROOT=./storage/working-copies` 始终指向仓库内目录。共享开发数据库已有
 WorkingCopy 记录但当前机器物理文件缺失时，下一次扫描会重新调度导入并从不可变原件修复本地副本。
+MCP/WorkBuddy 固定批次的上传分析使用优先级 20，高于普通受管目录后台分析的 100，低于即时检索的 10；
+仍由现有 `SOURCE_ANALYSIS,ANALYSIS` worker 消费，不增加进程或数据库迁移。升级后须重启 API 和旧
+分析 worker；旧批次中尚未领取的分析任务会在下一次 `batch_get` 时提升优先级，不会重建文件或任务。
 启用WorkBuddy批次附带读取/总结时，还需运行`scripts\start-workbuddy-ingest-worker.cmd`消费独立`AGENT`队列。
 以下是 macOS/Linux 的等价分终端命令：
 

@@ -1,11 +1,35 @@
 {
   "policy_id": "workdata-classification",
-  "version": "workdata-v3",
+  "version": "workdata-v4",
   "policy_mode": "conservative_rules",
   "candidate_limit": 8,
   "resume_window_paragraphs": 12,
   "resume_window_characters": 3000,
   "rules": [
+    {
+      "rule_id": "hr.shared-talent-program",
+      "version": "1",
+      "candidate_category_ids": ["school.hr.talent-work"],
+      "subject_signals": {"all_groups": [["校招共用"], ["引才用才", "人才目录", "人才需求"]], "any_group": [], "same_section": []},
+      "action_signals": {"all_groups": [], "any_group": [["编制", "引进", "申报", "拟招聘", "统计", "聘任合同"]], "same_section": []},
+      "title_signals": {"all_groups": [], "any_group": [], "same_section": []},
+      "negative_contexts": ["校园招聘会", "毕业生就业"],
+      "scope_policy": {"preferred_roots": ["学校", "学院"], "required": false},
+      "evidence_requirements": {"minimum_groups": 2, "require_body_signal": true, "require_subject_and_action_in_body": true},
+      "regression_sample_ids": ["HR-SHARED-TALENT"]
+    },
+    {
+      "rule_id": "hr.staff-transfer",
+      "version": "1",
+      "candidate_category_ids": ["school.hr"],
+      "subject_signals": {"all_groups": [["拟调入教师", "教师调动", "人员调动"]], "any_group": [], "same_section": []},
+      "action_signals": {"all_groups": [], "any_group": [["提前进校", "调动材料", "调入申请"]], "same_section": []},
+      "title_signals": {"all_groups": [], "any_group": [], "same_section": []},
+      "negative_contexts": ["学生转学"],
+      "scope_policy": {"preferred_roots": ["学校", "学院"], "required": false},
+      "evidence_requirements": {"minimum_groups": 2, "require_body_signal": true, "require_subject_and_action_in_body": true},
+      "regression_sample_ids": ["HR-STAFF-TRANSFER"]
+    },
     {
       "rule_id": "hr.title-review",
       "version": "1",

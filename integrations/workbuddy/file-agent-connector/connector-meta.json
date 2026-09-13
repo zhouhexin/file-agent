@@ -1,0 +1,23 @@
+{
+  "name": "文件助手",
+  "name_zh": "文件助手",
+  "name_en": "File Agent",
+  "description": "Import authorized local files, search archived files, and organize them with evidence-based classification.",
+  "description_zh": "连接文件助手，导入已授权目录文件并进行检索、归档、查重和分类。",
+  "description_en": "Connect to local File Agent for authorized file import, search, duplicate review, archival and classification.",
+  "source": "file-agent-local",
+  "type": "mcp",
+  "version": "1.0.1",
+  "auth_mode": "token",
+  "minWorkbuddyVersion": "4.24.0",
+  "examples_zh": [
+    "请用文件助手归档受管目录中的奖学金申请材料并按内容分类",
+    "请用文件助手找出 2025 年奖学金申请相关的文件，并说明依据",
+    "请用文件助手读取刚刚检索到的 Excel 文件并总结各工作表"
+  ],
+  "examples_en": [
+    "Archive authorized scholarship application files and classify them by content",
+    "Find scholarship application files from 2025 and explain the evidence",
+    "Read the Excel file found in this conversation and summarize its worksheets"
+  ]
+}

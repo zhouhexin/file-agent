@@ -12,7 +12,7 @@
 
 ### 1.2 Authentication
 
-除注册、登录、健康检查外，所有接口都需要 JWT。
+除注册、登录、健康检查，以及下文限定的三个重复候选只读对比 GET 接口外，所有接口都需要 JWT。
 
 ```http
 Authorization: Bearer <access_token>
@@ -1887,6 +1887,12 @@ GET  /api/integrations/v1/extraction-tasks/{task_id}/pages/{page_number}
 POST /api/integrations/v1/extraction-tasks/{task_id}/results
 ```
 
+2026-09-13 的公开对比例外：仅 `duplicate-comparison`、`duplicate-comparison/content`、
+`duplicate-comparison/preview` 这三个 GET 接口无需 JWT。任何网络可达者只要持有有效的条目、review、
+候选 ID 与修订参数，均可读取固定候选的两侧内容；服务端仍检查 review 等待状态、期限、候选归属、
+版本/快照和文件实际状态。链接失效后不能继续读取。`duplicate-review`、`duplicate-decision`、批次管理、
+普通文件下载和其他接口仍需 JWT，公开对比不授予任何文件写入或决定权限。
+
 创建批次请求示例：
 
 ```json
@@ -1941,6 +1947,13 @@ POST /api/integrations/v1/extraction-tasks/{task_id}/results
 宿主机路径、文件正文、内部归档记录 ID 或任务载荷。批次 `receipt` 同时返回 `new_file_count`、
 `reused_count`、`excluded_count` 和按最终 Document ID 去重的 `retained_file_count`。无权访问的批次
 与不存在批次统一返回 `INGEST_BATCH_NOT_FOUND`，防止跨用户枚举。
+
+`batch_get` 所消费的条目分页对 `SUCCEEDED/PARTIAL` 且已发布的文件额外返回
+`primary_category={category_id, category_path, status}` 和 `classification_outcome=CLASSIFIED|OTHER`。
+主分类只读取最终工作副本当前版本的 `PRIMARY + AUTO_APPLIED/CONFIRMED` 关系；没有生效关系的历史文件
+不得伪造 `system.other`，此时 `primary_category=null` 且结果状态按公开分类目录语义返回 `OTHER`。
+未发布、失败、取消或仍在处理的条目两个字段均为 `null`。该批次投影不返回分类证据或关键词，也不触发
+重新分类；需要依据时继续使用独立只读检索或证据能力。
 
 成功发布的条目必须区分导入历史快照和当前工作副本投影：`ingest_final_filename` 固定为导入完成时
 的名称，兼容旧记录时读取 `result.ingest_final_filename`，缺失则回退到历史

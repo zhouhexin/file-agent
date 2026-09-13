@@ -579,8 +579,9 @@ def test_document_classification_service_uses_unified_taxonomy_when_managed_cata
         )
 
         assert result["categories"][0]["taxonomy_key"] == "unified_school_file_classification"
-        assert result["categories"][0]["taxonomy_version"] == "2026-09-v9"
-        assert result["categories"][0]["source"] == "rule"
+        assert result["categories"][0]["taxonomy_version"] == "2026-09-v13"
+        assert result["categories"][0]["source"] == "system_fallback"
+        assert any(item["source"] == "rule" for item in result["categories"][1:])
         assert "managed_global_catalog" not in {
             item["source"] for item in result["categories"]
         }
@@ -624,12 +625,15 @@ def test_document_classification_service_uses_hybrid_judge_when_configured():
         document_id="doc-hybrid",
         extraction_run_id="run-hybrid",
         filename="职称材料.txt",
-        fallback_text="本文件涉及教师职称申报材料。",
+        fallback_text="本文件涉及学校教师职称申报材料。",
     )
 
-    assert result["categories"][0]["name"] == "学校/人事师资/职称"
-    assert result["categories"][0]["source"] == "hybrid"
-    assert result["categories"][0]["confidence"] == 0.91
+    # 内存态 fallback_text 没有页码或 Sheet 定位，最新策略必须以 OTHER 为
+    # PRIMARY；LLM 仍可在白名单内形成辅助候选，但不能绕过证据门槛。
+    assert result["categories"][0]["category_id"] == "system.other"
+    hybrid = next(item for item in result["categories"] if item["source"] == "hybrid")
+    assert hybrid["name"] == "学校/人事师资/职称"
+    assert hybrid["confidence"] == 0.91
 
 
 def test_document_classification_service_falls_back_when_hybrid_returns_no_valid_label():
@@ -649,11 +653,14 @@ def test_document_classification_service_falls_back_when_hybrid_returns_no_valid
         document_id="doc-rule-fallback",
         extraction_run_id="run-rule-fallback",
         filename="职称材料.txt",
-        fallback_text="本文件涉及教师职称申报材料。",
+        fallback_text="本文件涉及学校教师职称申报材料。",
     )
 
-    assert result["categories"][0]["name"] == "学校/人事师资/职称"
-    assert result["categories"][0]["source"] == "rule"
+    assert result["categories"][0]["category_id"] == "system.other"
+    assert any(
+        item["name"] == "学校/人事师资/职称" and item["source"] == "rule"
+        for item in result["categories"][1:]
+    )
 
 
 def test_graph_uses_classification_service_not_context_loader_texts(monkeypatch):
@@ -717,7 +724,7 @@ def test_llm_message_extracts_multiple_documents_and_builds_document_results():
         client,
         headers,
         filename="staff.txt",
-        content="本文件涉及学校教师职称、干部工作和会议纪要材料。".encode(),
+        content="学校教师专业技术职务申报评审材料，现申请开展职称评审。".encode(),
     )
     plan_document_id = _upload_document(
         client,
@@ -764,7 +771,6 @@ def test_llm_message_extracts_multiple_documents_and_builds_document_results():
         assert "plan.txt" in final_response
         assert "unknown.txt" in final_response
         assert "学校/人事师资/职称" in final_response
-        assert "学校/党委相关/干部工作" in final_response
         assert "置信度" in final_response
         assert "学院/行政管理/年度计划、总结" in final_response
         assert "其他（暂无明确关键词依据）" in final_response
@@ -778,8 +784,6 @@ def test_llm_message_extracts_multiple_documents_and_builds_document_results():
         ]
         staff_category_names = [category["name"] for category in document_results[0]["categories"]]
         staff_confidences = [category["confidence"] for category in document_results[0]["categories"]]
-        assert "学校/党委相关/干部工作" in staff_category_names
-        assert "学校/行政综合管理类/会议纪要" in staff_category_names
         assert "学校/人事师资/职称" in staff_category_names
         assert staff_confidences == sorted(staff_confidences, reverse=True)
         assert document_results[1]["categories"][0]["name"] == "学院/行政管理/年度计划、总结"

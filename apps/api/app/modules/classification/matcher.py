@@ -202,6 +202,28 @@ _SCHOOL_SCOPE_RECIPIENT_ACTIONS = (
 # 等单个文种词不能独立形成业务主类。元组字段依次为题名、字段组、学校 ID、
 # 学院 ID、默认 ID 和最少字段组数。
 _STRUCTURED_DOCUMENT_RULES = (
+    # 人才申报汇总表以表内真实题名和成组字段为依据，个人科研履历只是支撑信息。
+    (
+        ("申报CJ计划人员情况汇总表", "人才计划人员情况汇总表", "青年教师奖申报汇总表",
+         "青年教师基金及教师奖", "人才需求信息表", "引才用才汇总表", "校招共用人才目录"),
+        (("姓名", "拟招聘人员", "人才"), ("申报项目", "项目类别", "引才用才", "校招共用"),
+         ("入选人才计划", "入校时间", "职称", "学历", "需求")),
+        "school.hr.talent-work", "college.hr.talent-work", "school.hr.talent-work", 3,
+    ),
+    (
+        ("人事代理人员合同期满考核评分表", "人事代理人员合同期满考核情况汇总表",
+         "合同期满考核评分表"),
+        (("评价目标", "考核情况", "考核结果"), ("评价标准", "考核等级", "考核结论"),
+         ("得分", "姓名", "岗位")),
+        "school.hr.appointment-assessment", "college.hr.appointment-assessment",
+        "school.hr.appointment-assessment", 3,
+    ),
+    (
+        ("外聘和兼职教师基本信息采集表", "兼职教师基本信息表", "工号"),
+        # 无表内题名的花名册须同时满足五组人事字段，不能仅凭文件名或“姓名”分类。
+        (("聘任时间",), ("聘期",), ("任职状态",), ("单位名称",), ("工号", "姓名")),
+        "school.hr", "college.hr", "school.hr", 5,
+    ),
     (
         (
             "高层次人才申报表",
@@ -556,6 +578,9 @@ def recall_category_candidates(
     candidates = _dedupe_candidates_and_remove_shorter_embedded_matches(candidates)
     candidates.sort(
         key=lambda item: (
+            # 强结构候选必须先进入有限候选集，再由主类选择器校正组织镜像；
+            # 否则长表里的多个同组织背景词会把尚未切镜像的人事候选挤出 Top-N。
+            -int(item.purpose_basis == "STRUCTURED_FORM"),
             -int(
                 bool(organization_scope.dominant_root)
                 and bool(item.category_path)
@@ -577,7 +602,8 @@ def detect_structured_document_purpose(*, filename: str, full_text: str) -> str 
     防止汇编、模板合集或复合材料把整包附件带入错误业务。
     """
 
-    title_zone = _join_text([filename, (full_text or "")[:600]])
+    # 文件名可用于组织提示，但结构业务题名本身必须在原正文首页出现。
+    title_zone = (full_text or "")[:600]
     body_zone = (full_text or "")[:5_000]
     scope = _lightweight_structured_scope(filename, body_zone)
     matches: list[str] = []
@@ -589,7 +615,7 @@ def detect_structured_document_purpose(*, filename: str, full_text: str) -> str 
         default_category_id,
         minimum_groups,
     ) in _STRUCTURED_DOCUMENT_RULES:
-        if not _matched_configured_signals(title_zone, title_signals):
+        if not _matched_structured_signals(title_zone, title_signals):
             continue
         group_count = sum(
             bool(_matched_structured_signals(body_zone, group))
@@ -639,8 +665,14 @@ def _structured_document_candidate(
     matched_titles: list[str] = []
     matched_fields: list[str] = []
     for title_signals, field_groups, *_rest in _STRUCTURED_DOCUMENT_RULES:
-        titles = _matched_configured_signals(_join_text([filename, title_text]), title_signals)
+        titles = _matched_structured_signals(body_text[:600], title_signals)
         if not titles:
+            continue
+        group_count = sum(
+            bool(_matched_structured_signals(body_text[:5_000], group))
+            for group in field_groups
+        )
+        if group_count < _rest[-1]:
             continue
         fields = [
             signal
@@ -1222,14 +1254,6 @@ def apply_unclassified_fallback(
         for item in matches
         if _is_current_business_candidate(item)
     ]
-    existing_fallback = next(
-        (
-            item
-            for item in matches
-            if str(item.get("source") or "") == "rule_fallback"
-        ),
-        None,
-    )
     # 已有明确末级业务候选时不把兜底作为普通次级标签返回；兜底只负责
     # “无法具体分类”的最后落位，不能污染已分类文件的多标签结果。
     if any(
@@ -1238,7 +1262,8 @@ def apply_unclassified_fallback(
         for item in concrete_matches
     ):
         return concrete_matches
-    fallback = existing_fallback or _build_scoped_fallback(
+    # 摘要阶段的根级兜底不能锁死结果；每轮用当前完整证据重新验证部门及文号。
+    fallback = _build_scoped_fallback(
         document_features=document_features,
         taxonomy=taxonomy,
         matches=concrete_matches,
@@ -1306,16 +1331,26 @@ def _build_scoped_fallback(
         for item in flatten_category_paths(taxonomy)
         if item.category_id in department_ids
     }
+    # 部门识别独立于业务 Top-N：父节点可能被叶候选挤出，但正文发布/报送机关仍有效。
     department_matches = [
-        item
-        for item in matches
-        if str(item.get("category_id") or "") in department_ids
-        and (
+        {
+            "category_id": node.category_id,
+            "category_path": node.path,
+            "evidence": [
+                signal
+                for signal in _unique_signals(
+                    [node.name, *node.aliases, *node.positive_signals]
+                )
+                if signal in located_text
+            ],
+        }
+        for node in department_nodes.values()
+        if (
             not scope.dominant_root
-            or list(item.get("category_path") or [])[:1] == [scope.dominant_root]
+            or node.path[:1] == [scope.dominant_root]
         )
         and _is_department_keyword_match(
-            department=department_nodes.get(str(item.get("category_id") or "")),
+            department=node,
             text=located_text,
             document_number=document_number,
         )

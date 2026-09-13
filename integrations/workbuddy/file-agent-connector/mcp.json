@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "file-agent": {
+      "type": "stdio",
+      "command": "cmd.exe",
+      "args": [
+        "/d",
+        "/s",
+        "/c",
+        "\"%FILE_AGENT_PYTHON_EXECUTABLE%\" -m file_agent_mcp.server"
+      ],
+      "env": {
+        "FILE_AGENT_PYTHON_EXECUTABLE": "${FILE_AGENT_PYTHON_EXECUTABLE}",
+        "PYTHONPATH": "${FILE_AGENT_MCP_SOURCE_DIR}",
+        "FILE_AGENT_API_BASE_URL": "${FILE_AGENT_API_BASE_URL}",
+        "FILE_AGENT_ACCESS_TOKEN": "${FILE_AGENT_ACCESS_TOKEN}",
+        "FILE_AGENT_LOCAL_ROOTS": "${FILE_AGENT_LOCAL_ROOTS}",
+        "LOCAL_TRANSFER_STATE_DIR": "${LOCAL_TRANSFER_STATE_DIR}"
+      },
+      "timeout": 30000,
+      "disabledTools": [
+        "workbuddy_attachment_ingest",
+        "workbuddy_submission_ingest"
+      ]
+    }
+  }
+}

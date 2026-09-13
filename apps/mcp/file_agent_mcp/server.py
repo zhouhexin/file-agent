@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .attachment_transfer import AttachmentTransferService, WorkBuddyAttachmentInput
 from .client import FileAgentIntegrationClient, LocalRootRegistry, WorkBuddyAttachmentRegistry
+from .workbuddy_submission import WorkBuddySubmissionService
 from .conversation_tools import (
     ExplicitRenameInput,
     MoveWorkingCopyInput,
@@ -223,6 +224,43 @@ async def file_rename(
 
 
 @mcp.tool(
+    name="workbuddy_submission_ingest",
+    description=(
+        "导入本轮 WorkBuddy 附件桥接插件已捕获的可信附件提交单，并自动解析、"
+        "查重、归档和分类。文件助手是面向用户的中文称呼。仅在当前消息包含 "
+        "FILE_AGENT_HOST_SUBMISSION 且用户说‘请用文件助手’处理附件，或明确"
+        "要求导入、归档、整理或分类附件时调用；不得要求或填写本地路径、附件 ID。"
+        "调用后必须用 batch_get 检查逐文件状态；若为 WAITING_EXTERNAL_EXTRACTION，"
+        "应立即进入 extraction_claim、宿主 OCR、extraction_submit 流程，不能只重复查询状态。"
+    ),
+    structured_output=True,
+)
+async def workbuddy_submission_ingest(
+    submission_ref: str,
+    user_request: str | None = None,
+    placement_mode: Literal["BY_CATEGORY", "NEUTRAL"] = "BY_CATEGORY",
+    rule_profile: Literal["content_based", "legacy_school_materials"] = "content_based",
+) -> dict[str, Any]:
+    """按插件提交单导入当前会话附件；用户任务由 Hook 冻结，模型不能伪造附件范围。"""
+
+    client = _client()
+    try:
+        registry = WorkBuddyAttachmentRegistry.from_environment()
+        transfer = AttachmentTransferService(client, registry)
+        return await WorkBuddySubmissionService.from_environment(
+            transfer=transfer,
+            registry=registry,
+        ).ingest(
+            submission_ref=submission_ref,
+            user_request=user_request,
+            placement_mode=placement_mode,
+            rule_profile=rule_profile,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
     name="file_set_primary_category",
     description=(
         "把已确定文件的主分类设为指定 taxonomy 节点，并按该主类异步落位。"
@@ -367,7 +405,13 @@ async def batch_resume(batch_id: str) -> dict[str, Any]:
 
 @mcp.tool(
     name="batch_get",
-    description="恢复批次、逐文件状态和所有尚待选择的重复确认。",
+    description=(
+        "恢复批次、逐文件状态和所有尚待选择的重复确认。若条目状态为 "
+        "WAITING_EXTERNAL_EXTRACTION，必须从条目 result.external_extraction_task_id 取得任务 ID，"
+        "随后调用 extraction_claim、WorkBuddy 可用 OCR 和 extraction_submit；重复调用本工具不会完成 OCR。"
+        "已发布的成功条目同时返回 primary_category 和 classification_outcome，"
+        "应逐文件展示主分类路径与分类结果状态；本回执不提供分类证据或关键词。"
+    ),
     structured_output=True,
 )
 async def batch_get(batch_id: str) -> dict[str, Any]:
@@ -504,7 +548,11 @@ async def ingest_cancel(
 
 @mcp.tool(
     name="extraction_claim",
-    description="领取外部 OCR 任务并下载真实待识别页面到本地受控暂存目录。",
+    description=(
+        "领取外部 OCR 任务并下载真实待识别页面到本地受控暂存目录。领取后必须逐页调用 "
+        "WorkBuddy 已连接的识图工具，并把真实文本和可用坐标交给 extraction_submit；"
+        "不得只查询 batch_get，也不得让 File Agent 后端自行 OCR。"
+    ),
     structured_output=True,
 )
 async def extraction_claim(task_id: str, worker_id: str) -> dict[str, Any]:
@@ -524,7 +572,7 @@ async def extraction_claim(task_id: str, worker_id: str) -> dict[str, Any]:
 
 @mcp.tool(
     name="extraction_renew",
-    description="续期当前外部 OCR 租约。",
+    description="仅在正在执行宿主 OCR 且租约即将到期时续期当前任务；不得用续租代替 OCR 或提交结果。",
     structured_output=True,
 )
 async def extraction_renew(task_id: str, worker_id: str, lease_token: str) -> dict[str, Any]:
@@ -543,7 +591,11 @@ async def extraction_renew(task_id: str, worker_id: str, lease_token: str) -> di
 
 @mcp.tool(
     name="extraction_submit",
-    description="提交固定页集合的 OCR 结果并让 File Agent 继续查重和整理。",
+    description=(
+        "一次性提交 extraction_claim 固定页集合的真实 OCR 结果，并让 File Agent 继续查重、归档和分类。"
+        "页码、source_sha256、source_version_id 必须沿用领取结果；Provider 未返回的置信度、版本和请求 ID "
+        "必须为 null，不能推测或伪造。提交后按返回的 filesystem_job_id 查询实际处理任务。"
+    ),
     structured_output=True,
 )
 async def extraction_submit(

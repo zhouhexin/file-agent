@@ -1,0 +1,15 @@
+{
+  "name": "file-agent-local-marketplace",
+  "description": "文件助手 WorkBuddy 附件桥接本地测试市场。",
+  "owner": {
+    "name": "File Agent Team"
+  },
+  "plugins": [
+    {
+      "name": "file-agent-workbuddy-bridge",
+      "source": "./file-agent-plugin",
+      "description": "捕获本轮 WorkBuddy 附件并交给文件助手执行已授权导入。",
+      "version": "0.1.10"
+    }
+  ]
+}

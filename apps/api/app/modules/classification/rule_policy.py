@@ -47,6 +47,8 @@ class EvidenceRequirements(BaseModel):
 
     minimum_groups: int = Field(default=1, ge=1, le=8)
     require_body_signal: bool = True
+    # 人事对象/动作规则不能借文件名补足任一组正文证据。
+    require_subject_and_action_in_body: bool = False
 
 
 class ClassificationRule(BaseModel):
@@ -134,6 +136,11 @@ def evaluate_rule_policy(
         subject = _match_signal_groups(rule.subject_signals, full_text, sections)
         action = _match_signal_groups(rule.action_signals, full_text, sections)
         title_hits = _match_signal_groups(rule.title_signals, title_text, [title_text])
+        if rule.evidence_requirements.require_subject_and_action_in_body:
+            subject = _match_signal_groups(rule.subject_signals, body_text, sections)
+            action = _match_signal_groups(rule.action_signals, body_text, sections)
+            if not subject or not action:
+                continue
         positive_groups = int(bool(subject)) + int(bool(action)) + int(bool(title_hits))
         if positive_groups < rule.evidence_requirements.minimum_groups:
             continue

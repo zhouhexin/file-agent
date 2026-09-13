@@ -49,7 +49,8 @@ from app.modules.knowledge_graph.semantic_context import NoOpSemanticClassificat
 
 
 # 分类判定规则发生变化后必须递增版本，避免复用旧分类缓存。
-CLASSIFIER_IMPLEMENTATION_VERSION = "v19"
+# 落位用途校验、完整正文部门兜底与人事表单规则变更必须使旧分类缓存失效。
+CLASSIFIER_IMPLEMENTATION_VERSION = "v20"
 _FACULTY_RECRUITMENT_CATEGORY_ID = "college.hr.faculty-recruitment"
 _MANAGED_SOURCE_RECRUITMENT_PACKAGE_SOURCE = "managed_source_recruitment_package"
 _TITLE_REVIEW_CATEGORY_ID = "school.hr.title-review"

@@ -1,6 +1,6 @@
 """WorkBuddy/MCP 对外集成路由。
 
-路由只做认证、Schema 校验和事务级 Service 调用；它不能直接读本地源目录、写工作副本或绕过
+路由只做接口级认证或固定候选公开读取、Schema 校验和事务级 Service 调用；它不能直接读本地源目录、写工作副本或绕过
 Tool/worker 边界。上传、重复确认、OCR 回写、取消和重试均保存持久化业务状态后异步续跑。
 """
 
@@ -212,27 +212,30 @@ def get_ingest_duplicate_review(
 
 
 @router.get("/ingest-items/{item_id}/duplicate-comparison", response_model=IngestDuplicateComparisonResponse)
-def get_ingest_duplicate_comparison(item_id: str, request: Request, query: IngestDuplicateComparisonQuery = Depends(), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> IngestDuplicateComparisonResponse:
-    """读取固定重复候选的脱敏对比元数据，不改变确认或导入状态。"""
+def get_ingest_duplicate_comparison(item_id: str, request: Request, query: IngestDuplicateComparisonQuery = Depends(), db: Session = Depends(get_db)) -> IngestDuplicateComparisonResponse:
+    """匿名读取固定重复候选的脱敏元数据；写操作仍须登录。"""
 
     _require_known_query_parameters(request, {"review_id", "review_revision", "candidate_id", "group_revision"})
-    return IngestDuplicateComparisonService(db).comparison(item_id=item_id, query=query, current_user=current_user)
+    service = IngestDuplicateComparisonService(db)
+    return service.comparison(item_id=item_id, query=query, current_user=service.owner_for_public_link(item_id))
 
 
 @router.get("/ingest-items/{item_id}/duplicate-comparison/content", response_class=FileResponse)
-def get_ingest_duplicate_comparison_content(item_id: str, request: Request, query: IngestDuplicateContentQuery = Depends(), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> FileResponse:
-    """在当前快照仍有效时下载一侧文件，客户端不能指定路径或任意 Document。"""
+def get_ingest_duplicate_comparison_content(item_id: str, request: Request, query: IngestDuplicateContentQuery = Depends(), db: Session = Depends(get_db)) -> FileResponse:
+    """匿名下载当前快照的一侧文件，不扩展到任意 Document 或写操作。"""
 
     _require_known_query_parameters(request, {"review_id", "review_revision", "candidate_id", "group_revision", "snapshot_id", "side", "disposition"})
-    return IngestDuplicateComparisonService(db).content(item_id=item_id, query=query, current_user=current_user)
+    service = IngestDuplicateComparisonService(db)
+    return service.content(item_id=item_id, query=query, current_user=service.owner_for_public_link(item_id))
 
 
 @router.get("/ingest-items/{item_id}/duplicate-comparison/preview", response_model=IngestDuplicatePreviewResponse)
-def get_ingest_duplicate_comparison_preview(item_id: str, request: Request, query: IngestDuplicatePreviewQuery = Depends(), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> IngestDuplicatePreviewResponse:
-    """读取固定版本已有正文页；预览缺失不能在 GET 中启动解析或其他任务。"""
+def get_ingest_duplicate_comparison_preview(item_id: str, request: Request, query: IngestDuplicatePreviewQuery = Depends(), db: Session = Depends(get_db)) -> IngestDuplicatePreviewResponse:
+    """匿名读取固定版本已有正文页，不在 GET 中启动解析或其他任务。"""
 
     _require_known_query_parameters(request, {"review_id", "review_revision", "candidate_id", "group_revision", "snapshot_id", "side", "max_chars"})
-    return IngestDuplicateComparisonService(db).preview(item_id=item_id, query=query, current_user=current_user)
+    service = IngestDuplicateComparisonService(db)
+    return service.preview(item_id=item_id, query=query, current_user=service.owner_for_public_link(item_id))
 
 
 @router.post(

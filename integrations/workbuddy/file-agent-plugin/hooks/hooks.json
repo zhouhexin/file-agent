@@ -1,0 +1,28 @@
+{
+  "description": "为已提交的 WorkBuddy 附件生成受控提交单，并在调用文件助手前校验引用。",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${user_config.python_executable}\" \"${CODEBUDDY_PLUGIN_ROOT}/scripts/capture_submission.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "mcp__.*file.agent.*__workbuddy_submission_ingest",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${user_config.python_executable}\" \"${CODEBUDDY_PLUGIN_ROOT}/scripts/validate_submission_call.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
