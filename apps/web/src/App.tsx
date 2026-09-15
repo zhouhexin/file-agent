@@ -11,6 +11,7 @@ import { CapabilitySuggestionsPage } from './features/admin/CapabilitySuggestion
 import { AgentRunsPage } from './features/admin/AgentRunsPage';
 import { ChatPage } from './features/chat/ChatPage';
 import { ClassificationFilesPage } from './features/files/ClassificationFilesPage';
+import { readClassificationDeepLink } from './features/files/classificationDeepLink';
 import { IngestDuplicateComparisonPage } from './features/chat/IngestDuplicateComparisonPage';
 import { OnboardingPage } from './features/onboarding/OnboardingPage';
 import './features/chat/chat.css';
@@ -74,6 +75,9 @@ export function App() {
   const [currentPath, setCurrentPath] = useState<AppPath>(() => readInitialPath());
   const [returnTarget, setReturnTarget] = useState<string | null>(() => readInitialReturnTarget());
   const [pendingExample, setPendingExample] = useState('');
+  const classificationAccessToken = currentPath === '/files'
+    ? readClassificationDeepLink(window.location.search).accessToken
+    : null;
 
   useEffect(() => {
     // 监听浏览器前进后退，确保用户使用返回键也能回到正确页面。
@@ -105,13 +109,13 @@ export function App() {
         setToken(null);
         setCurrentUser(null);
         // 公开对比页不依赖浏览器登录态；过期令牌不能把分享链接重定向到登录页。
-        if (readInitialPath() !== '/duplicate-comparison') {
+        if (readInitialPath() !== '/duplicate-comparison' && !classificationAccessToken) {
           replacePath('/login');
           setCurrentPath('/login');
         }
       })
       .finally(() => setAuthChecked(true));
-  }, [token]);
+  }, [classificationAccessToken, token]);
 
   const route = useMemo(() => {
     // 'loading'：等待 /auth/me 校验；'login'：未登录或 token 失效；'protected'：已登录。
@@ -210,6 +214,16 @@ export function App() {
   // 对比链接只开放固定候选的只读页面；普通聊天、管理和重复决定仍走原登录门禁。
   if (currentPath === '/duplicate-comparison') {
     return <IngestDuplicateComparisonPage query={new URLSearchParams(window.location.search)} onBack={openChat} />;
+  }
+
+  if (currentPath === '/files' && classificationAccessToken) {
+    return (
+      <ClassificationFilesPage
+        token={null}
+        publicAccessToken={classificationAccessToken}
+        onBack={openChat}
+      />
+    );
   }
 
   if (route === 'loading') {

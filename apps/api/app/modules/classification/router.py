@@ -7,6 +7,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.security import (
+    TokenDecodeError,
+    create_public_classification_access_token,
+    decode_public_classification_access_token,
+)
 from app.db.models import ClassificationPlacementOperation, User, WorkingCopy
 from app.modules.auth.dependencies import get_current_user
 from app.modules.classification.feedback_schemas import (
@@ -270,7 +275,9 @@ def get_classification_organization_tree(
 ) -> OrganizationTreeResponse:
     """返回 schema v2 主分类树；分类依据不足的文件聚合到 OTHER。"""
 
-    return ClassificationOrganizationQueryService(db).tree()
+    result = ClassificationOrganizationQueryService(db).tree()
+    result.public_access_token = create_public_classification_access_token()
+    return result
 
 
 @router.get("/organization/files", response_model=OrganizationFilePageResponse)
@@ -286,7 +293,7 @@ def list_classification_organization_files(
     """按分类范围分页读取已发布工作副本；旧复核参数兼容映射到 OTHER。"""
 
     try:
-        return ClassificationOrganizationQueryService(db).files(
+        result = ClassificationOrganizationQueryService(db).files(
             category_id=category_id,
             scope=scope,
             review_only=review_only,
@@ -294,6 +301,57 @@ def list_classification_organization_files(
             page_size=page_size,
             include_public_links=True,
         )
+        result.public_access_token = create_public_classification_access_token()
+        return result
+    except OrganizationQueryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _validate_public_classification_token(access_token: str) -> None:
+    """验证只读分类能力令牌；无效令牌统一隐藏为不存在。"""
+
+    try:
+        decode_public_classification_access_token(access_token)
+    except TokenDecodeError as exc:
+        raise HTTPException(status_code=404, detail="公开分类链接无效") from exc
+
+
+@router.get("/organization/public/tree", response_model=OrganizationTreeResponse)
+def get_public_classification_organization_tree(
+    access_token: str = Query(min_length=1, max_length=512),
+    db: Session = Depends(get_db),
+) -> OrganizationTreeResponse:
+    """通过 WorkBuddy 只读能力链接返回分类树，不要求浏览器登录。"""
+
+    _validate_public_classification_token(access_token)
+    result = ClassificationOrganizationQueryService(db).tree()
+    result.public_access_token = access_token
+    return result
+
+
+@router.get("/organization/public/files", response_model=OrganizationFilePageResponse)
+def list_public_classification_organization_files(
+    access_token: str = Query(min_length=1, max_length=512),
+    category_id: str | None = None,
+    scope: str = Query(default="descendants", pattern="^(direct|descendants)$"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> OrganizationFilePageResponse:
+    """通过只读能力令牌分页返回分类文件和公开预览/下载链接。"""
+
+    _validate_public_classification_token(access_token)
+    try:
+        result = ClassificationOrganizationQueryService(db).files(
+            category_id=category_id,
+            scope=scope,
+            review_only=False,
+            page=page,
+            page_size=page_size,
+            include_public_links=True,
+        )
+        result.public_access_token = access_token
+        return result
     except OrganizationQueryError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

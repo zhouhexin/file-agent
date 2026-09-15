@@ -72,7 +72,7 @@
 .classification-status.confirmed { color: #027a48; background: #ecfdf3; }
 .classification-status.automatic { color: #175cd3; background: #eff4ff; }
 .classification-status.neutral { color: #475467; background: #f2f4f7; }
-.classification-download { padding: 6px 9px; color: #175cd3; }
+.classification-download { margin-right: 6px; padding: 6px 9px; color: #175cd3; text-decoration: none; }
 .classification-pagination { justify-content: flex-end; gap: 14px; padding-top: 18px; color: #667085; }
 
 @media (max-width: 860px) {

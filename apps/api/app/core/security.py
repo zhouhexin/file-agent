@@ -24,6 +24,7 @@ class TokenDecodeError(ValueError):
 
 
 PUBLIC_FILE_ACCESS_AUDIENCE = "file-agent-public-file-access-v1"
+PUBLIC_CLASSIFICATION_ACCESS_AUDIENCE = "file-agent-public-classification-access-v1"
 
 
 def hash_password(password: str) -> str:
@@ -130,6 +131,46 @@ def decode_public_file_access_token(token: str) -> dict[str, str]:
     return {
         "aud": PUBLIC_FILE_ACCESS_AUDIENCE,
         "working_copy_id": working_copy_id,
+    }
+
+
+def create_public_classification_access_token() -> str:
+    """创建无到期时间的只读分类页面能力令牌，不包含登录用户身份。"""
+
+    payload_part = _b64_json(
+        {
+            "aud": PUBLIC_CLASSIFICATION_ACCESS_AUDIENCE,
+            "scope": "organization-classification-read",
+        }
+    )
+    signature = _sign(f"{PUBLIC_CLASSIFICATION_ACCESS_AUDIENCE}.{payload_part}")
+    return f"{payload_part}.{signature}"
+
+
+def decode_public_classification_access_token(token: str) -> dict[str, str]:
+    """校验 WorkBuddy 分类页能力令牌；该只读令牌按产品要求不设置过期时间。"""
+
+    normalized = str(token or "").strip()
+    if not normalized or len(normalized) > 512:
+        raise TokenDecodeError("Invalid public classification access token")
+    try:
+        payload_part, signature = normalized.split(".", 1)
+    except ValueError as exc:
+        raise TokenDecodeError("Invalid public classification access token") from exc
+    expected_signature = _sign(
+        f"{PUBLIC_CLASSIFICATION_ACCESS_AUDIENCE}.{payload_part}"
+    )
+    if not hmac.compare_digest(signature, expected_signature):
+        raise TokenDecodeError("Invalid public classification access token")
+    payload = _decode_json(payload_part)
+    if (
+        payload.get("aud") != PUBLIC_CLASSIFICATION_ACCESS_AUDIENCE
+        or payload.get("scope") != "organization-classification-read"
+    ):
+        raise TokenDecodeError("Invalid public classification access token")
+    return {
+        "aud": PUBLIC_CLASSIFICATION_ACCESS_AUDIENCE,
+        "scope": "organization-classification-read",
     }
 
 

@@ -718,4 +718,8 @@ curl.exe -I "http://10.102.4.241/downloads/file-agent-marketplace-0.1.10.zip"
 http://<服务器地址>/files?category_id=<稳定分类ID>&page=1
 ```
 
-如果浏览器尚未登录，会先显示 File Agent 登录页，登录成功后返回原分类节点和页码。该能力需要同时部署最新 API、Web 和 MCP 代码，但不要求升级 WorkBuddy 套件压缩包。
+升级后的 MCP 会在分类页面地址中附加服务端签名的只读能力令牌。用户从 WorkBuddy 点击完整分类页或具体
+分类节点时，无论浏览器是否具有 File Agent 登录态，都会直接打开对应节点和页码；普通手工访问、不含
+`classification_access_token` 的 `/files` 地址仍进入登录页。文件预览和下载继续使用各文件独立的公开
+只读能力链接。该能力需要同时部署最新 API、Web 和 MCP 代码，但不要求升级 WorkBuddy 套件压缩包；升级前
+已经生成的历史分类链接不含能力令牌，仍按原规则要求登录。

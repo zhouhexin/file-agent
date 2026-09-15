@@ -12,7 +12,9 @@
 
 ### 1.2 Authentication
 
-除注册、登录、健康检查，以及下文限定的三个重复候选只读对比 GET 接口外，所有接口都需要 JWT。
+除注册、登录、健康检查，以及下文限定的公开文件能力链接、三个重复候选只读对比 GET 接口和
+WorkBuddy 只读分类能力链接外，所有接口都需要 JWT。所有公开能力链接都必须携带服务端签名令牌；
+它们不能作为登录 JWT 使用，也不授予写操作权限。
 
 ```http
 Authorization: Bearer <access_token>
@@ -1796,6 +1798,19 @@ GET /api/files/{document_id}/spreadsheet-preview
 GET /api/classification/organization/tree
 GET /api/classification/organization/files?category_id={stable_id}&scope=descendants&page=1&page_size=20
 ```
+
+以上两个认证接口会额外签发不含用户身份的 `public_access_token`，供 MCP 生成 WorkBuddy 浏览器深链接。
+带签名令牌的公开只读等价接口为：
+
+```text
+GET /api/classification/organization/public/tree?access_token={signed_capability}
+GET /api/classification/organization/public/files?access_token={signed_capability}&category_id={stable_id}&scope=descendants&page=1&page_size=20
+```
+
+公开令牌 audience 固定为 `file-agent-public-classification-access-v1`，scope 固定为
+`organization-classification-read`，不包含登录用户 ID、角色、文件路径或正文。它按 WorkBuddy 链接需长期
+可打开的产品要求不设置到期时间；更换部署 `JWT_SECRET_KEY` 会使既有链接失效。公开接口只返回与认证接口
+相同的分类树、安全文件投影和独立预览/下载能力链接，不提供任何分类、移动、改名或其他写操作。
 
 `tree` 按当前 taxonomy 返回父子节点、直接文件数和包含后代的去重文件数，并在树首部增加
 `category_id=__needs_review__` 的虚拟“待复核”节点。计数和清单只包含共享工作区的 `ACTIVE`

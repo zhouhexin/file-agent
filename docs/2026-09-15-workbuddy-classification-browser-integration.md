@@ -9,7 +9,7 @@
 3. 按稳定 `category_id` 分页查看该节点及其全部子分类下的文件。
 4. 在结果表格中直接预览或下载文件。
 5. 跳转到 File Agent 原有 `/files` 页面浏览完整分类树。
-6. 未登录时完成登录后返回原分类节点和页码。
+6. WorkBuddy 生成的分类页面链接在未登录浏览器中直接打开对应节点和页码。
 
 本功能使用现有数据库分类关系和现有分类查询服务作为唯一事实源，不在 MCP、WorkBuddy 套件或前端维护第二份分类树。
 
@@ -21,7 +21,9 @@
 - MCP 增加 `classification_overview`、`classification_files` 两个只读 Tool。
 - MCP 返回面向用户的固定 Markdown 展示文本，并把稳定对象 ID 放在结构化上下文中。
 - Web 分类页支持 `/files?category_id=<稳定ID>&page=<页码>`。
-- 登录门禁保存受控 `/files` 返回目标。
+- API 为 MCP 签发不含用户身份、不可作为登录凭据的只读分类能力令牌。
+- WorkBuddy 分类深链接携带该能力令牌并在登录门禁前进入只读分类页面。
+- 普通 `/files` 地址不携带能力令牌时仍执行原登录门禁。
 
 ### 2.2 明确不做
 
@@ -44,10 +46,15 @@ WorkBuddy
   -> GET /api/classification/organization/files
   -> 返回文件名、主分类、状态、预览/下载链接
 
-浏览器打开 /files?category_id=...&page=...
-  -> 未登录：显示登录页并保存受控返回目标
-  -> 登录成功：恢复相同 category_id 和 page
-  -> 前端继续调用现有分类树与分页接口
+浏览器打开 WorkBuddy 生成的 /files?category_id=...&page=...&classification_access_token=...
+  -> 前端在登录门禁前识别只读能力令牌
+  -> 调用公开只读分类树与分页接口
+  -> 未登录也直接展示相同 category_id 和 page
+  -> 文件预览和下载继续使用独立公开文件能力链接
+
+浏览器直接打开不含 classification_access_token 的 /files
+  -> 继续执行原浏览器登录门禁
+  -> 登录成功后恢复相同 category_id 和 page
 ```
 
 ## 4. 后端契约
@@ -68,6 +75,20 @@ WorkBuddy
 - 当前版本和物理内容仍存在。
 
 因此分类接口不返回绝对存储路径，也不会绕过工作副本活动状态。
+
+认证后的 `GET /api/classification/organization/tree` 与
+`GET /api/classification/organization/files` 还会返回 `public_access_token`。该字段只供 MCP 生成
+WorkBuddy 分类深链接，MCP 不在最终结构化结果中继续暴露该原始字段。令牌具有以下边界：
+
+- 使用当前部署的 JWT 密钥签名，但 audience 与登录 JWT 完全不同。
+- 只声明 `organization-classification-read`，不包含 `sub`、角色、用户 JWT、文件路径或正文。
+- 按“任何时候可打开”的产品要求不设置 `exp`；部署方更换 `JWT_SECRET_KEY` 后旧链接统一失效。
+- 只能访问下列两个公开只读接口，不能调用分类写接口、聊天接口或管理接口：
+
+```text
+GET /api/classification/organization/public/tree?access_token=...
+GET /api/classification/organization/public/files?access_token=...&category_id=...&page=...
+```
 
 ## 5. MCP Tool 契约
 
@@ -120,10 +141,13 @@ WorkBuddy
 
 - `category_id`：最多 200 字符的稳定分类 ID。
 - `page`：正整数，非法值回退到 1。
+- `classification_access_token`：最多 512 字符的服务端签名只读能力令牌。
 
 选择分类节点、选择全部文件或翻页时，页面使用 `history.replaceState` 同步当前 URL。分类显示名称仍从服务端 taxonomy 树查找，不能从 URL 接受显示名称。
 
-登录返回只允许保存同源 `/files` 及其查询字符串，不接受任意 `return_to` URL，避免开放重定向。
+携带有效能力令牌时，分类页在登录门禁前直接渲染并调用公开只读接口；选择节点和翻页时必须继续保留
+该令牌。不携带令牌时，登录返回只允许保存同源 `/files` 及其查询字符串，不接受任意 `return_to` URL，
+避免开放重定向。
 
 ## 7. 开发文件清单
 
@@ -144,9 +168,10 @@ WorkBuddy
 3. `classification_files` 翻页总数与后端分类分页接口一致。
 4. 表格中的预览和下载链接在未登录浏览器中也可打开；工作副本被回收后链接拒绝访问。
 5. 直接访问 `/files?category_id=...&page=2` 时能恢复节点和页码。
-6. 未登录访问上述地址，登录后仍回到同一地址。
-7. 两个 MCP Tool 不创建分类关系、落位任务、OperationPlan 或 ChangeSet。
-8. 原有 `file_search`、分类页面和分类写操作回归测试通过。
+6. WorkBuddy 生成的带签名链接在未登录浏览器中直接打开相同分类节点和页码。
+7. 删除 `classification_access_token` 后，同一 `/files` 地址仍进入登录页；篡改令牌后公开 API 返回 404。
+8. 两个 MCP Tool 不创建分类关系、落位任务、OperationPlan 或 ChangeSet。
+9. 原有 `file_search`、分类页面和分类写操作回归测试通过。
 
 ## 9. 部署影响
 
@@ -158,3 +183,4 @@ WorkBuddy
   `FILE_AGENT_API_BASE_URL` 仍可保持为 API 直连地址，例如 `http://10.102.4.241:8000`。
 - 不需要升级 WorkBuddy 套件版本；套件仅在需要自然语言固定路由提示时才是可选增强。
 - 数据库没有新增字段或表，不需要 Alembic 迁移。
+- 只有升级后的 MCP 新生成的分类链接包含能力令牌；历史分类链接仍按原规则要求登录。

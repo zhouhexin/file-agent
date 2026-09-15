@@ -419,6 +419,7 @@ class FileAgentIntegrationClient:
         *,
         category_id: str | None = None,
         page: int = 1,
+        public_access_token: str | None = None,
     ) -> str:
         """生成 Web 分类页深链接；只编码稳定分类 ID 和页码。"""
 
@@ -427,6 +428,8 @@ class FileAgentIntegrationClient:
             query["category_id"] = category_id
         if page > 1:
             query["page"] = str(page)
+        if public_access_token:
+            query["classification_access_token"] = public_access_token
         suffix = f"?{urlencode(query)}" if query else ""
         return f"{urljoin(self.web_base_url, '/files')}{suffix}"
 
@@ -436,7 +439,11 @@ class FileAgentIntegrationClient:
         payload = self._business_json(
             await self.http.get("/api/classification/organization/tree")
         )
-        payload["browser_url"] = self.classification_browser_url()
+        public_access_token = str(payload.pop("public_access_token", "") or "").strip()
+        payload["browser_url"] = self.classification_browser_url(
+            public_access_token=public_access_token or None,
+        )
+
         def attach_browser_url(nodes: Any) -> None:
             """递归附加受控 Web 深链接，不改变服务端分类树字段。"""
 
@@ -447,6 +454,7 @@ class FileAgentIntegrationClient:
                     continue
                 node["browser_url"] = self.classification_browser_url(
                     category_id=str(node.get("category_id") or "") or None,
+                    public_access_token=public_access_token or None,
                 )
                 attach_browser_url(node.get("children"))
 
@@ -482,9 +490,11 @@ class FileAgentIntegrationClient:
                 value = str(item.get(key) or "").strip()
                 if value.startswith("/"):
                     item[key] = urljoin(str(self.http.base_url), value)
+        public_access_token = str(payload.pop("public_access_token", "") or "").strip()
         payload["browser_url"] = self.classification_browser_url(
             category_id=category_id,
             page=page,
+            public_access_token=public_access_token or None,
         )
         return payload
 

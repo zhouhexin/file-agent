@@ -31,6 +31,7 @@ class OrganizationTreeResponse(BaseModel):
     other_file_count: int
     # 兼容一个发布版本的旧客户端；schema v2 UI 不应使用该字段表达复核语义。
     needs_review_file_count: int = 0
+    public_access_token: str | None = None
     nodes: list[OrganizationTreeNodeResponse] = Field(default_factory=list)
 
 
@@ -78,4 +79,5 @@ class OrganizationFilePageResponse(BaseModel):
     scope: str
     review_only: bool
     deprecated_compatibility: bool = False
+    public_access_token: str | None = None
     files: list[OrganizationFileItemResponse] = Field(default_factory=list)

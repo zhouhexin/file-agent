@@ -221,6 +221,7 @@ def test_classification_read_endpoints_add_browser_and_public_links(tmp_path) ->
                 200,
                 json={
                     "total_active_files": 3,
+                    "public_access_token": "classification-token",
                     "nodes": [
                         {
                             "category_id": "school.hr",
@@ -237,6 +238,7 @@ def test_classification_read_endpoints_add_browser_and_public_links(tmp_path) ->
             200,
             json={
                 "page": 2,
+                "public_access_token": "classification-token",
                 "files": [
                     {
                         "filename": "推荐意见.docx",
@@ -270,13 +272,17 @@ def test_classification_read_endpoints_add_browser_and_public_links(tmp_path) ->
             await client.close()
 
     overview, files = asyncio.run(scenario())
-    assert overview["browser_url"] == "http://10.102.4.241/files"
+    assert overview["browser_url"] == (
+        "http://10.102.4.241/files?classification_access_token=classification-token"
+    )
     assert overview["nodes"][0]["browser_url"] == (
-        "http://10.102.4.241/files?category_id=school.hr"
+        "http://10.102.4.241/files?category_id=school.hr&classification_access_token=classification-token"
     )
     assert files["browser_url"] == (
-        "http://10.102.4.241/files?category_id=school.hr&page=2"
+        "http://10.102.4.241/files?category_id=school.hr&page=2&classification_access_token=classification-token"
     )
+    assert "public_access_token" not in overview
+    assert "public_access_token" not in files
     assert files["files"][0]["preview_url"].startswith(
         "http://10.102.4.241:8000/api/public/file-access/"
     )

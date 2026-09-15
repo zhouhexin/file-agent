@@ -28,6 +28,7 @@ export type OrganizationTreeResponse = {
   classified_file_count: number;
   business_classified_file_count: number;
   other_file_count: number;
+  public_access_token?: string | null;
   nodes: OrganizationTreeNode[];
 };
 
@@ -69,6 +70,7 @@ export type OrganizationFilePageResponse = {
   scope: 'direct' | 'descendants';
   review_only: boolean;
   deprecated_compatibility: boolean;
+  public_access_token?: string | null;
   files: OrganizationFileItem[];
 };
 

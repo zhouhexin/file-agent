@@ -1,6 +1,14 @@
 // 文件分类页只浏览已发布工作副本；分类依据不足的文件会明确归入“其他”。
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, ChevronLeft, ChevronRight, Download, FolderTree, RefreshCw } from 'lucide-react';
+import {
+  ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  ExternalLink,
+  FolderTree,
+  RefreshCw,
+} from 'lucide-react';
 
 import {
   fetchWorkingCopyBlob,
@@ -20,7 +28,8 @@ import {
 import './classification-files.css';
 
 type ClassificationFilesPageProps = {
-  token: string;
+  token: string | null;
+  publicAccessToken?: string | null;
   onBack: () => void;
 };
 
@@ -123,7 +132,11 @@ function TreeNode({
   );
 }
 
-export function ClassificationFilesPage({ token, onBack }: ClassificationFilesPageProps) {
+export function ClassificationFilesPage({
+  token,
+  publicAccessToken = null,
+  onBack,
+}: ClassificationFilesPageProps) {
   const initialLink = readClassificationDeepLink(window.location.search);
   const [tree, setTree] = useState<OrganizationTreeResponse | null>(null);
   const [pageData, setPageData] = useState<OrganizationFilePageResponse | null>(null);
@@ -138,11 +151,12 @@ export function ClassificationFilesPage({ token, onBack }: ClassificationFilesPa
     setError('');
     try {
       const [nextTree, nextFiles] = await Promise.all([
-        getClassificationOrganizationTree(token),
+        getClassificationOrganizationTree(token, publicAccessToken),
         getClassificationOrganizationFiles(token, {
           categoryId: selectedId ?? undefined,
           page,
           pageSize: PAGE_SIZE,
+          publicAccessToken,
         }),
       ]);
       setTree(nextTree);
@@ -158,7 +172,7 @@ export function ClassificationFilesPage({ token, onBack }: ClassificationFilesPa
     } finally {
       setLoading(false);
     }
-  }, [page, selectedId, token]);
+  }, [page, publicAccessToken, selectedId, token]);
 
   useEffect(() => {
     void load();
@@ -169,9 +183,9 @@ export function ClassificationFilesPage({ token, onBack }: ClassificationFilesPa
     window.history.replaceState(
       null,
       '',
-      buildClassificationDeepLink(selectedId, page),
+      buildClassificationDeepLink(selectedId, page, publicAccessToken),
     );
-  }, [page, selectedId]);
+  }, [page, publicAccessToken, selectedId]);
 
   function selectNode(node: OrganizationTreeNode) {
     setSelectedId(node.category_id);
@@ -189,6 +203,7 @@ export function ClassificationFilesPage({ token, onBack }: ClassificationFilesPa
     // 通过浏览器临时 URL 下载，不在页面保存文件内容或暴露存储路径。
     try {
       setError('');
+      if (!token) throw new Error('当前公开链接缺少可用的下载地址。');
       const blob = await fetchWorkingCopyBlob(token, workingCopyId);
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -272,13 +287,24 @@ export function ClassificationFilesPage({ token, onBack }: ClassificationFilesPa
                     <td>{classificationStatus(file)}</td>
                     <td>{formatSize(file.size_bytes)}</td>
                     <td>
-                      <button
-                        type="button"
-                        className="classification-download"
-                        onClick={() => void downloadFile(file.working_copy_id, file.filename)}
-                      >
-                        <Download size={15} /> 下载
-                      </button>
+                      {file.preview_url ? (
+                        <a className="classification-download" href={file.preview_url} target="_blank" rel="noreferrer">
+                          <ExternalLink size={15} /> 预览
+                        </a>
+                      ) : null}
+                      {file.download_url ? (
+                        <a className="classification-download" href={file.download_url}>
+                          <Download size={15} /> 下载
+                        </a>
+                      ) : token ? (
+                        <button
+                          type="button"
+                          className="classification-download"
+                          onClick={() => void downloadFile(file.working_copy_id, file.filename)}
+                        >
+                          <Download size={15} /> 下载
+                        </button>
+                      ) : null}
                     </td>
                   </tr>
                 ))}

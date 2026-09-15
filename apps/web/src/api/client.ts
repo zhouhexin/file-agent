@@ -320,15 +320,27 @@ export async function fetchManagedFileBlob(
 }
 
 export async function getClassificationOrganizationTree(
-  token: string,
+  token: string | null,
+  publicAccessToken?: string | null,
 ): Promise<OrganizationTreeResponse> {
   // 目录计数完全由后端按活动主分类关系计算，前端不拼装本地分类树。
+  if (publicAccessToken) {
+    const params = new URLSearchParams({ access_token: publicAccessToken });
+    return request<OrganizationTreeResponse>(
+      `/classification/organization/public/tree?${params.toString()}`,
+    );
+  }
   return request<OrganizationTreeResponse>('/classification/organization/tree', { token });
 }
 
 export async function getClassificationOrganizationFiles(
-  token: string,
-  options: { categoryId?: string; page?: number; pageSize?: number } = {},
+  token: string | null,
+  options: {
+    categoryId?: string;
+    page?: number;
+    pageSize?: number;
+    publicAccessToken?: string | null;
+  } = {},
 ): Promise<OrganizationFilePageResponse> {
   // 分类目录始终使用服务端分页；无法细分的文件由稳定 system.other 聚合。
   const params = new URLSearchParams({
@@ -337,6 +349,12 @@ export async function getClassificationOrganizationFiles(
     page_size: String(options.pageSize ?? 20),
   });
   if (options.categoryId) params.set('category_id', options.categoryId);
+  if (options.publicAccessToken) {
+    params.set('access_token', options.publicAccessToken);
+    return request<OrganizationFilePageResponse>(
+      `/classification/organization/public/files?${params.toString()}`,
+    );
+  }
   return request<OrganizationFilePageResponse>(
     `/classification/organization/files?${params.toString()}`,
     { token },
