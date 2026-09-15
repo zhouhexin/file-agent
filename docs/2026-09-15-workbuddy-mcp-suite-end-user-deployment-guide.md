@@ -308,6 +308,7 @@ $WorkBuddyHome = Join-Path $env:USERPROFILE ".workbuddy"
 $McpPath = Join-Path $WorkBuddyHome "mcp.json"
 $Python = "D:\file-agent-client\venv\Scripts\python.exe"
 $ApiBase = "http://10.102.4.241"
+$WebBase = "http://10.102.4.241"
 $ClientData = "D:\file-agent-client-data"
 $BridgeState = Join-Path $ClientData "bridge-state"
 $LocalRootsJson = @{ "local-materials" = "D:\FileAgentInput" } | ConvertTo-Json -Compress
@@ -331,6 +332,7 @@ command = $Python
 args = @("-m", "file_agent_mcp")
 env = [pscustomobject]@{
 FILE_AGENT_API_BASE_URL = $ApiBase
+FILE_AGENT_WEB_BASE_URL = $WebBase
 FILE_AGENT_ACCESS_TOKEN = $Token
 FILE_AGENT_LOCAL_ROOTS = $LocalRootsJson
 LOCAL_TRANSFER_STATE_DIR = (Join-Path $ClientData "transfer-state")
@@ -351,6 +353,8 @@ $McpConfig | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $McpPath -Encod
 注意：
 
 - `FILE_AGENT_API_BASE_URL` 应填写用户浏览器可以访问的局域网地址，不能填服务器自身的 `127.0.0.1`。
+- `FILE_AGENT_WEB_BASE_URL` 应填写 File Agent 前端入口；如果 API 直连 `:8000` 而前端经 Caddy 使用 80
+  端口，这两个值必须分别填写。
 - 地址不要写成 `http://10.102.4.241/api`；MCP 会自行追加 `/api`。
 - JSON 中不能同时出现 `NO_PROXY` 和 `no_proxy` 两个仅大小写不同的键，否则部分解析工具会认为是重复键。
 - 如果使用的是复制源码而不是 wheel 安装，需要额外增加
@@ -695,3 +699,23 @@ curl.exe -I "http://10.102.4.241/downloads/file-agent-marketplace-0.1.10.zip"
 5. 确认不再需要本地可恢复任务后，再由用户决定是否删除客户端缓存。
 
 停用或卸载客户端不会删除服务器中的已归档文件、工作副本、解析结果或审计记录。
+# 分类浏览能力补充（2026-09-15）
+
+最新 MCP 代码提供两个不依赖 WorkBuddy 套件的只读工具：
+
+- `classification_overview`：查看分类统计、一级分类入口和完整分类页面链接。
+- `classification_files`：按 `category_id` 分页查看文件，并显示预览/下载链接。
+
+用户端 MCP 环境变量需要配置 Web 入口；API 使用 8000 端口而 Caddy 使用 80 端口时尤其不能省略：
+
+```json
+"FILE_AGENT_WEB_BASE_URL": "http://10.102.4.241"
+```
+
+服务器 Web 页面支持以下深链接：
+
+```text
+http://<服务器地址>/files?category_id=<稳定分类ID>&page=1
+```
+
+如果浏览器尚未登录，会先显示 File Agent 登录页，登录成功后返回原分类节点和页码。该能力需要同时部署最新 API、Web 和 MCP 代码，但不要求升级 WorkBuddy 套件压缩包。

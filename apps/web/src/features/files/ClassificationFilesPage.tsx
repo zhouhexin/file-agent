@@ -13,6 +13,10 @@ import type {
   OrganizationTreeNode,
   OrganizationTreeResponse,
 } from '../../types';
+import {
+  buildClassificationDeepLink,
+  readClassificationDeepLink,
+} from './classificationDeepLink';
 import './classification-files.css';
 
 type ClassificationFilesPageProps = {
@@ -21,6 +25,19 @@ type ClassificationFilesPageProps = {
 };
 
 const PAGE_SIZE = 20;
+
+function findTreeNode(
+  nodes: OrganizationTreeNode[],
+  categoryId: string,
+): OrganizationTreeNode | null {
+  // 节点显示名始终来自当前 taxonomy，不能相信 URL 中的任意文本。
+  for (const node of nodes) {
+    if (node.category_id === categoryId) return node;
+    const child = findTreeNode(node.children, categoryId);
+    if (child) return child;
+  }
+  return null;
+}
 
 function formatSize(size: number): string {
   // 文件大小只用于概览，保留一位小数即可。
@@ -107,11 +124,12 @@ function TreeNode({
 }
 
 export function ClassificationFilesPage({ token, onBack }: ClassificationFilesPageProps) {
+  const initialLink = readClassificationDeepLink(window.location.search);
   const [tree, setTree] = useState<OrganizationTreeResponse | null>(null);
   const [pageData, setPageData] = useState<OrganizationFilePageResponse | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(initialLink.categoryId);
   const [selectedLabel, setSelectedLabel] = useState('全部文件');
-  const [page, setPage] = useState(1);
+  const [page, setPage] = useState(initialLink.page);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -129,6 +147,12 @@ export function ClassificationFilesPage({ token, onBack }: ClassificationFilesPa
       ]);
       setTree(nextTree);
       setPageData(nextFiles);
+      if (selectedId) {
+        const selectedNode = findTreeNode(nextTree.nodes, selectedId);
+        setSelectedLabel(selectedNode?.category_path.join(' / ') ?? '当前分类');
+      } else {
+        setSelectedLabel('全部文件');
+      }
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -139,6 +163,15 @@ export function ClassificationFilesPage({ token, onBack }: ClassificationFilesPa
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    // 节点和页码变化立即反映到地址栏，复制链接后可恢复同一分类视图。
+    window.history.replaceState(
+      null,
+      '',
+      buildClassificationDeepLink(selectedId, page),
+    );
+  }, [page, selectedId]);
 
   function selectNode(node: OrganizationTreeNode) {
     setSelectedId(node.category_id);

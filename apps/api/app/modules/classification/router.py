@@ -292,6 +292,7 @@ def list_classification_organization_files(
             review_only=review_only,
             page=page,
             page_size=page_size,
+            include_public_links=True,
         )
     except OrganizationQueryError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

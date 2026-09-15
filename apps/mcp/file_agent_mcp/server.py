@@ -34,6 +34,7 @@ def _client() -> FileAgentIntegrationClient:
         base_url=os.getenv("FILE_AGENT_API_BASE_URL", "http://127.0.0.1:8000"),
         access_token=os.getenv("FILE_AGENT_ACCESS_TOKEN", ""),
         roots=LocalRootRegistry.from_environment(),
+        web_base_url=os.getenv("FILE_AGENT_WEB_BASE_URL", "").strip() or None,
     )
 
 
@@ -175,6 +176,73 @@ async def file_search(conversation_ref: str, query: str) -> Any:
             for key, value in result.items()
             if key != "display_text"
         }
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=str(result.get("display_text") or ""),
+                    annotations=Annotations(audience=["user"], priority=1.0),
+                )
+            ],
+            structuredContent=structured,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="classification_overview",
+    description=(
+        "只读查看 File Agent 当前分类总数、具体业务分类数、其他分类数和一级分类入口。"
+        "content.text 必须逐字原样展示；完整分类树应通过返回的分类页面链接打开。"
+    ),
+    structured_output=False,
+)
+async def classification_overview() -> Any:
+    """返回分类总览及原 Web 分类页链接，不执行重新分类或文件移动。"""
+
+    client = _client()
+    try:
+        result = await WorkBuddyConversationService(client).classification_overview()
+        structured = {key: value for key, value in result.items() if key != "display_text"}
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=str(result.get("display_text") or ""),
+                    annotations=Annotations(audience=["user"], priority=1.0),
+                )
+            ],
+            structuredContent=structured,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="classification_files",
+    description=(
+        "只读分页查看某个稳定 category_id 及其全部子分类下的已发布文件。"
+        "category_id 可从 classification_overview 的结构化结果取得；content.text 必须逐字原样展示，"
+        "并保留分类页面、预览和下载链接。"
+    ),
+    structured_output=False,
+)
+async def classification_files(
+    category_id: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> Any:
+    """返回分类文件分页；缺省 category_id 时查看全部活动文件。"""
+
+    client = _client()
+    try:
+        result = await WorkBuddyConversationService(client).classification_files(
+            category_id=category_id,
+            page=page,
+            page_size=page_size,
+        )
+        structured = {key: value for key, value in result.items() if key != "display_text"}
         return CallToolResult(
             content=[
                 TextContent(

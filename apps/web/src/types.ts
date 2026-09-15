@@ -45,6 +45,8 @@ export type OrganizationFileItem = {
   filename: string;
   relative_path: string;
   size_bytes: number;
+  preview_url: string | null;
+  download_url: string | null;
   primary_category_id: string | null;
   primary_category_path: string[];
   primary_category_status: 'AUTO_APPLIED' | 'CONFIRMED' | string | null;

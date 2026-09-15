@@ -9,6 +9,8 @@ import pytest
 from file_agent_mcp.conversation_tools import (
     WorkBuddyConversationService,
     conversation_id_for_workbuddy,
+    project_classification_files,
+    project_classification_overview,
     project_file_search_result,
 )
 
@@ -38,6 +40,18 @@ class FakeConversationClient:
 
         self.calls.append({"method": "evidence_answer", **kwargs})
         return {"task_result": {"response_type": "evidence_answer"}}
+
+    async def classification_overview(self) -> dict:
+        """返回只读分类总览。"""
+
+        self.calls.append({"method": "classification_overview"})
+        return {"total_active_files": 0, "nodes": []}
+
+    async def classification_files(self, **kwargs) -> dict:
+        """返回只读分类分页。"""
+
+        self.calls.append({"method": "classification_files", **kwargs})
+        return {"page": kwargs["page"], "page_size": kwargs["page_size"], "files": []}
 
     async def classification_placement_submit(self, **kwargs) -> dict:
         """记录分类落位提交，不执行任何真实网络请求。"""
@@ -93,6 +107,101 @@ def test_file_search_with_move_words_never_routes_to_placement_write() -> None:
     )
 
     assert [call["method"] for call in client.calls] == ["file_search"]
+
+
+def test_classification_service_calls_only_read_endpoints() -> None:
+    """分类浏览不得经过聊天写路由或分类落位接口。"""
+
+    client = FakeConversationClient()
+    service = WorkBuddyConversationService(client)
+    asyncio.run(service.classification_overview())
+    asyncio.run(
+        service.classification_files(category_id="school.hr", page=2, page_size=20)
+    )
+
+    assert [call["method"] for call in client.calls] == [
+        "classification_overview",
+        "classification_files",
+    ]
+    assert client.calls[1]["category_id"] == "school.hr"
+
+
+def test_classification_overview_projects_counts_and_page_links() -> None:
+    """总览只展示计数和 Web 入口，稳定 ID 留在工具上下文。"""
+
+    result = project_classification_overview(
+        {
+            "total_active_files": 12,
+            "business_classified_file_count": 9,
+            "other_file_count": 3,
+            "taxonomy_version": "v20",
+            "browser_url": "http://file-agent.test/files",
+            "nodes": [
+                {
+                    "category_id": "school",
+                    "name": "学校",
+                    "category_path": ["学校"],
+                    "subtree_file_count": 7,
+                    "browser_url": "http://file-agent.test/files?category_id=school",
+                    "children": [
+                        {
+                            "category_id": "school.hr",
+                            "name": "人事师资",
+                            "category_path": ["学校", "人事师资"],
+                            "subtree_file_count": 4,
+                            "browser_url": "http://file-agent.test/files?category_id=school.hr",
+                            "children": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert "当前共有 12 个活动文件" in result["display_text"]
+    assert "[打开完整分类页面](http://file-agent.test/files)" in result["display_text"]
+    assert "| 学校 | 7 |" in result["display_text"]
+    assert result["categories"][0]["tool_context"] == {"category_id": "school"}
+    assert result["category_options"][1]["label"] == "学校 / 人事师资"
+    assert "人事师资" not in result["display_text"]
+
+
+def test_classification_files_projects_clickable_read_only_table() -> None:
+    """分类文件页展示主分类、状态和公开链接，不显示相对路径与稳定 ID。"""
+
+    result = project_classification_files(
+        {
+            "page": 1,
+            "page_size": 20,
+            "total": 1,
+            "total_pages": 1,
+            "category_id": "school.hr",
+            "browser_url": "http://file-agent.test/files?category_id=school.hr",
+            "files": [
+                {
+                    "filename": "推荐意见.docx",
+                    "relative_path": "学校/人事师资/推荐意见.docx",
+                    "working_copy_id": "copy-1",
+                    "document_id": "doc-1",
+                    "document_version_id": "version-1",
+                    "classification_outcome": "CLASSIFIED",
+                    "primary_category_status": "AUTO_APPLIED",
+                    "effective_primary": {"category_path": ["学校", "人事师资", "人才工作"]},
+                    "preview_url": "http://file-agent.test/api/public/file-access/t/preview",
+                    "download_url": "http://file-agent.test/api/public/file-access/t/download",
+                }
+            ],
+        }
+    )
+
+    visible = result["display_text"]
+    assert "| 文件名 | 主分类 | 状态 | 操作 |" in visible
+    assert "学校 / 人事师资 / 人才工作" in visible
+    assert "自动归类" in visible
+    assert "[预览](http://file-agent.test/api/public/file-access/t/preview)" in visible
+    assert "学校/人事师资/推荐意见.docx" not in visible
+    assert "copy-1" not in visible
+    assert result["files"][0]["tool_context"]["working_copy_id"] == "copy-1"
 
 
 def test_file_search_projects_only_filename_and_basis_for_user_display() -> None:

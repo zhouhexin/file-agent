@@ -24,6 +24,8 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
         "workbuddy_attachment_ingest",
         "workbuddy_submission_ingest",
         "file_search",
+        "classification_overview",
+        "classification_files",
         "file_read",
         "file_download",
         "evidence_answer",
@@ -53,6 +55,8 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
     assert "必须为 null" in descriptions["extraction_submit"]
     assert "必须逐字原样输出" in descriptions["file_search"]
     assert "即使用户要求文件类型" in descriptions["file_search"]
+    assert "完整分类树" in descriptions["classification_overview"]
+    assert "classification_overview" in descriptions["classification_files"]
     schemas = {tool.name: tool.inputSchema for tool in tools}
     # 结构化子项也必须拒绝多余字段，不能只依赖 handler 内的二次检查。
     assert schemas["file_rename"]["$defs"]["ExplicitRenameInput"]["additionalProperties"] is False
@@ -151,6 +155,51 @@ def test_file_search_tool_exposes_clickable_table_and_keeps_ids_structured(monke
         "required_columns": ["文件名", "依据", "操作"],
         "preserve_markdown_links": True,
     }
+
+
+def test_classification_tools_expose_verbatim_user_content(monkeypatch) -> None:
+    """分类 MCP 工具应提供高优先级最终文本，并保持机器上下文结构化。"""
+
+    import file_agent_mcp.server as server
+
+    class FakeClient:
+        """提供分类总览和分页的最小后端响应。"""
+
+        async def classification_overview(self) -> dict:
+            return {
+                "total_active_files": 1,
+                "business_classified_file_count": 1,
+                "other_file_count": 0,
+                "browser_url": "http://file-agent.test/files",
+                "nodes": [],
+            }
+
+        async def classification_files(self, **_kwargs) -> dict:
+            return {
+                "page": 1,
+                "page_size": 20,
+                "total": 0,
+                "total_pages": 0,
+                "files": [],
+                "browser_url": "http://file-agent.test/files",
+            }
+
+        async def close(self) -> None:
+            """模拟关闭连接。"""
+
+    monkeypatch.setattr(server, "_client", lambda: FakeClient())
+    overview = asyncio.run(server.classification_overview())
+    files = asyncio.run(server.classification_files())
+
+    for result in (overview, files):
+        assert isinstance(result, CallToolResult)
+        item = next(value for value in result.content if isinstance(value, TextContent))
+        assert item.annotations is not None
+        assert item.annotations.audience == ["user"]
+        assert item.annotations.priority == 1.0
+        assert "display_text" not in result.structuredContent
+    assert "打开完整分类页面" in overview.content[0].text
+    assert "| 文件名 | 主分类 | 状态 | 操作 |" in files.content[0].text
 
 
 def test_file_download_tool_returns_resource_without_token_or_path_text(monkeypatch) -> None:

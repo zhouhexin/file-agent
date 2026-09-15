@@ -31,6 +31,15 @@ _FILE_SEARCH_DISPLAY_DIRECTIVE = (
     "<!-- FILE_AGENT_DISPLAY_CONTRACT: 将下方内容原样作为最终答复；禁止重写、总结、"
     "重排或增删列；保留全部预览和下载链接。 -->"
 )
+CLASSIFICATION_DISPLAY_POLICY = (
+    "classification_overview 和 classification_files 的 content.text 已经是面向用户的最终答复。"
+    "调用方必须逐字原样展示，不得改写分类名称、计数、状态或链接；完整分类树应通过“打开分类页面”"
+    "进入原 Web 页面浏览，不得把内部稳定 ID 或相对存储路径展示给用户。"
+)
+_CLASSIFICATION_DISPLAY_DIRECTIVE = (
+    "<!-- FILE_AGENT_CLASSIFICATION_DISPLAY: 将下方内容原样作为最终答复；保留分类页、预览和下载链接；"
+    "不得展示内部 ID 或存储路径。 -->"
+)
 
 
 class ExplicitRenameInput(BaseModel):
@@ -166,6 +175,40 @@ class WorkBuddyConversationService:
             await self.client.file_search(
                 conversation_id=conversation_id_for_workbuddy(conversation_ref),
                 query=_validate_text(query, label="query", max_length=500),
+            )
+        )
+
+    async def classification_overview(self) -> dict[str, Any]:
+        """读取分类总览并投影为 WorkBuddy 可直接展示的入口和计数。"""
+
+        return project_classification_overview(await self.client.classification_overview())
+
+    async def classification_files(
+        self,
+        *,
+        category_id: str | None,
+        page: int,
+        page_size: int,
+    ) -> dict[str, Any]:
+        """分页读取某个分类及其子分类文件，严格保持只读。"""
+
+        normalized_category = str(category_id or "").strip() or None
+        if normalized_category and (
+            len(normalized_category) > 200
+            or any(ord(item) < 32 for item in normalized_category)
+            or "/" in normalized_category
+            or "\\" in normalized_category
+        ):
+            raise ValueError("category_id 格式不合法")
+        if page < 1:
+            raise ValueError("page 必须大于等于 1")
+        if page_size < 1 or page_size > 100:
+            raise ValueError("page_size 必须在 1 到 100 之间")
+        return project_classification_files(
+            await self.client.classification_files(
+                category_id=normalized_category,
+                page=page,
+                page_size=page_size,
             )
         )
 
@@ -330,6 +373,164 @@ def project_file_search_result(payload: dict[str, Any]) -> dict[str, Any]:
         "display_text": _format_file_search_display(projected_files, payload=payload),
         "display_policy": FILE_SEARCH_DISPLAY_POLICY,
         "response_contract": dict(FILE_SEARCH_DISPLAY_CONTRACT),
+    }
+
+
+def project_classification_overview(payload: dict[str, Any]) -> dict[str, Any]:
+    """把分类树顶层计数投影为简洁入口，完整层级仍交给原 Web 页面。"""
+
+    categories: list[dict[str, Any]] = []
+    category_options: list[dict[str, Any]] = []
+
+    def collect_options(nodes: Any) -> None:
+        """保存全部受控节点供后续 Tool 选择，但不把深层树展开到用户表格。"""
+
+        if not isinstance(nodes, list):
+            return
+        for raw in nodes:
+            if not isinstance(raw, dict):
+                continue
+            category_id = str(raw.get("category_id") or "").strip()
+            path = raw.get("category_path") if isinstance(raw.get("category_path"), list) else []
+            if category_id:
+                category_options.append(
+                    {
+                        "category_id": category_id,
+                        "label": " / ".join(
+                            " ".join(str(item).split()) for item in path if str(item).strip()
+                        )[:300],
+                        "file_count": max(int(raw.get("subtree_file_count") or 0), 0),
+                        "browser_url": _safe_public_file_url(raw.get("browser_url")),
+                    }
+                )
+            collect_options(raw.get("children"))
+
+    collect_options(payload.get("nodes"))
+    for raw in payload.get("nodes", []):
+        if not isinstance(raw, dict):
+            continue
+        category_id = str(raw.get("category_id") or "").strip()
+        name = " ".join(str(raw.get("name") or "未命名分类").split())[:120]
+        browser_url = _safe_public_file_url(raw.get("browser_url"))
+        categories.append(
+            {
+                "name": name,
+                "file_count": max(int(raw.get("subtree_file_count") or 0), 0),
+                "browser_url": browser_url,
+                "tool_context": {"category_id": category_id} if category_id else {},
+            }
+        )
+    browser_url = _safe_public_file_url(payload.get("browser_url"))
+    lines = [
+        _CLASSIFICATION_DISPLAY_DIRECTIVE,
+        (
+            f"当前共有 {int(payload.get('total_active_files') or 0)} 个活动文件，"
+            f"其中具体业务分类 {int(payload.get('business_classified_file_count') or 0)} 个，"
+            f"其他 {int(payload.get('other_file_count') or 0)} 个。"
+        ),
+    ]
+    if browser_url:
+        lines.append(f"[打开完整分类页面]({browser_url})")
+    if categories:
+        lines.extend(["", "| 一级分类 | 文件数 | 查看 |", "|---|---:|---|"])
+        for item in categories:
+            link = (
+                f"[打开]({item['browser_url']})" if item.get("browser_url") else "使用分类文件工具查看"
+            )
+            lines.append(
+                f"| {_escape_markdown_text(item['name'])} | {item['file_count']} | {link} |"
+            )
+    return {
+        "total_active_files": int(payload.get("total_active_files") or 0),
+        "business_classified_file_count": int(
+            payload.get("business_classified_file_count") or 0
+        ),
+        "other_file_count": int(payload.get("other_file_count") or 0),
+        "taxonomy_version": str(payload.get("taxonomy_version") or ""),
+        "categories": categories,
+        "category_options": category_options,
+        "browser_url": browser_url,
+        "display_text": "\n".join(lines),
+        "display_policy": CLASSIFICATION_DISPLAY_POLICY,
+    }
+
+
+def project_classification_files(payload: dict[str, Any]) -> dict[str, Any]:
+    """把分类分页结果投影为文件名、主分类、状态和可点击操作。"""
+
+    files: list[dict[str, Any]] = []
+    for raw in payload.get("files", []):
+        if not isinstance(raw, dict):
+            continue
+        effective = raw.get("effective_primary") if isinstance(raw.get("effective_primary"), dict) else {}
+        path = effective.get("category_path") if isinstance(effective.get("category_path"), list) else []
+        category = " / ".join(" ".join(str(item).split()) for item in path if str(item).strip())
+        if not category:
+            category = "其他" if raw.get("classification_outcome") == "OTHER" else "处理中"
+        if raw.get("pending_primary"):
+            status = "分类落位处理中"
+        elif raw.get("classification_outcome") == "OTHER":
+            status = "已归入其他"
+        elif raw.get("primary_category_status") == "CONFIRMED":
+            status = "已确认"
+        elif raw.get("primary_category_status") == "AUTO_APPLIED":
+            status = "自动归类"
+        else:
+            status = "处理中"
+        files.append(
+            {
+                "filename": " ".join(str(raw.get("filename") or "未命名文件").split())[:255],
+                "primary_category": category[:300],
+                "status": status,
+                "preview_url": _safe_public_file_url(raw.get("preview_url")),
+                "download_url": _safe_public_file_url(raw.get("download_url")),
+                "tool_context": {
+                    key: value
+                    for key, value in {
+                        "working_copy_id": str(raw.get("working_copy_id") or "").strip() or None,
+                        "document_id": str(raw.get("document_id") or "").strip() or None,
+                        "document_version_id": str(raw.get("document_version_id") or "").strip() or None,
+                    }.items()
+                    if value is not None
+                },
+            }
+        )
+    browser_url = _safe_public_file_url(payload.get("browser_url"))
+    lines = [_CLASSIFICATION_DISPLAY_DIRECTIVE]
+    if browser_url:
+        lines.append(f"[在完整分类页面查看当前范围]({browser_url})")
+    lines.extend(["", "| 文件名 | 主分类 | 状态 | 操作 |", "|---|---|---|---|"])
+    if files:
+        for item in files:
+            actions: list[str] = []
+            if item.get("preview_url"):
+                actions.append(f"[预览]({item['preview_url']})")
+            if item.get("download_url"):
+                actions.append(f"[下载]({item['download_url']})")
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _escape_markdown_text(item["filename"]),
+                        _escape_markdown_text(item["primary_category"]),
+                        item["status"],
+                        " / ".join(actions) or "工作副本生成中",
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("| 当前范围没有已发布文件 | - | - | - |")
+    return {
+        "page": int(payload.get("page") or 1),
+        "page_size": int(payload.get("page_size") or 20),
+        "total": int(payload.get("total") or 0),
+        "total_pages": int(payload.get("total_pages") or 0),
+        "category_id": payload.get("category_id"),
+        "files": files,
+        "browser_url": browser_url,
+        "display_text": "\n".join(lines),
+        "display_policy": CLASSIFICATION_DISPLAY_POLICY,
     }
 
 

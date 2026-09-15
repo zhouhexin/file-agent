@@ -52,6 +52,8 @@ class OrganizationFileItemResponse(BaseModel):
     filename: str
     relative_path: str
     size_bytes: int
+    preview_url: str | None = None
+    download_url: str | None = None
     primary_category_id: str | None = None
     primary_category_path: list[str] = Field(default_factory=list)
     primary_category_status: str | None = None

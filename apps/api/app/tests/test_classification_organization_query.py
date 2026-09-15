@@ -244,12 +244,19 @@ def test_tree_uses_schema_v2_other_aggregation_without_review_node():
     assert _find_node(result.nodes, "system.other").direct_file_count == 3
 
 
-def test_files_support_direct_descendant_other_compatibility_and_stable_pagination():
+def test_files_support_direct_descendant_other_compatibility_and_stable_pagination(monkeypatch):
     """旧复核链接规范到 OTHER，且分页不会重复或泄漏 ORGANIZING 文件。"""
 
     db = _session()
     annual, planning, unclassified, review, shadow, _, confirmed_review = _seed_organization_data(db)
     service = ClassificationOrganizationQueryService(db)
+    monkeypatch.setattr(
+        "app.modules.classification.organization_query_service.public_file_links",
+        lambda working_copy_id: {
+            "preview_url": f"/api/public/file-access/{working_copy_id}/preview",
+            "download_url": f"/api/public/file-access/{working_copy_id}/download",
+        },
+    )
 
     descendants = service.files(
         category_id="school.admin",
@@ -257,6 +264,7 @@ def test_files_support_direct_descendant_other_compatibility_and_stable_paginati
         review_only=False,
         page=1,
         page_size=20,
+        include_public_links=True,
     )
     direct = service.files(
         category_id="school.admin",
@@ -308,6 +316,10 @@ def test_files_support_direct_descendant_other_compatibility_and_stable_paginati
     assert first.total == 6
     assert first.total_pages == 3
     assert not ({item.working_copy_id for item in first.files} & {item.working_copy_id for item in second.files})
+    assert descendants.files[0].preview_url.startswith("/api/public/file-access/")
+    assert descendants.files[0].preview_url.endswith("/preview")
+    assert descendants.files[0].download_url.startswith("/api/public/file-access/")
+    assert descendants.files[0].download_url.endswith("/download")
 
 
 def test_other_aggregation_keeps_historical_primary_and_location_truthful():

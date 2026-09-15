@@ -29,6 +29,7 @@ from app.modules.classification.organization_schemas import (
     OrganizationTreeResponse,
 )
 from app.modules.classification.schemas import CategoryNode
+from app.modules.file_lifecycle.public_access import public_file_links
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 
 
@@ -160,6 +161,7 @@ class ClassificationOrganizationQueryService:
         review_only: bool,
         page: int,
         page_size: int,
+        include_public_links: bool = False,
     ) -> OrganizationFilePageResponse:
         """按主分类返回稳定服务端分页结果；旧复核请求规范到 OTHER。"""
 
@@ -248,6 +250,7 @@ class ClassificationOrganizationQueryService:
                 if relation is not None
                 else None
             )
+            public_links = public_file_links(working_copy.id) if include_public_links else {}
             files.append(
                 OrganizationFileItemResponse(
                     working_copy_id=working_copy.id,
@@ -256,6 +259,8 @@ class ClassificationOrganizationQueryService:
                     filename=working_copy.filename,
                     relative_path=working_copy.relative_path,
                     size_bytes=working_copy.size_bytes,
+                    preview_url=public_links.get("preview_url"),
+                    download_url=public_links.get("download_url"),
                     primary_category_id=relation.category_id if relation else None,
                     primary_category_path=list(relation.category_path_json or []) if relation else [],
                     primary_category_status=relation.status if relation else None,

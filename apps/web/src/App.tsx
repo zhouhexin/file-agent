@@ -51,6 +51,12 @@ function readInitialPath(): AppPath {
   return '/chat';
 }
 
+function readInitialReturnTarget(): string | null {
+  // 登录门禁只保留受控分类页及其查询参数，不接受任意外部返回地址。
+  if (window.location.pathname !== '/files') return null;
+  return `/files${window.location.search}`;
+}
+
 function replacePath(path: AppPath): void {
   // 使用 replaceState 避免污染浏览器历史记录。
   window.history.replaceState(null, '', path);
@@ -66,6 +72,7 @@ export function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [currentPath, setCurrentPath] = useState<AppPath>(() => readInitialPath());
+  const [returnTarget, setReturnTarget] = useState<string | null>(() => readInitialReturnTarget());
   const [pendingExample, setPendingExample] = useState('');
 
   useEffect(() => {
@@ -88,7 +95,7 @@ export function App() {
     getCurrentUser(token)
       .then((user) => {
         setCurrentUser(user);
-        if (!hasCompletedOnboarding() && window.location.pathname !== '/getting-started' && window.location.pathname !== '/duplicate-comparison') {
+        if (!hasCompletedOnboarding() && window.location.pathname !== '/getting-started' && window.location.pathname !== '/duplicate-comparison' && window.location.pathname !== '/files') {
           replacePath('/getting-started');
           setCurrentPath('/getting-started');
         }
@@ -120,7 +127,14 @@ export function App() {
     setCurrentUser(user);
     setPendingExample('');
 
-    // 首次登录且未完成引导时跳转到引导页；否则直接进入聊天。
+    // 分类深链接优先返回原视图；普通登录仍沿用首次引导规则。
+    if (returnTarget) {
+      window.history.replaceState(null, '', returnTarget);
+      setCurrentPath('/files');
+      setReturnTarget(null);
+      return;
+    }
+
     if (!hasCompletedOnboarding()) {
       replacePath('/getting-started');
       setCurrentPath('/getting-started');
@@ -135,6 +149,7 @@ export function App() {
     setToken(null);
     setCurrentUser(null);
     setPendingExample('');
+    setReturnTarget(null);
     replacePath('/login');
     setCurrentPath('/login');
   }
@@ -181,6 +196,7 @@ export function App() {
   function completeOnboarding() {
     markOnboardingCompleted();
     setPendingExample('');
+    setReturnTarget(null);
     openReturnTargetOrChat();
   }
 

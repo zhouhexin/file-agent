@@ -10,7 +10,7 @@ import re
 import stat
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import quote, unquote, urljoin
+from urllib.parse import quote, unquote, urlencode, urljoin
 from uuid import uuid4
 
 import httpx
@@ -207,12 +207,14 @@ class FileAgentIntegrationClient:
         access_token: str,
         roots: LocalRootRegistry,
         transport: httpx.AsyncBaseTransport | None = None,
+        web_base_url: str | None = None,
     ) -> None:
         """创建请求客户端；令牌仅进入 Authorization 头，不写入工具结果。"""
 
         if not access_token.strip():
             raise ValueError("FILE_AGENT_ACCESS_TOKEN 不能为空")
         self.roots = roots
+        self.web_base_url = (web_base_url or base_url).rstrip("/")
         self.http = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {access_token}"},
@@ -228,6 +230,7 @@ class FileAgentIntegrationClient:
             base_url=os.getenv("FILE_AGENT_API_BASE_URL", "http://127.0.0.1:8000"),
             access_token=os.getenv("FILE_AGENT_ACCESS_TOKEN", ""),
             roots=roots,
+            web_base_url=os.getenv("FILE_AGENT_WEB_BASE_URL", "").strip() or None,
         )
 
     async def close(self) -> None:
@@ -409,6 +412,80 @@ class FileAgentIntegrationClient:
                 value = str(item.get(key) or "").strip()
                 if value.startswith("/"):
                     item[key] = urljoin(str(self.http.base_url), value)
+        return payload
+
+    def classification_browser_url(
+        self,
+        *,
+        category_id: str | None = None,
+        page: int = 1,
+    ) -> str:
+        """生成 Web 分类页深链接；只编码稳定分类 ID 和页码。"""
+
+        query: dict[str, str] = {}
+        if category_id:
+            query["category_id"] = category_id
+        if page > 1:
+            query["page"] = str(page)
+        suffix = f"?{urlencode(query)}" if query else ""
+        return f"{urljoin(self.web_base_url, '/files')}{suffix}"
+
+    async def classification_overview(self) -> dict[str, Any]:
+        """读取当前主分类树与计数，并附加可由浏览器打开的分类页入口。"""
+
+        payload = self._business_json(
+            await self.http.get("/api/classification/organization/tree")
+        )
+        payload["browser_url"] = self.classification_browser_url()
+        def attach_browser_url(nodes: Any) -> None:
+            """递归附加受控 Web 深链接，不改变服务端分类树字段。"""
+
+            if not isinstance(nodes, list):
+                return
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                node["browser_url"] = self.classification_browser_url(
+                    category_id=str(node.get("category_id") or "") or None,
+                )
+                attach_browser_url(node.get("children"))
+
+        attach_browser_url(payload.get("nodes"))
+        return payload
+
+    async def classification_files(
+        self,
+        *,
+        category_id: str | None,
+        page: int,
+        page_size: int,
+    ) -> dict[str, Any]:
+        """按分类节点分页读取工作副本，不触发分类、移动或其他写操作。"""
+
+        params: dict[str, str | int] = {
+            "scope": "descendants",
+            "page": page,
+            "page_size": page_size,
+        }
+        if category_id:
+            params["category_id"] = category_id
+        payload = self._business_json(
+            await self.http.get(
+                "/api/classification/organization/files",
+                params=params,
+            )
+        )
+        for item in payload.get("files", []):
+            if not isinstance(item, dict):
+                continue
+            for key in ("preview_url", "download_url"):
+                value = str(item.get(key) or "").strip()
+                if value.startswith("/"):
+                    item[key] = urljoin(str(self.http.base_url), value)
+        payload["browser_url"] = self.classification_browser_url(
+            category_id=category_id,
+            page=page,
+        )
         return payload
 
     async def classification_placement_submit(

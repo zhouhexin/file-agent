@@ -206,6 +206,82 @@ def test_file_search_expands_public_links_against_api_origin(tmp_path) -> None:
     )
 
 
+def test_classification_read_endpoints_add_browser_and_public_links(tmp_path) -> None:
+    """分类总览与分页必须保持只读，并返回 WorkBuddy 可直接打开的绝对链接。"""
+
+    root = tmp_path / "allowed"
+    root.mkdir()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        """按请求路径返回最小分类数据。"""
+
+        assert request.method == "GET"
+        if request.url.path.endswith("/tree"):
+            return httpx.Response(
+                200,
+                json={
+                    "total_active_files": 3,
+                    "nodes": [
+                        {
+                            "category_id": "school.hr",
+                            "name": "人事师资",
+                            "subtree_file_count": 2,
+                        }
+                    ],
+                },
+            )
+        assert request.url.path.endswith("/files")
+        assert request.url.params["category_id"] == "school.hr"
+        assert request.url.params["page"] == "2"
+        return httpx.Response(
+            200,
+            json={
+                "page": 2,
+                "files": [
+                    {
+                        "filename": "推荐意见.docx",
+                        "preview_url": "/api/public/file-access/token-2/preview",
+                        "download_url": "/api/public/file-access/token-2/download",
+                    }
+                ],
+            },
+        )
+
+    async def scenario() -> tuple[dict, dict]:
+        """依次读取总览和分类文件。"""
+
+        client = FileAgentIntegrationClient(
+            base_url="http://10.102.4.241:8000",
+            access_token="token-value",
+            roots=LocalRootRegistry({"materials": root}),
+            transport=httpx.MockTransport(handler),
+            web_base_url="http://10.102.4.241",
+        )
+        try:
+            return (
+                await client.classification_overview(),
+                await client.classification_files(
+                    category_id="school.hr",
+                    page=2,
+                    page_size=20,
+                ),
+            )
+        finally:
+            await client.close()
+
+    overview, files = asyncio.run(scenario())
+    assert overview["browser_url"] == "http://10.102.4.241/files"
+    assert overview["nodes"][0]["browser_url"] == (
+        "http://10.102.4.241/files?category_id=school.hr"
+    )
+    assert files["browser_url"] == (
+        "http://10.102.4.241/files?category_id=school.hr&page=2"
+    )
+    assert files["files"][0]["preview_url"].startswith(
+        "http://10.102.4.241:8000/api/public/file-access/"
+    )
+
+
 def test_working_copy_download_rejects_oversized_stream(tmp_path) -> None:
     """下载字节超过本机上限时必须失败，且不能留下可误开的半成品。"""
 
