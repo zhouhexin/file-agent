@@ -41,6 +41,7 @@ from app.modules.managed_files.worker import (
     _public_job_error_message,
     process_next_filesystem_job,
     reconcile_waiting_search_runs,
+    resolve_filesystem_worker_id,
 )
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.scanner import ManagedFileScanner
@@ -50,6 +51,43 @@ from app.modules.file_lifecycle.service import FileLifecycleJobProcessor
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.modules.retrieval.relevant_file_sets import RelevantFileSetService
 from app.tests.helpers import clear_overrides, client_with_database
+
+
+def test_worker_id_keeps_legacy_value_without_replica_suffix() -> None:
+    """未开启副本后缀时必须保持现有 worker 身份，避免影响本地脚本。"""
+
+    assert resolve_filesystem_worker_id(
+        environ={"FILESYSTEM_WORKER_ID": "source-analysis-worker"},
+        hostname="container-a",
+    ) == "source-analysis-worker"
+
+
+def test_worker_id_appends_container_hostname_for_scaled_replica() -> None:
+    """横向扩容的每个容器必须使用独立 lease_owner。"""
+
+    assert resolve_filesystem_worker_id(
+        environ={
+            "FILESYSTEM_WORKER_ID": "source-analysis-worker",
+            "FILESYSTEM_WORKER_APPEND_HOSTNAME": "true",
+        },
+        hostname="8cf274ed91a2",
+    ) == "source-analysis-worker-8cf274ed91a2"
+
+
+def test_worker_id_prefers_explicit_suffix_and_stays_within_database_limit() -> None:
+    """显式实例标识优先于主机名，超长输入也不得超过数据库字段长度。"""
+
+    worker_id = resolve_filesystem_worker_id(
+        environ={
+            "FILESYSTEM_WORKER_ID": "source-analysis-worker-" * 10,
+            "FILESYSTEM_WORKER_APPEND_HOSTNAME": "true",
+            "FILESYSTEM_WORKER_ID_SUFFIX": f"replica-{'x' * 100}",
+        },
+        hostname="ignored-hostname",
+    )
+
+    assert len(worker_id) <= 100
+    assert worker_id.endswith("x" * 48)
 
 
 def test_failed_deduplicated_job_is_not_reopened_by_automatic_scan():

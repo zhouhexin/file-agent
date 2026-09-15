@@ -110,6 +110,141 @@ def test_file_ingest_streams_authorized_file_without_exposing_local_path(tmp_pat
     assert result == {"accepted": True, "filesystem_job_id": "job-1"}
 
 
+def test_working_copy_download_uses_auth_and_returns_local_resource(tmp_path) -> None:
+    """下载工具必须鉴权、使用后端文件名，并只写入专用缓存目录。"""
+
+    root = tmp_path / "allowed"
+    root.mkdir()
+    output_dir = tmp_path / "downloads"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        """模拟带中文 RFC 5987 文件名的工作副本下载。"""
+
+        assert request.url.path == "/api/working-copies/copy-1/download"
+        assert request.headers["authorization"] == "Bearer token-value"
+        return httpx.Response(
+            200,
+            content="人才推荐正文".encode("utf-8"),
+            headers={
+                "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "content-disposition": "attachment; filename*=UTF-8''%E6%8E%A8%E8%8D%90%E6%84%8F%E8%A7%81.docx",
+            },
+        )
+
+    async def scenario() -> dict:
+        """执行一次下载并关闭连接池。"""
+
+        client = FileAgentIntegrationClient(
+            base_url="http://file-agent.test",
+            access_token="token-value",
+            roots=LocalRootRegistry({"materials": root}),
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            return await client.download_working_copy(
+                working_copy_id="copy-1",
+                output_dir=output_dir,
+            )
+        finally:
+            await client.close()
+
+    result = asyncio.run(scenario())
+    downloaded = next(output_dir.rglob("推荐意见.docx"))
+    assert result["filename"] == "推荐意见.docx"
+    assert result["resource_uri"].startswith("file:")
+    assert result["size_bytes"] == len("人才推荐正文".encode("utf-8"))
+    assert downloaded.read_bytes() == "人才推荐正文".encode("utf-8")
+    assert output_dir.resolve() in downloaded.resolve().parents
+
+
+def test_file_search_expands_public_links_against_api_origin(tmp_path) -> None:
+    """后端返回相对公开链接时，MCP 必须转换为 WorkBuddy 可点击的绝对地址。"""
+
+    root = tmp_path / "allowed"
+    root.mkdir()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        """模拟包含公开预览与下载能力地址的搜索响应。"""
+
+        assert request.url.path == "/api/search"
+        return httpx.Response(
+            200,
+            json={
+                "files": [
+                    {
+                        "filename": "材料.docx",
+                        "preview_url": "/api/public/file-access/token-1/preview",
+                        "download_url": "/api/public/file-access/token-1/download",
+                    }
+                ]
+            },
+        )
+
+    async def scenario() -> dict:
+        """执行一次搜索并关闭连接池。"""
+
+        client = FileAgentIntegrationClient(
+            base_url="http://10.102.4.241:8000",
+            access_token="token-value",
+            roots=LocalRootRegistry({"materials": root}),
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            return await client.file_search(
+                conversation_id="conversation-1",
+                query="材料",
+            )
+        finally:
+            await client.close()
+
+    result = asyncio.run(scenario())
+    assert result["files"][0]["preview_url"] == (
+        "http://10.102.4.241:8000/api/public/file-access/token-1/preview"
+    )
+    assert result["files"][0]["download_url"] == (
+        "http://10.102.4.241:8000/api/public/file-access/token-1/download"
+    )
+
+
+def test_working_copy_download_rejects_oversized_stream(tmp_path) -> None:
+    """下载字节超过本机上限时必须失败，且不能留下可误开的半成品。"""
+
+    root = tmp_path / "allowed"
+    root.mkdir()
+    output_dir = tmp_path / "downloads"
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        """返回超过测试上限的文件流。"""
+
+        return httpx.Response(
+            200,
+            content=b"too-large",
+            headers={"content-disposition": 'attachment; filename="large.bin"'},
+        )
+
+    async def scenario() -> None:
+        """执行受限下载并断言失败。"""
+
+        client = FileAgentIntegrationClient(
+            base_url="http://file-agent.test",
+            access_token="token-value",
+            roots=LocalRootRegistry({"materials": root}),
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            with pytest.raises(RuntimeError, match="大小上限"):
+                await client.download_working_copy(
+                    working_copy_id="copy-1",
+                    output_dir=output_dir,
+                    max_bytes=4,
+                )
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+    assert not list(output_dir.rglob("*.part"))
+
+
 def test_job_get_returns_structured_error_without_leaking_token(tmp_path) -> None:
     """后端错误只转成业务错误码和消息，不得包含 Authorization 令牌。"""
 

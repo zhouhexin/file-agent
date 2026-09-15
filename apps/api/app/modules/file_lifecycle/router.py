@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -26,6 +26,7 @@ from app.modules.file_lifecycle.schemas import (
     WorkingCopyResponse,
 )
 from app.modules.file_lifecycle.service import UploadLifecycleService, WorkingCopyQueryService
+from app.modules.file_lifecycle.public_access import PublicWorkingCopyAccessService
 from app.modules.file_lifecycle.operations import WorkingCopyOperationService
 from app.modules.operations.schemas import OperationPlanResponse
 from app.modules.operations.service import OperationPlanService
@@ -157,6 +158,26 @@ def download_working_copy(
         current_user=current_user,
     )
     return FileResponse(path=path, filename=filename, media_type=content_type)
+
+
+@router.get("/api/public/file-access/{token}/preview", response_class=Response)
+def preview_public_working_copy(
+    token: str,
+    db: Session = Depends(get_db),
+) -> Response:
+    """通过搜索结果签发的只读能力链接预览活动工作副本，无需登录。"""
+
+    return PublicWorkingCopyAccessService(db).preview_response(token)
+
+
+@router.get("/api/public/file-access/{token}/download", response_class=FileResponse)
+def download_public_working_copy(
+    token: str,
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """通过搜索结果签发的只读能力链接下载活动工作副本，无需登录。"""
+
+    return PublicWorkingCopyAccessService(db).download_response(token)
 
 
 @router.get(

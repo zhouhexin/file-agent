@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import os
+import re
+import socket
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from sqlalchemy.orm import Session
 
@@ -79,6 +81,45 @@ from app.modules.managed_files.source_analysis import (
     managed_source_extraction_fingerprint,
     managed_source_extraction_is_current,
 )
+
+
+_FILESYSTEM_WORKER_ID_MAX_LENGTH = 100
+
+
+def resolve_filesystem_worker_id(
+    *,
+    environ: Mapping[str, str] | None = None,
+    hostname: str | None = None,
+) -> str:
+    """为可横向扩容的 worker 生成数据库可容纳的唯一租约身份。
+
+    默认保持既有 ``FILESYSTEM_WORKER_ID`` 行为；生产 Compose 显式开启主机名后缀后，
+    每个容器副本使用不同的 lease_owner，避免一个副本替另一个副本错误续租。
+    """
+
+    values = os.environ if environ is None else environ
+    base_id = (values.get("FILESYSTEM_WORKER_ID") or "filesystem-worker").strip()
+    base_id = base_id or "filesystem-worker"
+    append_hostname = (values.get("FILESYSTEM_WORKER_APPEND_HOSTNAME") or "false").strip().lower()
+    explicit_suffix = (values.get("FILESYSTEM_WORKER_ID_SUFFIX") or "").strip()
+    suffix = explicit_suffix
+    if not suffix and append_hostname in {"1", "true", "yes", "on"}:
+        suffix = (
+            hostname
+            if hostname is not None
+            else values.get("HOSTNAME", "") or socket.gethostname()
+        ).strip()
+    if not suffix:
+        return base_id[:_FILESYSTEM_WORKER_ID_MAX_LENGTH]
+
+    # Docker hostname 的唯一部分通常位于末尾；保留尾部可避免超长服务名前缀吞掉副本差异。
+    normalized_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "-", suffix).strip("-._")
+    if not normalized_suffix:
+        return base_id[:_FILESYSTEM_WORKER_ID_MAX_LENGTH]
+    normalized_suffix = normalized_suffix[-48:]
+    max_base_length = _FILESYSTEM_WORKER_ID_MAX_LENGTH - len(normalized_suffix) - 1
+    normalized_base = base_id[:max_base_length].rstrip("-._") or "worker"
+    return f"{normalized_base}-{normalized_suffix}"
 
 
 def _print_worker_status(
@@ -2004,7 +2045,7 @@ def _public_job_error_message(*, job: FilesystemJob, error: Exception) -> str:
 def main() -> None:
     """worker 命令行入口。"""
 
-    worker_id = os.getenv("FILESYSTEM_WORKER_ID", "filesystem-worker")
+    worker_id = resolve_filesystem_worker_id()
     poll_seconds = float(os.getenv("FILESYSTEM_WORKER_POLL_SECONDS", "3"))
     configured_queues = {
         value.strip().upper()

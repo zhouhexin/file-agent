@@ -1104,7 +1104,9 @@ Response:
       "overview": "资助申请的材料与时间说明。",
       "match_reasons": ["文件名命中：2025年资助政策.pdf", "原文 Chunk 命中查询词"],
       "match_location": {"page_number": 2, "sheet_name": null, "cell_range": null},
-      "evidence_preview": "申请国家助学金需要提交申请表和相关证明材料。"
+      "evidence_preview": "申请国家助学金需要提交申请表和相关证明材料。",
+      "preview_url": "/api/public/file-access/{signed-token}/preview",
+      "download_url": "/api/public/file-access/{signed-token}/download"
     }
   ]
 }
@@ -1113,6 +1115,22 @@ Response:
 此接口和聊天入口均不调用 embedding、GPU、LLM、Graph 或文件系统扫描；不会返回 Chunk 正文、
 `search_text`、内部路径、SQL 分数或 Tool/Skill 载荷。`attachment_document_ids` 仅作为后端再次
 鉴权的稳定 ID 输入，`top_k` 范围为 1–20。
+
+当结果已经存在 `ACTIVE` 工作副本且 `can_open != false` 时，响应同时返回相对
+`preview_url` 和 `download_url`。二者是签名的只读能力链接，不包含物理路径、不依赖浏览器登录，
+也不设置到期时间；只有工作副本仍为 `ACTIVE`、当前版本存在且物理内容可读时才能打开。
+`JWT_SECRET_KEY` 轮换、工作副本进入回收站/删除或内容记录失效后，旧链接停止可用。
+受管源命中但工作副本仍在物化时不得提前签发链接。
+
+公开读取接口：
+
+```text
+GET /api/public/file-access/{signed_token}/preview
+GET /api/public/file-access/{signed_token}/download
+```
+
+PDF、图片和纯文本由浏览器内联预览；Word 与 Excel 使用当前版本已经持久化的解析结果生成只读
+HTML 预览。没有解析结果或格式不支持时仍返回可打开的说明页和下载入口，不触发同步解析。
 
 `search_completeness` 由后端根据实际检索范围和当前索引状态计算，前端不得根据返回文件数量自行
 推断“已找全”。`COMPLETE` 只表示当前唯一范围、检索条件和索引能力下不存在已知缺口；`PROCESSING`
@@ -1664,6 +1682,8 @@ external model use for file content must be explicit
 | `GET /api/agent-runs/{id}/tool-invocations` | no | yes | yes |
 | `GET /api/documents` | yes | yes | yes |
 | `POST /api/search` | yes | yes | yes |
+| `GET /api/public/file-access/{token}/preview` | signed public link | signed public link | signed public link |
+| `GET /api/public/file-access/{token}/download` | signed public link | signed public link | signed public link |
 | `POST /api/conversations/{id}/evidence-answer` | yes | yes | yes |
 | `POST /api/operations/plans` | yes | yes | yes |
 | `POST /api/operations/plans/{id}/confirm` | owner | yes | yes |
@@ -1699,6 +1719,8 @@ GET  /api/jobs/{job_id}/events
 GET  /api/working-copies
 GET  /api/working-copies/{working_copy_id}
 GET  /api/working-copies/{working_copy_id}/download
+GET  /api/public/file-access/{signed_token}/preview
+GET  /api/public/file-access/{signed_token}/download
 GET  /api/working-copies/{working_copy_id}/lineage
 GET  /api/working-copies/{working_copy_id}/versions
 GET  /api/working-copies/{working_copy_id}/path-records
@@ -1862,6 +1884,11 @@ MCP外部工具除导入外还封装`file_search`、`file_read`、`evidence_answ
 证据回答兼容入口；明确重命名复用现有Agent与OperationPlan审计链路。文件范围必须使用后端返回的稳定
 Document ID，不接受路径或正文；读取只允许固定只读模式，证据问答不接受客户端提供Evidence，操作确认
 不能修改计划中的对象或before/after。
+
+`file_search` 会把搜索 API 的相对公开链接按 `FILE_AGENT_API_BASE_URL` 转换为浏览器可达的绝对地址，
+并以“文件名 / 依据 / 操作”三列表格输出；操作列直接包含“预览”和“下载”链接。文件类型、逻辑路径、
+分类路径、相关度和稳定 ID 不进入用户展示。尚未生成工作副本的结果显示“工作副本生成中”。既有
+`file_download` 工具继续保留，供宿主需要 MCP 本机资源引用时兼容使用。
 
 新通道先固定目录导入清单，再按条目流式接收文件字节。清单登记和 seal 都不表示文件已经上传、解析、
 分类或归档成功；只有内容端点返回的逐项状态和后续任务状态可以证明该条目已开始处理：

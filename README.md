@@ -117,6 +117,10 @@ worker。预检通过后分别启动 scheduler 和五个合并后的 worker：�
 绝对路径。脚本无论从哪个当前目录调用都会先切换到仓库根，因此相对
 `WORKING_COPY_STORAGE_ROOT=./storage/working-copies` 始终指向仓库内目录。共享开发数据库已有
 WorkingCopy 记录但当前机器物理文件缺失时，下一次扫描会重新调度导入并从不可变原件修复本地副本。
+生产 Compose 默认以 `SOURCE_ANALYSIS_WORKER_REPLICAS=2` 启动两个源分析副本；每个副本使用带容器
+主机名后缀的独立租约身份。普通格式可以并行解析，旧版 `.doc/.xls` 则通过 PostgreSQL advisory lock
+在所有副本之间共同遵守 `MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY=1`，不会同时启动多个 LibreOffice。
+本地 `scripts\start-file-agent-workers.cmd` 仍默认启动一个分析进程，不受生产副本数配置影响。
 MCP/WorkBuddy 固定批次的上传分析使用优先级 20，高于普通受管目录后台分析的 100，低于即时检索的 10；
 仍由现有 `SOURCE_ANALYSIS,ANALYSIS` worker 消费，不增加进程或数据库迁移。升级后须重启 API 和旧
 分析 worker；旧批次中尚未领取的分析任务会在下一次 `batch_get` 时提升优先级，不会重建文件或任务。

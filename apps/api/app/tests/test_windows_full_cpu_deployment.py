@@ -52,6 +52,8 @@ def test_compose_starts_unique_migration_and_all_required_workers() -> None:
         "DUPLICATE_CHECK,ARCHIVE,FILE_OPERATION,MATERIALIZE,IMPORT"
     ) in compose
     assert "FILESYSTEM_WORKER_QUEUES: SOURCE_ANALYSIS,ANALYSIS" in compose
+    assert "replicas: ${SOURCE_ANALYSIS_WORKER_REPLICAS:-2}" in compose
+    assert 'FILESYSTEM_WORKER_APPEND_HOSTNAME: "true"' in compose
     assert "FILESYSTEM_WORKER_QUEUES: STRUCTURED_EXTRACTION" in compose
     assert 'STRUCTURED_EXTRACTION_WORKER_CONCURRENCY: "1"' in compose
     assert "FILESYSTEM_WORKER_QUEUES: GRAPH" in compose
@@ -102,6 +104,7 @@ def test_production_env_enables_full_local_image_stack_and_managed_sync() -> Non
     assert env["MANAGED_FILE_INITIALIZATION_MODE"] == "source_index_first"
     assert env["MATERIALIZE_WORKING_COPY_BACKGROUND_PRIORITY"] == "100"
     assert env["MATERIALIZE_WORKING_COPY_PRIORITY"] == "20"
+    assert env["SOURCE_ANALYSIS_WORKER_REPLICAS"] == "2"
 
 
 def test_api_image_installs_programs_and_preloads_every_required_model() -> None:

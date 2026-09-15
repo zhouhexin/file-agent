@@ -9,6 +9,7 @@ import pytest
 from file_agent_mcp.conversation_tools import (
     WorkBuddyConversationService,
     conversation_id_for_workbuddy,
+    project_file_search_result,
 )
 
 
@@ -92,6 +93,91 @@ def test_file_search_with_move_words_never_routes_to_placement_write() -> None:
     )
 
     assert [call["method"] for call in client.calls] == ["file_search"]
+
+
+def test_file_search_projects_only_filename_and_basis_for_user_display() -> None:
+    """WorkBuddy 搜索展示不能包含类型、路径、分类和相关度，但须保留机器引用。"""
+
+    result = project_file_search_result(
+        {
+            "query": "人才推荐",
+            "files": [
+                {
+                    "filename": "推荐意见-[测试].docx",
+                    "document_id": "doc-1",
+                    "working_copy_id": "copy-1",
+                    "document_version_id": "version-1",
+                    "revision": 3,
+                    "resource_type": "WORKING_COPY",
+                    "relative_path": "人事处/人才工程科/推荐意见.docx",
+                    "category_path": ["学校", "人事处", "人才工作"],
+                    "relevance_tier": "SUPPORTED",
+                    "match_reasons": ["正文主题命中：人才推荐"],
+                    "match_location": {"page_number": 2},
+                    "evidence_preview": "经学院研究，同意推荐该同志申报人才项目。",
+                    "preview_url": "http://file-agent.test/api/public/file-access/read-token/preview",
+                    "download_url": "http://file-agent.test/api/public/file-access/read-token/download",
+                }
+            ],
+        }
+    )
+
+    assert result["files"] == [
+        {
+            "filename": "推荐意见-[测试].docx",
+            "basis": [
+                "正文主题命中：人才推荐",
+                "原文依据（第 2 页）：经学院研究，同意推荐该同志申报人才项目。",
+            ],
+            "preview_url": "http://file-agent.test/api/public/file-access/read-token/preview",
+            "download_url": "http://file-agent.test/api/public/file-access/read-token/download",
+            "tool_context": {
+                "document_id": "doc-1",
+                "working_copy_id": "copy-1",
+                "document_version_id": "version-1",
+                "revision": 3,
+            },
+            "available_actions": {"preview": True, "download": True},
+        }
+    ]
+    display = result["display_text"]
+    assert "推荐意见" in display
+    assert "正文主题命中" in display
+    assert "第 2 页" in display
+    assert "人事处/人才工程科" not in display
+    assert "WORKING_COPY" not in display
+    assert "SUPPORTED" not in display
+    assert "doc-1" not in display
+    assert "\\[测试\\]" in display
+    assert "| 文件名 | 依据 | 操作 |" in display
+    assert "[预览](http://file-agent.test/api/public/file-access/read-token/preview)" in display
+    assert "[下载](http://file-agent.test/api/public/file-access/read-token/download)" in display
+
+
+def test_file_search_rejects_non_http_action_links() -> None:
+    """搜索结果中的链接只能来自后端 HTTP(S) 地址，不能被文件数据伪造成脚本链接。"""
+
+    result = project_file_search_result(
+        {
+            "files": [
+                {
+                    "filename": "测试.txt",
+                    "document_id": "doc-1",
+                    "working_copy_id": "copy-1",
+                    "preview_url": "javascript:alert(1)",
+                    "download_url": "file:///server/secret.txt",
+                }
+            ]
+        }
+    )
+
+    assert result["files"][0]["preview_url"] is None
+    assert result["files"][0]["download_url"] is None
+    assert result["files"][0]["available_actions"] == {
+        "preview": False,
+        "download": False,
+    }
+    assert "工作副本生成中" in result["display_text"]
 
 
 def test_file_read_requires_stable_document_scope() -> None:

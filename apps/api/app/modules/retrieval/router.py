@@ -30,6 +30,7 @@ from app.modules.retrieval.two_stage_search import TwoStageFileSearchService
 from app.modules.retrieval.completeness import SearchCompletenessService
 from app.modules.retrieval.readiness import WorkingCopySearchReadinessService
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
+from app.modules.file_lifecycle.public_access import public_file_links
 from app.modules.retrieval.clarification_service import (
     FileSearchClarificationError,
     FileSearchClarificationService,
@@ -172,7 +173,13 @@ def search_files(
         query=request.query,
         results=final_results,
     )
-    files = list(result.get("results") or [])[: request.top_k]
+    files = []
+    for raw_item in list(result.get("results") or [])[: request.top_k]:
+        item = dict(raw_item)
+        working_copy_id = str(item.get("working_copy_id") or "").strip()
+        if working_copy_id and item.get("can_open") is not False:
+            item.update(public_file_links(working_copy_id))
+        files.append(item)
     return {
         "query": result.get("query", request.query),
         "total_returned": int(result.get("total_returned") or 0),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import PurePath
 from typing import Any, Literal
+from urllib.parse import urlparse
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -141,9 +142,11 @@ class WorkBuddyConversationService:
     async def search(self, *, conversation_ref: str, query: str) -> dict[str, Any]:
         """执行只读文件搜索；查询文字没有机会路由到文件写操作。"""
 
-        return await self.client.file_search(
-            conversation_id=conversation_id_for_workbuddy(conversation_ref),
-            query=_validate_text(query, label="query", max_length=500),
+        return project_file_search_result(
+            await self.client.file_search(
+                conversation_id=conversation_id_for_workbuddy(conversation_ref),
+                query=_validate_text(query, label="query", max_length=500),
+            )
         )
 
     async def read(
@@ -253,6 +256,146 @@ def _validate_text(value: str, *, label: str, max_length: int) -> str:
     if any(ord(character) < 32 and character not in {"\n", "\t"} for character in normalized):
         raise ValueError(f"{label} 不能包含控制字符")
     return normalized
+
+
+def project_file_search_result(payload: dict[str, Any]) -> dict[str, Any]:
+    """为 WorkBuddy 投影紧凑搜索结果，同时保留后续只读工具所需的稳定引用。
+
+    用户可见文本只包含文件名和后端返回的命中依据；文件类型、逻辑路径、分类路径、
+    相关度等级和评分均不进入展示文本。稳定 ID 被隔离在 ``tool_context`` 中，供模型
+    后续调用预览、下载或受控文件动作，不能在面向用户的回复中展开。
+    """
+
+    projected_files: list[dict[str, Any]] = []
+    for raw in payload.get("files", []):
+        if not isinstance(raw, dict):
+            continue
+        filename = " ".join(str(raw.get("filename") or "未命名文件").split())[:255]
+        basis = _file_search_basis(raw)
+        document_id = str(raw.get("document_id") or "").strip()
+        working_copy_id = str(raw.get("working_copy_id") or "").strip()
+        preview_url = _safe_public_file_url(raw.get("preview_url"))
+        download_url = _safe_public_file_url(raw.get("download_url"))
+        projected_files.append(
+            {
+                "filename": filename,
+                "basis": basis,
+                "preview_url": preview_url,
+                "download_url": download_url,
+                # 这些字段是后续 Tool 的机器上下文，不属于用户展示字段。
+                "tool_context": {
+                    key: value
+                    for key, value in {
+                        "document_id": document_id or None,
+                        "working_copy_id": working_copy_id or None,
+                        "document_version_id": str(
+                            raw.get("document_version_id") or ""
+                        ).strip()
+                        or None,
+                        "revision": raw.get("revision"),
+                    }.items()
+                    if value is not None
+                },
+                "available_actions": {
+                    "preview": bool(preview_url),
+                    "download": bool(download_url),
+                },
+            }
+        )
+
+    return {
+        "query": str(payload.get("query") or ""),
+        "total_returned": len(projected_files),
+        "files": projected_files,
+        "display_text": _format_file_search_display(projected_files, payload=payload),
+        "display_policy": "仅向用户展示文件名、依据和预览/下载链接，不展示 tool_context、文件类型、路径或相关度。",
+    }
+
+
+def _file_search_basis(item: dict[str, Any]) -> list[str]:
+    """把后端确定的匹配原因和原文摘录整理为有限、可定位的依据。"""
+
+    basis: list[str] = []
+    for reason in item.get("match_reasons", []):
+        normalized = " ".join(str(reason).split()).strip()
+        if normalized and normalized not in basis:
+            basis.append(normalized[:180])
+        if len(basis) >= 3:
+            break
+
+    evidence = " ".join(str(item.get("evidence_preview") or "").split()).strip()
+    if evidence:
+        location = _file_search_location(item.get("match_location"))
+        evidence_basis = f"原文依据{location}：{evidence[:240]}"
+        if evidence_basis not in basis:
+            basis.append(evidence_basis)
+    if not basis:
+        basis.append("后端未返回可展示的命中依据。")
+    return basis[:4]
+
+
+def _file_search_location(raw: Any) -> str:
+    """仅把页码或 Sheet/单元格作为证据定位，不展示文件系统路径。"""
+
+    if not isinstance(raw, dict):
+        return ""
+    labels: list[str] = []
+    page_number = raw.get("page_number")
+    if isinstance(page_number, int) and page_number > 0:
+        labels.append(f"第 {page_number} 页")
+    sheet_name = " ".join(str(raw.get("sheet_name") or "").split()).strip()
+    if sheet_name:
+        labels.append(f"Sheet {sheet_name[:80]}")
+    cell_range = " ".join(str(raw.get("cell_range") or "").split()).strip()
+    if cell_range:
+        labels.append(f"单元格 {cell_range[:40]}")
+    return f"（{'，'.join(labels)}）" if labels else ""
+
+
+def _format_file_search_display(
+    files: list[dict[str, Any]], *, payload: dict[str, Any]
+) -> str:
+    """生成 MCP 的用户可见文本，不把机器引用和内部检索字段混入结果。"""
+
+    if not files:
+        message = " ".join(str(payload.get("user_message") or "").split()).strip()
+        return message or "没有找到符合当前条件的文件。"
+    lines = ["| 文件名 | 依据 | 操作 |", "|---|---|---|"]
+    for item in files:
+        basis = "；".join(
+            _escape_markdown_text(str(reason)) for reason in item.get("basis", [])
+        )
+        actions: list[str] = []
+        if item.get("preview_url"):
+            actions.append(f"[预览]({item['preview_url']})")
+        if item.get("download_url"):
+            actions.append(f"[下载]({item['download_url']})")
+        action_text = " / ".join(actions) or "工作副本生成中"
+        lines.append(
+            f"| {_escape_markdown_text(str(item['filename']))} | {basis} | {action_text} |"
+        )
+    return "\n".join(lines)
+
+
+def _safe_public_file_url(raw: Any) -> str | None:
+    """只允许后端生成的绝对 HTTP(S) 地址进入可点击 Markdown。"""
+
+    value = str(raw or "").strip()
+    if not value or len(value) > 2048 or any(ord(item) < 32 for item in value):
+        return None
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return value
+
+
+def _escape_markdown_text(value: str) -> str:
+    """转义文件数据中的 Markdown 控制符，避免文件名或正文伪造链接和指令。"""
+
+    escaped = value.replace("\\", "\\\\")
+    for character in "`*_{}[]<>()#+!|":
+        escaped = escaped.replace(character, f"\\{character}")
+    return escaped
 
 
 def _validate_request_id(value: str) -> str:

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 
+from mcp.types import CallToolResult, ResourceLink, TextContent
+
 
 def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
     """服务必须可实例化，并完整注册批量、查重、OCR、恢复和条目动作工具。"""
@@ -23,6 +25,7 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
         "workbuddy_submission_ingest",
         "file_search",
         "file_read",
+        "file_download",
         "evidence_answer",
         "file_rename",
         "file_set_primary_category",
@@ -80,3 +83,90 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
         "SUMMARY",
         "EXPLAIN",
     ]
+    assert "working_copy_id" in schemas["file_download"]["properties"]
+
+
+def test_file_search_tool_exposes_clickable_table_and_keeps_ids_structured(monkeypatch) -> None:
+    """搜索工具展示文件名、依据与公开链接，稳定 ID 仅保留在结构化上下文。"""
+
+    import file_agent_mcp.server as server
+
+    class FakeClient:
+        """返回包含内部检索字段的后端结果，验证 MCP 最终投影。"""
+
+        async def file_search(self, **_kwargs) -> dict:
+            """模拟后端搜索响应。"""
+
+            return {
+                "query": "人才推荐",
+                "files": [
+                    {
+                        "filename": "推荐意见.docx",
+                        "document_id": "doc-1",
+                        "working_copy_id": "copy-1",
+                        "resource_type": "WORKING_COPY",
+                        "relative_path": "人事处/推荐意见.docx",
+                        "relevance_tier": "SUPPORTED",
+                        "match_reasons": ["正文主题命中：人才推荐"],
+                        "preview_url": "http://file-agent.test/api/public/file-access/token/preview",
+                        "download_url": "http://file-agent.test/api/public/file-access/token/download",
+                    }
+                ],
+            }
+
+        async def close(self) -> None:
+            """模拟关闭连接。"""
+
+    monkeypatch.setattr(server, "_client", lambda: FakeClient())
+    result = asyncio.run(server.file_search("thread-1", "人才推荐"))
+
+    assert isinstance(result, CallToolResult)
+    visible = "\n".join(
+        item.text for item in result.content if isinstance(item, TextContent)
+    )
+    assert "推荐意见.docx" in visible
+    assert "正文主题命中" in visible
+    assert "人事处/推荐意见.docx" not in visible
+    assert "SUPPORTED" not in visible
+    assert "doc-1" not in visible
+    assert "[预览](http://file-agent.test/api/public/file-access/token/preview)" in visible
+    assert "[下载](http://file-agent.test/api/public/file-access/token/download)" in visible
+    assert result.structuredContent["files"][0]["tool_context"] == {
+        "document_id": "doc-1",
+        "working_copy_id": "copy-1",
+    }
+
+
+def test_file_download_tool_returns_resource_without_token_or_path_text(monkeypatch) -> None:
+    """下载结果应使用标准资源入口，用户文本和结构化摘要不得泄露 Token 或本机路径。"""
+
+    import file_agent_mcp.server as server
+
+    class FakeClient:
+        """模拟已经完成鉴权和本机缓存写入的客户端。"""
+
+        async def download_working_copy(self, **_kwargs) -> dict:
+            """返回标准本机资源元数据。"""
+
+            return {
+                "filename": "推荐意见.docx",
+                "resource_uri": "file:///E:/file-agent-client-data/downloads/file.docx",
+                "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "size_bytes": 1024,
+            }
+
+        async def close(self) -> None:
+            """模拟关闭连接。"""
+
+    monkeypatch.setattr(server, "_client", lambda: FakeClient())
+    result = asyncio.run(server.file_download("copy-1"))
+
+    assert isinstance(result, CallToolResult)
+    text_items = [item.text for item in result.content if isinstance(item, TextContent)]
+    resources = [item for item in result.content if isinstance(item, ResourceLink)]
+    assert text_items == ["已准备下载：推荐意见.docx"]
+    assert len(resources) == 1
+    assert resources[0].name == "推荐意见.docx"
+    assert resources[0].uri.scheme == "file"
+    assert "file:///" not in str(result.structuredContent)
+    assert "token" not in str(result).lower()

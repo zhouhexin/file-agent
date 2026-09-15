@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import os
@@ -11,10 +12,12 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-from typing import Callable, Mapping
+from typing import Callable, Iterator, Mapping
 import zipfile
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -99,6 +102,69 @@ XLS_TO_XLSX = OfficeConversionSpec(
 CommandRunner = Callable[..., subprocess.CompletedProcess[bytes]]
 
 
+_LOCAL_LIBREOFFICE_LIMITERS: dict[tuple[str, int], threading.BoundedSemaphore] = {}
+_LOCAL_LIBREOFFICE_LIMITERS_GUARD = threading.Lock()
+
+
+def _libreoffice_advisory_lock_key(slot: int) -> int:
+    """生成稳定的 PostgreSQL bigint advisory-lock key。"""
+
+    digest = hashlib.sha256(f"file-agent:libreoffice:{slot}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+@contextmanager
+def _libreoffice_conversion_slot(
+    *,
+    db: Session,
+    storage_root: Path,
+    concurrency: int,
+) -> Iterator[int]:
+    """跨生产容器限制 LibreOffice 进程数，并在进程退出时自动释放名额。
+
+    PostgreSQL advisory lock 属于连接级锁，即使 worker 被强制终止也会随连接关闭而释放。
+    SQLite 仅用于测试和单进程开发，因此使用进程内信号量作为兼容实现。
+    """
+
+    slot_count = max(1, int(concurrency))
+    bind = db.get_bind()
+    if bind.dialect.name == "postgresql":
+        with bind.connect() as connection:
+            acquired_slot: int | None = None
+            while acquired_slot is None:
+                for slot in range(slot_count):
+                    lock_key = _libreoffice_advisory_lock_key(slot)
+                    acquired = connection.execute(
+                        text("SELECT pg_try_advisory_lock(:lock_key)"),
+                        {"lock_key": lock_key},
+                    ).scalar()
+                    if bool(acquired):
+                        acquired_slot = slot
+                        break
+                if acquired_slot is None:
+                    time.sleep(0.1)
+            try:
+                yield acquired_slot
+            finally:
+                connection.execute(
+                    text("SELECT pg_advisory_unlock(:lock_key)"),
+                    {"lock_key": _libreoffice_advisory_lock_key(acquired_slot)},
+                )
+        return
+
+    limiter_key = (str(storage_root.resolve()), slot_count)
+    with _LOCAL_LIBREOFFICE_LIMITERS_GUARD:
+        limiter = _LOCAL_LIBREOFFICE_LIMITERS.setdefault(
+            limiter_key,
+            threading.BoundedSemaphore(slot_count),
+        )
+    limiter.acquire()
+    try:
+        yield 0
+    finally:
+        limiter.release()
+
+
 class OfficeDerivativeService:
     """统一创建、校验和复用 DOCX/XLSX 版本级持久化派生件。"""
 
@@ -122,6 +188,7 @@ class OfficeDerivativeService:
         )
         self.command_runner = command_runner or run_libreoffice_command
         self.timeout_seconds = settings.legacy_office_conversion_timeout_seconds
+        self.libreoffice_concurrency = settings.managed_source_libreoffice_concurrency
         self.max_file_size_bytes = settings.legacy_office_max_file_size_mb * 1024 * 1024
         self.derivative_dir = _validated_derivative_dir(settings.legacy_office_derivative_dir)
         self.converter_version = converter_version or libreoffice_runtime_version(self.executable)
@@ -369,20 +436,36 @@ class OfficeDerivativeService:
                 str(output_dir),
                 str(temp_source),
             ]
-            try:
-                completed = self.command_runner(command, timeout_seconds=self.timeout_seconds)
-            except subprocess.TimeoutExpired as exc:
-                raise OfficeConversionError(
-                    _format_error_code(spec, "CONVERSION_TIMEOUT"),
-                    f"LibreOffice 转换 {spec.source_suffix.lstrip('.').upper()} 超时。",
-                    retryable=True,
-                ) from exc
-            except OSError as exc:
-                raise OfficeConversionError(
-                    _format_error_code(spec, "CONVERSION_FAILED"),
-                    f"无法启动 LibreOffice：{exc}",
-                    retryable=True,
-                ) from exc
+            wait_started = time.perf_counter()
+            with _libreoffice_conversion_slot(
+                db=self.db,
+                storage_root=self.storage_root,
+                concurrency=self.libreoffice_concurrency,
+            ) as slot:
+                log_event(
+                    "file.derivative.convert.slot_acquired",
+                    document_id=document.id,
+                    document_version_id=document_version.id if document_version else None,
+                    status="RUNNING",
+                    duration_ms=int((time.perf_counter() - wait_started) * 1000),
+                    converter="libreoffice",
+                    concurrency=self.libreoffice_concurrency,
+                    slot=slot,
+                )
+                try:
+                    completed = self.command_runner(command, timeout_seconds=self.timeout_seconds)
+                except subprocess.TimeoutExpired as exc:
+                    raise OfficeConversionError(
+                        _format_error_code(spec, "CONVERSION_TIMEOUT"),
+                        f"LibreOffice 转换 {spec.source_suffix.lstrip('.').upper()} 超时。",
+                        retryable=True,
+                    ) from exc
+                except OSError as exc:
+                    raise OfficeConversionError(
+                        _format_error_code(spec, "CONVERSION_FAILED"),
+                        f"无法启动 LibreOffice：{exc}",
+                        retryable=True,
+                    ) from exc
             if completed.returncode != 0:
                 error_message = (completed.stderr or b"").decode("utf-8", errors="ignore").strip()
                 raise OfficeConversionError(

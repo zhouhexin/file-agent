@@ -23,6 +23,9 @@ class TokenDecodeError(ValueError):
     pass
 
 
+PUBLIC_FILE_ACCESS_AUDIENCE = "file-agent-public-file-access-v1"
+
+
 def hash_password(password: str) -> str:
     """使用 PBKDF2 生成带盐密码哈希。"""
 
@@ -83,6 +86,51 @@ def decode_access_token(token: str) -> dict[str, Any]:
     if not payload.get("sub"):
         raise TokenDecodeError("Missing subject")
     return payload
+
+
+def create_public_file_access_token(working_copy_id: str) -> str:
+    """为活动工作副本创建无到期时间的只读公开访问能力令牌。
+
+    令牌只保存稳定工作副本 ID，不包含用户身份、文件路径或正文。它使用部署实例的
+    JWT 密钥签名，但拥有独立 audience，不能被当作登录令牌使用。
+    """
+
+    normalized = str(working_copy_id or "").strip()
+    if not normalized or len(normalized) > 36 or any(ord(item) < 32 for item in normalized):
+        raise ValueError("working_copy_id 格式无效")
+    payload_part = _b64_json(
+        {
+            "aud": PUBLIC_FILE_ACCESS_AUDIENCE,
+            "working_copy_id": normalized,
+        }
+    )
+    signature = _sign(f"{PUBLIC_FILE_ACCESS_AUDIENCE}.{payload_part}")
+    return f"{payload_part}.{signature}"
+
+
+def decode_public_file_access_token(token: str) -> dict[str, str]:
+    """校验公开文件能力令牌；该令牌按产品要求不检查过期时间。"""
+
+    normalized = str(token or "").strip()
+    if not normalized or len(normalized) > 512:
+        raise TokenDecodeError("Invalid public file access token")
+    try:
+        payload_part, signature = normalized.split(".", 1)
+    except ValueError as exc:
+        raise TokenDecodeError("Invalid public file access token") from exc
+    expected_signature = _sign(f"{PUBLIC_FILE_ACCESS_AUDIENCE}.{payload_part}")
+    if not hmac.compare_digest(signature, expected_signature):
+        raise TokenDecodeError("Invalid public file access token")
+    payload = _decode_json(payload_part)
+    if not isinstance(payload, dict):
+        raise TokenDecodeError("Invalid public file access token")
+    working_copy_id = str(payload.get("working_copy_id") or "").strip()
+    if payload.get("aud") != PUBLIC_FILE_ACCESS_AUDIENCE or not working_copy_id:
+        raise TokenDecodeError("Invalid public file access token")
+    return {
+        "aud": PUBLIC_FILE_ACCESS_AUDIENCE,
+        "working_copy_id": working_copy_id,
+    }
 
 
 def _b64_json(data: dict[str, Any]) -> str:

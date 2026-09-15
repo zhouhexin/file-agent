@@ -402,7 +402,9 @@ DERIVATIVE_RECORD_FAILED
 ### 12.2 并发收敛
 
 - 物理路径由源哈希和转换指纹确定。
-- 多 worker 可以并行完成临时转换，但发布前再次检查目标文件。
+- 普通文件分析允许多 worker 并行；旧版 Office 转换使用 PostgreSQL 连接级 advisory lock，在所有
+  容器副本间共同遵守 `MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY`，worker 异常退出后锁自动释放。
+- 每次转换仍使用独立临时目录和 LibreOffice profile，发布前再次检查目标文件。
 - 数据库唯一约束冲突时回滚局部写入并重新查询获胜记录。
 - 禁止一个失败 worker 删除另一个 worker 已发布的有效文件。
 

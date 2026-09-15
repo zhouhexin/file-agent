@@ -140,6 +140,8 @@ def test_database_tables_can_be_created():
     assert DocumentCategorySuggestion.__tablename__ == "document_category_suggestions"
     assert DocumentCategoryFeedback.__tablename__ == "document_category_feedback"
     assert ToolInvocation.__table__.c.changeset_id.type.length >= 100
+    # ChangeItem 可以审计 taxonomy 稳定 ID，不得再被 UUID 的 36 字符上限截断。
+    assert ChangeItem.__table__.c.target_id.type.length == 255
 
 
 def test_post_message_persists_message_agent_run_and_tool_invocations():

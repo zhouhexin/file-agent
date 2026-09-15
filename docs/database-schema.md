@@ -878,7 +878,7 @@ create table change_items (
   id uuid primary key default gen_random_uuid(),
   changeset_id uuid not null references change_sets(id) on delete cascade,
   target_type varchar(50) not null,
-  target_id uuid null,
+  target_id varchar(255) null,
   target_document_id uuid null references documents(id) on delete set null,
   change_type varchar(80) not null,
   before_value_json jsonb not null default '{}'::jsonb,
@@ -890,6 +890,9 @@ create table change_items (
   created_at timestamptz not null default now()
 );
 ```
+
+`target_id` 是多态审计定位符，可以保存 UUID，也可以保存 taxonomy 稳定 ID、
+工作副本 ID 或其他受控业务标识。它不是外键，不得按 UUID 的 36 字符上限定义。
 
 `change_type` 至少覆盖：
 

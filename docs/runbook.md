@@ -821,6 +821,29 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
 
 三层文件生命周期上线后，生产环境应拆分队列，避免归档或导入占满普通任务资源：
 
+生产 Compose 默认读取 `SOURCE_ANALYSIS_WORKER_REPLICAS=2`，启动两个
+`SOURCE_ANALYSIS,ANALYSIS` 副本。副本通过 Docker hostname 形成唯一 `lease_owner`；PostgreSQL
+`SKIP LOCKED` 保证同一任务只被一个副本领取。`MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY=1` 是所有
+副本合计的旧版 `.doc/.xls` 转换上限，由 PostgreSQL advisory lock 强制执行；普通 PDF、DOCX、XLSX、
+TXT 等不经过该锁，可以由两个副本并行处理。该改造没有数据库结构变化，不需要新增迁移。
+
+服务器代码镜像更新后执行并核对：
+
+```powershell
+$Env = "E:\file-agent\deploy\.env"
+$Compose = "E:\file-agent\deploy\docker-compose.production.yml"
+docker compose --env-file $Env -f $Compose up -d --no-build source-analysis-worker
+docker compose --env-file $Env -f $Compose ps source-analysis-worker
+docker compose --env-file $Env -f $Compose logs --tail 40 source-analysis-worker
+```
+
+预期出现 `file-agent-source-analysis-worker-1` 和 `file-agent-source-analysis-worker-2`，启动日志中的
+`worker_id` 也应各不相同。若服务器资源压力明显，可受控缩回一个副本：
+
+```powershell
+docker compose --env-file $Env -f $Compose up -d --no-build --scale source-analysis-worker=1 source-analysis-worker
+```
+
 Windows CMD 开发环境可以直接运行 `scripts\start-file-agent-workers.cmd`。脚本会先执行同步预检：
 读取项目根 `.env`，用当前机器的 `MANAGED_ROOT_*` 更新数据库中的运行时目录路径，真实打开每个目录
 验证可读性，并停用旧版本误登记的 `scan_batch_size` 等伪目录。只有预检成功后，才会以独立窗口启动
@@ -1329,6 +1352,17 @@ DOC、XLSX、TXT 目前只有自动化覆盖，尚需真实 GUI 验收。
 记录；用户无需手写或预先创建内部会话 ID。空搜索不会创建会话记录。后端若返回待确认计划，必须先用
 `operation_plan_get`恢复真实状态，只在用户明确确认后
 调用`operation_plan_confirm`。
+
+`file_search` 的用户可见结果采用“文件名 / 依据 / 操作”表格。已有活动工作副本的每行会直接显示
+“预览 / 下载”，点击后不要求浏览器登录；工作副本仍在后台生成时显示“工作副本生成中”。MCP 使用
+`FILE_AGENT_API_BASE_URL` 把后端相对链接转换为绝对地址，因此该配置必须填写每台客户端浏览器都能访问的
+局域网地址，例如 `http://10.102.4.241:8000`，不能填写服务器或客户端自己的 `127.0.0.1`。
+
+公开文件链接没有到期时间，但仍绑定签名和活动工作副本：轮换 `JWT_SECRET_KEY`、将文件移入回收站、
+删除工作副本记录或丢失当前版本物理文件后，旧链接会失效。该行为是当前“无需登录且可长期打开”要求的
+明确部署选择；拿到链接且网络可达的人都能读取对应文件。部署更新后需要重建/更新 API 与 MCP 代码并
+重启 `api` 和各客户端 MCP/WorkBuddy；如果 Caddy 已经转发 `/api/*`，不需要新增静态下载目录或
+`python -m http.server`。
 
 新通道相关后端配置：
 

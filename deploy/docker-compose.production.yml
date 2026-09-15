@@ -162,12 +162,15 @@ services:
 
   source-analysis-worker:
     <<: *python-service
+    deploy:
+      replicas: ${SOURCE_ANALYSIS_WORKER_REPLICAS:-2}
     environment:
       <<: *common-environment
       APP_RUNTIME: filesystem-worker
       FILESYSTEM_WORKER_ID: source-analysis-worker
+      FILESYSTEM_WORKER_APPEND_HOSTNAME: "true"
       FILESYSTEM_WORKER_QUEUES: SOURCE_ANALYSIS,ANALYSIS
-      MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY: "1"
+      MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY: ${MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY:-1}
     depends_on: *worker-depends
     mem_limit: 5g
 

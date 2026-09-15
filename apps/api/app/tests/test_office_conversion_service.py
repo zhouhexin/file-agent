@@ -6,6 +6,8 @@ import hashlib
 import os
 from pathlib import Path, PureWindowsPath
 import subprocess
+import threading
+from types import SimpleNamespace
 
 from docx import Document as DocxDocument
 import pytest
@@ -18,10 +20,106 @@ from app.db.models import Document, DocumentArtifact, DocumentVersion
 from app.modules.files.office_conversion import (
     LegacyOfficeConversionService,
     OfficeConversionError,
+    _libreoffice_conversion_slot,
     _replace_with_retry,
     libreoffice_profile_uri,
     resolve_libreoffice_executable,
 )
+
+
+def test_local_libreoffice_slot_serializes_two_workers(tmp_path) -> None:
+    """非 PostgreSQL 测试环境也必须证明并发上限一会阻塞第二个转换。"""
+
+    first_db = _session()
+    second_db = _session()
+    storage_root = tmp_path / "storage"
+    second_entered = threading.Event()
+
+    def acquire_second_slot() -> None:
+        """等待第一个转换释放名额后进入临界区。"""
+
+        with _libreoffice_conversion_slot(
+            db=second_db,
+            storage_root=storage_root,
+            concurrency=1,
+        ):
+            second_entered.set()
+
+    with _libreoffice_conversion_slot(
+        db=first_db,
+        storage_root=storage_root,
+        concurrency=1,
+    ):
+        thread = threading.Thread(target=acquire_second_slot, daemon=True)
+        thread.start()
+        assert second_entered.wait(0.1) is False
+
+    assert second_entered.wait(1.0) is True
+    thread.join(timeout=1.0)
+    assert thread.is_alive() is False
+
+
+def test_postgresql_libreoffice_slot_retries_and_unlocks(monkeypatch, tmp_path) -> None:
+    """生产 PostgreSQL 路径必须等待可用槽位，并在退出临界区后显式解锁。"""
+
+    statements: list[str] = []
+    sleeps: list[float] = []
+    try_results = iter([False, True])
+
+    class FakeResult:
+        """提供 SQLAlchemy Result 所需的最小 scalar 接口。"""
+
+        def __init__(self, value: bool) -> None:
+            self.value = value
+
+        def scalar(self) -> bool:
+            return self.value
+
+    class FakeConnection:
+        """记录 advisory lock 的申请与释放语句。"""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _traceback) -> None:
+            return None
+
+        def execute(self, statement, _parameters):
+            sql = str(statement)
+            statements.append(sql)
+            if "pg_try_advisory_lock" in sql:
+                return FakeResult(next(try_results))
+            return FakeResult(True)
+
+    class FakeBind:
+        """模拟 Session.get_bind() 返回的 PostgreSQL Engine。"""
+
+        dialect = SimpleNamespace(name="postgresql")
+
+        def connect(self):
+            return FakeConnection()
+
+    class FakeSession:
+        """仅暴露并发控制器需要的数据库绑定。"""
+
+        def get_bind(self):
+            return FakeBind()
+
+    monkeypatch.setattr(
+        "app.modules.files.office_conversion.time.sleep",
+        lambda seconds: sleeps.append(seconds),
+    )
+
+    with _libreoffice_conversion_slot(
+        db=FakeSession(),
+        storage_root=tmp_path,
+        concurrency=1,
+    ) as slot:
+        assert slot == 0
+
+    assert sleeps == [0.1]
+    assert sum("pg_try_advisory_lock" in sql for sql in statements) == 2
+    assert sum("pg_advisory_unlock" in sql for sql in statements) == 1
 
 
 def _session():

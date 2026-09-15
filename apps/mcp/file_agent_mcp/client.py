@@ -6,10 +6,12 @@ import json
 import mimetypes
 import os
 import hashlib
+import re
 import stat
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urljoin
+from uuid import uuid4
 
 import httpx
 
@@ -389,7 +391,7 @@ class FileAgentIntegrationClient:
     ) -> dict[str, Any]:
         """调用后端只读搜索接口，避免搜索文字被通用 Agent 解释为文件写操作。"""
 
-        return self._business_json(
+        payload = self._business_json(
             await self.http.post(
                 "/api/search",
                 json={
@@ -400,6 +402,14 @@ class FileAgentIntegrationClient:
                 },
             )
         )
+        for item in payload.get("files", []):
+            if not isinstance(item, dict):
+                continue
+            for key in ("preview_url", "download_url"):
+                value = str(item.get(key) or "").strip()
+                if value.startswith("/"):
+                    item[key] = urljoin(str(self.http.base_url), value)
+        return payload
 
     async def classification_placement_submit(
         self,
@@ -426,6 +436,81 @@ class FileAgentIntegrationClient:
                 headers={"X-Request-ID": request_id},
             )
         )
+
+    async def download_working_copy(
+        self,
+        *,
+        working_copy_id: str,
+        output_dir: Path,
+        max_bytes: int = 512 * 1024 * 1024,
+    ) -> dict[str, Any]:
+        """鉴权下载工作副本到 MCP 专用缓存，并返回标准资源引用。
+
+        下载目录来自本机固定配置，不接受 Tool 参数；文件名只信任后端响应头并再次
+        校验为 basename。临时文件达到大小上限或请求失败时会被删除，不能留下被误认
+        为完整文件的半成品。
+        """
+
+        if max_bytes <= 0:
+            raise ValueError("本地下载大小上限必须大于 0")
+        configured_root = output_dir.expanduser()
+        if configured_root.is_symlink():
+            raise ValueError("本地下载缓存目录不能是符号链接")
+        root = configured_root.resolve()
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if root.is_symlink() or not root.is_dir():
+            raise ValueError("本地下载缓存目录无效")
+
+        cache_key = hashlib.sha256(working_copy_id.encode("utf-8")).hexdigest()[:24]
+        target_dir = (root / cache_key).resolve()
+        if root not in target_dir.parents:
+            raise ValueError("本地下载缓存目标越出固定目录")
+        target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+        async with self.http.stream(
+            "GET",
+            f"/api/working-copies/{_path_segment(working_copy_id)}/download",
+        ) as response:
+            if response.is_error:
+                await response.aread()
+                self._business_json(response)
+            declared_size = _content_length(response.headers.get("content-length"))
+            if declared_size is not None and declared_size > max_bytes:
+                raise RuntimeError("文件超过本机下载大小上限")
+            filename = _download_filename(
+                response.headers.get("content-disposition"),
+                fallback=f"file-{cache_key}",
+            )
+            raw_target = target_dir / filename
+            if raw_target.is_symlink():
+                raise RuntimeError("本地下载缓存文件不能是符号链接")
+            target = raw_target.resolve()
+            if target_dir not in target.parents:
+                raise RuntimeError("后端返回的下载文件名不安全")
+            temporary = target_dir / f".{uuid4().hex}.part"
+            written = 0
+            try:
+                with temporary.open("xb") as destination:
+                    async for chunk in response.aiter_bytes():
+                        written += len(chunk)
+                        if written > max_bytes:
+                            raise RuntimeError("文件超过本机下载大小上限")
+                        destination.write(chunk)
+                os.replace(temporary, target)
+                os.chmod(target, 0o600)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
+
+        return {
+            "filename": filename,
+            "resource_uri": target.as_uri(),
+            "content_type": str(response.headers.get("content-type") or "").split(
+                ";", 1
+            )[0]
+            or "application/octet-stream",
+            "size_bytes": written,
+        }
 
     async def classification_placement_status(
         self,
@@ -672,3 +757,46 @@ def _path_segment(value: str) -> str:
     if not normalized or len(normalized) > 200 or "\x00" in normalized:
         raise ValueError("后端业务 ID 不能为空或超过长度限制")
     return quote(normalized, safe="")
+
+
+def _content_length(value: str | None) -> int | None:
+    """解析可信响应头中的长度；缺失或格式异常时由流式累计继续限制。"""
+
+    if not value:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _download_filename(value: str | None, *, fallback: str) -> str:
+    """从 Content-Disposition 提取安全 basename，拒绝目录和控制字符。"""
+
+    candidates: list[str] = []
+    if value:
+        encoded = re.search(r"filename\*\s*=\s*UTF-8''([^;]+)", value, re.IGNORECASE)
+        if encoded:
+            candidates.append(unquote(encoded.group(1).strip().strip('"')))
+        plain = re.search(r'filename\s*=\s*"([^"]+)"', value, re.IGNORECASE)
+        if plain:
+            candidates.append(plain.group(1))
+        else:
+            unquoted = re.search(r"filename\s*=\s*([^;]+)", value, re.IGNORECASE)
+            if unquoted:
+                candidates.append(unquoted.group(1).strip())
+    candidates.append(fallback)
+    for candidate in candidates:
+        normalized = candidate.strip()
+        if (
+            normalized
+            and len(normalized) <= 255
+            and normalized not in {".", ".."}
+            and "/" not in normalized
+            and "\\" not in normalized
+            and "\x00" not in normalized
+            and not any(ord(character) < 32 for character in normalized)
+        ):
+            return normalized
+    raise RuntimeError("后端没有返回安全的下载文件名")

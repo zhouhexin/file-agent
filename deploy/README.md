@@ -107,6 +107,41 @@ MATERIALIZE_WORKING_COPY_PRIORITY=20
 保持只读。要执行受管文件改名等写操作，必须同时改为 `rw`、显式开启对应
 `MANAGED_ROOT_<KEY>_ALLOW_RENAME=true`，并仍然经过 OperationPlan 确认。
 
+## 源分析 Worker 扩容
+
+生产模板默认配置两个源分析副本：
+
+```dotenv
+SOURCE_ANALYSIS_WORKER_REPLICAS=2
+MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY=1
+```
+
+两个副本会并行消费 `SOURCE_ANALYSIS,ANALYSIS`，适合当前大量普通 PDF、DOCX、XLSX、TXT 等积压任务。
+每个容器自动把 Docker hostname 追加到 worker ID，租约、续租和故障恢复互不混淆。旧版 `.doc/.xls`
+转换在 PostgreSQL 中使用连接级 advisory lock；上述并发值为所有副本合计上限，因此默认仍只有一个
+LibreOffice 子进程。worker 被终止时数据库连接关闭，锁会自动释放，不需要人工删除锁文件。
+
+更新代码镜像并重建服务后，可直接核对两个副本：
+
+```powershell
+$Env = "E:\file-agent\deploy\.env"
+$Compose = "E:\file-agent\deploy\docker-compose.production.yml"
+docker compose --env-file $Env -f $Compose up -d --no-build source-analysis-worker
+docker compose --env-file $Env -f $Compose ps source-analysis-worker
+docker compose --env-file $Env -f $Compose logs --tail 40 source-analysis-worker
+```
+
+临时缩回一个副本或再次恢复两个副本：
+
+```powershell
+docker compose --env-file $Env -f $Compose up -d --no-build --scale source-analysis-worker=1 source-analysis-worker
+docker compose --env-file $Env -f $Compose up -d --no-build --scale source-analysis-worker=2 source-analysis-worker
+```
+
+横向扩容不新增数据库表，不需要额外 Alembic migration，也不会重建已完成任务。若宿主机持续高负载、
+出现频繁换页或容器重启，应先把 `SOURCE_ANALYSIS_WORKER_REPLICAS` 改回 `1`；不要通过提高
+`MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY` 来加速普通格式。
+
 ## 分层构建与快速代码更新
 
 API 镜像分为 `file-agent-api-runtime-base` 基础镜像和 `file-agent-api-full-cpu` 代码镜像。基础镜像保存

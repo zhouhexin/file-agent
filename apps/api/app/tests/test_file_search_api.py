@@ -19,6 +19,7 @@ from app.db.models import (
     User,
     WorkingCopy,
 )
+from app.core.config import get_settings
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.modules.retrieval.router import FileSearchRequest, search_files
 from app.tests.helpers import client_with_database
@@ -150,6 +151,71 @@ def test_search_api_returns_shared_workspace_safe_file_projection():
         {"search_text", "score", "tool_name", "absolute_path"}.isdisjoint(item)
         for item in payload["files"]
     )
+    assert all(
+        item["preview_url"].startswith("/api/public/file-access/")
+        and item["preview_url"].endswith("/preview")
+        and item["download_url"].startswith("/api/public/file-access/")
+        and item["download_url"].endswith("/download")
+        for item in payload["files"]
+    )
+
+
+def test_search_public_links_open_without_login_and_stop_after_trash(monkeypatch, tmp_path):
+    """搜索签发的永久链接无需 JWT；工作副本回收后同一链接必须停止读取。"""
+
+    working_root = tmp_path / "working"
+    monkeypatch.setenv("WORKING_COPY_STORAGE_ROOT", str(working_root))
+    monkeypatch.setenv("MANAGED_ROOT_RECONCILE_ON_STARTUP", "false")
+    get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    user_id, token = _register_and_login(client, "public-search-link-owner")
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        document_id = _add_profile(
+            db,
+            user=user,
+            filename="公开预览测试.txt",
+            summary_text="公开预览测试 正文材料",
+        )
+        db.commit()
+        working_copy = db.query(WorkingCopy).filter_by(document_id=document_id).one()
+        version = db.get(DocumentVersion, working_copy.current_version_id)
+        physical = working_root / version.storage_path
+        physical.parent.mkdir(parents=True, exist_ok=True)
+        physical.write_text("无需登录也可以打开的正文", encoding="utf-8")
+        working_copy_id = working_copy.id
+    finally:
+        db.close()
+
+    search = client.post(
+        "/api/search",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"query": "公开预览测试", "top_k": 1},
+    )
+    assert search.status_code == 200
+    item = search.json()["files"][0]
+
+    preview = client.get(item["preview_url"])
+    download = client.get(item["download_url"])
+    assert preview.status_code == 200
+    assert preview.content == "无需登录也可以打开的正文".encode("utf-8")
+    assert preview.headers["content-disposition"].startswith("inline;")
+    assert download.status_code == 200
+    assert download.content == preview.content
+    assert download.headers["content-disposition"].startswith("attachment;")
+
+    tampered_url = item["download_url"][:-1] + (
+        "a" if item["download_url"][-1] != "a" else "b"
+    )
+    assert client.get(tampered_url).status_code == 404
+
+    with SessionLocal() as db:
+        working_copy = db.get(WorkingCopy, working_copy_id)
+        working_copy.status = "TRASHED"
+        db.commit()
+    assert client.get(item["preview_url"]).status_code == 410
+    get_settings.cache_clear()
 
 
 def test_search_api_requires_authentication():

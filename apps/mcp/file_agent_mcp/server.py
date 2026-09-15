@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, ResourceLink, TextContent
 
 from .attachment_transfer import AttachmentTransferService, WorkBuddyAttachmentInput
 from .client import FileAgentIntegrationClient, LocalRootRegistry, WorkBuddyAttachmentRegistry
@@ -34,6 +35,18 @@ def _client() -> FileAgentIntegrationClient:
         access_token=os.getenv("FILE_AGENT_ACCESS_TOKEN", ""),
         roots=LocalRootRegistry.from_environment(),
     )
+
+
+def _local_download_dir() -> Path:
+    """确定 WorkBuddy 下载缓存；优先使用显式目录，否则落在桥接状态目录内。"""
+
+    configured = os.getenv("LOCAL_FILE_DOWNLOAD_DIR", "").strip()
+    if configured:
+        return Path(configured)
+    bridge_state = os.getenv("FILE_AGENT_WORKBUDDY_BRIDGE_STATE_DIR", "").strip()
+    if bridge_state:
+        return Path(bridge_state) / "downloads"
+    return Path("~/.file-agent/downloads")
 
 
 @mcp.tool(
@@ -140,17 +153,31 @@ async def workbuddy_attachment_ingest(
 
 @mcp.tool(
     name="file_search",
-    description="在 File Agent 已入库文件中执行聊天搜索，并返回可继续读取的稳定文件 ID。",
-    structured_output=True,
+    description=(
+        "在 File Agent 已入库文件中执行只读搜索。面向用户以表格展示文件名、命中依据"
+        "和可点击的预览/下载链接；稳定 ID 仅供后续只读或受控文件工具使用。"
+    ),
+    structured_output=False,
 )
-async def file_search(conversation_ref: str, query: str) -> dict[str, Any]:
-    """复用聊天搜索与澄清链路，不让 WorkBuddy 自行判断文件相关性。"""
+async def file_search(conversation_ref: str, query: str) -> Any:
+    """复用聊天搜索与澄清链路，并分离用户展示文本与后续 Tool 引用。"""
 
     client = _client()
     try:
-        return await WorkBuddyConversationService(client).search(
+        result = await WorkBuddyConversationService(client).search(
             conversation_ref=conversation_ref,
             query=query,
+        )
+        structured = {
+            key: value
+            for key, value in result.items()
+            if key != "display_text"
+        }
+        return CallToolResult(
+            content=[
+                TextContent(type="text", text=str(result.get("display_text") or ""))
+            ],
+            structuredContent=structured,
         )
     finally:
         await client.close()
@@ -218,6 +245,47 @@ async def file_rename(
         return await WorkBuddyConversationService(client).rename(
             conversation_ref=conversation_ref,
             renames=renames,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="file_download",
+    description=(
+        "下载 file_search 已确定且已生成工作副本的文件。必须原样使用搜索结果"
+        " tool_context 中的 working_copy_id；文件保存到 MCP 专用本机缓存。"
+    ),
+    structured_output=False,
+)
+async def file_download(working_copy_id: str) -> Any:
+    """通过当前用户令牌下载工作副本，并以 MCP ResourceLink 交给 WorkBuddy。"""
+
+    client = _client()
+    try:
+        result = await client.download_working_copy(
+            working_copy_id=working_copy_id,
+            output_dir=_local_download_dir(),
+        )
+        filename = str(result["filename"])
+        return CallToolResult(
+            content=[
+                TextContent(type="text", text=f"已准备下载：{filename}"),
+                ResourceLink(
+                    type="resource_link",
+                    name=filename,
+                    title=f"下载 {filename}",
+                    uri=str(result["resource_uri"]),
+                    mimeType=str(result["content_type"]),
+                    size=int(result["size_bytes"]),
+                    description="File Agent 已鉴权下载到本机专用缓存的文件。",
+                ),
+            ],
+            structuredContent={
+                "filename": filename,
+                "downloaded": True,
+                "size_bytes": int(result["size_bytes"]),
+            },
         )
     finally:
         await client.close()

@@ -1447,7 +1447,9 @@ class ChangeItem(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     changeset_id: Mapped[str] = mapped_column(String(36), ForeignKey("change_sets.id", ondelete="CASCADE"), nullable=False, index=True)
     target_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    target_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    # target_id 是多态审计定位符：多数时候是 UUID，分类变更时也可以是
+    # taxonomy 稳定 ID。因此不能用 UUID 的 36 字符上限约束业务标识。
+    target_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     target_document_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("documents.id"), nullable=True, index=True)
     change_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     before_value_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)

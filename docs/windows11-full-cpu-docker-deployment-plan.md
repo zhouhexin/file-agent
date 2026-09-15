@@ -151,7 +151,9 @@ Disk image limit: >= 150GB
 - `PADDLE_PDX_CPU_NUM_THREADS=4`，避免单模型占满所有宿主机核心。
 - `OMP_NUM_THREADS=4`、`MKL_NUM_THREADS=4`。
 - `STRUCTURED_EXTRACTION_WORKER_CONCURRENCY=1`。
-- `MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY=1`。
+- `SOURCE_ANALYSIS_WORKER_REPLICAS=2`，普通源文件分析由两个副本并行消费。
+- `MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY=1`，通过 PostgreSQL advisory lock 限制所有副本合计的
+  LibreOffice 进程数。
 - Neo4j heap 512MB～2GB、page cache 512MB。
 - PostgreSQL 和 Neo4j 不向宿主机公开端口；外部只开放 80/443。
 

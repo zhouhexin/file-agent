@@ -422,8 +422,9 @@ active_managed_file_count
    因此一次配置或 taxonomy 错误不会永久阻断修复后的后续扫描，也不会产生并发重复遍历。
 
 部署前必须执行数据库迁移，并启动 `SOURCE_ANALYSIS` 与 `MATERIALIZE,IMPORT` worker；具体命令见
-`docs/runbook.md`。`MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY=1` 的默认部署含义是只启动一个
-`SOURCE_ANALYSIS` worker，避免多个 LibreOffice 子进程并发抢占资源。
+`docs/runbook.md`。生产部署默认使用两个 `SOURCE_ANALYSIS` worker 并行处理普通格式，每个副本使用
+独立租约身份；`MANAGED_SOURCE_LIBREOFFICE_CONCURRENCY=1` 由 PostgreSQL advisory lock 在所有副本间
+共同执行，只限制旧版 `.doc/.xls` 的 LibreOffice 转换，不再等同于源分析 worker 总数。
 
 ## 8. Agent、Tool 与安全边界
 
