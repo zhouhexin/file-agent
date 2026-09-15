@@ -51,6 +51,8 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
     assert "重复调用本工具不会完成 OCR" in descriptions["batch_get"]
     assert "不得让 File Agent 后端自行 OCR" in descriptions["extraction_claim"]
     assert "必须为 null" in descriptions["extraction_submit"]
+    assert "必须逐字原样输出" in descriptions["file_search"]
+    assert "即使用户要求文件类型" in descriptions["file_search"]
     schemas = {tool.name: tool.inputSchema for tool in tools}
     # 结构化子项也必须拒绝多余字段，不能只依赖 handler 内的二次检查。
     assert schemas["file_rename"]["$defs"]["ExplicitRenameInput"]["additionalProperties"] is False
@@ -121,9 +123,14 @@ def test_file_search_tool_exposes_clickable_table_and_keeps_ids_structured(monke
     result = asyncio.run(server.file_search("thread-1", "人才推荐"))
 
     assert isinstance(result, CallToolResult)
-    visible = "\n".join(
-        item.text for item in result.content if isinstance(item, TextContent)
-    )
+    text_items = [item for item in result.content if isinstance(item, TextContent)]
+    assert len(text_items) == 1
+    assert text_items[0].annotations is not None
+    assert text_items[0].annotations.audience == ["user"]
+    assert text_items[0].annotations.priority == 1.0
+    visible = text_items[0].text
+    assert "<!-- FILE_AGENT_DISPLAY_CONTRACT:" in visible
+    assert "| 文件名 | 依据 | 操作 |" in visible
     assert "推荐意见.docx" in visible
     assert "正文主题命中" in visible
     assert "人事处/推荐意见.docx" not in visible
@@ -134,6 +141,15 @@ def test_file_search_tool_exposes_clickable_table_and_keeps_ids_structured(monke
     assert result.structuredContent["files"][0]["tool_context"] == {
         "document_id": "doc-1",
         "working_copy_id": "copy-1",
+    }
+    assert "逐字原样展示" in result.structuredContent["display_policy"]
+    assert result.structuredContent["response_contract"] == {
+        "mode": "VERBATIM_USER_DISPLAY",
+        "source": "content.text",
+        "allow_rewrite": False,
+        "allow_column_changes": False,
+        "required_columns": ["文件名", "依据", "操作"],
+        "preserve_markdown_links": True,
     }
 
 

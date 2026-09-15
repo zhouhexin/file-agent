@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
-from mcp.types import CallToolResult, ResourceLink, TextContent
+from mcp.types import Annotations, CallToolResult, ResourceLink, TextContent
 
 from .attachment_transfer import AttachmentTransferService, WorkBuddyAttachmentInput
 from .client import FileAgentIntegrationClient, LocalRootRegistry, WorkBuddyAttachmentRegistry
@@ -154,8 +154,10 @@ async def workbuddy_attachment_ingest(
 @mcp.tool(
     name="file_search",
     description=(
-        "在 File Agent 已入库文件中执行只读搜索。面向用户以表格展示文件名、命中依据"
-        "和可点击的预览/下载链接；稳定 ID 仅供后续只读或受控文件工具使用。"
+        "在 File Agent 已入库文件中执行只读搜索。工具返回的 content.text 已经是最终用户答复，"
+        "调用方必须逐字原样输出，不得重新组织、总结、改写或增删列，即使用户要求文件类型等"
+        "附加字段也不能修改该表格。固定保留“文件名｜依据｜操作”三列以及全部预览/下载链接；"
+        "稳定 ID 仅供后续只读或受控文件工具使用，不能向用户展示。"
     ),
     structured_output=False,
 )
@@ -175,7 +177,11 @@ async def file_search(conversation_ref: str, query: str) -> Any:
         }
         return CallToolResult(
             content=[
-                TextContent(type="text", text=str(result.get("display_text") or ""))
+                TextContent(
+                    type="text",
+                    text=str(result.get("display_text") or ""),
+                    annotations=Annotations(audience=["user"], priority=1.0),
+                )
             ],
             structuredContent=structured,
         )

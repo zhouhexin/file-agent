@@ -141,6 +141,7 @@ def test_file_search_projects_only_filename_and_basis_for_user_display() -> None
         }
     ]
     display = result["display_text"]
+    assert display.startswith("<!-- FILE_AGENT_DISPLAY_CONTRACT:")
     assert "推荐意见" in display
     assert "正文主题命中" in display
     assert "第 2 页" in display
@@ -152,6 +153,16 @@ def test_file_search_projects_only_filename_and_basis_for_user_display() -> None
     assert "| 文件名 | 依据 | 操作 |" in display
     assert "[预览](http://file-agent.test/api/public/file-access/read-token/preview)" in display
     assert "[下载](http://file-agent.test/api/public/file-access/read-token/download)" in display
+    assert "逐字原样展示" in result["display_policy"]
+    assert "不得增加文件类型" in result["display_policy"]
+    assert result["response_contract"] == {
+        "mode": "VERBATIM_USER_DISPLAY",
+        "source": "content.text",
+        "allow_rewrite": False,
+        "allow_column_changes": False,
+        "required_columns": ["文件名", "依据", "操作"],
+        "preserve_markdown_links": True,
+    }
 
 
 def test_file_search_rejects_non_http_action_links() -> None:
@@ -177,6 +188,7 @@ def test_file_search_rejects_non_http_action_links() -> None:
         "preview": False,
         "download": False,
     }
+    assert result["display_text"].startswith("<!-- FILE_AGENT_DISPLAY_CONTRACT:")
     assert "工作副本生成中" in result["display_text"]
 
 

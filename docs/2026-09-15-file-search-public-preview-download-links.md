@@ -73,6 +73,19 @@ MCP 只接受后端返回的绝对 `http` 或 `https` 链接进入 Markdown，�
 | 学校推荐意见.docx | 正文主题命中：人才推荐 | [预览](http://server/api/...) / [下载](http://server/api/...) |
 ```
 
+`file_search` 把 `content.text` 声明为面向用户的最终答复，要求宿主逐字展示，不得总结、重排、增删列或因
+用户同时要求“文件类型”等字段而重建表格。MCP 同时通过以下三层契约向宿主表达该约束：
+
+- Tool 描述明确固定三列，并禁止改写。
+- `TextContent.annotations` 设置 `audience=["user"]` 和最高优先级 `priority=1.0`。
+- `structuredContent.response_contract` 使用 `VERBATIM_USER_DISPLAY`，声明禁止改写、禁止改变列，并要求保留
+  Markdown 链接。
+
+用户可见文本开头还包含一条 Markdown 渲染时不可见的 HTML 注释，用于提醒会读取 Tool 输出正文的宿主模型
+原样转发。这些约束能显著降低 WorkBuddy 二次改写的概率，但 MCP 协议不能强制宿主模型逐字复制；若宿主
+完全忽略 Tool 描述、内容注释和结构化契约，仍需由 WorkBuddy 自身提供“直接展示 Tool 内容”的能力才能达到
+协议层面的绝对保证。
+
 `tool_context` 继续保留给模型后续调用 `file_read`、`file_download` 或受控动作，但不进入用户可见表格。
 既有 `file_download` MCP Tool 不删除，作为需要本机 `ResourceLink` 场景的兼容入口。
 
@@ -83,7 +96,7 @@ MCP 只接受后端返回的绝对 `http` 或 `https` 链接进入 Markdown，�
 
 建议验证：
 
-1. 登录 API 后通过 WorkBuddy 调用 `file_search`，确认只显示三列表格。
+1. 登录 API 后通过 WorkBuddy 调用 `file_search`，即使提示词同时要求文件类型，也应原样显示三列表格。
 2. 在未登录 File Agent 的浏览器中分别点击“预览”和“下载”。
 3. 修改链接令牌任意一字符，确认返回 404。
 4. 将目标工作副本移入回收站，确认旧链接返回 410。
