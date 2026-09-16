@@ -498,6 +498,16 @@ class FileAgentIntegrationClient:
         )
         return payload
 
+    async def file_classifications(self, *, working_copy_id: str) -> dict[str, Any]:
+        """读取一个活动工作副本当前版本的全部分类建议、角色和原文依据。"""
+
+        return self._business_json(
+            await self.http.get(
+                "/api/classification/working-copies/"
+                f"{_path_segment(working_copy_id)}/classifications"
+            )
+        )
+
     async def classification_placement_submit(
         self,
         *,

@@ -2,13 +2,20 @@
 
 > 2026-09-13 中文称呼补充：WorkBuddy 面向用户统一显示和提示“文件助手”，中文示例使用
 > “请用文件助手……”；底层 `file-agent` MCP server key、工具名、环境变量和英文内部标识保持不变。
-> 连接器元数据版本递增为 1.0.1，避免已安装客户端继续缓存旧中文名称与 Skill。
+> 连接器元数据版本递增为 1.0.2。1.0.2 补充“完整文件名＋目标分类”的已入库文件路由：
+> 必须先精确搜索并唯一解析文件，再取得稳定 taxonomy 节点并调用受控主分类 Tool；没有聊天附件
+> 不能成为拒绝该操作的理由。原有附件、目录导入、检索、查重和文件动作边界保持不变。
+>
+> 2026-09-16 分类只读能力补充：新增 `file_classifications` 专用 MCP Tool。用户要求查看某个
+> 已入库文件的全部分类建议、建议角色、正式生效角色和逐项原文依据时，必须先通过 `file_search`
+> 唯一解析稳定 `working_copy_id`，再调用该工具。WorkBuddy 严禁直接访问数据库、执行 SQL 或调用
+> 终端作为降级路径；当前部署缺少对应 API 时只能明确提示能力暂不支持。
 
 ## 1. 目标与范围
 
 将原先仅适用于 CodeBuddy Code CLI 的附件桥接交付目录，补充为 WorkBuddy 可识别的 MCP + Skill 连接器包。连接器必须能够通过 WorkBuddy 的插件/连接器安装流程，配置本机 stdio MCP，并让 AI 基于自然语言选择现有 File Agent 工具。
 
-本次不改变 File Agent API、MCP 的手工目录导入、检索、分类、查重或受控文件操作行为。
+除新增单文件分类只读 API 与 `file_classifications` MCP Tool 外，本次不改变 MCP 的手工目录导入、检索、分类落位、查重或受控文件操作行为。
 
 ## 2. 技术选择
 
@@ -36,7 +43,14 @@ Windows 通过 `cmd.exe` 启动 `%FILE_AGENT_PYTHON_EXECUTABLE% -m file_agent_mc
 
 ## 4. 自然语言路由
 
-Skill 覆盖：受管目录批量导入/归档/分类、已入库文件搜索、读取、证据回答、重复文件复核、明确的受控重命名和分类落位。Skill 仅解释现有 Tool 的正确顺序，不生成路径、文件 ID、证据、重命名参数或重复文件决定。
+Skill 覆盖：受管目录批量导入/归档/分类、已入库文件搜索、读取、证据回答、单文件全部分类和角色读取、重复文件复核、明确的受控重命名和分类落位。Skill 仅解释现有 Tool 的正确顺序，不生成路径、文件 ID、证据、重命名参数或重复文件决定。
+
+查看单文件分类时固定执行 `file_search -> file_classifications`。后者通过认证 API
+`GET /api/classification/working-copies/{working_copy_id}/classifications` 读取当前活动工作副本版本，
+同时返回最新分类建议中的 `suggested_role` 与正式 `document_categories` 关系中的
+`effective_role` / `effective_status`，并保留每条建议的原文定位证据。MCP 只显示 API 结果，
+不得连接 PostgreSQL、执行 SQL、读取容器数据库文件或让宿主自行解释内部表结构。旧后端没有该
+API 时返回固定“能力暂不支持”提示，不允许数据库降级。
 
 ## 5. 聊天附件的明确限制
 

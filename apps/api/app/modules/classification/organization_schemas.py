@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -81,3 +82,43 @@ class OrganizationFilePageResponse(BaseModel):
     deprecated_compatibility: bool = False
     public_access_token: str | None = None
     files: list[OrganizationFileItemResponse] = Field(default_factory=list)
+
+
+class WorkingCopyClassificationItemResponse(BaseModel):
+    """单个当前分类建议及其建议角色、正式角色和原文依据。"""
+
+    suggestion_id: str | None = None
+    category_id: str
+    name: str
+    category_path: list[str] = Field(default_factory=list)
+    rank: int | None = None
+    confidence: float | None = None
+    status: str | None = None
+    suggestion_status: str | None = None
+    suggested_role: str | None = None
+    effective_role: str | None = None
+    effective_status: str | None = None
+    source: str | None = None
+    evidence_items: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class WorkingCopyClassificationsResponse(BaseModel):
+    """WorkBuddy 按稳定工作副本 ID 读取的完整当前分类事实。"""
+
+    working_copy_id: str
+    document_id: str
+    document_version_id: str | None = None
+    filename: str
+    classification_run_id: str | None = None
+    taxonomy_key: str | None = None
+    taxonomy_version: str | None = None
+    classifier_version: str | None = None
+    classification_basis: str | None = None
+    summary_status: str | None = None
+    classification_outcome: str = ""
+    classification_quality: str = ""
+    selection_basis: str = ""
+    reason_codes: list[str] = Field(default_factory=list)
+    status: str
+    error_code: str | None = None
+    categories: list[WorkingCopyClassificationItemResponse] = Field(default_factory=list)

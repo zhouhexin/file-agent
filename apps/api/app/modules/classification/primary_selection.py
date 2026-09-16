@@ -177,7 +177,15 @@ def _result(
 
     primary_id = str(primary.get("category_id") or "")
     secondaries = [
-        item for item in candidates if str(item.get("category_id") or "") != primary_id
+        item
+        for item in candidates
+        if str(item.get("category_id") or "") != primary_id
+        # 业务 PRIMARY 已经确定时，兜底节点不应以次级建议形式混入解释结果。
+        # 正常流程会在前置过滤中排除 fallback；此处保留防御性约束，兼容历史调用方。
+        and not (
+            primary_id != "system.other"
+            and str(item.get("category_id") or "") == "system.other"
+        )
     ]
     return PrimarySelectionResult(
         primary_candidate=primary,

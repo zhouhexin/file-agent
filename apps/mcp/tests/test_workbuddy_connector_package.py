@@ -19,6 +19,7 @@ def test_workbuddy_connector_package_is_complete_and_safe() -> None:
     assert meta["name_zh"] == "文件助手"
     assert meta["type"] == "mcp"
     assert meta["auth_mode"] == "token"
+    assert meta["version"] == "1.0.2"
     assert len(mcp["mcpServers"]) == 1
     server = mcp["mcpServers"]["file-agent"]
     assert server["disabledTools"] == ["workbuddy_attachment_ingest", "workbuddy_submission_ingest"]
@@ -29,4 +30,10 @@ def test_workbuddy_connector_package_is_complete_and_safe() -> None:
     assert token_field["type"] == "password"
     assert (root / "icon.svg").is_file()
     assert (root / "skills" / "file-agent" / "SKILL.md").is_file()
-    assert "请用文件助手" in (root / "skills" / "file-agent" / "SKILL.md").read_text(encoding="utf-8")
+    skill_text = (root / "skills" / "file-agent" / "SKILL.md").read_text(encoding="utf-8")
+    assert "请用文件助手" in skill_text
+    assert "完整文件名唯一命中" in skill_text
+    assert "不得回答“没有找到这个附件”" in skill_text
+    assert "file_classifications" in skill_text
+    assert "不得直接访问数据库" in skill_text
+    assert "不能改用数据库查询" in skill_text

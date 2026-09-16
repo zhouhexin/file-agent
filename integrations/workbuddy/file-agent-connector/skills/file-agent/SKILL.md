@@ -9,8 +9,11 @@ description: 当用户说“请用文件助手”导入已授权目录文件，�
 
 - 用户说“导入/归档/分类 D 盘某个已授权目录的文件”时，先确认完整相对目录和授权根别名，再使用 `file_batch_ingest`。
 - 用户说“找文件”“读取这份文件”“解释文件内容”时，依次使用 `file_search`、`file_read` 或 `evidence_answer`；不要编造文件 ID 或证据。
+- 用户要求查看某个文件的全部分类建议、分类角色和每项原文依据时，必须先用 `file_search` 按完整文件名查找；仅在唯一命中后，把结果 `tool_context` 中的 `working_copy_id` 原样传给 `file_classifications`。必须逐字展示该工具的 `content.text`，不得自行推断角色或依据。
 - 用户明确要求对检索结果重命名、移动或设置主分类时，使用对应的受控工具，并如实呈现返回的计划、冲突或执行状态。
+- 用户没有上传本轮附件、但提供完整文件名并要求重新分类时，该名称代表已入库文件。必须先用 `file_search` 精确查找；仅在完整文件名唯一命中后，使用 `classification_overview` 的 `category_options` 精确解析目标节点，再调用 `file_set_primary_category`。零命中时说明未找到已入库文件；多个同名文件时先请用户选择。不得调用附件导入工具，也不得回答“没有找到这个附件”。
 - 发现重复文件时，先读取 `duplicate_review_get` 返回的候选和对比信息，再由用户作出决定。
+- WorkBuddy 不得直接访问数据库、执行 SQL、调用 Shell/终端或使用其他连接器代替 File Agent MCP Tool。若 `file_classifications` 或其他对应 Tool 不存在，或后端明确返回能力不可用，只能提示“当前部署的 File Agent 暂不支持该能力”，不能改用数据库查询，也不能编造结果。
 
 ## 附件边界
 

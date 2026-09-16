@@ -32,6 +32,8 @@ from app.modules.classification.clarification_service import (
 )
 from app.modules.classification.conversation_decision import (
     ConversationalClassificationDecisionService,
+    classification_decision_action,
+    parse_explicit_primary_category_command,
 )
 from app.modules.classification.graph_outbox import ClassificationGraphOutboxService
 from app.modules.file_lifecycle.shared_access import (
@@ -549,6 +551,100 @@ def test_multiple_classification_suggestions_require_signed_selection():
         relation = db.query(DocumentCategory).one()
         assert relation.category_id == "school.hr.appointment-assessment"
         assert db.get(WorkingCopy, "working-copy-feedback").relative_path == "职称材料.docx"
+    finally:
+        db.close()
+
+
+def test_named_file_category_command_is_parsed_without_weakening_other_moves():
+    """只识别明确分类落位表达，普通回收站移动不能被误判为 SET_PRIMARY。"""
+
+    message = "将 01引进人才工作合同-王磊磊.doc 放入 学院/人事师资/人才工作 分类下"
+    command = parse_explicit_primary_category_command(message)
+
+    assert command is not None
+    assert command.source_filename == "01引进人才工作合同-王磊磊.doc"
+    assert command.target_category_path == "学院/人事师资/人才工作"
+    assert classification_decision_action(message) == "CORRECT"
+    assert parse_explicit_primary_category_command("将 A.doc 放入回收站") is None
+
+
+def test_named_file_correction_resolves_shared_copy_outside_current_conversation(
+    monkeypatch,
+):
+    """新会话按完整文件名更正时应解析已入库文件，而不是依赖本轮附件或旧会话。"""
+
+    db = _feedback_session()
+    try:
+        user, suggestion = _seed_suggestion(db)
+        current_run = AgentRun(
+            id="33333333-3333-4333-8333-333333333333",
+            conversation_id="conversation-explicit-filename",
+            message_id="message-explicit-filename",
+            user_id=user.id,
+        )
+        db.add(current_run)
+        db.flush()
+        captured: dict[str, object] = {}
+
+        def fake_submit(_self, **kwargs):
+            """截获落位提交，验证仍复用既有受控 PRIMARY 服务。"""
+
+            captured.update(kwargs)
+            request = kwargs["request"]
+            return SimpleNamespace(
+                id="feedback-explicit-filename",
+                working_copy_id="working-copy-feedback",
+                document_id=suggestion.document_id,
+                document_version_id=suggestion.document_version_id,
+                action="CORRECTED",
+                changeset_id="changeset-explicit-filename",
+                placement_operation_id="placement-explicit-filename",
+                placement_status="PENDING",
+                user_message="已收到主分类确认，正在按受控目录处理文件。",
+                corrected_category_id=request.corrected_category_id,
+            )
+
+        monkeypatch.setattr(
+            "app.modules.classification.conversation_decision."
+            "PrimaryFeedbackPlacementService.submit",
+            fake_submit,
+        )
+        result = ConversationalClassificationDecisionService(db, user.id).execute(
+            action="CORRECT",
+            message=(
+                "将 职称材料.docx 放入 "
+                "学院/人事师资/人才工作 分类下"
+            ),
+            document_ids=[],
+            conversation_id=current_run.conversation_id,
+            agent_run_id=current_run.id,
+        )
+
+        assert result["status"] == "PREPARED"
+        assert result["working_copy_id"] == "working-copy-feedback"
+        assert captured["suggestion_id"] == suggestion.id
+        assert captured["request"].corrected_category_id == "college.hr.talent-work"
+    finally:
+        db.close()
+
+
+def test_named_file_correction_reports_missing_ingested_file_not_attachment():
+    """完整文件名未命中时必须说明已入库文件不存在，不能误报缺少聊天附件。"""
+
+    db = _feedback_session()
+    try:
+        user, _suggestion = _seed_suggestion(db)
+        result = ConversationalClassificationDecisionService(db, user.id).execute(
+            action="CORRECT",
+            message="将 不存在.doc 放入 学院/人事师资/人才工作 分类下",
+            document_ids=[],
+            conversation_id="conversation-feedback",
+            agent_run_id="11111111-1111-4111-8111-111111111111",
+        )
+
+        assert result["error"]["code"] == "WORKING_COPY_NOT_FOUND"
+        assert "已入库文件" in result["message"]
+        assert "附件" not in result["message"]
     finally:
         db.close()
 

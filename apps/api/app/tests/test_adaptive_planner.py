@@ -17,6 +17,7 @@ from app.db.models import (
     CapabilitySuggestion,
     Conversation,
     Document,
+    DocumentCategory,
     DocumentCategorySuggestion,
     DocumentClassificationRun,
     DocumentInsight,
@@ -2378,7 +2379,23 @@ def test_read_tools_can_use_shared_active_working_copy_from_another_importer():
                     "source": "document_pages",
                 }
             ],
+            candidate_scores_json={"relation_role": "PRIMARY"},
             rank=1,
+        )
+        formal_relation = DocumentCategory(
+            id="shared-read-formal-relation",
+            working_copy_id=working_copy.id,
+            document_id=document.id,
+            document_version_id=version.id,
+            category_id="student-work",
+            category_path_json=["学校", "学生工作"],
+            relation_role="RELATED",
+            status="CONFIRMED",
+            taxonomy_key="school",
+            taxonomy_version="2",
+            classifier_version="test",
+            source="user_confirmed",
+            evidence_json=[{"page_number": 2, "quote": "完善学生教育管理"}],
         )
         insight = DocumentInsight(
             document_id=document.id,
@@ -2438,6 +2455,7 @@ def test_read_tools_can_use_shared_active_working_copy_from_another_importer():
                 unrelated_working_copy,
                 run,
                 suggestion,
+                formal_relation,
                 insight,
                 owned_document,
                 owned_version,
@@ -2459,6 +2477,8 @@ def test_read_tools_can_use_shared_active_working_copy_from_another_importer():
 
         assert classifications["documents"][0]["filename"] == "学生工作实施建议.docx"
         assert classifications["documents"][0]["categories"][0]["name"] == "学生工作"
+        assert classifications["documents"][0]["categories"][0]["suggested_role"] == "PRIMARY"
+        assert classifications["documents"][0]["categories"][0]["effective_role"] == "RELATED"
         assert classifications["documents"][1]["filename"] == "本人上传材料.docx"
         assert classifications["documents"][1]["categories"][0]["name"] == "教学"
         assert (

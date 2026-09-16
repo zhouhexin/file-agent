@@ -14,6 +14,7 @@ import { ClassificationFilesPage } from './features/files/ClassificationFilesPag
 import { readClassificationDeepLink } from './features/files/classificationDeepLink';
 import { IngestDuplicateComparisonPage } from './features/chat/IngestDuplicateComparisonPage';
 import { OnboardingPage } from './features/onboarding/OnboardingPage';
+import { PromptGuidePage } from './features/guide/PromptGuidePage';
 import './features/chat/chat.css';
 import type { User } from './types';
 
@@ -21,6 +22,7 @@ type AppPath =
   | '/login'
   | '/chat'
   | '/getting-started'
+  | '/prompt-guide'
   | '/files'
   | '/duplicate-comparison'
   | '/admin/failed-files'
@@ -32,6 +34,9 @@ function readInitialPath(): AppPath {
   const pathname = window.location.pathname;
   if (pathname === '/getting-started') {
     return '/getting-started';
+  }
+  if (pathname === '/prompt-guide') {
+    return '/prompt-guide';
   }
   if (pathname === '/login') {
     return '/login';
@@ -99,7 +104,7 @@ export function App() {
     getCurrentUser(token)
       .then((user) => {
         setCurrentUser(user);
-        if (!hasCompletedOnboarding() && window.location.pathname !== '/getting-started' && window.location.pathname !== '/duplicate-comparison' && window.location.pathname !== '/files') {
+        if (!hasCompletedOnboarding() && window.location.pathname !== '/getting-started' && window.location.pathname !== '/duplicate-comparison' && window.location.pathname !== '/files' && window.location.pathname !== '/prompt-guide') {
           replacePath('/getting-started');
           setCurrentPath('/getting-started');
         }
@@ -109,7 +114,11 @@ export function App() {
         setToken(null);
         setCurrentUser(null);
         // 公开对比页不依赖浏览器登录态；过期令牌不能把分享链接重定向到登录页。
-        if (readInitialPath() !== '/duplicate-comparison' && !classificationAccessToken) {
+        if (
+          readInitialPath() !== '/duplicate-comparison'
+          && readInitialPath() !== '/prompt-guide'
+          && !classificationAccessToken
+        ) {
           replacePath('/login');
           setCurrentPath('/login');
         }
@@ -204,6 +213,12 @@ export function App() {
     openReturnTargetOrChat();
   }
 
+  function openPromptGuide() {
+    // 提示词指南是独立公开静态页，不读取登录态、文件内容或任何业务数据。
+    pushPath('/prompt-guide');
+    setCurrentPath('/prompt-guide');
+  }
+
   function openChatWithExample(example: string) {
     // 点击示例问题后写入标记、设置输入草稿、回到聊天。
     markOnboardingCompleted();
@@ -224,6 +239,11 @@ export function App() {
         onBack={openChat}
       />
     );
+  }
+
+  // 提示词指南不包含用户数据或文件入口，允许未登录用户直接查看。
+  if (currentPath === '/prompt-guide') {
+    return <PromptGuidePage />;
   }
 
   if (route === 'loading') {
@@ -248,6 +268,7 @@ export function App() {
   if (currentPath === '/files') {
     return <ClassificationFilesPage token={token} onBack={openChat} />;
   }
+
   if (
     currentPath === '/admin/failed-files'
     && ['ops', 'admin'].includes(currentUser.role)
@@ -281,6 +302,7 @@ export function App() {
       user={currentUser}
       onLogout={handleLogout}
       onOpenOnboarding={openOnboarding}
+      onOpenPromptGuide={openPromptGuide}
       onOpenFiles={openFiles}
       onOpenFailedFiles={openFailedFiles}
       onOpenAgentRuns={openAgentRuns}

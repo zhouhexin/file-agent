@@ -131,6 +131,7 @@ type ChatPageProps = {
   user: User;
   onLogout: () => void;
   onOpenOnboarding: () => void;
+  onOpenPromptGuide: () => void;
   onOpenFiles: () => void;
   onOpenFailedFiles: () => void;
   onOpenAgentRuns: () => void;
@@ -230,6 +231,7 @@ export function ChatPage({
   user,
   onLogout,
   onOpenOnboarding,
+  onOpenPromptGuide,
   onOpenFiles,
   onOpenFailedFiles,
   onOpenAgentRuns,
@@ -1368,6 +1370,14 @@ export function ChatPage({
 
       <section className={hasTurns ? 'workspace conversation-mode' : 'workspace empty-mode'}>
         <aside className="chat-sidebar" aria-label="聊天功能菜单">
+          <button
+            className="sidebar-menu-item"
+            type="button"
+            onClick={onOpenPromptGuide}
+          >
+            <MessageSquare size={16} />
+            <span>提示词指南</span>
+          </button>
           <button
             className="sidebar-menu-item"
             type="button"

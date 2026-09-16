@@ -36,6 +36,11 @@ CLASSIFICATION_DISPLAY_POLICY = (
     "调用方必须逐字原样展示，不得改写分类名称、计数、状态或链接；完整分类树应通过“打开分类页面”"
     "进入原 Web 页面浏览，不得把内部稳定 ID 或相对存储路径展示给用户。"
 )
+FILE_CLASSIFICATIONS_DISPLAY_POLICY = (
+    "file_classifications 的 content.text 是 File Agent 受控 API 返回的当前分类事实。"
+    "调用方必须逐字原样展示，不得改写角色、置信度或原文依据；禁止直接查询数据库、执行 SQL、"
+    "调用终端或使用其他非 File Agent 能力补全结果。能力不可用时只能明确提示暂不支持。"
+)
 _CLASSIFICATION_DISPLAY_DIRECTIVE = (
     "<!-- FILE_AGENT_CLASSIFICATION_DISPLAY: 将下方内容原样作为最终答复；保留分类页、预览和下载链接；"
     "不得展示内部 ID 或存储路径。 -->"
@@ -211,6 +216,33 @@ class WorkBuddyConversationService:
                 page_size=page_size,
             )
         )
+
+    async def file_classifications(self, *, working_copy_id: str) -> dict[str, Any]:
+        """读取唯一搜索结果的全部当前分类；缺少后端能力时不允许绕到数据库。"""
+
+        normalized = str(working_copy_id or "").strip()
+        if (
+            not normalized
+            or len(normalized) > 100
+            or "/" in normalized
+            or "\\" in normalized
+            or "\x00" in normalized
+        ):
+            raise ValueError("working_copy_id 格式不合法")
+        try:
+            payload = await self.client.file_classifications(
+                working_copy_id=normalized,
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            endpoint_missing = message.startswith("NOT_FOUND:") or (
+                message.startswith("INTEGRATION_API_ERROR:")
+                and ("404" in message or "Not Found" in message)
+            )
+            if not endpoint_missing:
+                raise
+            return project_file_classifications_unavailable()
+        return project_file_classifications(payload)
 
     async def read(
         self,
@@ -532,6 +564,165 @@ def project_classification_files(payload: dict[str, Any]) -> dict[str, Any]:
         "display_text": "\n".join(lines),
         "display_policy": CLASSIFICATION_DISPLAY_POLICY,
     }
+
+
+def project_file_classifications(payload: dict[str, Any]) -> dict[str, Any]:
+    """把单文件全部分类投影为建议角色、正式角色和逐项原文依据。"""
+
+    filename = " ".join(str(payload.get("filename") or "未命名文件").split())[:255]
+    categories: list[dict[str, Any]] = []
+    for raw in payload.get("categories", []):
+        if not isinstance(raw, dict):
+            continue
+        path = raw.get("category_path") if isinstance(raw.get("category_path"), list) else []
+        category_path = " / ".join(
+            " ".join(str(item).split()) for item in path if str(item).strip()
+        ) or " ".join(str(raw.get("name") or raw.get("category_id") or "未命名分类").split())
+        evidence_items = [
+            item for item in raw.get("evidence_items", []) if isinstance(item, dict)
+        ]
+        categories.append(
+            {
+                "category_id": str(raw.get("category_id") or ""),
+                "category_path": category_path[:500],
+                "rank": raw.get("rank"),
+                "confidence": raw.get("confidence"),
+                "suggestion_status": raw.get("suggestion_status"),
+                "suggested_role": raw.get("suggested_role"),
+                "effective_role": raw.get("effective_role"),
+                "effective_status": raw.get("effective_status"),
+                "role_display": _classification_role_display(raw),
+                "evidence_items": evidence_items,
+                "evidence_display": _classification_evidence_display(evidence_items),
+            }
+        )
+
+    lines = [
+        _CLASSIFICATION_DISPLAY_DIRECTIVE,
+        f"文件：{_escape_markdown_text(filename)}",
+        "",
+        "| 分类 | 角色 | 置信度 | 原文依据 |",
+        "|---|---|---:|---|",
+    ]
+    if categories:
+        for item in categories:
+            confidence = item.get("confidence")
+            confidence_text = (
+                f"{float(confidence):.1%}"
+                if isinstance(confidence, (int, float))
+                else "—"
+            )
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _escape_markdown_text(item["category_path"]),
+                        _escape_markdown_text(item["role_display"]),
+                        confidence_text,
+                        item["evidence_display"],
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("| 当前版本没有分类建议或正式分类关系 | — | — | 暂无可定位原文依据 |")
+    selection_basis = " ".join(str(payload.get("selection_basis") or "").split()).strip()
+    reason_codes = [
+        " ".join(str(item).split())
+        for item in payload.get("reason_codes", [])
+        if str(item).strip()
+    ]
+    if selection_basis or reason_codes:
+        lines.extend(["", "分类决策信息："])
+        if selection_basis:
+            lines.append(f"- 选择依据：{_escape_markdown_text(selection_basis)}")
+        if reason_codes:
+            lines.append(
+                "- 原因代码："
+                + _escape_markdown_text("、".join(reason_codes))
+            )
+    return {
+        "status": str(payload.get("status") or "COMPLETED"),
+        "filename": filename,
+        "working_copy_id": str(payload.get("working_copy_id") or ""),
+        "document_id": str(payload.get("document_id") or ""),
+        "document_version_id": str(payload.get("document_version_id") or ""),
+        "classification_run_id": payload.get("classification_run_id"),
+        "taxonomy_key": payload.get("taxonomy_key"),
+        "taxonomy_version": payload.get("taxonomy_version"),
+        "classification_outcome": str(payload.get("classification_outcome") or ""),
+        "selection_basis": selection_basis,
+        "reason_codes": reason_codes,
+        "categories": categories,
+        "display_text": "\n".join(lines),
+        "display_policy": FILE_CLASSIFICATIONS_DISPLAY_POLICY,
+    }
+
+
+def project_file_classifications_unavailable() -> dict[str, Any]:
+    """返回固定能力缺失提示，明确拒绝数据库或 SQL 降级。"""
+
+    message = (
+        "当前部署的 File Agent 暂不支持按文件查看全部分类建议、分类角色和原文依据；"
+        "不会改用数据库、SQL 或终端查询。"
+    )
+    return {
+        "status": "CAPABILITY_UNAVAILABLE",
+        "categories": [],
+        "display_text": message,
+        "display_policy": FILE_CLASSIFICATIONS_DISPLAY_POLICY,
+    }
+
+
+def _classification_role_display(item: dict[str, Any]) -> str:
+    """同时显示建议角色和正式生效角色，避免把最高分候选误当最终主分类。"""
+
+    role_labels = {
+        "PRIMARY": "主分类",
+        "SECONDARY": "次级分类建议",
+        "RELATED": "关联分类",
+        "DOCUMENT_TYPE": "文种分类",
+    }
+    suggested = str(item.get("suggested_role") or "").strip()
+    effective = str(item.get("effective_role") or "").strip()
+    parts: list[str] = []
+    if suggested:
+        parts.append(f"建议：{role_labels.get(suggested, suggested)}")
+    if effective:
+        status = str(item.get("effective_status") or "").strip()
+        suffix = f"（{status}）" if status else ""
+        parts.append(f"正式：{role_labels.get(effective, effective)}{suffix}")
+    return "；".join(parts) or "未指定角色"
+
+
+def _classification_evidence_display(evidence_items: list[dict[str, Any]]) -> str:
+    """逐项展示后端保存的原文 quote 及页码、Sheet、单元格或段落定位。"""
+
+    rendered: list[str] = []
+    for item in evidence_items:
+        quote = " ".join(str(item.get("quote") or "").split()).strip()
+        if not quote:
+            continue
+        locations: list[str] = []
+        page_number = item.get("page_number")
+        if isinstance(page_number, int) and page_number > 0:
+            locations.append(f"第 {page_number} 页")
+        sheet_name = " ".join(str(item.get("sheet_name") or "").split()).strip()
+        if sheet_name:
+            locations.append(f"Sheet {sheet_name}")
+        cell_range = " ".join(
+            str(item.get("cell_range") or item.get("cell_reference") or "").split()
+        ).strip()
+        if cell_range:
+            locations.append(f"单元格 {cell_range}")
+        paragraph_index = item.get("paragraph_index")
+        if isinstance(paragraph_index, int) and paragraph_index >= 0:
+            locations.append(f"段落 {paragraph_index + 1}")
+        location = f"（{'，'.join(locations)}）" if locations else ""
+        rendered.append(
+            _escape_markdown_text(f"原文{location}：{quote}")
+        )
+    return "<br>".join(rendered) or "暂无可定位原文依据"
 
 
 def _file_search_basis(item: dict[str, Any]) -> list[str]:

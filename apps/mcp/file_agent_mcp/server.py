@@ -23,7 +23,11 @@ from .transfer import BatchTransferService, TransferStateStore
 
 mcp = FastMCP(
     "file-agent-local-import",
-    instructions="仅处理用户明确提交的 WorkBuddy 附件或已经配置授权根并明确指定的本地文件。",
+    instructions=(
+        "仅处理用户明确提交的 WorkBuddy 附件、已配置授权根或 File Agent 白名单 Tool 返回的对象。"
+        "已入库文件的读取、搜索和分类查看只能调用 File Agent MCP Tool；禁止直接访问数据库、执行 SQL、"
+        "调用 Shell/终端或其他连接器替代缺失能力。相关 Tool 不存在时必须明确提示能力暂不支持。"
+    ),
 )
 
 
@@ -158,7 +162,9 @@ async def workbuddy_attachment_ingest(
         "在 File Agent 已入库文件中执行只读搜索。工具返回的 content.text 已经是最终用户答复，"
         "调用方必须逐字原样输出，不得重新组织、总结、改写或增删列，即使用户要求文件类型等"
         "附加字段也不能修改该表格。固定保留“文件名｜依据｜操作”三列以及全部预览/下载链接；"
-        "稳定 ID 仅供后续只读或受控文件工具使用，不能向用户展示。"
+        "稳定 ID 仅供后续只读或受控文件工具使用，不能向用户展示。用户没有附加本轮附件、"
+        "但以完整文件名要求读取、重命名、移动或设置主分类时，必须先用本工具查找已入库文件，"
+        "不得因为没有聊天附件而直接回答文件不存在。"
     ),
     structured_output=False,
 )
@@ -241,6 +247,39 @@ async def classification_files(
             category_id=category_id,
             page=page,
             page_size=page_size,
+        )
+        structured = {key: value for key, value in result.items() if key != "display_text"}
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=str(result.get("display_text") or ""),
+                    annotations=Annotations(audience=["user"], priority=1.0),
+                )
+            ],
+            structuredContent=structured,
+        )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="file_classifications",
+    description=(
+        "只读查看单个已入库文件当前版本的全部分类建议、建议角色、正式生效角色和每项原文依据。"
+        "必须先用 file_search 按完整文件名查找，并且只有唯一命中后才能原样传入 tool_context 中的 "
+        "working_copy_id。content.text 必须逐字原样展示。禁止直接访问数据库、执行 SQL、调用终端或"
+        "其他非 File Agent 能力补全；如果当前部署没有此 API，必须直接提示能力暂不支持。"
+    ),
+    structured_output=False,
+)
+async def file_classifications(working_copy_id: str) -> Any:
+    """读取单文件当前分类事实；本工具不写分类，也不允许数据库降级。"""
+
+    client = _client()
+    try:
+        result = await WorkBuddyConversationService(client).file_classifications(
+            working_copy_id=working_copy_id,
         )
         structured = {key: value for key, value in result.items() if key != "display_text"}
         return CallToolResult(
@@ -407,7 +446,10 @@ async def workbuddy_submission_ingest(
     description=(
         "把已确定文件的主分类设为指定 taxonomy 节点，并按该主类异步落位。"
         "必须提供 file_search 返回的 working_copy_id、当前版本、revision 和 taxonomy 目标；"
-        "不接受本机路径，不需要也不能提供二次确认字段。"
+        "不接受本机路径，不需要也不能提供二次确认字段。用户直接给出完整文件名和分类路径时，"
+        "先调用 file_search；只有完整文件名唯一命中后，才从 classification_overview 的"
+        " category_options 精确取得分类 ID 和 taxonomy_version，再调用本工具。零命中时说明"
+        "未找到已入库文件，多条同名命中时请求用户选择，不能把文件误当成本轮附件。"
     ),
     structured_output=True,
 )

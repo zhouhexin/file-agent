@@ -40,7 +40,9 @@ from app.modules.classification.organization_query_service import (
 from app.modules.classification.organization_schemas import (
     OrganizationFilePageResponse,
     OrganizationTreeResponse,
+    WorkingCopyClassificationsResponse,
 )
+from app.modules.classification.evidence_reader import CurrentClassificationEvidenceReader
 from app.modules.classification.placement_authorization import PlacementAuthorizationService
 from app.modules.classification.placement_schemas import (
     MoveWorkingCopyRequest,
@@ -278,6 +280,51 @@ def get_classification_organization_tree(
     result = ClassificationOrganizationQueryService(db).tree()
     result.public_access_token = create_public_classification_access_token()
     return result
+
+
+@router.get(
+    "/working-copies/{working_copy_id}/classifications",
+    response_model=WorkingCopyClassificationsResponse,
+)
+def get_working_copy_classifications(
+    working_copy_id: str,
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> WorkingCopyClassificationsResponse:
+    """按稳定工作副本 ID 只读返回当前版本的全部建议、角色和原文依据。"""
+
+    shared_workspace_id = get_shared_workspace_id(db)
+    working_copy = db.get(WorkingCopy, working_copy_id)
+    if (
+        working_copy is None
+        or working_copy.status != "ACTIVE"
+        or working_copy.workspace_id != shared_workspace_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": {
+                    "code": "WORKING_COPY_NOT_FOUND",
+                    "message": "活动工作副本不存在",
+                }
+            },
+        )
+    results = CurrentClassificationEvidenceReader(
+        db=db,
+        user_id=None,
+        workspace_id=shared_workspace_id,
+    ).read(document_ids=[working_copy.document_id])
+    if not results or results[0].get("working_copy_id") != working_copy.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": {
+                    "code": "WORKING_COPY_NOT_FOUND",
+                    "message": "活动工作副本不存在",
+                }
+            },
+        )
+    return WorkingCopyClassificationsResponse.model_validate(results[0])
 
 
 @router.get("/organization/files", response_model=OrganizationFilePageResponse)

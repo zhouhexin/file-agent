@@ -6,9 +6,11 @@ Planner 只传用户原话和后端附件范围。本服务从当前会话、规
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -16,6 +18,7 @@ from app.db.models import (
     DocumentCategorySuggestion,
     DocumentClassificationRun,
     User,
+    WorkingCopy,
 )
 from app.modules.classification.clarification_service import (
     ClassificationClarificationError,
@@ -36,7 +39,16 @@ from app.modules.classification.schemas import CategoryNode
 from app.modules.file_lifecycle.shared_access import (
     CanonicalWorkingFileError,
     CanonicalWorkingFileResolver,
+    SharedWorkingCopyAccessPolicy,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ExplicitPrimaryCategoryCommand:
+    """用户按完整文件名提交的主分类更正，不携带任何物理路径。"""
+
+    source_filename: str
+    target_category_path: str
 
 
 class ConversationalClassificationDecisionService:
@@ -66,6 +78,22 @@ class ConversationalClassificationDecisionService:
             return _error("USER_NOT_FOUND", "当前用户不存在。")
         if run is None or run.user_id != user.id or run.conversation_id != conversation_id:
             return _error("AGENT_RUN_SCOPE_INVALID", "分类决定与当前对话范围不一致。")
+        explicit_command = (
+            parse_explicit_primary_category_command(message)
+            if action == "CORRECT"
+            else None
+        )
+        if not document_ids and explicit_command is not None:
+            # 完整文件名代表已入库文件，不代表本轮附件。只在共享活动工作副本中精确
+            # 解析；同名对象全部保留给后续选择卡，不能按路径或时间替用户猜一个。
+            document_ids = self._document_ids_by_exact_filename(
+                explicit_command.source_filename
+            )
+            if not document_ids:
+                return _error(
+                    "WORKING_COPY_NOT_FOUND",
+                    f"没有找到已入库文件“{explicit_command.source_filename}”。",
+                )
         suggestions = self._candidate_suggestions(
             document_ids=document_ids,
             conversation_id=conversation_id,
@@ -92,7 +120,13 @@ class ConversationalClassificationDecisionService:
         target_category_id = None
         target_category_ids: list[str] = []
         if action == "CORRECT":
-            target_category_ids = _resolve_target_categories(message)
+            # 显式命令只使用目标分类片段召回 taxonomy，避免文件名中的业务词
+            # 干扰目标节点选择；旧式纠正表达仍沿用整句兼容逻辑。
+            target_category_ids = _resolve_target_categories(
+                explicit_command.target_category_path
+                if explicit_command is not None
+                else message
+            )
             if not target_category_ids:
                 return _error(
                     "TARGET_CATEGORY_NOT_FOUND",
@@ -217,6 +251,26 @@ class ConversationalClassificationDecisionService:
             "message": response.user_message,
         }
 
+    def _document_ids_by_exact_filename(self, filename: str) -> list[str]:
+        """在共享活动工作副本中按完整文件名精确解析全部候选 Document ID。
+
+        查询仅处理已入库文件的逻辑身份，不读取物理路径。扩展名大小写允许兼容，
+        但不会做模糊包含、哈希合并或按更新时间自动挑选。
+        """
+
+        normalized = filename.strip()
+        if not normalized:
+            return []
+        query = SharedWorkingCopyAccessPolicy(self.db).scope_readable(
+            self.db.query(WorkingCopy)
+        )
+        matches = (
+            query.filter(func.lower(WorkingCopy.filename) == normalized.lower())
+            .order_by(WorkingCopy.id.asc())
+            .all()
+        )
+        return list(dict.fromkeys(item.document_id for item in matches))
+
     def _collapse_explicit_correction_source(
         self,
         suggestions: list[DocumentCategorySuggestion],
@@ -330,6 +384,8 @@ class ConversationalClassificationDecisionService:
 def classification_decision_action(message: str) -> str | None:
     """确定性识别用户是否在接受、拒绝、纠正或撤回本人分类确认。"""
 
+    if parse_explicit_primary_category_command(message) is not None:
+        return "CORRECT"
     compact = re.sub(r"\s+", "", str(message or ""))
     if re.search(
         r"(?:撤回|撤销)(?:我|本人|自己)(?:此前|之前|先前)?(?:对)?(?:这个|该)?(?:分类|归类)?(?:的)?确认",
@@ -381,6 +437,48 @@ def classification_decision_action(message: str) -> str | None:
     ):
         return "REJECT"
     return None
+
+
+def parse_explicit_primary_category_command(
+    message: str,
+) -> ExplicitPrimaryCategoryCommand | None:
+    """解析“完整文件名＋目标分类”的明确主分类更正表达。
+
+    “放入/放到/归入/归到”只有在目标后明确出现“分类”时才命中，避免把
+    “放入回收站”或普通目录移动误判为 SET_PRIMARY。解析结果只包含用户原话中的
+    逻辑文件名和分类显示路径，稳定对象 ID、版本和 taxonomy ID 仍由后端校验。
+    """
+
+    text = str(message or "").strip()
+    if not text:
+        return None
+    filename_pattern = r"[^\r\n，。！？!?“”\"']+?\.[A-Za-z0-9]{1,10}"
+    movement = re.search(
+        rf"(?:将|把)\s*[“\"']?(?P<filename>{filename_pattern})[”\"']?\s*"
+        rf"(?:放入|放到|归入|归到)\s*[“\"']?(?P<category>.+?)[”\"']?\s*"
+        rf"分类(?:下|中|里|里面)?\s*[。！!]?$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    assignment = re.search(
+        rf"(?:将|把)\s*[“\"']?(?P<filename>{filename_pattern})[”\"']?\s*"
+        rf"(?:的)?(?:主分类|分类)\s*(?:设为|设置为|改为|改成|更正为|到)\s*"
+        rf"[“\"']?(?P<category>.+?)[”\"']?\s*(?:分类)?(?:下|中)?\s*[。！!]?$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    matched = movement or assignment
+    if matched is None:
+        return None
+    filename = matched.group("filename").strip()
+    category = matched.group("category").strip().strip("“”\"'")
+    category = re.sub(r"\s*(?:分类)?(?:下|中|里|里面)\s*$", "", category).strip()
+    if not filename or not category:
+        return None
+    return ExplicitPrimaryCategoryCommand(
+        source_filename=filename,
+        target_category_path=category,
+    )
 
 
 def has_organize_by_classification_intent(message: str) -> bool:

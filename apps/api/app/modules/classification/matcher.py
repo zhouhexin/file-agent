@@ -17,6 +17,33 @@ _APPOINTMENT_CATEGORY_IDS = {
     "school.hr.appointment-assessment",
     "college.hr.appointment-assessment",
 }
+_RULES_CATEGORY_IDS = {
+    "school.admin.rules",
+    "college.admin.rules",
+}
+_TALENT_INTRODUCTION_CONTRACT_SIGNALS = (
+    "引进人才工作合同",
+    "人才引进合同",
+    "引进人才合同",
+    "高层次人才引进合同",
+)
+_PERSONNEL_CONTRACT_PARTY_SIGNALS = ("甲方", "乙方", "双方")
+_PERSONNEL_CONTRACT_TERM_SIGNALS = (
+    "合同期限",
+    "合同期",
+    "自签订之日起",
+    "续签",
+    "终止",
+    "退休年龄",
+)
+_PERSONNEL_CONTRACT_EMPLOYMENT_SIGNALS = (
+    "聘用",
+    "聘期",
+    "受聘",
+    "工作岗位",
+    "岗位职责",
+    "教职工",
+)
 _FACULTY_RECRUITMENT_CATEGORY_ID = "college.hr.faculty-recruitment"
 _TITLE_REVIEW_CATEGORY_ID = "school.hr.title-review"
 _TITLE_REVIEW_CATEGORY_IDS = {
@@ -463,9 +490,20 @@ def recall_category_candidates(
         body_text=body_text,
         organization_scope=organization_scope.dominant_root,
     )
+    talent_introduction_contract = _talent_introduction_contract_candidate(
+        taxonomy=taxonomy,
+        title_text=title_text,
+        body_text=body_text,
+        organization_scope=organization_scope.dominant_root,
+    )
     candidates: list[CategoryCandidate] = [
         candidate
-        for candidate in (title_review_form, recruitment_resume, structured_form)
+        for candidate in (
+            title_review_form,
+            recruitment_resume,
+            structured_form,
+            talent_introduction_contract,
+        )
         if candidate is not None
     ]
     for category in flatten_category_paths(taxonomy):
@@ -573,6 +611,11 @@ def recall_category_candidates(
         title_text=title_text,
         body_text=body_text,
         rule_policy=rule_policy,
+    )
+    candidates = _suppress_rules_for_personnel_contract(
+        candidates=candidates,
+        title_text=title_text,
+        body_text=body_text,
     )
 
     candidates = _dedupe_candidates_and_remove_shorter_embedded_matches(candidates)
@@ -710,6 +753,130 @@ def _structured_document_candidate(
         leading_body_score=0.3,
         negative_conflict=False,
     )
+
+
+def _talent_introduction_contract_candidate(
+    *,
+    taxonomy: Taxonomy,
+    title_text: str,
+    body_text: str,
+    organization_scope: str | None,
+) -> CategoryCandidate | None:
+    """以人才题名和合同正文结构生成受限的人才工作强候选。
+
+    文件名或标题中的“人才引进”只能用于召回，正文必须同时证明甲乙双方、
+    合同期限和聘用关系，避免普通合同或单个“人才”词被误归到人才工作。
+    """
+
+    if not _is_personnel_contract_structure(title_text=title_text, body_text=body_text):
+        return None
+    talent_title_signals = _matched_configured_signals(
+        title_text,
+        _TALENT_INTRODUCTION_CONTRACT_SIGNALS,
+    )
+    talent_body_signals = _matched_configured_signals(
+        body_text[:2_000],
+        _TALENT_INTRODUCTION_CONTRACT_SIGNALS,
+    )
+    if not talent_title_signals and not talent_body_signals:
+        return None
+    category_id = (
+        "college.hr.talent-work"
+        if organization_scope == "学院"
+        else "school.hr.talent-work"
+    )
+    category = next(
+        (
+            item
+            for item in flatten_category_paths(taxonomy)
+            if item.category_id == category_id and item.primary_enabled
+        ),
+        None,
+    )
+    if category is None:
+        return None
+    contract_body_signals = _personnel_contract_body_signals(body_text)
+    matched_title_signals = _unique_signals(talent_title_signals)
+    matched_content_signals = _unique_signals(
+        [*talent_body_signals, *contract_body_signals]
+    )
+    matched_signals = _unique_signals(
+        [*matched_title_signals, *matched_content_signals]
+    )
+    scope_score = 0.9 if organization_scope == category.path[0] else 0.45
+    return CategoryCandidate(
+        category_id=category.category_id,
+        category_path=category.path,
+        name="/".join(category.path),
+        rule_score=0.86,
+        matched_signals=matched_signals,
+        matched_title_signals=matched_title_signals,
+        matched_content_signals=matched_content_signals,
+        negative_signals=[],
+        organization_scope=organization_scope or category.path[0],
+        organization_score=scope_score,
+        candidate_reason=(
+            "人才引进合同题名与正文合同结构同时成立："
+            f"{'、'.join(matched_signals[:6])}"
+        ),
+        taxonomy_key=taxonomy.key,
+        taxonomy_version=taxonomy.version,
+        order=category.order,
+        business_score=0.86,
+        scope_score=scope_score,
+        purpose_basis="TALENT_INTRODUCTION_CONTRACT",
+        evidence_support=1.0,
+        title_theme_score=0.46 if matched_title_signals else 0.2,
+        leading_body_score=0.3,
+        negative_conflict=False,
+    )
+
+
+def _is_personnel_contract_structure(*, title_text: str, body_text: str) -> bool:
+    """仅识别具备当事人、期限和聘用字段组的人事合同正文。"""
+
+    if "合同" not in _join_text([title_text, body_text[:2_000]]):
+        return False
+    body_signals = _personnel_contract_body_signals(body_text)
+    has_parties = (
+        {"甲方", "乙方"}.issubset(body_signals)
+        or "双方" in body_signals
+    )
+    has_term = any(signal in body_signals for signal in _PERSONNEL_CONTRACT_TERM_SIGNALS)
+    has_employment = any(
+        signal in body_signals for signal in _PERSONNEL_CONTRACT_EMPLOYMENT_SIGNALS
+    )
+    return has_parties and has_term and has_employment
+
+
+def _personnel_contract_body_signals(body_text: str) -> list[str]:
+    """提取合同正文前段的原始命中词，供候选证据定位而非生成伪造引文。"""
+
+    body_zone = body_text[:4_000]
+    return _unique_signals(
+        [
+            *_matched_configured_signals(body_zone, _PERSONNEL_CONTRACT_PARTY_SIGNALS),
+            *_matched_configured_signals(body_zone, _PERSONNEL_CONTRACT_TERM_SIGNALS),
+            *_matched_configured_signals(body_zone, _PERSONNEL_CONTRACT_EMPLOYMENT_SIGNALS),
+        ]
+    )
+
+
+def _suppress_rules_for_personnel_contract(
+    *,
+    candidates: list[CategoryCandidate],
+    title_text: str,
+    body_text: str,
+) -> list[CategoryCandidate]:
+    """人事合同结构明确时移除制度候选，防止“国家规定”泛词造成误召回。"""
+
+    if not _is_personnel_contract_structure(title_text=title_text, body_text=body_text):
+        return candidates
+    return [
+        candidate
+        for candidate in candidates
+        if candidate.category_id not in _RULES_CATEGORY_IDS
+    ]
 
 
 def _lightweight_structured_scope(title_text: str, body_text: str) -> str | None:

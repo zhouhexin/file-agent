@@ -640,6 +640,56 @@ def test_contract_task_mentions_do_not_override_appointment_assessment_theme():
     assert candidates[0].business_score > accreditation.business_score
 
 
+def test_talent_introduction_contract_overrides_generic_rules_signal():
+    """人才引进合同的正文结构应压过“国家规定”这类泛化制度词。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename="01引进人才工作合同-王磊磊.doc",
+            title="引进人才工作合同",
+            full_text=(
+                "计算机科学与工程学院引进人才工作合同\n"
+                "甲方：西安理工大学计算机科学与工程学院\n"
+                "乙方：王磊磊\n"
+                "乙方受聘从事教学科研工作，工作岗位为专任教师。\n"
+                "本合同期限自签订之日起算，至乙方达到国家规定的退休年龄之日终止。"
+            ),
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert candidates[0].category_id == "college.hr.talent-work"
+    assert candidates[0].purpose_basis == "TALENT_INTRODUCTION_CONTRACT"
+    assert {"甲方", "乙方", "合同期限", "受聘"} <= set(
+        candidates[0].matched_content_signals
+    )
+    assert all(
+        item.category_id not in {"school.admin.rules", "college.admin.rules"}
+        for item in candidates
+    )
+
+
+def test_actual_rules_document_is_not_suppressed_without_personnel_contract_structure():
+    """真实管理办法不具有人事合同字段组时，仍应保持规章制度召回。"""
+
+    candidates = recall_category_candidates(
+        DocumentFeatures(
+            filename="计算机科学与工程学院科研奖励管理办法.docx",
+            title="计算机科学与工程学院科研奖励管理办法",
+            full_text=(
+                "计算机科学与工程学院科研奖励管理办法\n"
+                "为规范学院科研奖励管理，制定本办法。\n"
+                "本办法适用于学院在职教职工，自发布之日起施行。"
+            ),
+        ),
+        load_default_taxonomy(),
+        limit=8,
+    )
+
+    assert any(item.category_id == "college.admin.rules" for item in candidates)
+
+
 def test_recall_candidates_recognizes_workdata_college_talent_filenames():
     """来自 workdata 的稳定学院人才文种在仅有文件名时也应优先召回学院级分类。"""
 

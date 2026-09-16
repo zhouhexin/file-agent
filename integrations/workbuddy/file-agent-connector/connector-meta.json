@@ -7,7 +7,7 @@
   "description_en": "Connect to local File Agent for authorized file import, search, duplicate review, archival and classification.",
   "source": "file-agent-local",
   "type": "mcp",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "auth_mode": "token",
   "minWorkbuddyVersion": "4.24.0",
   "examples_zh": [

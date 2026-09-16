@@ -23,6 +23,7 @@ from app.modules.agent.capability_router import route_user_intent
 from app.modules.classification.conversation_decision import (
     classification_decision_action,
     has_organize_by_classification_intent,
+    parse_explicit_primary_category_command,
 )
 from app.modules.file_lifecycle.conversation_intents import (
     has_file_removal_action,
@@ -3637,6 +3638,10 @@ def _managed_file_classification_filters_from_request(
 ) -> Dict[str, str] | None:
     """提取受管目录批量分类请求中的后端可校验范围。"""
 
+    # “把 A.doc 放入 B 分类下”是单文件主分类更正，目标分类中的“下”不能
+    # 再被本函数解释为受管来源目录边界。
+    if parse_explicit_primary_category_command(message) is not None:
+        return None
     if not _has_classification_intent(message=message, lowered=lowered):
         return None
     if _has_classification_summary_intent(message=message):

@@ -156,6 +156,97 @@ def test_path_bound_set_primary_reuses_placement_coordinator(monkeypatch, tmp_pa
         db.close()
 
 
+def test_working_copy_classifications_api_is_read_only_and_uses_stable_copy_id(
+    monkeypatch,
+    tmp_path,
+):
+    """专用 API 只按活动工作副本读取分类事实，并为 MCP 隔离数据库访问。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, session_factory = client_with_database()
+    headers = _auth(client, "classification-read-owner")
+    _upload(client, headers, "人才推荐意见.txt", "人才项目推荐意见".encode("utf-8"))
+    _drain(session_factory)
+    working_copy = client.get("/api/working-copies", headers=headers).json()[0]
+
+    response = client.get(
+        f"/api/classification/working-copies/{working_copy['id']}/classifications",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["working_copy_id"] == working_copy["id"]
+    assert body["document_id"] == working_copy["document_id"]
+    assert body["document_version_id"] == working_copy["current_version_id"]
+    assert isinstance(body["categories"], list)
+    assert all(
+        "suggested_role" in category and "effective_role" in category
+        for category in body["categories"]
+    )
+
+    missing = client.get(
+        "/api/classification/working-copies/not-found/classifications",
+        headers=headers,
+    )
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "WORKING_COPY_NOT_FOUND"
+
+
+def test_classification_evidence_reader_ignores_legacy_string_signals() -> None:
+    """早期字符串信号不是原文证据，不得导致全部分类接口响应校验失败。"""
+
+    from app.modules.classification.evidence_reader import (
+        CurrentClassificationEvidenceReader,
+    )
+
+    assert CurrentClassificationEvidenceReader._normalize_evidence_items(
+        [
+            "人才工作",
+            {"type": "text_quote", "page_number": 1, "quote": "人才项目推荐意见"},
+            None,
+        ]
+    ) == [
+        {"type": "text_quote", "page_number": 1, "quote": "人才项目推荐意见"}
+    ]
+    assert CurrentClassificationEvidenceReader._normalize_evidence_items(
+        "人才工作"
+    ) == []
+
+
+def test_classification_evidence_reader_hides_inactive_other_after_business_primary() -> None:
+    """业务主类已经落位时，历史零分 other 不应继续作为分类建议展示。"""
+
+    from app.modules.classification.evidence_reader import (
+        CurrentClassificationEvidenceReader,
+    )
+
+    rows = CurrentClassificationEvidenceReader._hide_inactive_system_other(
+        rows=[
+            {
+                "category_id": "system.other",
+                "confidence": 0.0,
+                "effective_role": None,
+            },
+            {
+                "category_id": "college.hr.talent-work",
+                "confidence": 0.72,
+                "effective_role": "PRIMARY",
+            },
+            {
+                "category_id": "college.hr.faculty-recruitment",
+                "confidence": 0.47,
+                "effective_role": None,
+            },
+        ]
+    )
+
+    assert [row["category_id"] for row in rows] == [
+        "college.hr.talent-work",
+        "college.hr.faculty-recruitment",
+    ]
+
+
 def test_integration_path_uses_workbuddy_client_identity(monkeypatch, tmp_path):
     """外部连接器路径应复用协调器，但审计来源必须与普通 API 可区分。"""
 

@@ -158,7 +158,7 @@ export function AuthPage({ onLogin }: AuthPageProps) {
 
       <footer className="auth-footer">
         <nav aria-label="登录页辅助链接">
-          <a href="#help">使用帮助</a>
+          <a href="/prompt-guide">使用帮助</a>
           <a href="#support">技术支持</a>
           <a href="#privacy">隐私政策</a>
         </nav>

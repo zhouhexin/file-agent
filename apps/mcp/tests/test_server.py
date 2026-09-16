@@ -26,6 +26,7 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
         "file_search",
         "classification_overview",
         "classification_files",
+        "file_classifications",
         "file_read",
         "file_download",
         "evidence_answer",
@@ -55,8 +56,14 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
     assert "必须为 null" in descriptions["extraction_submit"]
     assert "必须逐字原样输出" in descriptions["file_search"]
     assert "即使用户要求文件类型" in descriptions["file_search"]
+    assert "没有附加本轮附件" in descriptions["file_search"]
+    assert "完整文件名唯一命中" in descriptions["file_set_primary_category"]
+    assert "不能把文件误当成本轮附件" in descriptions["file_set_primary_category"]
     assert "完整分类树" in descriptions["classification_overview"]
     assert "classification_overview" in descriptions["classification_files"]
+    assert "file_search" in descriptions["file_classifications"]
+    assert "禁止直接访问数据库" in descriptions["file_classifications"]
+    assert "能力暂不支持" in descriptions["file_classifications"]
     schemas = {tool.name: tool.inputSchema for tool in tools}
     # 结构化子项也必须拒绝多余字段，不能只依赖 handler 内的二次检查。
     assert schemas["file_rename"]["$defs"]["ExplicitRenameInput"]["additionalProperties"] is False
@@ -184,14 +191,45 @@ def test_classification_tools_expose_verbatim_user_content(monkeypatch) -> None:
                 "browser_url": "http://file-agent.test/files",
             }
 
+        async def file_classifications(self, **_kwargs) -> dict:
+            return {
+                "status": "COMPLETED",
+                "filename": "推荐意见.docx",
+                "working_copy_id": "copy-1",
+                "document_id": "doc-1",
+                "document_version_id": "version-1",
+                "selection_basis": "TOP_RANKED_EVIDENCE",
+                "reason_codes": ["TITLE_MATCH"],
+                "categories": [
+                    {
+                        "category_id": "college.hr.talent",
+                        "name": "人才工作",
+                        "category_path": ["学院", "人事师资", "人才工作"],
+                        "rank": 1,
+                        "confidence": 0.91,
+                        "suggestion_status": "SUGGESTED",
+                        "suggested_role": "PRIMARY",
+                        "effective_role": "RELATED",
+                        "effective_status": "CONFIRMED",
+                        "evidence_items": [
+                            {
+                                "page_number": 2,
+                                "quote": "现推荐该同志申报人才项目",
+                            }
+                        ],
+                    }
+                ],
+            }
+
         async def close(self) -> None:
             """模拟关闭连接。"""
 
     monkeypatch.setattr(server, "_client", lambda: FakeClient())
     overview = asyncio.run(server.classification_overview())
     files = asyncio.run(server.classification_files())
+    classifications = asyncio.run(server.file_classifications("copy-1"))
 
-    for result in (overview, files):
+    for result in (overview, files, classifications):
         assert isinstance(result, CallToolResult)
         item = next(value for value in result.content if isinstance(value, TextContent))
         assert item.annotations is not None
@@ -200,6 +238,32 @@ def test_classification_tools_expose_verbatim_user_content(monkeypatch) -> None:
         assert "display_text" not in result.structuredContent
     assert "打开完整分类页面" in overview.content[0].text
     assert "| 文件名 | 主分类 | 状态 | 操作 |" in files.content[0].text
+    assert "| 分类 | 角色 | 置信度 | 原文依据 |" in classifications.content[0].text
+    assert "建议：主分类；正式：关联分类（CONFIRMED）" in classifications.content[0].text
+    assert "原文（第 2 页）：现推荐该同志申报人才项目" in classifications.content[0].text
+
+
+def test_file_classifications_reports_missing_capability_without_database_fallback(monkeypatch) -> None:
+    """旧后端缺少专用 API 时只能提示不支持，不能建议或执行数据库查询。"""
+
+    import file_agent_mcp.server as server
+
+    class FakeClient:
+        """模拟尚未部署单文件分类 API 的旧服务。"""
+
+        async def file_classifications(self, **_kwargs) -> dict:
+            raise RuntimeError("NOT_FOUND: Not Found")
+
+        async def close(self) -> None:
+            """模拟关闭连接。"""
+
+    monkeypatch.setattr(server, "_client", lambda: FakeClient())
+    result = asyncio.run(server.file_classifications("copy-1"))
+
+    assert isinstance(result, CallToolResult)
+    assert result.structuredContent["status"] == "CAPABILITY_UNAVAILABLE"
+    assert "暂不支持" in result.content[0].text
+    assert "不会改用数据库、SQL 或终端查询" in result.content[0].text
 
 
 def test_file_download_tool_returns_resource_without_token_or_path_text(monkeypatch) -> None:

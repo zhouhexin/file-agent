@@ -396,6 +396,28 @@ def test_deterministic_planner_routes_managed_directory_classification():
     assert plan.slots["requested_outputs"] == ["classification", "receipt"]
 
 
+def test_deterministic_planner_routes_named_file_primary_category_correction():
+    """完整文件名加目标分类必须进入单文件更正，不能误解析为受管目录批量分类。"""
+
+    message = "将 01引进人才工作合同-王磊磊.doc 放入 学院/人事师资/人才工作 分类下"
+    plan = DeterministicPlanner().plan(
+        conversation_id="conv-explicit-primary-category",
+        user_id="user-1",
+        message_id="msg-explicit-primary-category",
+        message=message,
+        attachments=[],
+    )
+
+    assert plan.intent == "CORRECT_CLASSIFICATION"
+    assert [step.tool_name for step in plan.steps] == ["classification-decision"]
+    assert plan.steps[0].input == {
+        "action": "CORRECT",
+        "message": message,
+        "document_ids": [],
+    }
+    assert "path_prefix" not in plan.steps[0].input
+
+
 def test_llm_planner_routes_managed_directory_classification_without_attachments():
     """LLM 只提供高层意图，受管范围仍应进入受控分类 Tool。"""
 
