@@ -13,10 +13,22 @@ case "$APP_RUNTIME" in
     ;;
   api)
     python /app/deploy/scripts/verify_runtime.py
+    API_UVICORN_WORKERS="${API_UVICORN_WORKERS:-2}"
+    case "$API_UVICORN_WORKERS" in
+      ''|*[!0-9]*)
+        echo "API_UVICORN_WORKERS 必须是正整数" >&2
+        exit 64
+        ;;
+    esac
+    if [ "$API_UVICORN_WORKERS" -lt 1 ]; then
+      echo "API_UVICORN_WORKERS 必须至少为 1" >&2
+      exit 64
+    fi
     echo "==> 启动 File Agent API"
     exec python -m uvicorn app.main:app \
       --host 0.0.0.0 \
       --port 8000 \
+      --workers "$API_UVICORN_WORKERS" \
       --proxy-headers \
       --forwarded-allow-ips='*'
     ;;

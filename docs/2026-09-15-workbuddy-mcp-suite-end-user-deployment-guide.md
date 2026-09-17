@@ -334,6 +334,7 @@ env = [pscustomobject]@{
 FILE_AGENT_API_BASE_URL = $ApiBase
 FILE_AGENT_WEB_BASE_URL = $WebBase
 FILE_AGENT_ACCESS_TOKEN = $Token
+FILE_AGENT_API_TIMEOUT_SECONDS = "30"
 FILE_AGENT_LOCAL_ROOTS = $LocalRootsJson
 LOCAL_TRANSFER_STATE_DIR = (Join-Path $ClientData "transfer-state")
 LOCAL_UPLOAD_CONCURRENCY = "2"
@@ -355,6 +356,8 @@ $McpConfig | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $McpPath -Encod
 - `FILE_AGENT_API_BASE_URL` 应填写用户浏览器可以访问的局域网地址，不能填服务器自身的 `127.0.0.1`。
 - `FILE_AGENT_WEB_BASE_URL` 应填写 File Agent 前端入口；如果 API 直连 `:8000` 而前端经 Caddy 使用 80
   端口，这两个值必须分别填写。
+- `FILE_AGENT_API_TIMEOUT_SECONDS` 是单次 API 请求等待秒数，默认 30，可在 5–120 间调整。超时会提示
+  可安全重试，同一提交会复用原有批次而不会重复导入。
 - 地址不要写成 `http://10.102.4.241/api`；MCP 会自行追加 `/api`。
 - JSON 中不能同时出现 `NO_PROXY` 和 `no_proxy` 两个仅大小写不同的键，否则部分解析工具会认为是重复键。
 - 如果使用的是复制源码而不是 wheel 安装，需要额外增加

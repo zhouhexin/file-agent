@@ -8,6 +8,7 @@ import os
 import hashlib
 import re
 import stat
+from collections.abc import Awaitable
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote, unquote, urlencode, urljoin
@@ -24,6 +25,18 @@ _EXTRACTION_PAGE_SUFFIXES = {
     "image/webp": ".webp",
     "image/tiff": ".tiff",
 }
+
+DEFAULT_FILE_AGENT_API_TIMEOUT_SECONDS = 30.0
+
+
+def _file_agent_api_timeout_seconds(raw_value: str | None) -> float:
+    """读取 WorkBuddy 到 File Agent 的单请求超时，拒绝无界等待。"""
+
+    try:
+        configured = float(str(raw_value or DEFAULT_FILE_AGENT_API_TIMEOUT_SECONDS).strip())
+    except (TypeError, ValueError):
+        configured = DEFAULT_FILE_AGENT_API_TIMEOUT_SECONDS
+    return min(120.0, max(5.0, configured))
 
 
 def _extraction_page_suffix(content_type: object) -> str:
@@ -208,6 +221,7 @@ class FileAgentIntegrationClient:
         roots: LocalRootRegistry,
         transport: httpx.AsyncBaseTransport | None = None,
         web_base_url: str | None = None,
+        api_timeout_seconds: float | None = None,
     ) -> None:
         """创建请求客户端；令牌仅进入 Authorization 头，不写入工具结果。"""
 
@@ -215,10 +229,17 @@ class FileAgentIntegrationClient:
             raise ValueError("FILE_AGENT_ACCESS_TOKEN 不能为空")
         self.roots = roots
         self.web_base_url = (web_base_url or base_url).rstrip("/")
+        timeout_seconds = _file_agent_api_timeout_seconds(
+            (
+                str(api_timeout_seconds)
+                if api_timeout_seconds is not None
+                else os.getenv("FILE_AGENT_API_TIMEOUT_SECONDS")
+            )
+        )
         self.http = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {access_token}"},
-            timeout=httpx.Timeout(120.0, connect=15.0),
+            timeout=httpx.Timeout(timeout_seconds, connect=min(15.0, timeout_seconds)),
             transport=transport,
         )
 
@@ -238,6 +259,28 @@ class FileAgentIntegrationClient:
 
         await self.http.aclose()
 
+    async def _request(
+        self,
+        request: Awaitable[httpx.Response],
+        *,
+        operation: str,
+    ) -> httpx.Response:
+        """把网络故障转成 WorkBuddy 可展示、可行动的错误，不返回空异常文本。"""
+
+        try:
+            return await request
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(
+                "FILE_AGENT_REQUEST_TIMEOUT: "
+                f"{operation} 在 File Agent 响应超时前未完成；服务可能正在处理大量受管目录扫描，"
+                "请稍后重试。相同提交会复用原批次，不会重复导入。"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise RuntimeError(
+                "FILE_AGENT_REQUEST_ERROR: "
+                f"{operation} 无法连接 File Agent（{exc.__class__.__name__}）；请检查服务地址和网络后重试。"
+            ) from exc
+
     async def file_ingest(
         self,
         *,
@@ -254,9 +297,12 @@ class FileAgentIntegrationClient:
         )
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         with path.open("rb") as source:
-            response = await self.http.put(
-                f"/api/integrations/v1/ingest-batches/{batch_id}/items/{item_id}/content",
-                files={"file": (path.name, source, content_type)},
+            response = await self._request(
+                self.http.put(
+                    f"/api/integrations/v1/ingest-batches/{batch_id}/items/{item_id}/content",
+                    files={"file": (path.name, source, content_type)},
+                ),
+                operation="上传导入文件",
             )
         return self._business_json(response)
 
@@ -272,9 +318,12 @@ class FileAgentIntegrationClient:
 
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
         with path.open("rb") as source:
-            response = await self.http.put(
-                f"/api/integrations/v1/ingest-batches/{batch_id}/items/{item_id}/content",
-                files={"file": (filename, source, content_type)},
+            response = await self._request(
+                self.http.put(
+                    f"/api/integrations/v1/ingest-batches/{batch_id}/items/{item_id}/content",
+                    files={"file": (filename, source, content_type)},
+                ),
+                operation="上传 WorkBuddy 附件",
             )
         return self._business_json(response)
 
@@ -282,7 +331,10 @@ class FileAgentIntegrationClient:
         """幂等创建批次，调用方必须提供已经固定的逻辑目录和策略。"""
 
         return self._business_json(
-            await self.http.post("/api/integrations/v1/ingest-batches", json=payload)
+            await self._request(
+                self.http.post("/api/integrations/v1/ingest-batches", json=payload),
+                operation="创建 WorkBuddy 导入批次",
+            )
         )
 
     async def append_items(
@@ -294,9 +346,12 @@ class FileAgentIntegrationClient:
         """分页登记本地文件快照；单页数量由后端 Schema 再次限制。"""
 
         return self._business_json(
-            await self.http.post(
-                f"/api/integrations/v1/ingest-batches/{batch_id}/items",
-                json={"items": items},
+            await self._request(
+                self.http.post(
+                    f"/api/integrations/v1/ingest-batches/{batch_id}/items",
+                    json={"items": items},
+                ),
+                operation="登记 WorkBuddy 附件清单",
             )
         )
 
@@ -304,7 +359,10 @@ class FileAgentIntegrationClient:
         """固定批次成员范围。"""
 
         return self._business_json(
-            await self.http.post(f"/api/integrations/v1/ingest-batches/{batch_id}/seal")
+            await self._request(
+                self.http.post(f"/api/integrations/v1/ingest-batches/{batch_id}/seal"),
+                operation="封存 WorkBuddy 附件清单",
+            )
         )
 
     async def batch_get(self, *, batch_id: str) -> dict[str, Any]:

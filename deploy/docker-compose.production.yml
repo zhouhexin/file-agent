@@ -105,6 +105,7 @@ services:
     environment:
       <<: *common-environment
       APP_RUNTIME: api
+      API_UVICORN_WORKERS: ${API_UVICORN_WORKERS:-2}
       MCP_FILESYSTEM_ENABLED: ${MCP_FILESYSTEM_ENABLED:-false}
       MCP_FILESYSTEM_COMMAND: ${MCP_FILESYSTEM_COMMAND:-/usr/local/bin/mcp-server-filesystem}
       MCP_FILESYSTEM_TIMEOUT_SECONDS: ${MCP_FILESYSTEM_TIMEOUT_SECONDS:-45}

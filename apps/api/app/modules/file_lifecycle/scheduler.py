@@ -6,12 +6,13 @@
 from __future__ import annotations
 
 import time
+from datetime import timedelta
 
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.db.models import ManagedRoot, WorkingCopyRoot
+from app.db.models import FilesystemJob, ManagedRoot, WorkingCopyRoot, utcnow
 from app.modules.managed_files.jobs import FilesystemJobQueue
 from app.modules.managed_files.service import sync_configured_managed_roots
 
@@ -88,6 +89,8 @@ def enqueue_reconciliation_jobs(*, db: Session, created_by: str | None = None) -
         )
         job_ids.append(repair_job.id)
     for root in roots:
+        if not _periodic_managed_root_scan_due(db=db, root_id=root.id):
+            continue
         job = queue.create_job(
             job_type="RECONCILE_MANAGED_ROOT",
             queue_name="RECONCILE",
@@ -101,6 +104,47 @@ def enqueue_reconciliation_jobs(*, db: Session, created_by: str | None = None) -
         job_ids.append(job.id)
     db.flush()
     return job_ids
+
+
+def _periodic_managed_root_scan_due(*, db: Session, root_id: str) -> bool:
+    """判断常规全量扫描是否到期，避免大目录扫描结束后立刻再次启动。
+
+    watcher 发现真实文件变化时走独立入队路径，不调用本方法，因此不会因周期冷却延迟增量同步。
+    """
+
+    active_job = (
+        db.query(FilesystemJob.id)
+        .filter(
+            FilesystemJob.root_id == root_id,
+            FilesystemJob.job_type.in_({"RECONCILE_MANAGED_ROOT", "SCAN_MANAGED_ROOT"}),
+            FilesystemJob.status.in_({"PENDING", "RUNNING"}),
+        )
+        .first()
+    )
+    if active_job is not None:
+        return False
+
+    latest_scan = (
+        db.query(FilesystemJob.finished_at)
+        .filter(
+            FilesystemJob.root_id == root_id,
+            FilesystemJob.job_type == "SCAN_MANAGED_ROOT",
+            FilesystemJob.status.in_({"COMPLETED", "FAILED"}),
+            FilesystemJob.finished_at.is_not(None),
+        )
+        .order_by(FilesystemJob.finished_at.desc())
+        .first()
+    )
+    if latest_scan is None or latest_scan[0] is None:
+        return True
+    settings = get_settings()
+    finished_at = latest_scan[0]
+    now = utcnow()
+    if finished_at.tzinfo is None:
+        finished_at = finished_at.replace(tzinfo=now.tzinfo)
+    return finished_at + timedelta(
+        seconds=settings.managed_root_full_scan_min_interval_seconds
+    ) <= now
 
 
 def run_reconciliation_scheduler(*, interval_seconds: int | None = None) -> None:

@@ -14,6 +14,7 @@ import pytest
 from file_agent_mcp.client import (
     FileAgentIntegrationClient,
     LocalRootRegistry,
+    _file_agent_api_timeout_seconds,
     _extraction_page_suffix,
 )
 
@@ -36,6 +37,45 @@ def test_extraction_page_suffix_preserves_verified_image_format(
     """下载页必须保留受控 MIME 对应后缀，宿主 OCR 才能按真实格式读取。"""
 
     assert _extraction_page_suffix(content_type) == expected
+
+
+def test_file_agent_api_timeout_is_bounded() -> None:
+    """WorkBuddy 到 File Agent 的超时必须有保守默认值和上限。"""
+
+    assert _file_agent_api_timeout_seconds(None) == 30.0
+    assert _file_agent_api_timeout_seconds("1") == 5.0
+    assert _file_agent_api_timeout_seconds("999") == 120.0
+    assert _file_agent_api_timeout_seconds("invalid") == 30.0
+
+
+def test_create_batch_timeout_has_actionable_error(tmp_path) -> None:
+    """附件提交超时必须返回可见错误，而不能把 ReadTimeout 渲染为空字符串。"""
+
+    root = tmp_path / "allowed"
+    root.mkdir()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        """模拟服务端在响应前读取超时。"""
+
+        raise httpx.ReadTimeout("", request=_request)
+
+    async def scenario() -> None:
+        """执行创建批次并验证转换后的错误。"""
+
+        client = FileAgentIntegrationClient(
+            base_url="http://file-agent.test",
+            access_token="token-value",
+            roots=LocalRootRegistry({"materials": root}),
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            with pytest.raises(RuntimeError, match="FILE_AGENT_REQUEST_TIMEOUT") as exc_info:
+                await client.create_batch({"idempotency_key": "stable-key"})
+            assert "不会重复导入" in str(exc_info.value)
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
 
 
 def test_local_root_registry_rejects_traversal_and_symlink_escape(tmp_path) -> None:

@@ -63,6 +63,7 @@ def test_compose_starts_unique_migration_and_all_required_workers() -> None:
     assert "8000:8000" not in compose
     api_block = compose.split("  api:", 1)[1].split("  scheduler:", 1)[0]
     assert "neo4j:" not in api_block
+    assert "API_UVICORN_WORKERS: ${API_UVICORN_WORKERS:-2}" in api_block
 
 
 def test_production_env_enables_full_local_image_stack_and_managed_sync() -> None:
@@ -100,6 +101,8 @@ def test_production_env_enables_full_local_image_stack_and_managed_sync() -> Non
     assert env["MANAGED_ROOT_HOST_PATH"] == "E:/workdata"
     assert env["MANAGED_ROOT_WORKDATA"] == "/managed/workdata"
     assert env["MANAGED_ROOT_VOLUME_MODE"] == "ro"
+    assert env["API_UVICORN_WORKERS"] == "2"
+    assert env["MANAGED_ROOT_FULL_SCAN_MIN_INTERVAL_SECONDS"] == "3600"
     assert env["MANAGED_ROOT_WORKDATA_CLASSIFICATION_MODE"] == "NONE"
     assert env["MANAGED_FILE_INITIALIZATION_MODE"] == "source_index_first"
     assert env["MATERIALIZE_WORKING_COPY_BACKGROUND_PRIORITY"] == "100"
@@ -202,6 +205,8 @@ def test_runtime_entrypoint_and_management_scripts_fail_closed() -> None:
     assert entrypoint.count("alembic -c apps/api/alembic.ini upgrade head") == 1
     assert 'APP_RUNTIME="${APP_RUNTIME:-api}"' in entrypoint
     assert "verify_runtime.py --managed-root" in entrypoint
+    assert 'API_UVICORN_WORKERS="${API_UVICORN_WORKERS:-2}"' in entrypoint
+    assert '--workers "$API_UVICORN_WORKERS"' in entrypoint
     assert "dockerCpuCount -lt 4" in deploy
     assert "dockerMemoryGb -lt 20" in deploy
     assert "Docker Compose 启动失败" in deploy

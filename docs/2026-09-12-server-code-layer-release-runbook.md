@@ -18,6 +18,10 @@
 
 不包含 WorkBuddy 本地连接器/插件的安装或升级；如本次需要更新该客户端，应另行按其交付文档在 WorkBuddy 所在电脑安装。
 
+本版本额外支持 API 进程数和周期全量扫描冷却：生产 `deploy/.env` 可设置
+`API_UVICORN_WORKERS=2` 与 `MANAGED_ROOT_FULL_SCAN_MIN_INTERVAL_SECONDS=3600`。前者让 API
+请求不与单一进程争用，后者仅抑制无变更的重复全量扫描；watcher 发现真实文件变化时仍会立即入队。
+
 ## 2. 发布前提与禁止事项
 
 发布前确认：
