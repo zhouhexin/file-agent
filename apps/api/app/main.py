@@ -10,6 +10,7 @@ from app.core.api_errors import internal_error_response, register_api_error_hand
 from app.core.config import get_settings, validate_classification_runtime_settings
 from app.core.database import SessionLocal, init_database
 from app.core.logging import cleanup_old_logs, log_context, log_event, new_request_id
+from app.core.security import TokenDecodeError, decode_access_token
 from app.modules.agent.router import (
     admin_agent_runs_router,
     agent_runs_router,
@@ -87,7 +88,11 @@ async def request_logging_middleware(request: Request, call_next):
     # 异常处理器通过 request.state 读取同一个 ID，保证响应体、响应头和 JSONL 日志可以互相定位。
     request.state.request_id = request_id
     start = time.perf_counter()
-    with log_context(request_id=request_id):
+    # 路由依赖中的 get_current_user 在本中间件之后才执行。先从已签名且未过期的
+    # Bearer JWT 提取 subject，才能让 API 开始、结束以及同请求内的 Agent/Tool 日志
+    # 使用同一个 user_id；日志中不保存 Token 本身。
+    user_id = _logging_user_id_from_authorization(request.headers.get("Authorization"))
+    with log_context(request_id=request_id, user_id=user_id):
         log_event(
             "api.request.started",
             method=request.method,
@@ -127,6 +132,22 @@ async def request_logging_middleware(request: Request, call_next):
             message="API 请求完成",
         )
         return response
+
+
+def _logging_user_id_from_authorization(authorization: str | None) -> str | None:
+    """仅为日志关联安全提取有效 Bearer JWT 的用户标识，不改变认证结果。"""
+
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        return None
+    try:
+        subject = str(decode_access_token(token).get("sub") or "").strip()
+    except TokenDecodeError:
+        # 鉴权仍由路由依赖统一拒绝无效 Token；中间件只是不把无效请求归属给用户。
+        return None
+    return subject or None
 
 # 允许本地 Vite 前端跨端口调用 API；生产环境应改为正式域名白名单。
 app.add_middleware(

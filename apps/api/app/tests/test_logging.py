@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.core import config
 from app.core.logging import cleanup_old_logs, format_exception_traceback
+from app.core.security import decode_access_token
 from app.tests.helpers import clear_overrides, client_with_database
 
 
@@ -29,6 +30,33 @@ def test_api_request_writes_jsonl_log_with_request_id(monkeypatch, tmp_path):
     assert completed[-1]["request_id"] == "req-test-001"
     assert completed[-1]["status"] == "COMPLETED"
     assert completed[-1]["duration_ms"] >= 0
+    clear_overrides()
+    config.get_settings.cache_clear()
+
+
+def test_authenticated_api_request_writes_user_id_to_jsonl_log(monkeypatch, tmp_path):
+    """有效 Bearer Token 的访问日志必须带用户 ID，便于关联 MCP 请求。"""
+
+    monkeypatch.setenv("LOG_DIR", str(tmp_path))
+    config.get_settings.cache_clear()
+    client, _ = client_with_database()
+    auth_header = _auth_header(client)
+    expected_user_id = str(
+        decode_access_token(auth_header["Authorization"].removeprefix("Bearer "))["sub"]
+    )
+
+    response = client.get(
+        "/api/health",
+        headers={**auth_header, "X-Request-ID": "req-user-id-log-test"},
+    )
+
+    assert response.status_code == 200
+    records = _read_jsonl_logs(tmp_path)
+    request_records = [
+        item for item in records if item.get("request_id") == "req-user-id-log-test"
+    ]
+    assert request_records
+    assert all(item["user_id"] == expected_user_id for item in request_records)
     clear_overrides()
     config.get_settings.cache_clear()
 
