@@ -107,7 +107,9 @@ class UploadedRenameReviewResolutionService:
         }
         for selected_document_id in list(selected_document_ids):
             selected_document = self.db.get(Document, selected_document_id)
-            if selected_document is None or selected_document.user_id != self.user_id:
+            if selected_document is None or not self._document_is_accessible(
+                document=selected_document
+            ):
                 continue
             selected_copy = self._resolve_active_working_copy(
                 document=selected_document
@@ -171,7 +173,7 @@ class UploadedRenameReviewResolutionService:
             if not source_document_id or source_document_id in used_source_ids:
                 return _error("PENDING_RENAME_INVALID", "待确认文件范围无效，请重新生成计划。")
             document = self.db.get(Document, source_document_id)
-            if document is None or document.user_id != self.user_id:
+            if document is None or not self._document_is_accessible(document=document):
                 return _error("DOCUMENT_NOT_FOUND", "待确认文件不存在或不属于当前用户。")
             try:
                 validated_target = _validate_target_filename(
@@ -431,16 +433,15 @@ class UploadedRenameReviewResolutionService:
         if attachment_ids:
             documents = (
                 self.db.query(Document)
-                .filter(
-                    Document.user_id == self.user_id,
-                    Document.id.in_(attachment_ids),
-                )
+                .filter(Document.id.in_(attachment_ids))
                 .all()
             )
             by_id = {row.id: row for row in documents}
             for document_id in attachment_ids:
                 document = by_id.get(document_id)
-                if document is None:
+                if document is None or not self._document_is_accessible(
+                    document=document
+                ):
                     continue
                 candidates.append(
                     {
@@ -461,7 +462,6 @@ class UploadedRenameReviewResolutionService:
             .filter(
                 WorkingCopy.workspace_id == get_shared_workspace_id(self.db),
                 WorkingCopy.status == "ACTIVE",
-                Document.user_id == self.user_id,
             )
             .order_by(WorkingCopy.updated_at.desc())
             .limit(500)
@@ -494,12 +494,14 @@ class UploadedRenameReviewResolutionService:
             if not document_id:
                 continue
             document = self.db.get(Document, document_id)
-            if document is None or document.user_id != self.user_id:
+            if document is None or not self._document_is_accessible(document=document):
                 continue
             active_copy = self._resolve_active_working_copy(document=document)
             if active_copy is not None:
                 active_document = self.db.get(Document, active_copy.document_id)
-                if active_document is None or active_document.user_id != self.user_id:
+                if active_document is None or not self._document_is_accessible(
+                    document=active_document
+                ):
                     continue
                 document = active_document
                 document_id = active_document.id
@@ -555,7 +557,7 @@ class UploadedRenameReviewResolutionService:
         source_name: str,
         document_ids: list[str] | None,
     ) -> list[dict[str, Any]]:
-        """在当前用户可见的共享工作区按完整文件名查询活动副本。"""
+        """在共享工作区按完整文件名查询当前认证用户可操作的活动副本。"""
 
         query = (
             self.db.query(WorkingCopy, Document, ManagedFile)
@@ -565,7 +567,6 @@ class UploadedRenameReviewResolutionService:
                 WorkingCopy.workspace_id == get_shared_workspace_id(self.db),
                 WorkingCopy.status == "ACTIVE",
                 WorkingCopy.filename == source_name,
-                Document.user_id == self.user_id,
             )
         )
         selected_ids = [str(value) for value in document_ids or [] if str(value)]
@@ -614,21 +615,15 @@ class UploadedRenameReviewResolutionService:
         *,
         document: Document,
     ) -> WorkingCopy | None:
-        """把上传来源或工作副本文档解析到当前用户可见的活动共享副本。"""
+        """把本人上传来源或共享工作副本文档解析到活动共享副本。"""
 
-        direct = (
-            self.db.query(WorkingCopy)
-            .join(Document, Document.id == WorkingCopy.document_id)
-            .filter(
-                WorkingCopy.document_id == document.id,
-                WorkingCopy.workspace_id == get_shared_workspace_id(self.db),
-                WorkingCopy.status == "ACTIVE",
-                Document.user_id == self.user_id,
-            )
-            .one_or_none()
-        )
+        direct = self._direct_active_shared_working_copy(document_id=document.id)
         if direct is not None:
             return direct
+        # 只有本人上传的临时文档才允许沿归档记录映射到共享副本；其他用户尚未
+        # 归档的私有上传不能因为知道 Document ID 就跨用户进入重命名链路。
+        if document.user_id != self.user_id:
+            return None
         upload_version = (
             self.db.query(DocumentVersion)
             .filter(
@@ -658,7 +653,32 @@ class UploadedRenameReviewResolutionService:
                 WorkingCopy.managed_file_id == archive.managed_file_id,
                 WorkingCopy.workspace_id == get_shared_workspace_id(self.db),
                 WorkingCopy.status == "ACTIVE",
-                Document.user_id == self.user_id,
+            )
+            .one_or_none()
+        )
+
+    def _document_is_accessible(self, *, document: Document) -> bool:
+        """仅允许本人上传文档或共享工作区中的活动工作副本文档。"""
+
+        if document.user_id == self.user_id:
+            return True
+        return (
+            self._direct_active_shared_working_copy(document_id=document.id) is not None
+        )
+
+    def _direct_active_shared_working_copy(
+        self,
+        *,
+        document_id: str,
+    ) -> WorkingCopy | None:
+        """按稳定 Document ID 解析共享工作区中的活动工作副本。"""
+
+        return (
+            self.db.query(WorkingCopy)
+            .filter(
+                WorkingCopy.document_id == document_id,
+                WorkingCopy.workspace_id == get_shared_workspace_id(self.db),
+                WorkingCopy.status == "ACTIVE",
             )
             .one_or_none()
         )
@@ -688,7 +708,7 @@ class UploadedRenameReviewResolutionService:
                 or ""
             )
             document = self.db.get(Document, document_id)
-            if document is None or document.user_id != self.user_id:
+            if document is None or not self._document_is_accessible(document=document):
                 continue
             version = (
                 self.db.query(DocumentVersion)

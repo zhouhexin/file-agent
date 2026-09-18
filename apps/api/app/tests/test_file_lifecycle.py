@@ -866,6 +866,65 @@ def test_explicit_re_rename_uses_current_working_copy_name(monkeypatch, tmp_path
     clear_overrides()
 
 
+def test_authenticated_user_can_explicitly_rename_shared_working_copy_owned_by_importer(
+    monkeypatch,
+    tmp_path,
+):
+    """共享副本的导入审计用户不能阻止其他认证用户按稳定文档 ID 明确改名。"""
+
+    _configure(monkeypatch, tmp_path)
+    client, SessionLocal = client_with_database()
+    importer_headers = _auth(client, "shared-rename-importer")
+    user_headers = _auth(client, "shared-rename-operator")
+    source_name = "2023_计算机科学与工程学院春季学期工作总结.docx"
+    target_name = "2023_计算机科学与工程学院春季工作总结.docx"
+    _upload(
+        client,
+        importer_headers,
+        filename=source_name,
+        content=b"shared-working-copy-cross-user-rename",
+    )
+    _drain(SessionLocal)
+
+    with SessionLocal() as db:
+        source_copy = (
+            db.query(WorkingCopy)
+            .filter(
+                WorkingCopy.status == "ACTIVE",
+                WorkingCopy.filename == source_name,
+            )
+            .one()
+        )
+        working_document_id = source_copy.document_id
+
+    response = client.post(
+        "/api/conversations/shared-working-copy-cross-user-rename/messages",
+        headers=user_headers,
+        json={
+            "content": f"把{source_name}重命名为{target_name}",
+            "attachments": [{"document_id": working_document_id}],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    task_result = response.json()["task_result"]
+    assert task_result["response_type"] == "text"
+    assert task_result["operation_plan_id"] is None
+    assert "已直接重命名 1 个文件" in task_result["final_response"]
+    with SessionLocal() as db:
+        renamed_copy = db.get(WorkingCopy, source_copy.id)
+        assert renamed_copy is not None
+        assert renamed_copy.filename == target_name
+        plan = db.query(OperationPlan).order_by(OperationPlan.created_at.desc()).first()
+        assert plan is not None
+        assert plan.status == "EXECUTED"
+        working_document = db.get(Document, renamed_copy.document_id)
+        assert working_document is not None
+        assert plan.user_id != working_document.user_id
+        assert plan.plan_json["items"][0]["document_id"] == working_document_id
+    clear_overrides()
+
+
 def test_explicit_working_copy_rename_detects_shared_filename_conflict(
     monkeypatch,
     tmp_path,

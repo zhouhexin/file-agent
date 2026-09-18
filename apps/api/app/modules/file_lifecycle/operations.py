@@ -344,8 +344,21 @@ class WorkingCopyOperationService:
         ]:
             source_document_id = str(requested.get("document_id") or "")
             source_document = self.db.get(Document, source_document_id)
-            if source_document is None or source_document.user_id != current_user.id:
-                raise HTTPException(status_code=404, detail="上传文件不存在或不属于当前用户")
+            if source_document is None:
+                raise HTTPException(status_code=404, detail="文件不存在或当前用户无权操作")
+            direct_shared_copy = (
+                self.db.query(WorkingCopy)
+                .filter(
+                    WorkingCopy.document_id == source_document.id,
+                    WorkingCopy.workspace_id == shared_workspace_id,
+                    WorkingCopy.status == "ACTIVE",
+                )
+                .one_or_none()
+            )
+            # 私有上传文档仍严格按上传用户隔离；只有已经进入唯一共享工作区的
+            # 活动工作副本文档，才允许其他认证用户依据稳定 Document ID 操作。
+            if source_document.user_id != current_user.id and direct_shared_copy is None:
+                raise HTTPException(status_code=404, detail="文件不存在或当前用户无权操作")
             working_copy = self._resolve_uploaded_source_working_copy(
                 source_document=source_document,
                 workspace_id=shared_workspace_id,

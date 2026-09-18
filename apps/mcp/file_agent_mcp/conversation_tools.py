@@ -52,9 +52,28 @@ class ExplicitRenameInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    document_id: str = Field(min_length=1, max_length=100)
-    source_filename: str = Field(min_length=1, max_length=255)
-    target_filename: str = Field(min_length=1, max_length=255)
+    document_id: str = Field(
+        min_length=1,
+        max_length=100,
+        description=(
+            "必须原样使用 file_search 结果 "
+            "tool_context.action_inputs.file_rename.document_id；不得使用 "
+            "working_copy_id 或 document_version_id。"
+        ),
+    )
+    source_filename: str = Field(
+        min_length=1,
+        max_length=255,
+        description=(
+            "必须原样使用同一搜索结果 "
+            "tool_context.action_inputs.file_rename.source_filename。"
+        ),
+    )
+    target_filename: str = Field(
+        min_length=1,
+        max_length=255,
+        description="用户明确要求的新文件名，包含需保留的扩展名。",
+    )
 
 
 class ExplicitClassificationPlacementInput(BaseModel):
@@ -300,11 +319,15 @@ class WorkBuddyConversationService:
                 raise ValueError(
                     "每个重命名项必须且只能包含 document_id、source_filename、target_filename"
                 ) from exc
-            document_id = validate_document_ids([item.document_id], required=True)[0]
+            candidate_id = validate_document_ids([item.document_id], required=True)[0]
             source = validate_filename(item.source_filename, label="source_filename")
             target = validate_filename(item.target_filename, label="target_filename")
             if source == target:
                 raise ValueError("目标文件名不能与当前文件名相同")
+            document_id = await self._canonical_rename_document_id(
+                candidate_id=candidate_id,
+                source_filename=source,
+            )
             document_ids.append(document_id)
             commands.append(f"把“{source}”重命名为“{target}”")
         if len(document_ids) != len(set(document_ids)):
@@ -314,6 +337,49 @@ class WorkBuddyConversationService:
             content="\n".join(commands),
             document_ids=document_ids,
         )
+
+    async def _canonical_rename_document_id(
+        self,
+        *,
+        candidate_id: str,
+        source_filename: str,
+    ) -> str:
+        """将误传的工作副本 ID 安全归一为文档 ID。
+
+        WorkBuddy 可能在搜索结果同时携带多种稳定 ID 时选错字段。
+        这里只通过当前令牌可访问的分类读取 API 尝试把候选解析为活动
+        工作副本，并要求服务端返回的当前文件名与用户锁定名称完全一致。
+        若候选并非工作副本 ID，则保留原值作为 document_id 交给后端
+        权限和对象校验；不直连数据库，也不绕过 OperationPlan。
+        """
+
+        try:
+            payload = await self.client.file_classifications(
+                working_copy_id=candidate_id,
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            if message.startswith(("NOT_FOUND:", "WORKING_COPY_NOT_FOUND:")) or (
+                message.startswith("INTEGRATION_API_ERROR:")
+                and ("404" in message or "Not Found" in message)
+            ):
+                return candidate_id
+            raise
+
+        actual_filename = validate_filename(
+            str(payload.get("filename") or ""),
+            label="服务端当前文件名",
+        )
+        if actual_filename != source_filename:
+            raise ValueError(
+                "传入的 ID 对应工作副本与 source_filename 不一致，"
+                "请重新使用同一条 file_search 结果中的重命名参数"
+            )
+        document_id = validate_document_ids(
+            [str(payload.get("document_id") or "")],
+            required=True,
+        )[0]
+        return document_id
 
     async def submit_classification_placement(
         self,
@@ -365,7 +431,15 @@ def project_file_search_result(payload: dict[str, Any]) -> dict[str, Any]:
     for raw in payload.get("files", []):
         if not isinstance(raw, dict):
             continue
-        filename = " ".join(str(raw.get("filename") or "未命名文件").split())[:255]
+        try:
+            source_filename = validate_filename(
+                str(raw.get("filename") or ""),
+                label="filename",
+            )
+        except ValueError:
+            # 异常文件名仍可出现在只读搜索结果中，但不能生成写操作参数。
+            source_filename = ""
+        filename = " ".join((source_filename or "未命名文件").split())[:255]
         basis = _file_search_basis(raw)
         document_id = str(raw.get("document_id") or "").strip()
         working_copy_id = str(raw.get("working_copy_id") or "").strip()
@@ -379,17 +453,54 @@ def project_file_search_result(payload: dict[str, Any]) -> dict[str, Any]:
                 "download_url": download_url,
                 # 这些字段是后续 Tool 的机器上下文，不属于用户展示字段。
                 "tool_context": {
-                    key: value
-                    for key, value in {
-                        "document_id": document_id or None,
-                        "working_copy_id": working_copy_id or None,
-                        "document_version_id": str(
-                            raw.get("document_version_id") or ""
-                        ).strip()
-                        or None,
-                        "revision": raw.get("revision"),
-                    }.items()
-                    if value is not None
+                    **{
+                        key: value
+                        for key, value in {
+                            "document_id": document_id or None,
+                            "working_copy_id": working_copy_id or None,
+                            "document_version_id": str(
+                                raw.get("document_version_id") or ""
+                            ).strip()
+                            or None,
+                            "revision": raw.get("revision"),
+                        }.items()
+                        if value is not None
+                    },
+                    # 按 Tool 分组的动作参数比并列 ID 更不易被模型混淆。
+                    # 旧的扁平字段暂时保留，供已安装客户端平滑升级；服务端
+                    # 仍会在执行前核对对象和文件名。
+                    "action_inputs": {
+                        **(
+                            {
+                                "file_read": {"document_id": document_id},
+                                "evidence_answer": {"document_id": document_id},
+                                **(
+                                    {
+                                        "file_rename": {
+                                            "document_id": document_id,
+                                            "source_filename": source_filename,
+                                        }
+                                    }
+                                    if source_filename
+                                    else {}
+                                ),
+                            }
+                            if document_id
+                            else {}
+                        ),
+                        **(
+                            {
+                                "file_download": {
+                                    "working_copy_id": working_copy_id
+                                },
+                                "file_classifications": {
+                                    "working_copy_id": working_copy_id
+                                },
+                            }
+                            if working_copy_id
+                            else {}
+                        ),
+                    },
                 },
                 "available_actions": {
                     "preview": bool(preview_url),

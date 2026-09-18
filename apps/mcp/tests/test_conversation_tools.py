@@ -53,6 +53,11 @@ class FakeConversationClient:
         self.calls.append({"method": "classification_files", **kwargs})
         return {"page": kwargs["page"], "page_size": kwargs["page_size"], "files": []}
 
+    async def file_classifications(self, **_kwargs) -> dict:
+        """默认把候选视为 document_id，模拟工作副本解析接口未命中。"""
+
+        raise RuntimeError("WORKING_COPY_NOT_FOUND: Working copy not found")
+
     async def classification_placement_submit(self, **kwargs) -> dict:
         """记录分类落位提交，不执行任何真实网络请求。"""
 
@@ -245,6 +250,16 @@ def test_file_search_projects_only_filename_and_basis_for_user_display() -> None
                 "working_copy_id": "copy-1",
                 "document_version_id": "version-1",
                 "revision": 3,
+                "action_inputs": {
+                    "file_read": {"document_id": "doc-1"},
+                    "evidence_answer": {"document_id": "doc-1"},
+                    "file_rename": {
+                        "document_id": "doc-1",
+                        "source_filename": "推荐意见-[测试].docx",
+                    },
+                    "file_download": {"working_copy_id": "copy-1"},
+                    "file_classifications": {"working_copy_id": "copy-1"},
+                },
             },
             "available_actions": {"preview": True, "download": True},
         }
@@ -271,6 +286,28 @@ def test_file_search_projects_only_filename_and_basis_for_user_display() -> None
         "allow_column_changes": False,
         "required_columns": ["文件名", "依据", "操作"],
         "preserve_markdown_links": True,
+    }
+
+
+def test_file_search_rename_action_preserves_exact_source_filename() -> None:
+    """展示名可压缩空格，但重命名锁定名必须保持后端原始文件名。"""
+
+    result = project_file_search_result(
+        {
+            "query": "工作总结",
+            "files": [
+                {
+                    "filename": "学院  工作总结.docx",
+                    "document_id": "doc-1",
+                }
+            ],
+        }
+    )
+
+    assert result["files"][0]["filename"] == "学院 工作总结.docx"
+    assert result["files"][0]["tool_context"]["action_inputs"]["file_rename"] == {
+        "document_id": "doc-1",
+        "source_filename": "学院  工作总结.docx",
     }
 
 
@@ -419,6 +456,66 @@ def test_explicit_rename_rejects_paths_and_duplicate_targets() -> None:
                         "source_filename": "新文件.docx",
                         "target_filename": "再次改名.docx",
                     },
+                ],
+            )
+        )
+
+
+def test_explicit_rename_canonicalizes_working_copy_id_before_submission() -> None:
+    """WorkBuddy 误传 working_copy_id 时必须校验文件名后转为 document_id。"""
+
+    class WorkingCopyAwareClient(FakeConversationClient):
+        """模拟后端只读分类接口可将工作副本归一为文档。"""
+
+        async def file_classifications(self, *, working_copy_id: str) -> dict:
+            assert working_copy_id == "copy-1"
+            return {
+                "working_copy_id": "copy-1",
+                "document_id": "doc-1",
+                "filename": "旧文件.docx",
+            }
+
+    client = WorkingCopyAwareClient()
+    asyncio.run(
+        WorkBuddyConversationService(client).rename(
+            conversation_ref="thread-rename",
+            renames=[
+                {
+                    "document_id": "copy-1",
+                    "source_filename": "旧文件.docx",
+                    "target_filename": "新文件.docx",
+                }
+            ],
+        )
+    )
+
+    assert client.calls[0]["method"] == "conversation_task"
+    assert client.calls[0]["document_ids"] == ["doc-1"]
+
+
+def test_explicit_rename_rejects_mismatched_working_copy_filename() -> None:
+    """工作副本 ID 与当前文件名不绑定时不得执行重命名。"""
+
+    class MismatchedWorkingCopyClient(FakeConversationClient):
+        """模拟模型把另一个文件的工作副本 ID 混入当前操作。"""
+
+        async def file_classifications(self, **_kwargs) -> dict:
+            return {
+                "working_copy_id": "copy-other",
+                "document_id": "doc-other",
+                "filename": "另一个文件.docx",
+            }
+
+    with pytest.raises(ValueError, match="source_filename 不一致"):
+        asyncio.run(
+            WorkBuddyConversationService(MismatchedWorkingCopyClient()).rename(
+                conversation_ref="thread-rename",
+                renames=[
+                    {
+                        "document_id": "copy-other",
+                        "source_filename": "旧文件.docx",
+                        "target_filename": "新文件.docx",
+                    }
                 ],
             )
         )

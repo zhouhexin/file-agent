@@ -344,7 +344,12 @@ async def evidence_answer(
 
 @mcp.tool(
     name="file_rename",
-    description="按用户明确给出的原文件名和目标文件名重命名已确定文件。",
+    description=(
+        "按用户明确给出的原文件名和目标文件名重命名已确定文件。"
+        "renames[].document_id 和 source_filename 必须原样复制同一条 file_search "
+        "结果 tool_context.action_inputs.file_rename 中的值；严禁使用 "
+        "working_copy_id 或 document_version_id 代替 document_id。"
+    ),
     structured_output=True,
 )
 async def file_rename(
@@ -367,7 +372,8 @@ async def file_rename(
     name="file_download",
     description=(
         "下载 file_search 已确定且已生成工作副本的文件。必须原样使用搜索结果"
-        " tool_context 中的 working_copy_id；文件保存到 MCP 专用本机缓存。"
+        " tool_context.action_inputs.file_download.working_copy_id；"
+        "文件保存到 MCP 专用本机缓存。"
     ),
     structured_output=False,
 )

@@ -66,7 +66,13 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
     assert "能力暂不支持" in descriptions["file_classifications"]
     schemas = {tool.name: tool.inputSchema for tool in tools}
     # 结构化子项也必须拒绝多余字段，不能只依赖 handler 内的二次检查。
-    assert schemas["file_rename"]["$defs"]["ExplicitRenameInput"]["additionalProperties"] is False
+    rename_item_schema = schemas["file_rename"]["$defs"]["ExplicitRenameInput"]
+    assert rename_item_schema["additionalProperties"] is False
+    rename_document_description = rename_item_schema["properties"]["document_id"][
+        "description"
+    ]
+    assert "action_inputs.file_rename.document_id" in rename_document_description
+    assert "working_copy_id" in rename_document_description
     assert (
         schemas["file_set_primary_category"]["$defs"][
             "SetPrimaryCategoryInput"
@@ -149,9 +155,12 @@ def test_file_search_tool_exposes_clickable_table_and_keeps_ids_structured(monke
     assert "doc-1" not in visible
     assert "[预览](http://file-agent.test/api/public/file-access/token/preview)" in visible
     assert "[下载](http://file-agent.test/api/public/file-access/token/download)" in visible
-    assert result.structuredContent["files"][0]["tool_context"] == {
+    tool_context = result.structuredContent["files"][0]["tool_context"]
+    assert tool_context["document_id"] == "doc-1"
+    assert tool_context["working_copy_id"] == "copy-1"
+    assert tool_context["action_inputs"]["file_rename"] == {
         "document_id": "doc-1",
-        "working_copy_id": "copy-1",
+        "source_filename": "推荐意见.docx",
     }
     assert "逐字原样展示" in result.structuredContent["display_policy"]
     assert result.structuredContent["response_contract"] == {
