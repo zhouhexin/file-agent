@@ -606,6 +606,46 @@ class FileAgentIntegrationClient:
         为完整文件的半成品。
         """
 
+        return await self._download_to_cache(
+            url=f"/api/working-copies/{_path_segment(working_copy_id)}/download",
+            cache_id=working_copy_id, output_dir=output_dir, max_bytes=max_bytes,
+        )
+
+    async def download_dataset_export(self, *, dataset_id: str, export_id: str, output_dir: Path) -> dict[str, Any]:
+        """聚合导出复用同一鉴权流式下载与缓存发布逻辑。"""
+        return await self._download_to_cache(
+            url=f"/api/structured-datasets/{_path_segment(dataset_id)}/exports/{_path_segment(export_id)}/content",
+            cache_id=f"dataset:{dataset_id}:{export_id}", output_dir=output_dir, max_bytes=32 * 1024 * 1024,
+        )
+
+    async def dataset_request(self, method: str, path: str, payload: dict | None = None) -> dict[str, Any]:
+        """路径仅由新增工具的固定模板生成，Tool 不暴露通用 HTTP 调用。"""
+        response = await self._request(self.http.request(method, f"/api/structured-datasets{path}", json=payload), operation="累计表格")
+        return self._business_json(response)
+
+    async def document_extraction_request(self, method: str, task_id: str, suffix: str, payload: dict | None = None) -> dict[str, Any]:
+        """调用固定的 WorkBuddy 文档提取契约，不开放任意 HTTP 路径。"""
+
+        response = await self._request(
+            self.http.request(method, f"/api/integrations/v1/document-extraction-tasks/{_path_segment(task_id)}{suffix}", json=payload),
+            operation="WorkBuddy 文档提取",
+        )
+        return self._business_json(response)
+
+    async def _download_to_cache(
+        self,
+        *,
+        url: str,
+        cache_id: str,
+        output_dir: Path,
+        max_bytes: int,
+        headers: dict[str, str] | None = None,
+        params: dict[str, str] | None = None,
+        expected_sha256: str | None = None,
+        expected_size: int | None = None,
+    ) -> dict[str, Any]:
+        """共享下载实现保留原有大小、路径、符号链接和原子发布保护。"""
+
         if max_bytes <= 0:
             raise ValueError("本地下载大小上限必须大于 0")
         configured_root = output_dir.expanduser()
@@ -616,7 +656,7 @@ class FileAgentIntegrationClient:
         if root.is_symlink() or not root.is_dir():
             raise ValueError("本地下载缓存目录无效")
 
-        cache_key = hashlib.sha256(working_copy_id.encode("utf-8")).hexdigest()[:24]
+        cache_key = hashlib.sha256(cache_id.encode("utf-8")).hexdigest()[:24]
         target_dir = (root / cache_key).resolve()
         if root not in target_dir.parents:
             raise ValueError("本地下载缓存目标越出固定目录")
@@ -624,7 +664,9 @@ class FileAgentIntegrationClient:
 
         async with self.http.stream(
             "GET",
-            f"/api/working-copies/{_path_segment(working_copy_id)}/download",
+            url,
+            headers=headers,
+            params=params,
         ) as response:
             if response.is_error:
                 await response.aread()
@@ -644,13 +686,20 @@ class FileAgentIntegrationClient:
                 raise RuntimeError("后端返回的下载文件名不安全")
             temporary = target_dir / f".{uuid4().hex}.part"
             written = 0
+            content_digest = hashlib.sha256()
             try:
                 with temporary.open("xb") as destination:
                     async for chunk in response.aiter_bytes():
                         written += len(chunk)
                         if written > max_bytes:
                             raise RuntimeError("文件超过本机下载大小上限")
+                        content_digest.update(chunk)
                         destination.write(chunk)
+                if expected_size is not None and written != expected_size:
+                    raise RuntimeError("SOURCE_SNAPSHOT_CHANGED: 下载文件大小与固定源版本不一致")
+                actual_sha256 = content_digest.hexdigest()
+                if expected_sha256 is not None and actual_sha256 != expected_sha256:
+                    raise RuntimeError("SOURCE_SNAPSHOT_CHANGED: 下载文件哈希与固定源版本不一致")
                 os.replace(temporary, target)
                 os.chmod(target, 0o600)
             finally:
@@ -665,7 +714,42 @@ class FileAgentIntegrationClient:
             )[0]
             or "application/octet-stream",
             "size_bytes": written,
+            "sha256": content_digest.hexdigest(),
         }
+
+    async def document_extraction_get(self, *, task_id: str) -> dict[str, Any]:
+        """读取文档任务状态，不返回正文或本地资源。"""
+
+        return await self.document_extraction_request("GET", task_id, "")
+
+    async def document_extraction_claim(self, *, task_id: str, worker_id: str, output_dir: Path) -> dict[str, Any]:
+        """领取文档任务并流式下载固定原文件，完成大小与 SHA-256 双重校验。"""
+
+        claim = await self.document_extraction_request("POST", task_id, "/claim", {"worker_id": worker_id})
+        source = dict(claim.get("source") or {})
+        resource = await self._download_to_cache(
+            url=f"/api/integrations/v1/document-extraction-tasks/{_path_segment(task_id)}/source",
+            cache_id=f"document-extraction:{task_id}:{claim['source_sha256']}",
+            output_dir=output_dir,
+            max_bytes=max(int(source.get("size_bytes") or 0), 1),
+            headers={"X-Extraction-Lease-Token": str(claim["lease_token"])},
+            params={"worker_id": worker_id},
+            expected_sha256=str(claim["source_sha256"]),
+            expected_size=int(source.get("size_bytes") or 0),
+        )
+        return {**claim, "source": {**source, **resource}}
+
+    async def document_extraction_renew(self, *, task_id: str, worker_id: str, lease_token: str) -> dict[str, Any]:
+        """续期当前文档提取租约。"""
+
+        return await self.document_extraction_request(
+            "POST", task_id, "/renew", {"worker_id": worker_id, "lease_token": lease_token}
+        )
+
+    async def document_extraction_submit(self, *, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """提交通过 MCP 强类型 schema 校验的宿主全文结果。"""
+
+        return await self.document_extraction_request("POST", task_id, "/results", payload)
 
     async def classification_placement_status(
         self,

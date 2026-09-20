@@ -1,5 +1,11 @@
 # 文件助手 WorkBuddy 附件桥接
 
+2026-09-20 文档累计表补充（套件 0.1.11）：新增图片、DOC/DOCX、PDF 的宿主正文提取与累计 Excel
+编排。连接器 1.0.3 同时开启 `WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED` 和
+`WORKBUDDY_DOCUMENT_EXTRACTION_ENABLED`，并允许可信的 `workbuddy_attachment_ingest`、
+`workbuddy_submission_ingest` 入口正常注册。更新后必须重新安装本地市场并完全重启 WorkBuddy；仅更新
+后端或 Skill 文件不会刷新正在运行的 stdio MCP 工具清单。
+
 2026-09-13 重复对比展示补充（套件 0.1.10）：发现 `WAITING_DUPLICATE_CONFIRMATION` 后，Skill 必须先对
 最新 review 的每个可对比候选调用 `duplicate_comparison_get`，在回复中逐项展示“打开对比页面”的
 Markdown 链接，之后才能询问继续上传、使用已有文件或取消。该能力主动展示入口，但不会替用户自动打开
@@ -28,7 +34,7 @@ Markdown 链接，之后才能询问继续上传、使用已有文件或取消�
 不是 WorkBuddy 官方稳定附件 API；DOC、XLSX 已有自动化覆盖，仍需各自完成真实 GUI 验收。
 该文档引用捕获能力从 0.1.6 沿用；中文称呼需重新安装 0.1.7 套件，并完全重启 WorkBuddy。
 
-当前试点版本：**0.1.10**。0.1.6 在 0.1.5 的附件捕获修复上补齐 WorkBuddy 外部 OCR 编排：图片进入
+当前试点版本：**0.1.11**。0.1.6 在 0.1.5 的附件捕获修复上补齐 WorkBuddy 外部 OCR 编排：图片进入
 `WAITING_EXTERNAL_EXTRACTION` 后，不再只查询状态，而是由 Agent 调用 `extraction_claim` 领取固定页，
 使用 WorkBuddy 已启用的腾讯文档 `ocr.extract` 识别，再通过 `extraction_submit` 回填，最后继续查重、
 归档和分类。File Agent 后端不会因此启用内部 OCR。

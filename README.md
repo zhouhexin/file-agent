@@ -158,6 +158,15 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules
 
 前端开发端口固定为 `5173`，如果端口被占用，请先停止占用进程，或同步调整 Vite 端口、`VITE_API_BASE_URL` 和后端 CORS 白名单。
 
+## 可选共享累计表格 Demo
+
+共享图片、Word、PDF 累计表格 Demo 已增加独立 `structured_dataset_*` MCP 工具。新文档通道由 WorkBuddy
+宿主读取原文，File Agent 验收证据、累计查询并导出版本化 XLSX；所有登录用户可共同操作，不增加授权流程。
+默认关闭；先执行到迁移 `20260920_0002`，再在 API 与 MCP 进程同时设置
+`WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED=true` 和 `WORKBUDDY_DOCUMENT_EXTRACTION_ENABLED=true`。
+旧图片兼容路径只需原 Demo 开关。启动和试用见
+[Demo 操作说明](docs/2026-09-18-workbuddy-structured-dataset-demo.md)。
+
 ## MVP 目标
 
 ```text

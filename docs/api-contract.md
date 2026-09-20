@@ -1889,6 +1889,11 @@ GET /api/admin/planner-shadow/metrics?limit=5000
 
 ## 21. WorkBuddy/MCP 批量导入 API
 
+独立新增的共享累计表格 Demo 使用 `/api/structured-datasets`，不修改本节旧导入/OCR 契约。
+所有登录用户共用数据集及 ACTIVE 工作副本，无新增 owner 授权；受独立
+`WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED` 开关控制。完整 API 请求、查询与导出行为见
+[Demo 契约](2026-09-18-workbuddy-structured-dataset-demo.md#api-契约)。
+
 该接口面默认由 `INTEGRATION_INGEST_ENABLED=false` 关闭；试点部署显式设为 `true` 后才接受请求。
 关闭时所有 `/api/integrations/v1` 路由统一返回 `503 / INTEGRATION_INGEST_DISABLED`，不能只依赖
 WorkBuddy 是否展示工具来控制外部导入权限。

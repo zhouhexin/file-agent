@@ -7,7 +7,6 @@ import json
 import os
 import subprocess
 import sys
-import zipfile
 from pathlib import Path
 
 import pytest
@@ -53,25 +52,19 @@ def test_attachment_skill_drives_external_ocr_instead_of_polling() -> None:
     assert "`confidence`" in skill and "填 `null`" in skill
 
 
-def test_marketplace_0110_requires_duplicate_comparison_link_without_cache_files() -> None:
-    """0.1.10 交付包必须先展示重复对比链接，且不混入本机 Python 缓存。"""
+def test_current_marketplace_requires_duplicate_comparison_link() -> None:
+    """当前市场源码必须保留重复对比流程并保持清单版本一致。"""
 
-    marketplace = (
-        Path(__file__).resolve().parents[3]
-        / "integrations"
-        / "workbuddy"
-        / "file-agent-marketplace-0.1.10.zip"
+    marketplace = Path(__file__).resolve().parents[3] / "integrations" / "workbuddy"
+    manifest = json.loads(
+        (marketplace / "file-agent-plugin" / ".codebuddy-plugin" / "plugin.json").read_text(encoding="utf-8")
     )
-    with zipfile.ZipFile(marketplace) as archive:
-        names = set(archive.namelist())
-        assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
-        manifest = json.loads(
-            archive.read("file-agent-plugin/.codebuddy-plugin/plugin.json")
-        )
-        skill = archive.read(
-            "file-agent-plugin/skills/file-agent/SKILL.md"
-        ).decode("utf-8")
-    assert manifest["version"] == "0.1.10"
+    listing = json.loads(
+        (marketplace / ".codebuddy-plugin" / "marketplace.json").read_text(encoding="utf-8")
+    )
+    skill = (marketplace / "file-agent-plugin" / "skills" / "file-agent" / "SKILL.md").read_text(encoding="utf-8")
+    assert manifest["version"] == "0.1.11"
+    assert listing["plugins"][0]["version"] == manifest["version"]
     assert "extraction_claim" in skill
     assert "ocr.extract" in skill
     assert "extraction_submit" in skill

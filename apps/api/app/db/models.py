@@ -218,6 +218,11 @@ class DocumentVersion(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     source_type: Mapped[str] = mapped_column(String(40), nullable=False, default="UPLOAD", index=True)
+    # 新的 WorkBuddy 完整文档提取通道必须随内容版本传播该策略；后续解析、重处理和
+    # 工作副本发布据此阻止服务器回退读取正文，避免宿主提取责任被悄悄绕过。
+    extraction_policy_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
     source_managed_file_id: Mapped[Optional[str]] = mapped_column(
         String(36), ForeignKey("managed_files.id", ondelete="RESTRICT"), nullable=True, index=True
     )
@@ -469,6 +474,54 @@ class DocumentElement(Base):
 
     document: Mapped[Document] = relationship(back_populates="elements")
     extraction_run: Mapped[DocumentExtractionRun] = relationship(back_populates="elements")
+
+
+class StructuredDataset(Base):
+    """所有登录用户共享的固定 Schema 累计表格；创建人只用于审计。"""
+
+    __tablename__ = "structured_datasets"
+    __table_args__ = (UniqueConstraint("creation_key", name="uq_dataset_creation_key"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    schema_json: Mapped[list] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=False)
+    creation_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    creation_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class StructuredDatasetMember(Base):
+    """成员仅引用单图运行，一张内容版本在同一表格只能出现一次。"""
+
+    __tablename__ = "structured_dataset_members"
+    __table_args__ = (
+        UniqueConstraint("dataset_id", "document_version_id", name="uq_dataset_source_version"),
+        UniqueConstraint("dataset_id", "append_key", name="uq_dataset_append_key"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    dataset_id: Mapped[str] = mapped_column(String(36), ForeignKey("structured_datasets.id", ondelete="RESTRICT"), nullable=False, index=True)
+    structured_extraction_run_id: Mapped[str] = mapped_column(String(36), ForeignKey("structured_extraction_runs.id", ondelete="RESTRICT"), nullable=False)
+    document_version_id: Mapped[str] = mapped_column(String(36), ForeignKey("document_versions.id", ondelete="RESTRICT"), nullable=False)
+    append_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    appended_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class StructuredDatasetExport(Base):
+    """跨文档 XLSX 快照独立管理，不伪造单文档派生件关系。"""
+
+    __tablename__ = "structured_dataset_exports"
+    __table_args__ = (UniqueConstraint("dataset_id", "dataset_revision", name="uq_dataset_export_revision"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    dataset_id: Mapped[str] = mapped_column(String(36), ForeignKey("structured_datasets.id", ondelete="RESTRICT"), nullable=False, index=True)
+    dataset_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class StructuredExtractionRun(Base):
@@ -2651,6 +2704,14 @@ class ExternalExtractionTask(Base):
     provider_contract_version: Mapped[str] = mapped_column(String(40), nullable=False)
     page_manifest_json: Mapped[list] = mapped_column(
         JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=list
+    )
+    # 文档提取 v1 固定整个原文件的受控资源描述，不和旧 OCR 的页图 manifest 混用。
+    source_manifest_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    # 仅保存覆盖、数量和错误摘要；正文必须留在 DocumentPage，不能复制进任务审计。
+    result_summary_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
     )
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="PENDING", index=True)
     lease_owner: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)

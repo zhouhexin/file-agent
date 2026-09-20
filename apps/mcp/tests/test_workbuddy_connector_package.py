@@ -19,10 +19,12 @@ def test_workbuddy_connector_package_is_complete_and_safe() -> None:
     assert meta["name_zh"] == "文件助手"
     assert meta["type"] == "mcp"
     assert meta["auth_mode"] == "token"
-    assert meta["version"] == "1.0.2"
+    assert meta["version"] == "1.0.3"
     assert len(mcp["mcpServers"]) == 1
     server = mcp["mcpServers"]["file-agent"]
-    assert server["disabledTools"] == ["workbuddy_attachment_ingest", "workbuddy_submission_ingest"]
+    assert "disabledTools" not in server
+    assert server["env"]["WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED"] == "true"
+    assert server["env"]["WORKBUDDY_DOCUMENT_EXTRACTION_ENABLED"] == "true"
     field_keys = {field["key"] for field in schema["fields"]}
     placeholders = set(re.findall(r"\$\{([A-Z0-9_]+)\}", json.dumps(server)))
     assert placeholders <= field_keys

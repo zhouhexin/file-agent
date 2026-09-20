@@ -1440,6 +1440,40 @@ cd apps/mcp
 
 ## 12. 维护规则
 
+### 共享累计表格 Demo（2026-09-20）
+
+本功能复用已有图片整理结果，不改动原有上传/OCR/分类入口。执行前先完成数据库迁移：在仓库根使用当前
+Python 环境运行 `python -m alembic -c apps/api/alembic.ini upgrade head`。新增迁移为 `20260920_0001`，
+只增加 `structured_datasets`、`structured_dataset_members`、`structured_dataset_exports`。
+
+API 配置和 WorkBuddy MCP 进程环境都设置 `WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED=true`，重启对应
+API/MCP。MCP 不读取后端 `.env`，应在 MCP 的 `env` 配置中显式添加该值。安装目录中需要包含插件新增的
+`skills/file-agent-structured-dataset/SKILL.md`；无需修改原附件 Hook 或已有 Skill。
+
+Word、DOC、PDF 以及新图片宿主提取通道还需要在 API 与 MCP 同时设置
+`WORKBUDDY_DOCUMENT_EXTRACTION_ENABLED=true`，并完成迁移 `20260920_0002`。只有两个 Demo 开关同时开启时，
+MCP 才注册 `document_extraction_get/claim/renew/submit`。claim 会下载并校验固定原文件，正文读取必须由
+WorkBuddy 的真实图片、Word 或 PDF 工具完成；File Agent 不使用服务器解析或 OCR 兜底。旧图片兼容路径不受
+新文档开关影响。
+
+使用所有登录用户共享的 ACTIVE 工作副本和数据集，不配置 owner 或新增用户授权。图片兼容路径复用已有 OCR；
+Word/PDF 只接受 `workbuddy-external-document` 正文。支持 PNG/JPEG/WebP/BMP、DOC/DOCX、PDF，每文件 100 条、
+每表 1000 条、最多 20 字段及固定 schema。导出按需执行，没有新增后台队列。待复核记录默认不进入合计和正式导出；
+字段置信度缺失时保守待复核，不虚构 OCR 评分。
+
+新增 API 位于 `/api/structured-datasets`，列表/创建、source、get、records、query、exports 及导出下载。
+具体请求和试用流程见 [Demo 文档](2026-09-18-workbuddy-structured-dataset-demo.md)。关闭独立开关会关闭
+整个 Demo 路由，不影响现有功能；数据与快照保留，下次开启后继续使用。此阶段不承诺关闭开关后仍可读 Demo。
+
+局部验证（均在仓库根）：
+
+```bash
+python -m pytest apps/api/app/tests/test_structured_datasets.py apps/api/app/tests/test_structured_extraction.py apps/api/app/tests/test_external_extraction_api.py -q
+python -m pytest apps/mcp/tests/test_dataset_tools.py apps/mcp/tests/test_client.py apps/mcp/tests/test_server.py -q
+```
+
+### 文档同步要求
+
 以下任一内容发生变化时，必须同步更新本文和 `README.md`：
 
 - 启动命令。

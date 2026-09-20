@@ -24,6 +24,13 @@ class FileLifecycleStorageService:
 
         self.settings = settings or get_settings()
 
+    def dataset_export_path(self, dataset_id: str, export_id: str) -> Path:
+        """按服务端 UUID 定位聚合导出，不允许调用者提交文件路径。"""
+        from uuid import UUID
+
+        relative = f"derivatives/structured-datasets/{UUID(dataset_id)}/{UUID(export_id)}.xlsx"
+        return self._resolve_under(Path(self.settings.file_storage_root), relative)
+
     def upload_path(self, storage_path: str) -> Path:
         """解析上传暂存相对路径，拒绝路径穿越。"""
 

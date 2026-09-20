@@ -102,6 +102,10 @@ from app.modules.classification.placement_service import (
 )
 from app.modules.chunks.service import DocumentIndexService
 from app.modules.files.extraction_repository import FileExtractionRepository
+from app.modules.files.extraction_policy import (
+    latest_workbuddy_document_run,
+    requires_workbuddy_document_extraction,
+)
 from app.modules.files.extractors import extract_document_text, extraction_config_hash
 from app.modules.files.readable_source import (
     ReadableDocumentSource,
@@ -3373,18 +3377,38 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
         # 显式重新转换不能复用旧页面，否则 Tool 会报告执行成功但根本不读取新派生件。
         force_reprocess = force_reprocess or force_reconvert
         document_version = repository.get_current_document_version(document=document)
+        # WorkBuddy 文档模式的正文已经在上传阶段由宿主验收。即使用户请求“重新处理”，
+        # 也只能复用同一固定版本的宿主结果，不能改由服务器读取 Word/PDF 或执行 OCR。
+        workbuddy_only = requires_workbuddy_document_extraction(document_version)
         readable_source_resolver = ReadableDocumentSourceResolver(db=db)
-        expected_parser_config_hash = readable_source_resolver.expected_parser_config_hash(
-            document=document,
-            document_version=document_version,
+        expected_parser_config_hash = (
+            None
+            if workbuddy_only
+            else readable_source_resolver.expected_parser_config_hash(
+                document=document,
+                document_version=document_version,
+            )
+        )
+        host_run = (
+            latest_workbuddy_document_run(
+                db=db,
+                document_id=document.id,
+                document_version_id=document_version.id,
+            )
+            if workbuddy_only and document_version is not None
+            else None
         )
         reusable = (
-            None
-            if force_reprocess
-            else repository.get_latest_successful_extraction(
-                document_id=document.id,
-                document_version_id=document_version.id if document_version else None,
-                parser_config_hash=expected_parser_config_hash,
+            repository.get_extraction_result(extraction_run_id=host_run.id)
+            if host_run is not None
+            else (
+                None
+                if force_reprocess or workbuddy_only
+                else repository.get_latest_successful_extraction(
+                    document_id=document.id,
+                    document_version_id=document_version.id if document_version else None,
+                    parser_config_hash=expected_parser_config_hash,
+                )
             )
         )
         if reusable is not None:
@@ -3441,6 +3465,13 @@ def _extract_document_text_handler(db: Any, user_id: str | None) -> ToolHandler:
                 ],
                 "error": None,
             }
+
+        if workbuddy_only:
+            error = {
+                "code": "WORKBUDDY_EXTRACTION_REQUIRED",
+                "message": "该版本必须先完成 WorkBuddy 文档提取，系统不会改用服务器解析。",
+            }
+            return _failed_extraction_output(document_id=document_id, error=error)
 
         resolved = repository.resolve_original_file_for_document(document)
         if not resolved["ok"]:

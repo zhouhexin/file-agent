@@ -29,6 +29,10 @@ from app.db.models import (
     EvidenceSpan,
     utcnow,
 )
+from app.modules.files.extraction_policy import (
+    requires_workbuddy_document_extraction,
+    latest_workbuddy_document_run,
+)
 from app.modules.chunks.tokenizer import ChineseLexicalTokenizer, load_default_business_terms
 
 
@@ -289,7 +293,14 @@ class DocumentIndexService:
             .order_by(DocumentExtractionRun.updated_at.desc())
             .first()
         )
-        if extraction is None:
+        workbuddy_only = requires_workbuddy_document_extraction(version)
+        if workbuddy_only:
+            extraction = latest_workbuddy_document_run(
+                db=self.db,
+                document_id=document_id,
+                document_version_id=version.id,
+            )
+        if extraction is None and not workbuddy_only:
             # 迁移前的 NULL 版本解析事实只允许在单版本文档中兼容，避免旧正文绑定到新版本。
             version_count = self.db.query(DocumentVersion).filter(DocumentVersion.document_id == document_id).count()
             if version_count == 1:

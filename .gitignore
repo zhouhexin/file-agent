@@ -16,6 +16,7 @@ build/
 *.tsbuildinfo
 storage/
 logs/
+runtime/
 data/build-model-cache/
 data/docker-backup/
 file-agent-offline-images/

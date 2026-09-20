@@ -27,6 +27,7 @@ from app.db.models import (
     Conversation,
     Document,
     DocumentCategory,
+    DocumentElement,
     DocumentExtractionRun,
     DocumentIndexRun,
     DocumentOrganizationDecision,
@@ -396,20 +397,53 @@ class UploadLifecycleService:
                 detail="Upload already used in a message; it can no longer be replaced or cancelled",
             )
 
+        ingest_item = self.db.get(IngestItem, review.ingest_item_id) if review.ingest_item_id else None
+        ingest_batch = self.db.get(IngestBatch, ingest_item.batch_id) if ingest_item is not None else None
+        workbuddy_document_mode = bool(
+            ingest_batch is not None
+            and str((ingest_batch.policy_json or {}).get("extraction_profile") or "") == "WORKBUDDY_DOCUMENT"
+        )
         selected_copy: WorkingCopy | None = None
         if request.decision == "USE_EXISTING_FILE":
             selected_copy = self._validate_existing_candidate(
                 review=review,
                 working_copy_id=str(request.selected_existing_working_copy_id),
             )
+            if workbuddy_document_mode:
+                from app.modules.files.extraction_policy import latest_workbuddy_document_run
+
+                host_run = latest_workbuddy_document_run(
+                    db=self.db,
+                    document_id=selected_copy.document_id,
+                    document_version_id=selected_copy.current_version_id,
+                )
+                if host_run is None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Existing file has no completed WorkBuddy document extraction",
+                    )
             review.selected_existing_working_copy_id = selected_copy.id
             archive.status = "EXISTING_FILE_SELECTED"
             cleanup_job = self._enqueue_cleanup(review=review)
             archive.filesystem_job_id = cleanup_job.id
         elif request.decision == "CONTINUE_UPLOAD":
-            archive.status = "PENDING"
-            job = self._enqueue_archive(review=review, archive=archive)
-            archive.filesystem_job_id = job.id
+            extraction_task = None
+            if ingest_item is not None:
+                from app.modules.external_extraction.document_service import WorkBuddyDocumentExtractionService
+
+                extraction_task = WorkBuddyDocumentExtractionService(self.db).prepare_for_ingest_item(item=ingest_item)
+            if extraction_task is not None and extraction_task.status != "COMPLETED":
+                # 精确重复已经由用户明确选择继续；宿主正文完成后只评估新的近似候选。
+                self.db.query(UploadDuplicateCandidate).filter(
+                    UploadDuplicateCandidate.duplicate_review_id == review.id
+                ).delete(synchronize_session=False)
+                archive.status = "WAITING_EXTERNAL_EXTRACTION"
+                archive.filesystem_job_id = None
+                job = None
+            else:
+                archive.status = "PENDING"
+                job = self._enqueue_archive(review=review, archive=archive)
+                archive.filesystem_job_id = job.id
         else:
             archive.status = "CANCELLED"
             job = self._enqueue_cleanup(review=review)
@@ -1393,13 +1427,27 @@ class FileLifecycleJobProcessor:
             max_candidates=self.settings.upload_duplicate_max_candidates,
             filename=version.filename,
         )
+        if candidates:
+            # 精确重复先由用户决定，避免在选择已有文件时无意义地读取上传副本。
+            archive.status = "WAITING_DUPLICATE_CONFIRMATION"
+            review.status = "WAITING_CONFIRMATION"
+            self._create_duplicate_notification(review=review, version=version, candidates=candidates)
+            FilesystemJobQueue(self.db).mark_completed(job=job, result={
+                "status": archive.status,
+                "duplicate_review_id": review.id,
+                "candidate_count": len(candidates),
+            })
+            return
         ingest_item = self.db.get(IngestItem, review.ingest_item_id) if review.ingest_item_id else None
-        if not candidates and ingest_item is not None:
+        if ingest_item is not None:
             # WorkBuddy 新通道把扫描件 OCR 委托给外部客户端。阶段任务写入等待事实后立即结束，
             # 不持有 worker 租约轮询，也不会偷偷回退到旧内部 OCR Provider。
+            from app.modules.external_extraction.document_service import WorkBuddyDocumentExtractionService
             from app.modules.external_extraction.service import ExternalExtractionService
 
-            extraction_task = ExternalExtractionService(self.db).prepare_for_ingest_item(item=ingest_item)
+            extraction_task = WorkBuddyDocumentExtractionService(self.db).prepare_for_ingest_item(item=ingest_item)
+            if extraction_task is None:
+                extraction_task = ExternalExtractionService(self.db).prepare_for_ingest_item(item=ingest_item)
             if extraction_task is not None:
                 archive.status = "WAITING_EXTERNAL_EXTRACTION"
                 review.status = "WAITING_EXTERNAL_EXTRACTION"
@@ -1947,7 +1995,7 @@ class FileLifecycleJobProcessor:
         target_document: Document,
         target_version: DocumentVersion,
     ) -> None:
-        """复用上传暂存阶段的外部 OCR 正文，避免正式分析再次调用内部 OCR。
+        """复用上传暂存阶段的 WorkBuddy 正文，避免正式分析再次调用服务器解析。
 
         只有原件哈希、上传版本哈希和目标工作副本哈希完全一致时才复制派生事实；选择已有文件
         等异内容分支不会调用此方法，也不能把新上传正文挂到已有版本。
@@ -1967,7 +2015,9 @@ class FileLifecycleJobProcessor:
             .filter(
                 DocumentExtractionRun.document_version_id == source_version.id,
                 DocumentExtractionRun.status == "COMPLETED",
-                DocumentExtractionRun.extractor == "workbuddy-external-ocr",
+                DocumentExtractionRun.extractor.in_(
+                    {"workbuddy-external-ocr", "workbuddy-external-document"}
+                ),
             )
             .order_by(DocumentExtractionRun.updated_at.desc())
             .first()
@@ -1985,6 +2035,13 @@ class FileLifecycleJobProcessor:
         )
         self.db.add(clone)
         self.db.flush()
+        if source_run.extractor == "workbuddy-external-document":
+            # 工作副本必须继承不可回退策略；只有相同哈希的上传版本能传播它。
+            target_version.extraction_policy_json = {
+                **dict(source_version.extraction_policy_json or {}),
+                "origin_upload_extraction_run_id": source_run.id,
+                "origin_upload_version_id": source_version.id,
+            }
         for page in self.db.query(DocumentPage).filter(DocumentPage.extraction_run_id == source_run.id).all():
             self.db.add(
                 DocumentPage(
@@ -1993,7 +2050,30 @@ class FileLifecycleJobProcessor:
                     page_number=page.page_number,
                     sheet_name=page.sheet_name,
                     text_content=page.text_content,
-                    metadata_json={**dict(page.metadata_json or {}), "reused_from_upload_extraction": source_run.id},
+                    metadata_json={
+                        **dict(page.metadata_json or {}),
+                        "reused_from_upload_extraction": source_run.id,
+                        "reused_from_upload_page_id": page.id,
+                    },
+                )
+            )
+        for element in self.db.query(DocumentElement).filter(DocumentElement.extraction_run_id == source_run.id).all():
+            self.db.add(
+                DocumentElement(
+                    document_id=target_document.id,
+                    extraction_run_id=clone.id,
+                    element_index=element.element_index,
+                    label=element.label,
+                    text_content=element.text_content,
+                    page_number=element.page_number,
+                    bbox_json=dict(element.bbox_json or {}),
+                    content_layer=element.content_layer,
+                    parent_ref=element.parent_ref,
+                    metadata_json={
+                        **dict(element.metadata_json or {}),
+                        "reused_from_upload_extraction": source_run.id,
+                        "reused_from_upload_element_id": element.id,
+                    },
                 )
             )
         self.db.flush()

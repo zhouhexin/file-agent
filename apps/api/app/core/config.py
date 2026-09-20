@@ -255,6 +255,8 @@ class Settings(BaseModel):
     integration_max_batch_bytes: int = DEFAULT_INTEGRATION_MAX_BATCH_BYTES
     integration_user_quota_bytes: int = DEFAULT_INTEGRATION_USER_QUOTA_BYTES
     integration_external_ocr_enabled: bool = True
+    # 新文档通道默认关闭；开启后只允许 WorkBuddy 回传正文，不允许服务器解析兜底。
+    workbuddy_document_extraction_enabled: bool = False
     integration_allow_partial_extraction: bool = True
     # 重复确认网页地址只由部署者配置，MCP 不能根据请求 Host 或本机地址猜测。
     integration_review_web_base_url: str = ""
@@ -335,6 +337,7 @@ class Settings(BaseModel):
     pp_structure_use_region_detection: bool = True
     pp_structure_max_image_pixels: int = DEFAULT_PP_STRUCTURE_MAX_IMAGE_PIXELS
     pp_structure_max_pdf_pages: int = DEFAULT_PP_STRUCTURE_MAX_PDF_PAGES
+    workbuddy_structured_dataset_demo_enabled: bool = False
     structured_extraction_enabled: bool = False
     structured_extraction_layout_provider: str = "pp_structure_v3"
     structured_extraction_llm_provider: str = "disabled"
@@ -940,6 +943,9 @@ def get_settings() -> Settings:
         integration_external_ocr_enabled=(
             os.getenv("INTEGRATION_EXTERNAL_OCR_ENABLED", "true").lower() == "true"
         ),
+        workbuddy_document_extraction_enabled=(
+            os.getenv("WORKBUDDY_DOCUMENT_EXTRACTION_ENABLED", "false").lower() == "true"
+        ),
         integration_allow_partial_extraction=(
             os.getenv("INTEGRATION_ALLOW_PARTIAL_EXTRACTION", "true").lower() == "true"
         ),
@@ -1212,6 +1218,7 @@ def get_settings() -> Settings:
             minimum=1,
             maximum=500,
         ),
+        workbuddy_structured_dataset_demo_enabled=os.getenv("WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED", "false").lower() == "true",
         structured_extraction_enabled=os.getenv(
             "STRUCTURED_EXTRACTION_ENABLED", "false"
         ).lower()

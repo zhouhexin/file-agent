@@ -51,6 +51,16 @@ class ExternalExtractionService:
         self.settings = get_settings()
         self.storage = FileLifecycleStorageService(self.settings)
 
+    def _new_lease_token(self) -> str:
+        """集中生成高熵租约 token；数据库只保存其哈希。"""
+
+        return secrets.token_urlsafe(32)
+
+    def _lease_duration(self) -> timedelta:
+        """统一读取部署级租约时长，避免新旧任务出现不同有效期。"""
+
+        return timedelta(seconds=self.settings.external_extraction_lease_seconds)
+
     def prepare_for_ingest_item(self, *, item: IngestItem) -> ExternalExtractionTask | None:
         """为扫描图片或 PDF 生成可领取页资源；其他格式返回空并走原生流程。"""
 
@@ -130,10 +140,10 @@ class ExternalExtractionService:
             expires = self._aware(task.lease_expires_at)
             if expires > now and task.lease_owner != worker_id:
                 self._raise(409, "EXTRACTION_ALREADY_CLAIMED", "任务正在由其他 Worker 处理。")
-        token = secrets.token_urlsafe(32)
+        token = self._new_lease_token()
         task.lease_owner = worker_id
         task.lease_token_hash = self._token_hash(token)
-        task.lease_expires_at = now + timedelta(seconds=self.settings.external_extraction_lease_seconds)
+        task.lease_expires_at = now + self._lease_duration()
         task.status = "CLAIMED"
         task.attempt_count += 1
         self.db.commit()
@@ -167,7 +177,7 @@ class ExternalExtractionService:
 
         task, _, _ = self._owned_task(task_id=task_id, user_id=current_user.id, for_update=True)
         self._validate_lease(task=task, worker_id=worker_id, lease_token=lease_token)
-        task.lease_expires_at = utcnow() + timedelta(seconds=self.settings.external_extraction_lease_seconds)
+        task.lease_expires_at = utcnow() + self._lease_duration()
         self.db.commit()
         self.db.refresh(task)
         return task
@@ -527,9 +537,17 @@ class ExternalExtractionService:
         source_tokens = self._tokens("\n".join(str(page["text"]) for page in pages))
         if not source_tokens:
             return []
+        existing = (
+            self.db.query(UploadDuplicateCandidate)
+            .filter(UploadDuplicateCandidate.duplicate_review_id == review.id)
+            .all()
+        )
+        existing_managed_file_ids = {candidate.candidate_managed_file_id for candidate in existing}
         candidates = []
         copies = self.db.query(WorkingCopy).filter(WorkingCopy.status == "ACTIVE").limit(100).all()
         for working_copy in copies:
+            if working_copy.managed_file_id in existing_managed_file_ids:
+                continue
             rows = (
                 self.db.query(DocumentPage)
                 .join(
@@ -561,7 +579,7 @@ class ExternalExtractionService:
                 similarity_score=score,
                 match_evidence_json={"method": "external_ocr_token_jaccard_v1"},
                 user_visible_summary_json={"filename": working_copy.filename, "similarity_bucket": f"{int(score * 100)}%"},
-                rank=len(candidates) + 1,
+                rank=len(existing) + len(candidates) + 1,
             )
             self.db.add(candidate)
             candidates.append(candidate)

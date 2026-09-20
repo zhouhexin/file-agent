@@ -55,6 +55,8 @@ class IngestBatchCreateRequest(BaseModel):
     ingest_policy: Literal["AUTO_ORGANIZE"] = "AUTO_ORGANIZE"
     placement_mode: Literal["BY_CATEGORY", "NEUTRAL"] = "BY_CATEGORY"
     rule_profile: Literal["content_based", "legacy_school_materials"] = "content_based"
+    # DEFAULT 保持旧导入和服务器附加请求行为；新值只能由受控 WorkBuddy 入口使用。
+    extraction_profile: Literal["DEFAULT", "WORKBUDDY_DOCUMENT"] = "DEFAULT"
     user_request: str | None = Field(default=None, max_length=20_000)
     conversation_id: str | None = Field(default=None, min_length=1, max_length=36)
 

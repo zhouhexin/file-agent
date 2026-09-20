@@ -20,8 +20,8 @@ Windows 示例：
 - MCP 源码目录：`E:\PycharmProject\file-agent\apps\mcp`
 - API：`http://127.0.0.1:8000`
 
-## 当前附件限制
+## 当前附件边界
 
-此标准连接器能够导入“已授权目录”中的文件，但**不能自动导入聊天框上传的附件**。原因是 WorkBuddy 的公开连接器 MCP 契约没有把当前消息附件的稳定提交清单传给 MCP。连接器特意隐藏了需要该清单的两个工具，避免模型捏造路径或附件 ID。
+连接器保留 `workbuddy_attachment_ingest` 和 `workbuddy_submission_ingest`，用于配合同套件中的可信附件 Hook。标准连接器本身不会生成附件提交单；只有本轮上下文已经包含 `FILE_AGENT_HOST_SUBMISSION`，或宿主直接提供稳定提交 ID、附件 ID、原文件名和位于预配置缓存根内的真实文件引用时，才能调用对应附件工具。
 
-若 WorkBuddy 后续发布官方附件提交 API 或 Hook 连接器契约，再把现有 `workbuddy_submission_ingest` 重新启用；后端可信提交单校验代码已保留。
+缺少这些宿主事实时，不得猜测本地路径、附件 ID 或提交 ID。用户明确指定已授权目录时，继续使用 `file_batch_ingest`。

@@ -20,7 +20,13 @@ def test_database_migrations_have_one_current_head() -> None:
 
     scripts = _migration_scripts()
 
-    assert scripts.get_heads() == ["20260914_0001"]
+    assert scripts.get_heads() == ["20260920_0002"]
+    document_revision = scripts.get_revision("20260920_0002")
+    assert document_revision is not None
+    assert document_revision.down_revision == "20260920_0001"
+    dataset_revision = scripts.get_revision("20260920_0001")
+    assert dataset_revision is not None
+    assert dataset_revision.down_revision == "20260914_0001"
     placement_revision = scripts.get_revision("20260910_0001")
     assert placement_revision is not None
     assert placement_revision.down_revision == "20260908_0005"

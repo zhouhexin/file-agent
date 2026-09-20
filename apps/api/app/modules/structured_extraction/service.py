@@ -426,13 +426,6 @@ class StructuredExtractionService:
             ]
             if len(fields) > self.settings.structured_extraction_max_fields:
                 raise RuntimeError("自动发现字段数量超过当前结构化抽取上限。")
-        result, normalized_fields = self._normalize_candidates(
-            run=run,
-            layout_extraction_run_id=layout_run.id,
-            fields=fields,
-            candidates=candidates,
-            elements=elements,
-        )
         persisting_started = time.perf_counter()
         log_event(
             "structured_extraction.persisting_started",
@@ -441,15 +434,12 @@ class StructuredExtractionService:
             document_id=run.document_id,
             status="RUNNING",
         )
-        self.repository.complete_run(
+        result = self.finalize_candidates(
             run=run,
-            fields=normalized_fields,
-            field_schema=result.field_schema,
-            record_count=result.record_count,
-            review_count=result.review_count,
-            missing_required_field_count=result.missing_required_field_count,
-            quality_score=result.quality_score,
-            quality_band=result.quality_band,
+            layout_extraction_run_id=layout_run.id,
+            fields=fields,
+            candidates=candidates,
+            elements=elements,
         )
         export_artifact = StructuredExtractionExportService(
             db=self.db,
@@ -632,6 +622,32 @@ class StructuredExtractionService:
                 if key in merged
             }
         )
+
+    def finalize_candidates(
+        self,
+        *,
+        run: StructuredExtractionRun,
+        layout_extraction_run_id: str,
+        fields: list[StructuredFieldSpec],
+        candidates: CandidateExtraction,
+        elements: list[EvidenceElement],
+    ) -> StructuredExtractionResult:
+        """复用字段规范化和持久化，不调用 OCR/LLM，不提交外层事务。
+
+        内部 Provider 和外部候选走同一完成链路；导出与审计仍由各自编排负责。
+        外部入口必须先校验稳定对象、完整原文及候选范围。
+        """
+        result, normalized_fields = self._normalize_candidates(
+            run=run, layout_extraction_run_id=layout_extraction_run_id,
+            fields=fields, candidates=candidates, elements=elements,
+        )
+        self.repository.complete_run(
+            run=run, fields=normalized_fields, field_schema=result.field_schema,
+            record_count=result.record_count, review_count=result.review_count,
+            missing_required_field_count=result.missing_required_field_count,
+            quality_score=result.quality_score, quality_band=result.quality_band,
+        )
+        return result
 
     def _normalize_candidates(
         self,

@@ -36,6 +36,8 @@ from app.modules.file_lifecycle.router import router as file_lifecycle_router
 from app.modules.file_lifecycle.scheduler import enqueue_reconciliation_jobs
 from app.modules.file_lifecycle.shared_workspace import get_or_create_shared_workspace
 from app.modules.integrations.router import router as integrations_router
+from app.modules.external_extraction.document_router import router as document_extraction_router
+from app.modules.structured_datasets.router import router as structured_datasets_router
 from app.modules.managed_files.router import router as managed_files_router
 from app.modules.operations.router import router as operations_router
 from app.modules.retrieval.router import router as retrieval_router
@@ -77,6 +79,7 @@ async def lifespan(app: FastAPI):
 # 这里故意保持应用入口很薄，具体业务边界交给各模块路由维护，
 # 避免 Agent Runtime 扩展后把 main.py 变成混杂的调度中心。
 app = FastAPI(title="File Agent API", lifespan=lifespan)
+app.include_router(structured_datasets_router)
 register_api_error_handlers(app)
 
 
@@ -177,6 +180,7 @@ app.include_router(files_router)
 app.include_router(file_rename_router)
 app.include_router(file_lifecycle_router)
 app.include_router(integrations_router)
+app.include_router(document_extraction_router)
 app.include_router(managed_files_router)
 app.include_router(operations_router)
 app.include_router(retrieval_router)

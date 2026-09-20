@@ -1194,6 +1194,19 @@ planner_shadow_comparisons:
 
 ## 11. WorkBuddy/MCP Batch Ingestion Extension
 
+### 共享累计表格 Demo（迁移 `20260920_0001`）
+
+新增三个独立模型，不改变现有 OCR 与结构化事实表：
+
+- `structured_datasets`：共享 workspace、创建人审计、名称、固定 `schema_json`、revision、创建幂等摘要。
+- `structured_dataset_members`：引用单图 `structured_extraction_run_id` 和 `document_version_id`，保存追加键、
+  载荷摘要与 appended_revision；唯一约束为 dataset+version、dataset+append_key。
+- `structured_dataset_exports`：dataset+revision 唯一的 XLSX 快照，包含独立 ID、存储引用、SHA-256 和大小。
+
+created_by 不参与数据集读写权限限制；所有登录用户共享。成员不复制字段值，来源外键采用 RESTRICT，
+聚合导出不伪造单 Document 的 Artifact 关系。首期 schema 固定、成员只追加，导出按需生成；
+详情见 [Demo 方案](2026-09-18-workbuddy-structured-dataset-demo.md)。
+
 迁移 `20260908_0001` 顺接 `20260901_0001`，建立 P1 批次业务事实。它不替代
 `upload_archive_records` 或 `filesystem_jobs`：前者记录一个上传版本的归档状态，后者记录一次阶段执行，
 而以下表负责跨阶段聚合、恢复和外部写请求幂等。

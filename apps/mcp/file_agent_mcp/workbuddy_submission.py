@@ -98,6 +98,7 @@ class WorkBuddySubmissionService:
         user_request: str | None,
         placement_mode: str,
         rule_profile: str,
+        extraction_profile: str = "DEFAULT",
     ) -> dict[str, Any]:
         """导入本轮受信提交单；任务文字只能为空或与 Hook 捕获的原文一致。"""
 
@@ -113,6 +114,7 @@ class WorkBuddySubmissionService:
             user_request=submission.user_request,
             placement_mode=placement_mode,
             rule_profile=rule_profile,
+            extraction_profile=extraction_profile,
         )
 
     def load(self, *, submission_ref: str) -> TrustedSubmission:

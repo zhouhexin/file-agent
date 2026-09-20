@@ -89,6 +89,10 @@ class IngestionWorkflow:
         """
 
         request = str(batch.user_request or "").strip()
+        # 文档提取与字段编排已由 WorkBuddy 负责。保留原始任务文字供审计和最终回执，
+        # 但绝不能在工作副本发布后再次交给服务器 Agent Runtime 解析同一附件。
+        if str((batch.policy_json or {}).get("extra_request_executor") or "FILE_AGENT") == "WORKBUDDY":
+            return False
         if not request or self._is_default_organization_request(request) or aggregate_status == "RUNNING":
             return False
         executions = (

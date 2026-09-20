@@ -1,15 +1,15 @@
 ---
 name: file-agent-attachment-bridge
-description: 当本轮上下文含 FILE_AGENT_HOST_SUBMISSION，且用户说“请用文件助手”处理附件，或明确要求导入、归档、整理、解析、OCR、分类本轮附件时，使用可信附件提交单工具；图片等待外部提取时调用 WorkBuddy 的腾讯文档 OCR 后回填。
+description: 当本轮上下文含 FILE_AGENT_HOST_SUBMISSION，且用户要求处理本轮附件时，使用可信附件提交单工具；图片的旧 OCR 回填流程按本说明执行，图片、Word、PDF 抽取并回填 Excel 使用 file-agent-structured-dataset skill。
 ---
 
 # 文件助手附件桥接
 
-仅在当前轮出现 `FILE_AGENT_HOST_SUBMISSION ref=...`，且用户明确要求将本轮附件导入、归档、整理、解析、OCR 或分类时调用。“文件助手”是面向用户的中文称呼，用户无需输入英文产品名；例如“请用文件助手归档并分类本轮附件”或“把刚上传的文件交给文件助手解析”。不提称呼但明确要求归档本轮附件，同样可以调用；只说“文件助手”而未给出文件任务，不得导入。可信文档引用当前支持 `.doc/.docx/.pdf/.xls/.xlsx/.txt`；图片必须由宿主提供 `image_blob_ref`。`count=pending` 是 WorkBuddy 5.5.3/插件 0.1.10 的正常延迟解析状态，不是失败：
+仅在当前轮出现 `FILE_AGENT_HOST_SUBMISSION ref=...`，且用户明确要求将本轮附件导入、归档、整理、解析、OCR 或分类时调用。“文件助手”是面向用户的中文称呼，用户无需输入英文产品名；例如“请用文件助手归档并分类本轮附件”或“把刚上传的文件交给文件助手解析”。不提称呼但明确要求归档本轮附件，同样可以调用；只说“文件助手”而未给出文件任务，不得导入。可信文档引用当前支持 `.doc/.docx/.pdf/.xls/.xlsx/.txt`；图片必须由宿主提供 `image_blob_ref`。`count=pending` 是 WorkBuddy 5.5.3/插件 0.1.11 的正常延迟解析状态，不是失败：
 
 `workbuddy_submission_ingest(submission_ref=<ref>)`
 
-不要调用旧的 `workbuddy_attachment_ingest`，不要索取、猜测或传入 `local_path`、`attachment_id`、文件名和 `user_request`。如果用户只是查看附件、讨论附件内容，或没有表达交给文件助手保存/处理的意图，不调用导入工具。
+有可信提交单引用时必须调用 `workbuddy_submission_ingest`，不得从引用中自行重建附件字段。只有宿主直接提供稳定提交 ID、附件 ID、原文件名和位于预配置缓存根内的真实文件引用时，才允许调用 `workbuddy_attachment_ingest`；不得索取或猜测 `local_path`、附件 ID、文件名及提交 ID。如果用户只是查看附件、讨论附件内容，或没有表达交给文件助手保存/处理的意图，不调用导入工具。
 
 如果用户要求归档本轮上传的附件，但当前轮没有 `FILE_AGENT_HOST_SUBMISSION ref=...`，应说明附件桥接尚未提供可信提交单并停止本次导入。不得用 Bash、`cp`、`Copy-Item` 将附件复制到授权目录，也不得用 `file_batch_ingest` 冒充本轮附件导入。用户另外明确指定已授权本地目录的批量导入不受这条附件边界影响。
 

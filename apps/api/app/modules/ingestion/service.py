@@ -94,6 +94,12 @@ class IngestionService:
         workspace_id = current_user.default_workspace_id
         if not workspace_id:
             self._raise_error(409, "DEFAULT_WORKSPACE_REQUIRED", "当前用户缺少默认工作区。")
+        if request.extraction_profile == "WORKBUDDY_DOCUMENT":
+            settings = get_settings()
+            # 新模式从批次创建即关闭式校验，防止 worker 发现开关关闭后落回旧 OCR 或
+            # 服务器 Word/PDF 解析。累计表 Demo 同时是该功能的唯一首轮输出边界。
+            if not settings.workbuddy_document_extraction_enabled or not settings.workbuddy_structured_dataset_demo_enabled:
+                self._raise_error(503, "WORKBUDDY_DOCUMENT_DISABLED", "WorkBuddy 文档提取与累计表格 Demo 必须同时启用。")
         self._validate_conversation(
             conversation_id=request.conversation_id,
             user_id=current_user.id,
@@ -116,6 +122,13 @@ class IngestionService:
             "placement_mode": request.placement_mode,
             "rule_profile": request.rule_profile,
         }
+        # 默认旧批次的 policy JSON 必须保持原形。只有新模式才固化额外执行者，避免
+        # 历史回执、重试比较和外部客户端把无语义的默认字段当成策略变更。
+        if request.extraction_profile == "WORKBUDDY_DOCUMENT":
+            policy.update({
+                "extraction_profile": "WORKBUDDY_DOCUMENT",
+                "extra_request_executor": "WORKBUDDY",
+            })
         try:
             batch = self.repository.create_batch(
                 user_id=current_user.id,
@@ -1459,6 +1472,10 @@ class IngestionService:
             mode="json",
             exclude={"request_id", "idempotency_key"},
         )
+        # 默认值在旧客户端请求中不存在。剔除它才能让版本升级前创建的稳定幂等键
+        # 仍命中同一指纹；新模式显式纳入摘要，防止同一提交事件静默切换执行责任。
+        if payload.get("extraction_profile") == "DEFAULT":
+            payload.pop("extraction_profile", None)
         canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

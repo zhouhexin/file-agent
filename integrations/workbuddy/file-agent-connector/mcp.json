@@ -15,13 +15,11 @@
         "FILE_AGENT_API_BASE_URL": "${FILE_AGENT_API_BASE_URL}",
         "FILE_AGENT_ACCESS_TOKEN": "${FILE_AGENT_ACCESS_TOKEN}",
         "FILE_AGENT_LOCAL_ROOTS": "${FILE_AGENT_LOCAL_ROOTS}",
-        "LOCAL_TRANSFER_STATE_DIR": "${LOCAL_TRANSFER_STATE_DIR}"
+        "LOCAL_TRANSFER_STATE_DIR": "${LOCAL_TRANSFER_STATE_DIR}",
+        "WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED": "true",
+        "WORKBUDDY_DOCUMENT_EXTRACTION_ENABLED": "true"
       },
-      "timeout": 30000,
-      "disabledTools": [
-        "workbuddy_attachment_ingest",
-        "workbuddy_submission_ingest"
-      ]
+      "timeout": 30000
     }
   }
 }

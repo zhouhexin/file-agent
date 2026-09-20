@@ -12,6 +12,10 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.models import Document, DocumentVersion
 from app.modules.files.extractors import extraction_config_hash
+from app.modules.files.extraction_policy import (
+    WorkBuddyContentRequiredError,
+    requires_workbuddy_document_extraction,
+)
 from app.modules.files.office_conversion import (
     DOCX_CONTENT_TYPE,
     XLSX_CONTENT_TYPE,
@@ -118,6 +122,11 @@ class ReadableDocumentSourceResolver:
         purpose: str = "document",
     ) -> ReadableDocumentSource:
         """返回实际解析源；DOC 可降级，XLS 失败则保留结构化错误而不伪造正文。"""
+
+        if requires_workbuddy_document_extraction(document_version):
+            raise WorkBuddyContentRequiredError(
+                "该内容版本由 WorkBuddy 提取，禁止服务器创建可读派生件或重新解析。"
+            )
 
         original_path = original_path.resolve()
         cache_key = (document_version.id if document_version else document.id, purpose, str(original_path))

@@ -77,6 +77,7 @@ class AttachmentTransferService:
         user_request: str | None,
         placement_mode: str,
         rule_profile: str,
+        extraction_profile: str = "DEFAULT",
     ) -> dict[str, Any]:
         """按一次 WorkBuddy 提交事件导入全部附件，空任务文字仍执行默认整理。"""
 
@@ -90,6 +91,8 @@ class AttachmentTransferService:
             raise ValueError("placement_mode 只能是 BY_CATEGORY 或 NEUTRAL")
         if rule_profile not in {"content_based", "legacy_school_materials"}:
             raise ValueError("rule_profile 不是 File Agent 允许的固定规则集")
+        if extraction_profile not in {"DEFAULT", "WORKBUDDY_DOCUMENT"}:
+            raise ValueError("extraction_profile 不是 File Agent 允许的固定提取模式")
 
         manifest = [self._resolve_attachment(raw) for raw in attachments]
         return await self.ingest_resolved(
@@ -98,6 +101,7 @@ class AttachmentTransferService:
             user_request=user_request,
             placement_mode=placement_mode,
             rule_profile=rule_profile,
+            extraction_profile=extraction_profile,
         )
 
     async def ingest_resolved(
@@ -108,6 +112,7 @@ class AttachmentTransferService:
         user_request: str | None,
         placement_mode: str,
         rule_profile: str,
+        extraction_profile: str = "DEFAULT",
     ) -> dict[str, Any]:
         """传输已由受控入口解析的附件快照。
 
@@ -125,6 +130,8 @@ class AttachmentTransferService:
             raise ValueError("placement_mode 只能是 BY_CATEGORY 或 NEUTRAL")
         if rule_profile not in {"content_based", "legacy_school_materials"}:
             raise ValueError("rule_profile 不是 File Agent 允许的固定规则集")
+        if extraction_profile not in {"DEFAULT", "WORKBUDDY_DOCUMENT"}:
+            raise ValueError("extraction_profile 不是 File Agent 允许的固定提取模式")
         attachment_ids = [item.attachment_id for item in attachments]
         if len(attachment_ids) != len(set(attachment_ids)):
             raise ValueError("同一次提交中的 attachment_id 不能重复")
@@ -134,9 +141,9 @@ class AttachmentTransferService:
             user_request=user_request,
             placement_mode=placement_mode,
             rule_profile=rule_profile,
+            extraction_profile=extraction_profile,
         )
-        batch = await self.client.create_batch(
-            {
+        batch_payload = {
                 "client_id": "workbuddy-attachment",
                 # 请求 ID 携带清单摘要并受后端批次指纹保护；同一提交事件若附件变化，
                 # 稳定幂等键不变而请求指纹变化，后端会关闭式返回 IDEMPOTENCY_CONFLICT。
@@ -153,7 +160,10 @@ class AttachmentTransferService:
                 "user_request": user_request,
                 "conversation_id": None,
             }
-        )
+        # 默认入口必须发送与旧版本完全相同的载荷，避免既有提交单重试改变请求摘要。
+        if extraction_profile != "DEFAULT":
+            batch_payload["extraction_profile"] = extraction_profile
+        batch = await self.client.create_batch(batch_payload)
         batch_id = str(batch["id"])
         if batch.get("manifest_status") == "SEALED":
             server_items = await self.client.batch_items(batch_id=batch_id)
@@ -263,16 +273,20 @@ class AttachmentTransferService:
         user_request: str | None,
         placement_mode: str,
         rule_profile: str,
+        extraction_profile: str = "DEFAULT",
     ) -> str:
         """计算进入后端请求指纹的附件清单和冻结策略摘要。"""
 
-        canonical = json.dumps(
-            {
+        manifest = {
                 "attachments": payloads,
                 "user_request": user_request,
                 "placement_mode": placement_mode,
                 "rule_profile": rule_profile,
-            },
+            }
+        if extraction_profile != "DEFAULT":
+            manifest["extraction_profile"] = extraction_profile
+        canonical = json.dumps(
+            manifest,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

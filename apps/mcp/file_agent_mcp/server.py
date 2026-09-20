@@ -54,6 +54,21 @@ def _local_download_dir() -> Path:
     return Path("~/.file-agent/downloads")
 
 
+# 新 Demo 使用独立注册开关，关闭时旧插件清单和契约保持完全兼容。
+if os.getenv("WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED", "false").lower() == "true":
+    from .dataset_tools import register_dataset_tools
+
+    register_dataset_tools(mcp, _client, _local_download_dir)
+
+if (
+    os.getenv("WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED", "false").lower() == "true"
+    and os.getenv("WORKBUDDY_DOCUMENT_EXTRACTION_ENABLED", "false").lower() == "true"
+):
+    from .document_extraction_tools import register_document_extraction_tools
+
+    register_document_extraction_tools(mcp, _client, _local_download_dir)
+
+
 @mcp.tool(
     name="file_ingest",
     description="上传已登记批次中的一个本地文件，并自动启动后端整理任务。",
@@ -137,6 +152,7 @@ async def workbuddy_attachment_ingest(
     user_request: str | None = None,
     placement_mode: Literal["BY_CATEGORY", "NEUTRAL"] = "BY_CATEGORY",
     rule_profile: Literal["content_based", "legacy_school_materials"] = "content_based",
+    extraction_profile: Literal["DEFAULT", "WORKBUDDY_DOCUMENT"] = "DEFAULT",
 ) -> dict[str, Any]:
     """接收 WorkBuddy 附件缓存引用；调用本身即构成本轮附件的提交授权。"""
 
@@ -151,6 +167,7 @@ async def workbuddy_attachment_ingest(
             user_request=user_request,
             placement_mode=placement_mode,
             rule_profile=rule_profile,
+            extraction_profile=extraction_profile,
         )
     finally:
         await client.close()
@@ -427,6 +444,7 @@ async def workbuddy_submission_ingest(
     user_request: str | None = None,
     placement_mode: Literal["BY_CATEGORY", "NEUTRAL"] = "BY_CATEGORY",
     rule_profile: Literal["content_based", "legacy_school_materials"] = "content_based",
+    extraction_profile: Literal["DEFAULT", "WORKBUDDY_DOCUMENT"] = "DEFAULT",
 ) -> dict[str, Any]:
     """按插件提交单导入当前会话附件；用户任务由 Hook 冻结，模型不能伪造附件范围。"""
 
@@ -442,6 +460,7 @@ async def workbuddy_submission_ingest(
             user_request=user_request,
             placement_mode=placement_mode,
             rule_profile=rule_profile,
+            extraction_profile=extraction_profile,
         )
     finally:
         await client.close()

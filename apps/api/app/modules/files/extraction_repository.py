@@ -321,6 +321,28 @@ class FileExtractionRepository:
         )
         return {"run": run, "pages": pages, "elements": elements}
 
+    def get_extraction_result(self, *, extraction_run_id: str) -> Dict[str, Any] | None:
+        """按已校验的运行 ID 读取正文事实，避免重新做“最新运行”选择。"""
+
+        run = self.db.get(DocumentExtractionRun, extraction_run_id)
+        if run is None or run.status != "COMPLETED":
+            return None
+        pages = (
+            self.db.query(DocumentPage)
+            .filter(DocumentPage.extraction_run_id == run.id)
+            .order_by(DocumentPage.page_number.asc().nullslast(), DocumentPage.created_at.asc())
+            .all()
+        )
+        if not pages:
+            return None
+        elements = (
+            self.db.query(DocumentElement)
+            .filter(DocumentElement.extraction_run_id == run.id)
+            .order_by(DocumentElement.element_index.asc())
+            .all()
+        )
+        return {"run": run, "pages": pages, "elements": elements}
+
     def complete_extraction_run(
         self,
         *,

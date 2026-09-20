@@ -31,6 +31,8 @@ class IngestRequestRunner:
         batch = self.db.get(IngestBatch, execution.batch_id)
         if batch is None or not str(batch.user_request or "").strip():
             raise RuntimeError("批次附带请求不存在")
+        if str((batch.policy_json or {}).get("extra_request_executor") or "FILE_AGENT") != "FILE_AGENT":
+            raise RuntimeError("WORKBUDDY 文档提取批次不能由服务器执行附带请求")
         recovered = self._recover_committed_run(execution=execution, batch=batch)
         if recovered is not None and not execution.agent_run_id:
             # Agent Runtime 自身事务可能已提交，而 worker 在写回 execution 前退出；
