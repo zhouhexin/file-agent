@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>File Agent · WorkBuddy 风格预览</title>
+  <style>
+    /* 中文说明：这是 WorkBuddy 风格的静态视觉预览，不连接后端，也不代表生产页面已切换。 */
+    :root{--ink:#172033;--muted:#64748b;--line:#dbe3ef;--soft:#f8fafc;--blue:#2563eb;--blue-soft:#eef4ff;--green:#166534;--green-soft:#f0fdf4;--amber:#92400e;--amber-soft:#fff7ed;--red:#b42318;--red-soft:#fff1f2}
+    *{box-sizing:border-box}html{background:#fff}body{margin:0;color:var(--ink);background:#fff;font:14px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    .page{min-height:100vh;padding:12px 20px 148px}.topbar{display:flex;align-items:center;justify-content:space-between;max-width:1020px;margin:0 auto}.title{font-size:16px;font-weight:750}.topbar small{color:#a2a6af;font-size:11px}
+    .thread{width:min(980px,100%);margin:22px auto 0}.user-row{display:flex;justify-content:flex-end;margin:0 0 35px}.user-bubble{max-width:330px;padding:9px 14px;border-radius:15px 15px 2px 15px;background:#e6efff;color:#1e3a8a;font-size:14px}
+    .assistant{display:grid;gap:0}.assistant-head{display:flex;align-items:center;gap:10px;margin-bottom:8px}.avatar{display:grid;place-items:center;width:25px;height:25px;border-radius:50%;background:#3449a4;color:#fff;font-size:11px;font-weight:800;box-shadow:0 0 0 3px #eef1ff}.assistant-name{font-size:14px;font-weight:750;color:#1d2e6e}.assistant-time{color:#8a93a6;font-size:12px}.assistant-time::after{content:' ›';color:#8da4df}.assistant-intro{margin:0 0 17px;color:#334155}.rule{height:1px;background:var(--line);margin:0 0 20px}.result-block{display:grid;gap:10px;margin:0 0 25px}.result-title{display:flex;align-items:center;gap:8px;margin:0;font-size:17px;line-height:1.4;font-weight:800;color:#1e293b}.result-title .emoji{display:grid;place-items:center;width:24px;height:24px;border-radius:7px;background:var(--blue-soft);font-size:15px}.result-title small{margin-left:auto;color:#7b879b;font-size:11px;font-weight:500}
+    .result-lede{margin:0;color:#334155}.table-wrap{overflow:auto;border:1px solid #dbe3ef;border-radius:4px;box-shadow:0 2px 10px rgb(31 41 51 / .035)}.table{width:100%;min-width:620px;border-collapse:collapse;font-size:13px}.table th,.table td{padding:10px 12px;border-bottom:1px solid #e5eaf2;text-align:left;vertical-align:top}.table th{background:#f5f8ff;font-weight:750;color:#1e3a8a}.table tr:last-child td{border-bottom:0}.table tr:hover td{background:#fbfdff}.path{display:inline-block;max-width:100%;padding:1px 5px;border-radius:3px;background:#f1f5ff;color:#26449b;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.6}.status{color:var(--green);font-size:12px;font-weight:650}.status.warn{color:var(--amber)}
+    .tree{display:grid;gap:8px}.tree-node{display:grid;gap:7px;padding:10px 11px;border:1px solid #dbe3ef;border-radius:5px;background:#fbfdff}.tree-node-title{display:flex;align-items:center;gap:8px;color:#1e3a8a;font-weight:800}.tree-node-title .count{margin-left:auto;border-radius:999px;padding:2px 8px;background:var(--blue-soft);color:#1d4ed8;font-size:11px;font-weight:700}.tree-files{display:grid;gap:6px;margin-left:20px;padding-left:12px;border-left:2px solid #dbe6ff}.tree-file{display:grid;grid-template-columns:26px minmax(0,1fr) auto;align-items:start;gap:8px;padding:8px 9px;border:1px solid #e5eaf2;border-radius:4px;background:#fff}.tree-file-icon{display:grid;place-items:center;width:26px;height:26px;border-radius:7px;background:var(--blue-soft);color:var(--blue);font-size:9px;font-weight:800}.tree-file-main{min-width:0}.tree-file-name{overflow-wrap:anywhere;font-weight:700;color:#273a78}.tree-file-rename{margin-top:2px;color:#64748b;font-size:12px}.tree-file-state{font-size:11px;font-weight:650;color:var(--green);white-space:nowrap}.tree-file-state.warn{color:var(--amber)}
+    .section-heading{margin:0;font-size:16px;line-height:1.45;font-weight:800}.bullet-list{display:grid;gap:7px;margin:0;padding-left:22px}.bullet-list li{padding-left:2px}.bullet-list .path{margin-left:3px}.subtle-block{padding:10px 12px;background:#fafafa;border-left:2px solid #e1e3e8;color:#5d626d}.rename-table td:first-child{width:34%;color:#6b717d}.rename-table td:nth-child(2){width:8%;color:#a1a6af;text-align:center}.rename-table td:last-child{font-weight:650}.action-copy{margin:5px 0 0;color:#535862}.feedback{display:flex;align-items:center;gap:17px;padding-top:1px;color:#969ba6;font-size:13px}.feedback button{border:0;background:transparent;color:inherit;font:inherit;cursor:pointer;padding:0}.feedback .cost{margin-left:3px;color:#868b97}.composer{position:fixed;right:0;bottom:0;left:0;padding:0 20px 14px;background:linear-gradient(#fff0,#fff 25%)}.composer-inner{display:flex;align-items:flex-end;gap:10px;width:min(980px,100%);min-height:92px;margin:0 auto;padding:14px 14px 11px;border:1px solid #e4e6ea;border-radius:24px;background:#fff;box-shadow:0 5px 18px rgb(31 36 48 / .05)}.composer textarea{flex:1;min-height:47px;resize:none;border:0;outline:0;color:#7d828c;font:14px/1.6 inherit}.composer-actions{display:flex;align-items:center;gap:13px;color:#4d5360;font-size:13px;white-space:nowrap}.composer-actions button{border:0;background:transparent;color:inherit;font:inherit;cursor:pointer}.send{display:grid;place-items:center;width:34px;height:34px;border-radius:50%;background:#cfd1d6!important;color:#fff!important;font-size:17px!important}.tool-row{display:flex;gap:13px;align-items:center;margin-top:8px;color:#999eaa;font-size:13px}.tool-row button{border:0;background:transparent;color:inherit;font:inherit;padding:0}.tool-row span{color:#858b97}.model{margin-left:auto;color:#565b66}.model::before{content:'◌ ';color:#adb1b9}
+    .view-note{width:min(980px,100%);margin:22px auto 0;padding:10px 0;color:#a0a5af;font-size:11px;border-top:1px solid var(--line)}
+    @media(max-width:700px){.page{padding:12px 14px 148px}.user-row{margin-bottom:25px}.table{min-width:560px}.composer{padding:0 10px 10px}.composer-inner{border-radius:18px;flex-wrap:wrap}.composer textarea{flex-basis:100%;order:-1}.composer-actions{width:100%}.model{margin-left:auto}}
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="topbar"><div class="title">查找学校工作总结</div><small>File Agent 视觉预览</small></header>
+    <main class="thread">
+      <div class="user-row"><div class="user-bubble">帮我整理并分类刚上传的 3 个文件</div></div>
+      <section class="assistant">
+        <header class="assistant-head"><span class="avatar">FA</span><span class="assistant-name">File Agent</span><span class="assistant-time">已完成 12s</span></header>
+        <p class="assistant-intro">文件已完成读取、分类和首次标准化命名，我按分类与命名结果整理如下：</p>
+        <div class="rule"></div>
+        <section class="result-block">
+          <h2 class="result-title"><span class="emoji">🗂️</span>文件分类树 <small>3 个文件</small></h2>
+          <div class="tree">
+            <div class="tree-node"><div class="tree-node-title">⌄　📁 学生工作 / 奖助学金 <span class="count">2</span></div><div class="tree-files"><div class="tree-file"><span class="tree-file-icon">XLS</span><div class="tree-file-main"><div class="tree-file-name">2026_国家励志奖学金申请汇总.xlsx</div><div class="tree-file-rename">原名：奖学金申请汇总.xlsx → 现名：2026_国家励志奖学金申请汇总.xlsx</div></div><span class="tree-file-state">已标准化命名</span></div><div class="tree-file"><span class="tree-file-icon">PDF</span><div class="tree-file-main"><div class="tree-file-name">奖学金证明材料.pdf</div><div class="tree-file-rename">原名：奖学金证明材料.pdf → 保留原名</div></div><span class="tree-file-state warn">依据不足，保留原名</span></div></div></div>
+            <div class="tree-node"><div class="tree-node-title">⌄　🏫 行政综合 / 会议材料 <span class="count">1</span></div><div class="tree-files"><div class="tree-file"><span class="tree-file-icon">DOC</span><div class="tree-file-main"><div class="tree-file-name">2026_春季学生工作会议纪要.docx</div><div class="tree-file-rename">原名：春季学生工作会议纪要.docx → 现名：2026_春季学生工作会议纪要.docx</div></div><span class="tree-file-state">已标准化命名</span></div></div></div>
+          </div>
+        </section>
+        <section class="result-block">
+          <h2 class="result-title"><span class="emoji">🛡️</span>文件变化</h2>
+          <p class="subtle-block">工作副本已完成整理；上传原件保持不变。命名依据不足的文件直接保留原名。</p>
+        </section>
+        <p class="action-copy">你想查看哪份文件？我可以直接打开具体内容给你。</p>
+        <div class="feedback"><button>▣</button><button>♧</button><button>♤</button><button>◖</button><button>↻</button><button>↗</button><button>···</button><span class="cost">共消耗 ◇ 1.86</span><span class="model">File Agent</span></div>
+      </section>
+
+      <div style="height:38px"></div>
+      <div class="user-row"><div class="user-bubble">把“会议纪要.docx”重命名为“2026_春季学生工作会议纪要.docx”</div></div>
+      <section class="assistant">
+        <header class="assistant-head"><span class="avatar">FA</span><span class="assistant-name">File Agent</span><span class="assistant-time">已完成 4s</span></header>
+        <p class="assistant-intro">已按你的明确请求完成文件重命名：</p>
+        <div class="rule"></div>
+        <section class="result-block">
+          <h2 class="result-title"><span class="emoji">✏️</span>文件重命名完成</h2>
+          <div class="table-wrap"><table class="table rename-table"><tbody><tr><td>原文件名</td><td>→</td><td><span class="path">会议纪要.docx</span></td></tr><tr><td>现文件名</td><td>→</td><td><span class="path">2026_春季学生工作会议纪要.docx</span></td></tr><tr><td>文件变化</td><td>→</td><td><span class="status">仅工作副本名称改变，上传原件保持不变</span></td></tr></tbody></table></div>
+        </section>
+        <p class="action-copy">还需要处理其他文件吗？</p>
+        <div class="feedback"><button>▣</button><button>♧</button><button>♤</button><button>◖</button><button>↻</button><button>↗</button><button>···</button><span class="model">File Agent</span></div>
+      </section>
+    </main>
+    <div class="composer"><div class="composer-inner"><textarea readonly>今天帮你做些什么？　@ 引用对话文件，/ 调用技能与指令</textarea><div class="composer-actions"><button>＋</button><button>◉ 默认权限⌄</button><span class="model">◌　File Agent⌄</span><button>♩</button><button class="send">➤</button></div></div><div class="tool-row"><span>对话式文件工作台</span><span>原件保护已开启</span></div></div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>File Agent · 统一回执样式预览</title>
+  <style>
+    :root { --bg:#f6f8fb; --surface:#fff; --line:#dbe3ef; --muted:#64748b; --ink:#172033; --blue:#2563eb; --blue-soft:#eef4ff; --green:#166534; --green-soft:#f0fdf4; --amber:#92400e; --amber-soft:#fff7ed; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+    .app { display:grid; grid-template-columns:190px minmax(0,1fr); min-height:100vh; }
+    aside { padding:28px 18px; border-right:1px solid #e6ebf2; background:#f8fafc; }
+    .brand { margin-bottom:42px; font-size:18px; font-weight:760; letter-spacing:-.02em; }
+    .nav { display:grid; gap:8px; }
+    .nav div { padding:10px 12px; border-radius:10px; color:#52616f; }
+    .nav div:first-child { background:#fff; color:var(--blue); box-shadow:0 8px 18px rgb(37 99 235 / .08); }
+    main { width:min(900px,100%); margin:0 auto; padding:54px 40px 132px; }
+    .user { display:flex; justify-content:flex-end; margin-bottom:20px; }
+    .bubble { max-width:460px; padding:12px 16px; border-radius:16px 16px 4px 16px; background:#e6efff; color:#1e3a8a; }
+    .receipt { display:grid; gap:12px; width:min(760px,100%); margin:0 auto; padding:14px; border:1px solid var(--line); border-radius:14px; background:var(--surface); box-shadow:0 10px 28px rgb(31 41 51 / .06); }
+    .receipt-header,.summary,.change,.next-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+    .receipt-header > div { display:flex; align-items:center; gap:8px; }
+    .check { color:#0f766e; font-size:20px; }
+    h2,h3,p { margin:0; }
+    h2 { font-size:16px; }
+    h3 { margin-bottom:9px; color:#334155; font-size:12px; letter-spacing:.03em; }
+    .status,.complete { border-radius:999px; padding:6px 10px; font-size:12px; font-weight:700; white-space:nowrap; }
+    .status,.complete { background:var(--blue-soft); color:#1d4ed8; }
+    .complete { background:#dcfce7; color:var(--green); }
+    .panel { padding:11px 12px; border:1px solid #e2e8f0; border-radius:10px; background:#f8fafc; }
+    .understanding { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+    .understanding span { display:block; color:var(--muted); font-size:11px; }
+    .understanding strong { display:block; margin-top:3px; font-size:13px; }
+    .summary { padding:11px 12px; border-left:3px solid var(--blue); background:#f7faff; }
+    .summary strong { display:block; font-size:15px; }
+    .summary small { color:var(--muted); }
+    .tree { display:grid; gap:8px; }
+    .folder { padding:9px 10px; border:1px solid #e2e8f0; border-radius:10px; background:#fbfdff; }
+    .folder-title { display:flex; align-items:center; gap:7px; font-weight:760; }
+    .count { margin-left:auto; border-radius:999px; padding:2px 7px; background:#f1f5f9; color:var(--muted); font-size:11px; }
+    .files { display:grid; gap:7px; margin:8px 0 0 21px; }
+    .file { display:grid; grid-template-columns:28px minmax(0,1fr) auto; gap:8px; align-items:center; padding:9px 10px; border:1px solid #e1e8f2; border-radius:9px; background:#fff; }
+    .file-icon { display:grid; place-items:center; width:28px; height:28px; border-radius:8px; background:var(--blue-soft); color:var(--blue); font-size:12px; font-weight:800; }
+    .file-main { min-width:0; }
+    .file-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:700; }
+    .file-meta { display:flex; flex-wrap:wrap; gap:6px; margin-top:3px; color:var(--muted); font-size:12px; }
+    .rename-line { flex-basis:100%; color:var(--muted); font-size:11px; }
+    .tag { border-radius:999px; padding:2px 7px; background:#eef4ff; color:#1d4ed8; }
+    .attention { color:var(--amber); }
+    .open { border:0; background:transparent; color:var(--blue); font:inherit; font-size:12px; font-weight:700; }
+    .change { align-items:flex-start; justify-content:flex-start; padding:10px 11px; border:1px solid #bbf7d0; border-radius:10px; background:var(--green-soft); color:var(--green); }
+    .change-icon { font-size:17px; }
+    .change small { display:block; margin-top:3px; color:#38634b; }
+    .next { display:grid; gap:7px; }
+    .next-actions { display:flex; flex-wrap:wrap; gap:7px; }
+    .next-actions button { padding:6px 10px; border:1px solid #c7d8f2; border-radius:999px; background:#f5f8ff; color:#1d4ed8; font:inherit; font-size:12px; font-weight:650; }
+    .hint { color:var(--muted); font-size:11px; }
+    .composer { position:fixed; right:40px; bottom:24px; left:230px; display:flex; gap:8px; width:min(760px,calc(100% - 270px)); margin:0 auto; padding:8px; border:1px solid var(--line); border-radius:14px; background:#fff; box-shadow:0 12px 30px rgb(31 41 51 / .10); }
+    .composer input { flex:1; min-width:0; border:0; outline:0; color:#475569; font:inherit; }
+    .attach,.send { border:0; border-radius:9px; padding:9px 12px; font:inherit; font-weight:700; }
+    .attach { background:#f8fafc; color:#475569; }
+    .send { background:var(--blue); color:#fff; }
+    @media (max-width:760px) { .app { grid-template-columns:1fr; } aside { display:none; } main { padding:24px 16px 126px; } .understanding { grid-template-columns:1fr; } .composer { right:12px; bottom:12px; left:12px; width:auto; } }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside><div class="brand">File Agent</div><div class="nav"><div>▣　文件列表</div><div>▤　功能介绍</div><div>⌫　清空对话</div></div></aside>
+    <main>
+      <div class="user"><div class="bubble">帮我整理并分类刚上传的 3 个文件</div></div>
+      <section class="receipt" aria-label="统一文件任务回执">
+        <header class="receipt-header"><div><span class="check">✓</span><h2>文件整理完成</h2></div><span class="status">已完成</span></header>
+        <section class="panel"><h3>任务理解</h3><div class="understanding"><div><span>对象</span><strong>3 个上传文件</strong></div><div><span>范围</span><strong>本次附件</strong></div><div><span>动作</span><strong>归档、分类并标准化命名</strong></div></div></section>
+        <section class="summary"><div><h3>结果摘要</h3><strong>3 个文件已完成整理</strong><small>完成 3 · 待留意 0 · 失败 0</small></div><span class="complete">结果完整</span></section>
+        <section><h3>文件明细</h3><div class="tree">
+          <div class="folder"><div class="folder-title">⌄　📁 学生工作 / 奖助学金 <span class="count">2</span></div><div class="files">
+            <div class="file"><span class="file-icon">XLS</span><div class="file-main"><div class="file-name">2026_国家励志奖学金申请汇总.xlsx</div><div class="file-meta"><span class="tag">奖学金材料</span><span>已标准化命名</span><span class="rename-line">原名：奖学金申请汇总.xlsx → 现名：2026_国家励志奖学金申请汇总.xlsx</span></div></div><button class="open">查看文件</button></div>
+            <div class="file"><span class="file-icon">PDF</span><div class="file-main"><div class="file-name">奖学金证明材料.pdf</div><div class="file-meta"><span class="tag">证明材料</span><span class="attention">命名依据不足，直接保留原名</span><span class="rename-line">原名：奖学金证明材料.pdf → 保留原名</span></div></div><button class="open">查看文件</button></div>
+          </div></div>
+          <div class="folder"><div class="folder-title">⌄　📁 行政综合 / 会议材料 <span class="count">1</span></div><div class="files"><div class="file"><span class="file-icon">DOC</span><div class="file-main"><div class="file-name">2026_春季学生工作会议纪要.docx</div><div class="file-meta"><span class="tag">会议纪要</span><span>已标准化命名</span><span class="rename-line">原名：春季学生工作会议纪要.docx → 现名：2026_春季学生工作会议纪要.docx</span></div></div><button class="open">查看文件</button></div></div></div>
+        </div></section>
+        <section class="change"><span class="change-icon">♢</span><div><h3>文件变化</h3><p>工作副本已完成整理；上传原件保持不变。</p><small>首次归档允许对工作副本进行标准化命名；命名依据不足时保留原名。</small></div></section>
+        <section class="next"><div class="next-head"><h3>下一步</h3></div><div class="next-actions"><button>查找相关证明材料</button><button>总结奖学金文件</button></div><span class="hint">建议只会填入输入框，不会自动发送或修改文件。</span></section>
+      </section>
+    </main>
+  </div>
+  <div class="composer"><button class="attach">＋ 附件</button><input value="继续告诉我需要处理哪些文件…" readonly /><button class="send">发送　➤</button></div>
+</body>
+</html>

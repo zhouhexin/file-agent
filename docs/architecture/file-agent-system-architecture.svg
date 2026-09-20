@@ -1,0 +1,251 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  对话式文件工作智能体简化架构图。
+  可见文字全部使用中文，突出普通用户入口、受控编排、业务能力、安全确认和持久化边界。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="2160" viewBox="0 0 3840 2160" role="img" aria-labelledby="title desc">
+  <title id="title">对话式文件工作智能体架构</title>
+  <desc id="desc">用户从聊天工作台提交任务，经接口应用层和智能体运行时调用受控业务能力与异步任务，并将事实、证据、审计记录和文件保存到持久化存储。</desc>
+
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#F8FAFC"/>
+      <stop offset="1" stop-color="#EEF4F9"/>
+    </linearGradient>
+    <linearGradient id="heading" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#17324D"/>
+      <stop offset="1" stop-color="#25557B"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#17324D" flood-opacity="0.10"/>
+    </filter>
+    <marker id="blueArrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#2878FF"/>
+    </marker>
+    <marker id="greenArrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#18A999"/>
+    </marker>
+    <marker id="purpleArrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#7257D5"/>
+    </marker>
+    <style>
+      .font { font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
+      .title { font-size: 70px; font-weight: 800; fill: #FFFFFF; letter-spacing: 2px; }
+      .subtitle { font-size: 30px; font-weight: 500; fill: #DCEAF5; letter-spacing: 3px; }
+      .section { font-size: 34px; font-weight: 800; fill: #17324D; }
+      .cardTitle { font-size: 29px; font-weight: 750; fill: #17324D; }
+      .body { font-size: 25px; font-weight: 500; fill: #40566A; }
+      .small { font-size: 22px; font-weight: 500; fill: #52697C; }
+      .node { font-size: 25px; font-weight: 750; fill: #17324D; }
+      .white { font-size: 24px; font-weight: 750; fill: #FFFFFF; }
+    </style>
+  </defs>
+
+  <rect width="3840" height="2160" fill="url(#background)"/>
+
+  <!-- 标题 -->
+  <rect x="0" y="0" width="3840" height="240" fill="url(#heading)"/>
+  <circle cx="115" cy="98" r="38" fill="#18A999"/>
+  <path d="M95 98h40M115 78v40" stroke="#FFFFFF" stroke-width="9" stroke-linecap="round"/>
+  <text x="180" y="108" class="font title">对话式文件工作智能体架构</text>
+  <text x="184" y="172" class="font subtitle">聊天主入口 · 受控智能编排 · 证据可追溯 · 高风险操作先确认</text>
+
+  <!-- 用户入口 -->
+  <g filter="url(#shadow)">
+    <rect x="80" y="310" width="470" height="1240" rx="30" fill="#FFFFFF" stroke="#8CB8F4" stroke-width="3"/>
+  </g>
+  <rect x="80" y="310" width="470" height="92" rx="30" fill="#EAF2FF"/>
+  <rect x="80" y="372" width="470" height="30" fill="#EAF2FF"/>
+  <circle cx="132" cy="356" r="24" fill="#2878FF"/>
+  <circle cx="132" cy="347" r="7" fill="#FFFFFF"/>
+  <path d="M120 369c4-13 20-13 24 0" fill="none" stroke="#FFFFFF" stroke-width="5" stroke-linecap="round"/>
+  <text x="180" y="368" class="font section">用户入口</text>
+
+  <rect x="125" y="455" width="380" height="370" rx="26" fill="#F5F9FF" stroke="#9DC1FF" stroke-width="3"/>
+  <circle cx="315" cy="555" r="58" fill="#2878FF"/>
+  <path d="M278 543h74a25 25 0 0 1 25 25v8a25 25 0 0 1-25 25h-34l-26 23 7-23h-21a25 25 0 0 1-25-25v-8a25 25 0 0 1 25-25z" fill="#FFFFFF"/>
+  <circle cx="292" cy="572" r="6" fill="#2878FF"/>
+  <circle cx="315" cy="572" r="6" fill="#2878FF"/>
+  <circle cx="338" cy="572" r="6" fill="#2878FF"/>
+  <text x="315" y="682" text-anchor="middle" class="font cardTitle">普通用户聊天工作台</text>
+  <text x="315" y="742" text-anchor="middle" class="font body">任务指令与附件</text>
+  <text x="315" y="786" text-anchor="middle" class="font body">逐文件回执、引用与确认</text>
+
+  <rect x="125" y="875" width="380" height="610" rx="26" fill="#FFF9F1" stroke="#F4C47F" stroke-width="3"/>
+  <text x="165" y="936" class="font cardTitle">用户获得</text>
+  <circle cx="165" cy="998" r="7" fill="#F59E42"/><text x="190" y="1008" class="font body">任务状态与处理进度</text>
+  <circle cx="165" cy="1060" r="7" fill="#F59E42"/><text x="190" y="1070" class="font body">逐文件分类与证据</text>
+  <circle cx="165" cy="1122" r="7" fill="#F59E42"/><text x="190" y="1132" class="font body">搜索结果与推荐原因</text>
+  <circle cx="165" cy="1184" r="7" fill="#F59E42"/><text x="190" y="1194" class="font body">原文引用与文件预览</text>
+  <circle cx="165" cy="1246" r="7" fill="#F59E42"/><text x="190" y="1256" class="font body">待确认操作计划</text>
+  <line x1="165" y1="1310" x2="465" y2="1310" stroke="#E6D2B2" stroke-width="2"/>
+  <text x="165" y="1365" class="font cardTitle">系统内部细节不暴露</text>
+  <text x="165" y="1418" class="font small">工具、规划状态、数据库表</text>
+  <text x="165" y="1458" class="font small">服务器路径、密钥与模型响应</text>
+
+  <!-- 接口应用层 -->
+  <g filter="url(#shadow)">
+    <rect x="630" y="310" width="2110" height="350" rx="30" fill="#FFFFFF" stroke="#8CB8F4" stroke-width="3"/>
+  </g>
+  <rect x="630" y="310" width="2110" height="88" rx="30" fill="#EAF2FF"/>
+  <rect x="630" y="370" width="2110" height="28" fill="#EAF2FF"/>
+  <text x="685" y="368" class="font section">接口应用层</text>
+
+  <rect x="685" y="445" width="965" height="160" rx="22" fill="#F7FAFF" stroke="#BCD4F2" stroke-width="3"/>
+  <circle cx="750" cy="525" r="34" fill="#2878FF"/>
+  <path d="M729 518h42v30h-42zM735 512v-9h30v9" fill="none" stroke="#FFFFFF" stroke-width="5" stroke-linejoin="round"/>
+  <text x="805" y="505" class="font cardTitle">会话与附件范围解析</text>
+  <text x="805" y="558" class="font body">确定文件范围、上传批次和上下文来源</text>
+
+  <rect x="1695" y="445" width="990" height="160" rx="22" fill="#F7FAFF" stroke="#BCD4F2" stroke-width="3"/>
+  <circle cx="1760" cy="525" r="34" fill="#2878FF"/>
+  <path d="M1744 508h32v34h-32zM1752 517h16M1752 527h16M1752 537h10" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round"/>
+  <text x="1815" y="505" class="font cardTitle">接口服务与数据校验</text>
+  <text x="1815" y="558" class="font body">生成结构化的用户任务回执</text>
+
+  <!-- 智能体运行时 -->
+  <g filter="url(#shadow)">
+    <rect x="630" y="720" width="2110" height="830" rx="30" fill="#FFFFFF" stroke="#669EF0" stroke-width="3"/>
+  </g>
+  <rect x="630" y="720" width="2110" height="90" rx="30" fill="#EAF2FF"/>
+  <rect x="630" y="782" width="2110" height="28" fill="#EAF2FF"/>
+  <text x="685" y="780" class="font section">智能体运行时</text>
+  <rect x="2225" y="742" width="455" height="50" rx="25" fill="#2878FF"/>
+  <text x="2452" y="776" text-anchor="middle" class="font white">运行状态与任务恢复点</text>
+
+  <!-- 中文流程节点 -->
+  <g>
+    <rect x="685" y="860" width="225" height="100" rx="20" fill="#F5F9FF" stroke="#83B2FA" stroke-width="3"/>
+    <text x="797" y="921" text-anchor="middle" class="font node">接收任务</text>
+    <rect x="945" y="860" width="235" height="100" rx="20" fill="#F5F9FF" stroke="#83B2FA" stroke-width="3"/>
+    <text x="1062" y="921" text-anchor="middle" class="font node">收集上下文</text>
+    <rect x="1215" y="860" width="255" height="100" rx="20" fill="#F5F9FF" stroke="#83B2FA" stroke-width="3"/>
+    <text x="1342" y="921" text-anchor="middle" class="font node">构建能力目录</text>
+    <rect x="1505" y="860" width="225" height="100" rx="20" fill="#DDEAFF" stroke="#2878FF" stroke-width="4"/>
+    <text x="1617" y="921" text-anchor="middle" class="font node">生成计划</text>
+    <rect x="1765" y="860" width="225" height="100" rx="20" fill="#DDEAFF" stroke="#2878FF" stroke-width="4"/>
+    <text x="1877" y="921" text-anchor="middle" class="font node">调度工具</text>
+    <rect x="2025" y="860" width="245" height="100" rx="20" fill="#F5F9FF" stroke="#83B2FA" stroke-width="3"/>
+    <text x="2147" y="921" text-anchor="middle" class="font node">观察工具结果</text>
+    <rect x="2305" y="860" width="255" height="100" rx="20" fill="#F5F9FF" stroke="#83B2FA" stroke-width="3"/>
+    <text x="2432" y="921" text-anchor="middle" class="font node">校验证据与变更</text>
+    <rect x="2595" y="860" width="95" height="100" rx="20" fill="#DFF7F2" stroke="#18A999" stroke-width="4"/>
+    <text x="2642" y="902" text-anchor="middle" class="font node">生成</text>
+    <text x="2642" y="935" text-anchor="middle" class="font node">回执</text>
+    <path d="M910 910H935M1180 910H1205M1470 910H1495M1730 910H1755M1990 910H2015M2270 910H2295M2560 910H2585" stroke="#2878FF" stroke-width="5" marker-end="url(#blueArrow)"/>
+  </g>
+
+  <rect x="685" y="1020" width="620" height="155" rx="22" fill="#F6F9FC" stroke="#CAD6E1" stroke-width="3"/>
+  <text x="725" y="1072" class="font cardTitle">图状态：可持久化业务状态</text>
+  <text x="725" y="1123" class="font body">输入、计划、轻量结果与业务对象标识</text>
+  <rect x="1340" y="1020" width="620" height="155" rx="22" fill="#F6F9FC" stroke="#CAD6E1" stroke-width="3"/>
+  <text x="1380" y="1072" class="font cardTitle">运行上下文：任务依赖</text>
+  <text x="1380" y="1123" class="font body">每次任务重新构造，不写入图状态</text>
+  <rect x="1995" y="1020" width="695" height="155" rx="22" fill="#F6F9FC" stroke="#CAD6E1" stroke-width="3"/>
+  <text x="2035" y="1072" class="font cardTitle">长期事实存储</text>
+  <text x="2035" y="1123" class="font body">文件、正文、证据、分类、变更与审计</text>
+
+  <rect x="685" y="1225" width="2005" height="255" rx="24" fill="#FFF8EE" stroke="#F0B55B" stroke-width="3"/>
+  <text x="730" y="1280" class="font cardTitle">工具与技能目录及执行安全控制</text>
+  <text x="730" y="1335" class="font body">白名单、数据校验、权限、范围、风险、执行预算</text>
+  <text x="730" y="1382" class="font body">单步执行、结果绑定、幂等、可重新规划、高风险步骤暂停确认</text>
+  <rect x="730" y="1410" width="1915" height="48" rx="24" fill="#F59E42"/>
+  <text x="1687" y="1443" text-anchor="middle" class="font white">大模型只负责理解与编排，不直接访问文件系统或数据库写接口</text>
+
+  <!-- 受控业务能力 -->
+  <g filter="url(#shadow)">
+    <rect x="2800" y="310" width="960" height="760" rx="30" fill="#FFFFFF" stroke="#68CDBD" stroke-width="3"/>
+  </g>
+  <rect x="2800" y="310" width="960" height="92" rx="30" fill="#E5F8F4"/>
+  <rect x="2800" y="372" width="960" height="30" fill="#E5F8F4"/>
+  <text x="2855" y="368" class="font section">受控业务能力</text>
+
+  <rect x="2850" y="450" width="410" height="115" rx="20" fill="#F2FBF9" stroke="#9ADACE" stroke-width="3"/>
+  <text x="3055" y="518" text-anchor="middle" class="font cardTitle">文件接入与生命周期</text>
+  <rect x="3300" y="450" width="410" height="115" rx="20" fill="#F2FBF9" stroke="#9ADACE" stroke-width="3"/>
+  <text x="3505" y="500" text-anchor="middle" class="font cardTitle">文档解析与</text>
+  <text x="3505" y="538" text-anchor="middle" class="font cardTitle">文字识别</text>
+
+  <rect x="2850" y="600" width="410" height="115" rx="20" fill="#F2FBF9" stroke="#9ADACE" stroke-width="3"/>
+  <text x="3055" y="650" text-anchor="middle" class="font cardTitle">摘要与</text>
+  <text x="3055" y="688" text-anchor="middle" class="font cardTitle">结构化信息</text>
+  <rect x="3300" y="600" width="410" height="115" rx="20" fill="#F2FBF9" stroke="#9ADACE" stroke-width="3"/>
+  <text x="3505" y="650" text-anchor="middle" class="font cardTitle">多标签分类与</text>
+  <text x="3505" y="688" text-anchor="middle" class="font cardTitle">证据定位</text>
+
+  <rect x="2850" y="750" width="410" height="115" rx="20" fill="#F2FBF9" stroke="#9ADACE" stroke-width="3"/>
+  <text x="3055" y="800" text-anchor="middle" class="font cardTitle">混合检索与</text>
+  <text x="3055" y="838" text-anchor="middle" class="font cardTitle">基于证据回答</text>
+  <rect x="3300" y="750" width="410" height="115" rx="20" fill="#F2FBF9" stroke="#9ADACE" stroke-width="3"/>
+  <text x="3505" y="800" text-anchor="middle" class="font cardTitle">工作副本操作与</text>
+  <text x="3505" y="838" text-anchor="middle" class="font cardTitle">回收站</text>
+
+  <rect x="2850" y="900" width="860" height="115" rx="20" fill="#F2FBF9" stroke="#9ADACE" stroke-width="3"/>
+  <text x="3280" y="970" text-anchor="middle" class="font cardTitle">反馈、记忆候选与能力建议</text>
+
+  <!-- 异步任务 -->
+  <g filter="url(#shadow)">
+    <rect x="2800" y="1125" width="960" height="425" rx="30" fill="#FFFFFF" stroke="#A69AE2" stroke-width="3"/>
+  </g>
+  <rect x="2800" y="1125" width="960" height="92" rx="30" fill="#F1EEFF"/>
+  <rect x="2800" y="1187" width="960" height="30" fill="#F1EEFF"/>
+  <text x="2855" y="1183" class="font section">异步任务与调度</text>
+
+  <rect x="2850" y="1260" width="410" height="90" rx="20" fill="#F8F6FF" stroke="#C9C0F0" stroke-width="3"/>
+  <text x="3055" y="1317" text-anchor="middle" class="font cardTitle">查重、归档与导入</text>
+  <rect x="3300" y="1260" width="410" height="90" rx="20" fill="#F8F6FF" stroke="#C9C0F0" stroke-width="3"/>
+  <text x="3505" y="1317" text-anchor="middle" class="font cardTitle">文档分析与建索引</text>
+  <rect x="2850" y="1380" width="410" height="90" rx="20" fill="#F8F6FF" stroke="#C9C0F0" stroke-width="3"/>
+  <text x="3055" y="1437" text-anchor="middle" class="font cardTitle">结构化抽取</text>
+  <rect x="3300" y="1380" width="410" height="90" rx="20" fill="#F8F6FF" stroke="#C9C0F0" stroke-width="3"/>
+  <text x="3505" y="1418" text-anchor="middle" class="font cardTitle">文件同步与</text>
+  <text x="3505" y="1454" text-anchor="middle" class="font cardTitle">图谱投影</text>
+  <text x="3280" y="1515" text-anchor="middle" class="font small">批量任务由受控异步工具创建</text>
+
+  <!-- 主流程箭头 -->
+  <path d="M550 650H610" stroke="#2878FF" stroke-width="7" marker-end="url(#blueArrow)"/>
+  <path d="M1685 660V700" stroke="#2878FF" stroke-width="7" marker-end="url(#blueArrow)"/>
+  <path d="M2740 900H2780" stroke="#18A999" stroke-width="7" marker-end="url(#greenArrow)"/>
+  <path d="M3280 1070V1105" stroke="#7257D5" stroke-width="6" stroke-dasharray="14 10" marker-end="url(#purpleArrow)"/>
+
+  <!-- 安全确认边界 -->
+  <rect x="80" y="1605" width="3680" height="145" rx="28" fill="#F59E42"/>
+  <text x="130" y="1660" class="font white">安全、审计与确认边界</text>
+  <line x1="580" y1="1635" x2="580" y2="1720" stroke="#FFFFFF" stroke-opacity="0.5" stroke-width="3"/>
+  <text x="630" y="1658" class="font white">所有工具调用可审计，分析与派生结果写入变更集</text>
+  <text x="630" y="1705" class="font white">改名、移动、覆盖、删除与外发必须先生成操作计划，用户确认后才执行</text>
+  <line x1="2840" y1="1635" x2="2840" y2="1720" stroke="#FFFFFF" stroke-opacity="0.5" stroke-width="3"/>
+  <text x="2890" y="1658" class="font white">原始文件永不被覆盖</text>
+  <text x="2890" y="1705" class="font white">文件正文只作为数据</text>
+
+  <!-- 持久化与存储 -->
+  <text x="85" y="1825" class="font section">持久化与存储</text>
+  <path d="M1685 1550V1585M3280 1550V1585" stroke="#7257D5" stroke-width="5" stroke-dasharray="12 9" marker-end="url(#purpleArrow)"/>
+
+  <g filter="url(#shadow)">
+    <rect x="80" y="1860" width="1400" height="240" rx="28" fill="#FFFFFF" stroke="#9F8BE4" stroke-width="3"/>
+    <rect x="1510" y="1860" width="960" height="240" rx="28" fill="#FFFFFF" stroke="#9F8BE4" stroke-width="3"/>
+    <rect x="2500" y="1860" width="1260" height="240" rx="28" fill="#FFFFFF" stroke="#9F8BE4" stroke-width="3"/>
+  </g>
+
+  <rect x="80" y="1860" width="1400" height="66" rx="28" fill="#F1EEFF"/>
+  <rect x="80" y="1902" width="1400" height="24" fill="#F1EEFF"/>
+  <text x="125" y="1905" class="font cardTitle">关系数据库与向量扩展（业务事实源）</text>
+  <text x="125" y="1970" class="font body">用户、会话、任务运行、工具调用与异步任务</text>
+  <text x="125" y="2015" class="font body">文件版本、正文、证据、分类建议与反馈</text>
+  <text x="125" y="2060" class="font body">变更集、操作计划、用户确认与审计记录</text>
+
+  <rect x="1510" y="1860" width="960" height="66" rx="28" fill="#F1EEFF"/>
+  <rect x="1510" y="1902" width="960" height="24" fill="#F1EEFF"/>
+  <text x="1555" y="1905" class="font cardTitle">图数据库（可重建影子投影）</text>
+  <text x="1555" y="1970" class="font body">文件、分类、实体、关系与相似度</text>
+  <text x="1555" y="2015" class="font body">失败不阻塞主要处理链路</text>
+  <text x="1555" y="2060" class="font body">不得反向覆盖业务事实源</text>
+
+  <rect x="2500" y="1860" width="1260" height="66" rx="28" fill="#F1EEFF"/>
+  <rect x="2500" y="1902" width="1260" height="24" fill="#F1EEFF"/>
+  <text x="2545" y="1905" class="font cardTitle">三层文件存储</text>
+  <text x="2545" y="1970" class="font body">受管原始目录：不可变、只读</text>
+  <text x="2545" y="2015" class="font body">共享工作副本：活动状态，可受控操作　　回收站：可恢复</text>
+  <text x="2545" y="2060" class="font body">派生件：解析、文字识别、预览与导出</text>
+</svg>
