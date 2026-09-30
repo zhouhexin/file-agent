@@ -69,16 +69,25 @@ class TaskManifest(StrictInput):
     sealed_only: bool = False
     identity_column_range: Literal["B:I"] | None = Field(default=None, exclude_if=lambda value: value is None)
     source_fact_column_range: Literal["J:P"] | None = Field(default=None, exclude_if=lambda value: value is None)
-    write_scope: Literal["A:I"] | None = Field(default=None, exclude_if=lambda value: value is None)
+    write_scope: Literal["A:I", "A:AA"] | None = Field(default=None, exclude_if=lambda value: value is None)
     required_pdf_columns: Literal["B:I"] | None = Field(default=None, exclude_if=lambda value: value is None)
     extraction_confirmations: list[ExtractionConfirmationRef] = Field(default_factory=list, max_length=21)
 
     @model_validator(mode="after")
     def check_identity_columns(self):
         """免审批只允许绑定真实上传或既有模板的物理 B:I，不扩大到新建表。"""
-        if (self.write_scope is None) != (self.required_pdf_columns is None):
+        if self.write_scope == "A:AA":
+            if (self.required_pdf_columns is not None or not self.sealed_only
+                    or self.identity_column_range != "B:I" or self.source_fact_column_range != "J:P"
+                    or self.target.new is not None or self.target.layout is None):
+                raise ValueError("完整教授表任务须绑定真实模板、身份列与盖章列策略")
+            from openpyxl.utils.cell import range_boundaries
+            left, _, right, _ = range_boundaries(self.target.layout["header_range"])
+            if left != 1 or right != 27 or len(self.target.labels) != 27:
+                raise ValueError("完整教授表必须精确覆盖物理 A:AA 列")
+        elif (self.write_scope is None) != (self.required_pdf_columns is None):
             raise ValueError("定向写入范围与 PDF 必填范围必须同时提供")
-        if self.write_scope is not None:
+        if self.write_scope == "A:I":
             if self.target.new is not None or self.target.layout is None or self.sealed_only or self.identity_column_range or self.source_fact_column_range:
                 raise ValueError("A–I 定向写入需要已有模板的真实布局，且不能混用盖章任务")
             from openpyxl.utils.cell import range_boundaries
@@ -122,9 +131,9 @@ class TaskPayload(StrictInput):
     @model_validator(mode="after")
     def check_coverage(self):
         """所有列必须有内容或原因，每条候选绑定确定来源。"""
-        if (self.manifest.write_scope == "A:I"
+        if (self.manifest.write_scope in {"A:I", "A:AA"}
                 and [row.source_index for row in self.records] != list(range(len(self.manifest.sources)))):
-            raise ValueError("A–I 批量任务必须每份来源恰好对应一行，并按附件顺序排列")
+            raise ValueError("定向批量任务必须每份来源恰好对应一行，并按附件顺序排列")
         for row in self.records:
             if row.source_index >= len(self.manifest.sources):
                 raise ValueError("来源索引越界")
@@ -145,6 +154,19 @@ class TaskPayload(StrictInput):
                         raise ValueError("B–I 必须逐列提供来源原文证据且不得做资格判定")
                     if column >= 10 and (field.raw_text or field.blank_reason != "OUT_OF_SCOPE" or field.evidence_refs or field.fragments or field.assessment or field.approval):
                         raise ValueError("J 列及以后必须为 OUT_OF_SCOPE")
+                if self.manifest.write_scope == "A:AA":
+                    column = left + index
+                    if column == 1 and (field.raw_text or field.blank_reason != "TARGET_DERIVED" or field.ocr_status):
+                        raise ValueError("A 列只能沿用目标模板序号")
+                    if column >= 2 and field.blank_reason == "OUT_OF_SCOPE":
+                        raise ValueError("完整教授表须处理 B–AA 全部列，不能标记为范围外")
+                    if column >= 2 and field.ocr_status == "UNREADABLE" and field.blank_reason != "OCR_UNREADABLE":
+                        raise ValueError("OCR 未识别字段需要固定留空原因")
+                    if 2 <= column <= 9 and not field.ocr_status and (
+                            not field.raw_text or not field.evidence_refs or field.approval or field.assessment):
+                        raise ValueError("清晰的 B–I 字段必须提供本来源 OCR 证据")
+                elif field.ocr_status:
+                    raise ValueError("OCR 待核对标记仅允许完整教授表任务")
                 identity_field = self.manifest.identity_column_range == "B:I" and 2 <= left + index <= 9
                 column = left + index
                 source_fact = self.manifest.source_fact_column_range == "J:P" and column in {10, 11, 13, 15, 16}
@@ -157,7 +179,8 @@ class TaskPayload(StrictInput):
                 sealed_fragments = [ref for ref in field.fragments if ref not in field.source_only_fragments]
                 if field.source_only_fragments and sealed_fragments and not field.approval:
                     raise ValueError("混合状态字段的盖章片段必须绑定审批证据")
-                if field.raw_text and self.manifest.sealed_only and not identity_field and not field.approval and not field.source_only_fragments:
+                if (field.raw_text and self.manifest.sealed_only and not identity_field
+                        and not field.approval and not field.source_only_fragments and not field.ocr_status):
                     raise ValueError("盖章范围任务的所有填写内容必须绑定审批证据")
         return self
 

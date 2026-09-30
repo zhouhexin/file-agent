@@ -180,6 +180,12 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules
 API/MCP 两侧额外设置 `WORKBUDDY_EXCEL_WRITEBACK_ENABLED=true` 后启用；仍需保留结构化数据集开关。
 新路径由 WorkBuddy 本地定向写入 XLSX、服务端校验并发布同名新版本；设计与限制见
 [完整文件回传方案](docs/2026-09-23-workbuddy-excel-writeback-proposal.md)。
+
+教授业绩汇总 A–AA 同轮填表使用独立 WorkBuddy Skill `file-agent-full-professor-excel` 和
+`full_professor_excel_sources_ingest`：首次一份 Excel 加 1–20 份 PDF，后续只上传 PDF 并在任务文字中指定完整目标 `.xlsx` 文件名。
+PDF 每份一次完整页面读取，按相关页复用正文与印章证据；OCR 不清的格子标记待核对，完整行只发布一个新版本。
+需同时部署 API/MCP 并安装插件 0.1.55；当前未实现区域裁剪 OCR 或自动成本硬预算，见
+[完整列实施方案](docs/2026-09-30-workbuddy-j-aa-incremental-extraction-plan.md)。
 针对已验收 PDF 的定向读取，`structured_dataset_source` 可选 `mode=INDEX` 返回无正文区段目录，
 再用 `unit_orders` 只取本轮需要的已保存正文；省略参数仍返回原完整结果。此读取不重新 OCR，
 字段、印章和版本校验均保持原规则。新用法需同步部署 API、MCP 与 WorkBuddy Skill。

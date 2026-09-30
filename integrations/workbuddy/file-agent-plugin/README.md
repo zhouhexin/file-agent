@@ -1,6 +1,8 @@
 # 文件助手 WorkBuddy 附件桥接
 
-当前套件 **0.1.54**：`file-agent-manual-excel-revision` 支持把与本轮上传文件完全一致的服务器可见 Excel 直接编辑结果登记为新版本。用户基于已发布 Excel 手工补全后，本轮上传同名 `.xlsx`；WorkBuddy 用编辑前冻结的版本 ID/SHA 回传，服务端发布为同一工作副本的新版本，旧版保留。需部署 API/MCP、重启服务并安装新版插件；无需数据库迁移。
+当前套件 **0.1.55**：新增 `file-agent-full-professor-excel`，首次可用一份 Excel 与 1–20 份 PDF 填写 A–AA 全列，后续只上传 PDF 并按完整 `.xlsx` 文件名续写。PDF 正文一次读取并复用页证据；模糊 OCR 在 Excel 中明确标记，不触发重复识别，也不计入核验或对勾。完整行同轮一次发布，旧 A–I Skill 保持独立。需部署 API/MCP、重启服务并安装新版插件；无需数据库迁移。
+
+0.1.54：`file-agent-manual-excel-revision` 支持把与本轮上传文件完全一致的服务器可见 Excel 直接编辑结果登记为新版本。用户基于已发布 Excel 手工补全后，本轮上传同名 `.xlsx`；WorkBuddy 用编辑前冻结的版本 ID/SHA 回传，服务端发布为同一工作副本的新版本，旧版保留。
 
 0.1.52：A–I 定向 PDF 支持已核对的 25 页参考版式与 22 页 A4 版式，仍只 OCR 第 1、3 页的 B–I 区域。服务端修复版式不符时的归档无限重试，并能补偿旧版留下的等待态。
 
@@ -43,7 +45,7 @@
 
 打包：项目根运行 `python integrations/workbuddy/build_marketplace.py`。
 本地升级服务：`python -m http.server 8175 --bind 127.0.0.1 --directory integrations/workbuddy`。
-下载地址：`http://127.0.0.1:8175/file-agent-marketplace-0.1.50.zip`。
+下载地址：`http://127.0.0.1:8175/file-agent-marketplace-0.1.55.zip`。
 
 2026-09-22 盖章审批规则更新（历史套件 0.1.31）：审批声明、盖章证据和唯一项目映射成立即可，签字不再是必需条件。
 盖章证据可由 `type=Image` 且 OCR 返回“圆章”的元素、印章检测区域或图内红色圆形印记检测结果提供；每项仍须带 PDF 页码。

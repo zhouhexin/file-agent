@@ -99,7 +99,9 @@ def task_capabilities(user=Depends(get_current_user)):
     """在宿主 OCR 之前公开当前服务端可校验的专用契约，不返回任何文件内容。"""
     return {"contract_version": "sealed-item-template-v1", "source_fact_column_range": "J:P",
             "source_only_fragments": True, "hr_annual_excellence_seal_block": True,
-            "identity_column_range": "B:I", "review_modes": ["REVIEW_REQUIRED", "DIRECT_SAVE"]}
+            "identity_column_range": "B:I", "review_modes": ["REVIEW_REQUIRED", "DIRECT_SAVE"],
+            "full_row_write_scope": "A:AA", "ocr_uncertain_markers": True,
+            "full_row_pdf_source_kind": "WORKBUDDY_DOCUMENT"}
 
 
 @router.get("/tasks/{task_id}")

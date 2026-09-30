@@ -79,6 +79,7 @@ class StructuredDatasetService:
         self.storage = FileLifecycleStorageService(self.settings)
         self.workflow_task_id = None
         self.source_fact_keys: set[str] = set()
+        self.full_row_ocr_mode = False
 
     def _assert_task_write_access(self, dataset):
         """跨请求表格任务占用目标时，旧粒度接口也不能穿透并发发布。"""
@@ -1432,7 +1433,7 @@ class StructuredDatasetService:
         for record in payload_for_digest.get("records", []):
             for value in record.get("fields", {}).values():
                 # 新可选字段不改变旧请求指纹，保证升级后原幂等键仍可恢复。
-                for optional in ("fragments", "blank_reason", "approval", "assessment"):
+                for optional in ("fragments", "blank_reason", "approval", "assessment", "ocr_status", "ocr_unit_id"):
                     if not value.get(optional):
                         value.pop(optional, None)
                 if not value.get("evidence_refs"):
@@ -1516,6 +1517,25 @@ class StructuredDatasetService:
             values = {}
             for key, value in record.fields.items():
                 presentation = {"blank_reason": value.blank_reason} if value.blank_reason else {}
+                if value.ocr_status:
+                    if (not self.workflow_task_id or not self.full_row_ocr_mode
+                            or source["source_kind"] != "WORKBUDDY_DOCUMENT"
+                            or Path(source["filename"]).suffix.lower() != ".pdf"):
+                        fail("OCR_MARKER_NOT_ALLOWED", "OCR 待核对标记只允许完整教授表 PDF 任务。", 422)
+                    matching_units = [(offset, unit) for offset, unit in enumerate(source["source_units"])
+                                      if unit["source_unit_id"] == str(value.ocr_unit_id)]
+                    if (len(matching_units) != 1 or matching_units[0][1]["kind"] != "PDF_PAGE"
+                            or matching_units[0][1]["page_number"] != value.page_number):
+                        fail("OCR_SOURCE_MISMATCH", "待核对字段未绑定本份 PDF 的真实页面。", 422)
+                    if value.ocr_status == "UNCERTAIN" and any(
+                            str(ref.source_unit_id) != str(value.ocr_unit_id) for ref in value.evidence_refs):
+                        fail("OCR_SOURCE_MISMATCH", "OCR 候选引文不属于指定页面。", 422)
+                    if fields[[field.key for field in fields].index(key)].field_type != "string":
+                        fail("OCR_MARKER_TEXT_FIELD_REQUIRED", "OCR 待核对标记只能写入文本列。", 422)
+                    presentation.update(ocr_status=value.ocr_status,
+                                        ocr_source_unit_id=str(value.ocr_unit_id))
+                    if value.ocr_status == "UNCERTAIN":
+                        presentation["ocr_candidate"] = value.raw_text
                 if value.source_only_fragments and key not in self.source_fact_keys:
                     fail("SOURCE_ONLY_NOT_ALLOWED", "无章来源事实只允许在专用任务指定的业务列写入。", 422)
                 if value.source_only_fragments and Path(source["filename"]).suffix.lower() != ".pdf":
@@ -1639,7 +1659,20 @@ class StructuredDatasetService:
             fields=fields, candidates=CandidateExtraction(records=candidates), elements=elements,
             unscored_fields=unscored_fields)
         for persisted in self.repository.load_fields(run.id):
-            persisted.presentation_json = presentations.get((persisted.record_index, persisted.field_key), {})
+            presentation = presentations.get((persisted.record_index, persisted.field_key), {})
+            persisted.presentation_json = presentation
+            if presentation.get("ocr_status"):
+                # 已读但不清晰是可发布的显式待核对状态；规范化值保持空，查询与合计不能误用候选。
+                persisted.status = "EXTRACTED"
+                persisted.normalized_value_json = None
+                persisted.warning_codes_json = [*(persisted.warning_codes_json or []),
+                                                f"OCR_{presentation['ocr_status']}"]
+                if presentation["ocr_status"] == "UNREADABLE":
+                    persisted.page_number = next(
+                        (unit["page_number"] for unit in source["source_units"]
+                         if unit["source_unit_id"] == presentation["ocr_source_unit_id"]),
+                        persisted.page_number,
+                    )
         changeset_id = self.repository.record_changeset(
             run=run, agent_run_id=self.agent_run.id, conversation_id=self.agent_run.conversation_id,
             user_id=self.user.id, review_count=result.review_count,

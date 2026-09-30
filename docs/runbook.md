@@ -1629,3 +1629,14 @@ python -m app.scripts.repair_structured_dataset_publication --publication-id <pu
 不匹配，须补读相关区段或整份已缓存正文，不能省略必要的判断。等待异步依赖时查询原任务状态，
 不要在状态未变化时反复调用 `structured_dataset_commit`。此改动不需要新增数据库迁移，
 但必须重启 API 和 WorkBuddy MCP 并安装新版插件后新开会话；真实端到端耗时仍需重新测量。
+
+## WorkBuddy 教授业绩 A–AA 整行填表（2026-09-30）
+
+部署当前 API 与 MCP 代码，保持 `WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED=true`、
+`WORKBUDDY_DOCUMENT_EXTRACTION_ENABLED=true`、`WORKBUDDY_EXCEL_WRITEBACK_ENABLED=true`，
+重启 API、文件队列 worker 与 MCP，再安装 `integrations/workbuddy/file-agent-marketplace-0.1.55.zip` 并新开 WorkBuddy 会话。
+首次消息附一份 XLS/XLSX 和 1–20 份 PDF；后续只附 PDF，并在任务文字中写出完整已发布 `.xlsx` 文件名。
+新入口 `full_professor_excel_sources_ingest` 固定附件顺序与目标，随后按
+`file-agent-full-professor-excel` 完成 PDF 一次读取、逐列印章验证、整行写回和一次发布。
+只有返回 `COMPLETED`、`excel_published=true` 及当前版本下载资源才算成功；待核对 OCR 格可见但不参与核验或合计。
+本版不新增数据库迁移，OCR 仍使用完整页面契约，不能宣称已按区域减少 OCR 页数。

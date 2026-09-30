@@ -201,6 +201,10 @@ def assess_field(*, label: str, assessment: FieldAssessment, approval: ApprovalS
 
 def display_value(value, assessment: dict):
     """只有通过校验的文本格增加一个末尾展示标记；不改写规范化事实和证据。"""
+    if assessment.get("ocr_status") == "UNCERTAIN":
+        return f"〔OCR 待核对：{assessment['ocr_candidate']}〕"
+    if assessment.get("ocr_status") == "UNREADABLE":
+        return "〔OCR 未识别，待核对〕"
     indexes = assessment.get("source_only_fragment_indexes") or []
     if isinstance(value, str) and indexes:
         parts = value.split("\n")

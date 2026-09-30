@@ -9,7 +9,7 @@
       "name": "file-agent-workbuddy-bridge",
       "source": "./file-agent-plugin",
       "description": "捕获本轮 WorkBuddy 附件并交给文件助手执行已授权导入。",
-      "version": "0.1.54"
+      "version": "0.1.55"
     }
   ]
 }

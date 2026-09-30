@@ -50,6 +50,7 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
         "ingest_retry",
         "ingest_cancel",
         "scoped_excel_pdf_append_ingest",
+        "full_professor_excel_sources_ingest",
     } <= names
     if "excel_writeback_checkout" in names:
         assert {"excel_writeback_apply", "excel_writeback_preview", "excel_writeback_confirm",

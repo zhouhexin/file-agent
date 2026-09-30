@@ -295,6 +295,7 @@ class ExcelWritebackService:
                 record.source_index for record in payload.records):
             fail("WRITEBACK_ROWS_MISMATCH", "多来源记录必须按来源顺序排列。", 422)
         scoped = payload.manifest.write_scope == "A:I"
+        full_row = payload.manifest.write_scope == "A:AA"
         if scoped and (payload.manifest.required_pdf_columns != "B:I"
                        or [record.source_index for record in payload.records]
                        != list(range(len(payload.manifest.sources)))):
@@ -310,6 +311,7 @@ class ExcelWritebackService:
             if left + offset == 12 and payload.manifest.sealed_only), None)
         dataset.active_task_id = task.id
         self.datasets.scoped_write_scope = scoped
+        self.datasets.full_row_ocr_mode = full_row
         start_revision = dataset.revision
         for source_index, source_ref in enumerate(payload.manifest.sources):
             source = self.tasks._source(source_ref)
@@ -322,6 +324,10 @@ class ExcelWritebackService:
                 fail("SCOPED_SOURCE_NOT_READY", "来源必须是已完成的定向 PDF 或 Word 正文。", 422)
             if scoped and scoped_pdf and source["coverage"].get("resolved_columns") != list("BCDEFGHI"):
                 fail("SCOPED_SOURCE_NOT_READY", "PDF 来源没有完成 B–I 定向 OCR。", 422)
+            if full_row and (source["source_kind"] != "WORKBUDDY_DOCUMENT"
+                             or Path(source["filename"]).suffix.lower() != ".pdf"
+                             or source["coverage"].get("status") != "COMPLETE"):
+                fail("FULL_ROW_SOURCE_NOT_READY", "完整填表必须绑定已完成一次读取的 PDF 来源。", 422)
             records = []
             for candidate in (record for record in payload.records if record.source_index == source_index):
                 values = {}
@@ -382,13 +388,14 @@ class ExcelWritebackService:
         expected = [[record["fields"][field["key"]].get(
             "display_value", record["fields"][field["key"]]["value"])
             for field in dataset.schema_json] for record in added]
-        if scoped:
+        if scoped or full_row:
             for row in expected:
                 row[0] = None
-                for offset in range(9, len(row)):
-                    row[offset] = None
+                if scoped:
+                    for offset in range(9, len(row)):
+                        row[offset] = None
         inserted = self._verify_workbook(base_path=base_path, candidate_path=file_path,
-                                         dataset=dataset, expected_rows=expected, scoped_a_i=scoped)
+                                         dataset=dataset, expected_rows=expected, scoped_a_i=scoped or full_row)
         if inserted:
             updated_layout = dict(dataset.target_layout_json)
             left_col, top_row, right_col, bottom_row = range_boundaries(updated_layout["data_range"])

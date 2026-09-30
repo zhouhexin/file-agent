@@ -549,6 +549,24 @@ async def scoped_excel_sources_ingest(submission_ref: str, target_filename: str 
 
 
 @mcp.tool(
+    name="full_professor_excel_sources_ingest",
+    description="本轮固定 1–20 份 PDF；首次另带一份 Excel，后续按任务文字中的完整 .xlsx 文件名追加。PDF 使用一次完整文档读取并按来源顺序填 A–AA。",
+    structured_output=True,
+)
+async def full_professor_excel_sources_ingest(submission_ref: str, target_filename: str | None = None) -> dict[str, Any]:
+    """完整教授表使用独立可信导入入口，避免误走 B–I 裁剪契约。"""
+    client = _client()
+    try:
+        registry = WorkBuddyAttachmentRegistry.from_environment()
+        transfer = AttachmentTransferService(client, registry)
+        return await WorkBuddySubmissionService.from_environment(
+            transfer=transfer, registry=registry).ingest_scoped_sources(
+                submission_ref=submission_ref, target_filename=target_filename, full_professor=True)
+    finally:
+        await client.close()
+
+
+@mcp.tool(
     name="file_set_primary_category",
     description=(
         "把已确定文件的主分类设为指定 taxonomy 节点，并按该主类异步落位。"

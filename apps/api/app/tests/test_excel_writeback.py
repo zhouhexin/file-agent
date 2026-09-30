@@ -22,7 +22,7 @@ from app.modules.structured_datasets.publication import (
     finalize_publication, recover_pending_publications, repair_needs_repair_publication,
 )
 from app.tests.test_dataset_tasks import make_payload
-from app.tests.test_structured_datasets import BASE, demo, seed_workbuddy_document
+from app.tests.test_structured_datasets import BASE, demo, seed_workbuddy_document, seed_excel_target
 
 
 def _ready(client, sessions, headers, monkeypatch, tmp_path, *, review_mode="DIRECT_SAVE"):
@@ -103,6 +103,93 @@ def test_writeback_publishes_workbuddy_bytes_and_preserves_old_path(demo, monkey
         visible = FileLifecycleStorageService().working_copy_path(
             f"{root.relative_storage_path}/{working.relative_path}")
         assert visible.read_bytes() == output.read_bytes()
+
+
+def test_full_professor_row_publishes_once_with_separate_ocr_markers(demo, monkeypatch, tmp_path):
+    """同一 PDF 的 B–AA 一次落盘；待核对格可见但不参与规范化事实。"""
+    client, sessions, users = demo
+    monkeypatch.setenv("WORKBUDDY_EXCEL_WRITEBACK_ENABLED", "true")
+    get_settings.cache_clear()
+    capabilities = client.get(f"{BASE}/tasks/capabilities", headers=users[0])
+    assert capabilities.status_code == 200
+    assert capabilities.json()["full_row_write_scope"] == "A:AA"
+    assert capabilities.json()["ocr_uncertain_markers"] is True
+    labels = ["序号", *[f"字段{number}" for number in range(2, 28)]]
+    target_id = seed_excel_target(sessions, filename="教授汇总.xlsx", sheets={"汇总": [labels, [1]]})
+    layout = {"header_range": "A1:AA1", "data_range": "A2:AA3"}
+    registered = client.post(f"{BASE}/from-excel", headers=users[0], json={
+        "document_id": str(target_id), "sheet_name": "汇总", "layout": layout,
+        "idempotency_key": "full-professor-target"})
+    assert registered.status_code == 200, registered.text
+    checkout = client.post("/api/excel-writeback/checkout", headers=users[0], json={
+        "filename": "教授汇总.xlsx", "request_key": "full-professor-row", "review_mode": "DIRECT_SAVE"})
+    assert checkout.status_code == 200, checkout.text
+    task = checkout.json()
+    source_id = seed_workbuddy_document(sessions, filename="申报.pdf", content_type="application/pdf",
+        units=[{"kind": "PDF_PAGE", "page_number": 1,
+                "text": "单位 学院甲 姓名 张三 性别 男 出生 1980 学历 博士 职称 教授 年份 2026 部门 教学\n论文 12?篇\n师德评价 优秀"}])
+    source = client.get(f"{BASE}/sources/{source_id}", headers=users[0]).json()
+    unit_id = source["source_units"][0]["source_unit_id"]
+    clear = [("学院甲", "单位 学院甲"), ("张三", "姓名 张三"), ("男", "性别 男"),
+             ("1980", "出生 1980"), ("博士", "学历 博士"), ("教授", "职称 教授"),
+             ("2026", "年份 2026"), ("教学", "部门 教学")]
+    fields = [{"blank_reason": "TARGET_DERIVED"}]
+    fields.extend({"raw_text": value, "page_number": 1,
+                   "evidence_refs": [{"source_unit_id": unit_id, "quote": quote}]}
+                  for value, quote in clear)
+    fields.append({"raw_text": "12?篇", "page_number": 1, "ocr_status": "UNCERTAIN",
+                   "ocr_unit_id": unit_id,
+                   "evidence_refs": [{"source_unit_id": unit_id, "quote": "论文 12?篇"}]})
+    fields.append({"blank_reason": "OCR_UNREADABLE", "page_number": 1,
+                   "ocr_status": "UNREADABLE", "ocr_unit_id": unit_id})
+    fields.extend({"blank_reason": "来源未提供对应事实"} for _ in range(16))
+    source_quote = {"source_unit_id": unit_id, "quote": "师德评价 优秀"}
+    fields[12] = {"raw_text": "师德评价 优秀", "page_number": 1,
+                  "fragments": [source_quote], "source_only_fragments": [source_quote]}
+    payload = TaskPayload.model_validate({"manifest": {
+        "sources": [{key: source[key] for key in (
+            "document_id", "document_version_id", "extraction_run_id", "source_sha256")}],
+        "target": {"dataset_id": registered.json()["dataset_id"],
+                   "document_version_id": task["document_version_id"], "filename": task["filename"],
+                   "sheet_name": task["sheet_name"], "layout": task["layout"], "labels": task["labels"]},
+        "sealed_only": True, "identity_column_range": "B:I", "source_fact_column_range": "J:P",
+        "write_scope": "A:AA"}, "records": [{"source_index": 0, "fields": fields}]}).model_dump(mode="json")
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "mcp"))
+    from file_agent_mcp.xlsx_writeback import patch_workbook
+    from file_agent_mcp.excel_writeback_tools import _full_professor_rows
+    from file_agent_mcp.dataset_task_contracts import TaskPayload as HostPayload
+    assert HostPayload.model_validate(payload).model_dump(mode="json") == payload
+    baseline = tmp_path / "full-baseline.xlsx"
+    baseline.write_bytes(client.get(task["download_url"], headers=users[0]).content)
+    output = tmp_path / "full-candidate.xlsx"
+    cells = {chr(66 + index): value for index, (value, _) in enumerate(clear)}
+    cells.update(J="〔OCR 待核对：12?篇〕", K="〔OCR 未识别，待核对〕",
+                 M="师德评价 优秀〔PDF 原文，未见对应印章〕")
+    row = _full_professor_rows([cells], len(task["labels"]))[0]
+    patch_workbook(baseline=baseline, output=output, sheet_name="汇总", labels=task["labels"],
+                   rows=[row], layout=task["layout"], scoped_a_i=True)
+    sha = hashlib.sha256(output.read_bytes()).hexdigest()
+    digest = writeback_digest(payload, sha)
+    preview = client.post(f"/api/excel-writeback/tasks/{task['task_id']}/preview", headers=users[0],
+                          json={"result_digest": digest, "file_sha256": sha})
+    assert preview.status_code == 200, preview.text
+    published = _publish(client, users[0], task, payload, output, sha, digest)
+    assert published.status_code == 200, published.text
+    result = published.json()
+    assert result["excel_published"] and result["task_record_count"] == 1
+    book = load_workbook(io.BytesIO(client.get(result["download_url"], headers=users[0]).content))
+    assert book["汇总"]["A2"].value == 1
+    assert book["汇总"]["B2"].value == "学院甲"
+    assert book["汇总"]["J2"].value == "〔OCR 待核对：12?篇〕"
+    assert book["汇总"]["K2"].value == "〔OCR 未识别，待核对〕"
+    assert book["汇总"]["M2"].value == "师德评价 优秀〔PDF 原文，未见对应印章〕"
+    book.close()
+    query = client.post(f"{BASE}/{result['dataset_id']}/query", headers=users[0], json={})
+    assert query.status_code == 200, query.text
+    current = query.json()["records"][-1]
+    uncertain = [field for field in current["fields"].values()
+                 if field.get("assessment", {}).get("ocr_status") == "UNCERTAIN"]
+    assert len(uncertain) == 1 and uncertain[0]["value"] is None
 
 
 def test_writeback_publication_failure_is_recoverable_without_duplicate_append(demo, monkeypatch, tmp_path):

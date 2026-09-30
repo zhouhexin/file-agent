@@ -29,6 +29,8 @@ class DatasetValue(BaseModel):
     fragments: list[SourceQuote] = Field(default_factory=list, max_length=100)
     source_only_fragments: list[SourceQuote] = Field(default_factory=list, max_length=100)
     blank_reason: str | None = Field(default=None, min_length=1, max_length=1000)
+    ocr_status: Literal["UNCERTAIN", "UNREADABLE"] | None = Field(default=None, exclude_if=lambda value: value is None)
+    ocr_unit_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
     approval: ApprovalScope | None = None
     assessment: FieldAssessment | None = None
 
@@ -44,6 +46,15 @@ class DatasetValue(BaseModel):
             self.raw_text = joined
         if self.blank_reason and self.raw_text:
             raise ValueError("有内容字段不能同时声明留空")
+        if self.ocr_status:
+            if not self.ocr_unit_id or self.approval or self.assessment or self.fragments or self.source_only_fragments:
+                raise ValueError("OCR 待核对字段须绑定来源区段，且不能声明审批或资格通过")
+            if self.ocr_status == "UNCERTAIN" and (not self.raw_text or not self.evidence_refs or self.blank_reason):
+                raise ValueError("OCR 候选须有可定位的原始 OCR 引文")
+            if self.ocr_status == "UNREADABLE" and (self.raw_text or self.evidence_refs or self.blank_reason != "OCR_UNREADABLE"):
+                raise ValueError("OCR 未识别字段只能提供来源区段和固定原因")
+        elif self.ocr_unit_id is not None:
+            raise ValueError("OCR 来源区段只用于待核对字段")
         if self.source_only_fragments:
             # 与服务端同一约束，状态必须随原文证据走，不能单独提交展示后缀。
             all_refs = [ref.model_dump() for ref in self.fragments]

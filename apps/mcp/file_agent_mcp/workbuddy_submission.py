@@ -188,19 +188,23 @@ class WorkBuddySubmissionService:
                 "write_columns": list("ABCDEFGHI")}
 
     async def ingest_scoped_sources(self, *, submission_ref: str,
-                                    target_filename: str | None = None) -> dict[str, Any]:
-        """固定一至二十份 PDF/Word 来源，按原附件顺序为每份生成一行。"""
+                                    target_filename: str | None = None,
+                                    full_professor: bool = False) -> dict[str, Any]:
+        """固定来源顺序；完整教授表与 A–I 使用独立的 PDF 提取配置。"""
         submission = self.load(submission_ref=submission_ref)
         manifest = [self._resolve_attachment(item) for item in submission.attachments]
         excels = [item for item in manifest if Path(item.filename).suffix.lower() in {".xls", ".xlsx"}]
-        sources = [item for item in manifest if Path(item.filename).suffix.lower() in {".pdf", ".doc", ".docx"}]
+        allowed = {".pdf"} if full_professor else {".pdf", ".doc", ".docx"}
+        sources = [item for item in manifest if Path(item.filename).suffix.lower() in allowed]
         if (not 1 <= len(sources) <= 20 or len(manifest) != len(sources) + len(excels)
                 or len(excels) != (0 if target_filename is not None else 1)):
-            raise ValueError("SCOPED_SOURCES_ATTACHMENTS: 首次需一份 Excel 与 1–20 份 PDF/Word，后续只需 1–20 份 PDF/Word")
+            raise ValueError("FULL_ROW_ATTACHMENTS: 首次需一份 Excel 与 1–20 份 PDF，后续只需 1–20 份 PDF" if full_professor
+                             else "SCOPED_SOURCES_ATTACHMENTS: 首次需一份 Excel 与 1–20 份 PDF/Word，后续只需 1–20 份 PDF/Word")
         key = hashlib.sha256(submission.submission_id.encode()).hexdigest()[:32]
+        prefix = "full-professor" if full_professor else "scoped"
         if target_filename is None:
             target = await self.transfer.ingest_resolved(
-                submission_id=f"scoped-{key}-target", attachments=excels,
+                submission_id=f"{prefix}-{key}-target", attachments=excels,
                 user_request=submission.user_request, placement_mode="NEUTRAL",
                 rule_profile="content_based", extraction_profile="WORKBUDDY_DOCUMENT",
                 extraction_save_policy="DIRECT_ARCHIVE")
@@ -223,12 +227,12 @@ class WorkBuddySubmissionService:
         pdfs = [item for item in sources if Path(item.filename).suffix.lower() == ".pdf"]
         words = [item for item in sources if Path(item.filename).suffix.lower() in {".doc", ".docx"}]
         batches = {}
-        for kind, items, profile in (("pdf", pdfs, "SCOPED_EXCEL_SOURCE"),
+        for kind, items, profile in (("pdf", pdfs, "WORKBUDDY_DOCUMENT" if full_professor else "SCOPED_EXCEL_SOURCE"),
                                      ("word", words, "WORKBUDDY_DOCUMENT")):
             if not items:
                 continue
             batches[kind] = await self.transfer.ingest_resolved(
-                submission_id=f"scoped-{key}-{kind}", attachments=items,
+                submission_id=f"{prefix}-{key}-{kind}", attachments=items,
                 user_request=submission.user_request, placement_mode="NEUTRAL",
                 rule_profile="content_based", extraction_profile=profile,
                 extraction_save_policy="DIRECT_ARCHIVE")
@@ -239,7 +243,8 @@ class WorkBuddySubmissionService:
                         for index, item in enumerate(sources)]
         return {"target": target, "target_kind": target_kind, "target_filename": target_name,
                 "source_batches": batches, "source_order": source_order,
-                "required_source_columns": list("BCDEFGHI"), "write_columns": list("ABCDEFGHI")}
+                "required_source_columns": list("BCDEFGHI") if not full_professor else list("BCDEFGHIJKLMNOPQRSTUVWXYZ") + ["AA"],
+                "write_columns": list("ABCDEFGHI") if not full_professor else list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") + ["AA"]}
 
     def load(self, *, submission_ref: str) -> TrustedSubmission:
         """读取一个未过期、非软链接且结构完整的插件提交单。"""

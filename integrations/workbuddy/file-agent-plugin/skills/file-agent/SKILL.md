@@ -5,6 +5,8 @@ description: 当本轮上下文含 FILE_AGENT_HOST_SUBMISSION，且用户要求�
 
 # 文件助手附件桥接
 
+用户要求教授业绩汇总模板 A–AA 全列同时填写、核对印章并控制 OCR 重复调用时，转用 `file-agent-full-professor-excel`；用户明确只填写 A–I 时仍用 `file-agent-a-i-scoped-excel`。完整任务的 PDF 使用独立的 `full_professor_excel_sources_ingest`，不得走 A–I 区域契约。
+
 仅在当前轮出现 `FILE_AGENT_HOST_SUBMISSION ref=...`，且用户明确要求将本轮附件导入、归档、整理、解析、OCR、提取内容或分类时调用。“文件助手”是面向用户的中文称呼，用户无需输入英文产品名；例如“请用文件助手归档并分类本轮附件”或“从刚上传的文件提取姓名和金额”。不提称呼但任务明确时同样可以调用；只说“文件助手”而未给出文件任务，不得导入。可信文档引用当前支持 `.doc/.docx/.pdf/.xls/.xlsx/.txt`；图片必须由宿主提供 `image_blob_ref`。`count=pending` 是 WorkBuddy 5.5.3/插件 0.1.15 的正常延迟解析状态，不是失败。
 
 ## 必须先判定保存策略

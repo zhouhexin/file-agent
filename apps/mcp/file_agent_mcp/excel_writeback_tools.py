@@ -21,6 +21,7 @@ from .dataset_task_contracts import TaskPayload
 from .dataset_tools import DatasetLayout
 from .correction_contracts import CorrectionPayload
 from .xlsx_writeback import _bounds, _column, patch_existing_cells, patch_workbook
+from openpyxl.utils.cell import get_column_letter
 
 
 def writeback_digest(payload: dict, file_sha256: str) -> str:
@@ -61,6 +62,25 @@ def _scoped_a_i_rows(rows: list[list], label_count: int) -> list[list]:
                 or any(value is None for value in row[1:9])
                 or any(value is not None for value in row[9:])):
             raise ValueError("SCOPED_WRITE_SCOPE_INVALID: 仅传 B–I 八个值，或传 A/J–末列均为 JSON null 的完整行")
+        normalized.append(row)
+    return normalized
+
+
+def _full_professor_rows(rows: list[list | dict], label_count: int) -> list[list]:
+    """完整任务优先按物理列键传非空值，由工具补齐空位与 A 序号。"""
+    if label_count != 27:
+        raise ValueError("FULL_ROW_SCOPE_INVALID: 目标必须精确覆盖 A–AA")
+    normalized = []
+    for row in rows:
+        if isinstance(row, dict):
+            allowed = {get_column_letter(column) for column in range(2, 28)}
+            if any(key not in allowed or value is None for key, value in row.items()):
+                raise ValueError("FULL_ROW_SCOPE_INVALID: 行映射只能包含 B–AA 的非空展示值")
+            row = [None, *[row.get(get_column_letter(column)) for column in range(2, 28)]]
+        if len(row) == 26:
+            row = [None, *row]
+        if len(row) != 27 or row[0] is not None:
+            raise ValueError("FULL_ROW_SCOPE_INVALID: 每行只传 B–AA 的 26 个值")
         normalized.append(row)
     return normalized
 
@@ -128,9 +148,11 @@ def register_excel_writeback_tools(mcp, client_factory, download_dir):
 
     @mcp.tool(name="excel_writeback_apply", description=(
         "由 WorkBuddy 提供已提取并判定的每列最终展示值；A–I 定向任务的 rows 每行只传 B–I 八个值，"
-        "本机补齐 A 和 J 列以后的空位；本机只在冻结基线的目标工作表新增数据格，"
+        "本机补齐 A 和 J 列以后的空位；A–AA 完整任务每行优先按物理列键传 B–AA 非空值，本机补空位和 A 序号。"
+        "本机只在冻结基线的目标工作表新增数据格，"
         "原字节保留其余工作簿部件。完成后自动登记候选和文件共同指纹。"), structured_output=True)
-    async def apply(task_id: UUID, payload: TaskPayload, rows: list[list[str | int | float | bool | None]]) -> dict[str, Any]:
+    async def apply(task_id: UUID, payload: TaskPayload,
+                    rows: list[list[str | int | float | bool | None] | dict[str, str | int | float | bool]]) -> dict[str, Any]:
         client = client_factory()
         try:
             task = await client.excel_writeback_request("GET", f"/tasks/{task_id}")
@@ -159,9 +181,11 @@ def register_excel_writeback_tools(mcp, client_factory, download_dir):
                 if left != 1:
                     raise ValueError("SCOPED_WRITE_SCOPE_INVALID: 目标数据区必须从 A 列开始")
                 rows = _scoped_a_i_rows(rows, len(task["labels"]))
+            elif payload.manifest.write_scope == "A:AA":
+                rows = _full_professor_rows(rows, len(task["labels"]))
             patch_workbook(baseline=baseline, output=output, sheet_name=task["sheet_name"] or "Sheet1",
                            labels=task["labels"], rows=rows, layout=task["layout"],
-                           scoped_a_i=payload.manifest.write_scope == "A:I")
+                           scoped_a_i=payload.manifest.write_scope in {"A:I", "A:AA"})
             body = payload.model_dump(mode="json")
             sha = file_sha256(output)
             digest = writeback_digest(body, sha)

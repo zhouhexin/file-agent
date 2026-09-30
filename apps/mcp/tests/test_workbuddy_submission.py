@@ -318,6 +318,62 @@ def test_scoped_sources_ingest_groups_pdf_and_word_but_preserves_attachment_orde
     assert initial["target_kind"] == "UPLOADED" and initial["target_filename"] == "新汇总.xls"
 
 
+def test_full_professor_ingest_uses_document_profile_for_all_pdfs(tmp_path) -> None:
+    """完整教授表独立于 B–I 裁剪契约，目标与来源仍按可信提交单冻结。"""
+    calls = []
+
+    class TargetClient:
+        async def dataset_request(self, method, path):
+            calls.append(("resolve", method, path))
+            return {"status": "ACTIVE", "filename": "教授汇总.xlsx", "revision": 1,
+                    "document_version_id": "current-version",
+                    "layout": {"header_range": "A1:AA1", "data_range": "A2:AA3"}}
+
+    class Transfer:
+        client = TargetClient()
+
+        async def ingest_resolved(self, **kwargs):
+            calls.append(("ingest", kwargs))
+            return {"id": kwargs["extraction_profile"]}
+
+    service = WorkBuddySubmissionService(transfer=Transfer(),
+        registry=WorkBuddyAttachmentRegistry([tmp_path]), state_dir=tmp_path)
+    attachments = [WorkBuddyAttachment(attachment_id=f"p-{index}", filename=f"申报{index}.pdf",
+        local_path=tmp_path / f"申报{index}.pdf", size_bytes=1, mtime_ns=1, sha256="a" * 64)
+        for index in range(2)]
+    excel = WorkBuddyAttachment(attachment_id="target", filename="教授汇总.xls",
+        local_path=tmp_path / "教授汇总.xls", size_bytes=1, mtime_ns=1, sha256="b" * 64)
+    word = WorkBuddyAttachment(attachment_id="word", filename="申请.docx",
+        local_path=tmp_path / "申请.docx", size_bytes=1, mtime_ns=1, sha256="c" * 64)
+    submission = TrustedSubmission("wbsub_v1_" + "c" * 32, "full-professor-first", "完整填写 A–AA",
+        [{"filename": item.filename} for item in (attachments[0], excel, attachments[1])])
+    service.load = lambda *, submission_ref: submission
+    service._resolve_attachment = lambda item: next(
+        attachment for attachment in [*attachments, excel, word] if attachment.filename == item["filename"])
+    first = asyncio.run(service.ingest_scoped_sources(
+        submission_ref=submission.submission_ref, full_professor=True))
+    assert [item["filename"] for item in first["source_order"]] == [item.filename for item in attachments]
+    assert [call[1]["extraction_profile"] for call in calls] == ["WORKBUDDY_DOCUMENT"] * 2
+    assert first["write_columns"][-1] == "AA" and len(first["write_columns"]) == 27
+    calls.clear()
+    service.load = lambda *, submission_ref: TrustedSubmission(
+        submission.submission_ref, "full-professor-append", "追加到教授汇总.xlsx",
+        [{"filename": item.filename} for item in attachments])
+    again = asyncio.run(service.ingest_scoped_sources(
+        submission_ref=submission.submission_ref, target_filename="教授汇总.xlsx", full_professor=True))
+    assert again["target_kind"] == "EXISTING"
+    assert [call[0] for call in calls] == ["resolve", "ingest"]
+    assert calls[1][1]["extraction_profile"] == "WORKBUDDY_DOCUMENT"
+    calls.clear()
+    service.load = lambda *, submission_ref: TrustedSubmission(
+        submission.submission_ref, "full-professor-word", "完整填写 A–AA",
+        [{"filename": "申请.docx"}, {"filename": excel.filename}])
+    with pytest.raises(ValueError, match="FULL_ROW_ATTACHMENTS"):
+        asyncio.run(service.ingest_scoped_sources(
+            submission_ref=submission.submission_ref, full_professor=True))
+    assert not calls
+
+
 @pytest.mark.parametrize("suffix", [".doc", ".docx", ".pdf", ".xls", ".xlsx", ".txt"])
 def test_host_document_reference_stages_and_ingests_without_model_path(tmp_path, suffix) -> None:
     """文档只从宿主附件区提取，按消息 ID 固定清单并复用既有批次上传。"""

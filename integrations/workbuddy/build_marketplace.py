@@ -30,6 +30,7 @@ def main():
         assert "file-agent-plugin/skills/file-agent-structured-dataset/references/task-payload.md" in archive.namelist()
         assert "file-agent-plugin/skills/file-agent-a-i-scoped-excel/SKILL.md" in archive.namelist()
         assert "file-agent-plugin/skills/file-agent-a-i-scoped-excel/references/a-i-source-map.md" in archive.namelist()
+        assert "file-agent-plugin/skills/file-agent-full-professor-excel/SKILL.md" in archive.namelist()
         assert "file-agent-plugin/skills/file-agent-excel-grid-archive/SKILL.md" in archive.namelist()
         assert "file-agent-plugin/skills/file-agent-excel-grid-archive/scripts/grid_to_payload.py" in archive.namelist()
         assert "file-agent-plugin/skills/file-agent-manual-excel-revision/SKILL.md" in archive.namelist()
