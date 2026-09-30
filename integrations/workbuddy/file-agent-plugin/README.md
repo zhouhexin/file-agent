@@ -1,5 +1,155 @@
 # 文件助手 WorkBuddy 附件桥接
 
+当前套件 **0.1.54**：`file-agent-manual-excel-revision` 支持把与本轮上传文件完全一致的服务器可见 Excel 直接编辑结果登记为新版本。用户基于已发布 Excel 手工补全后，本轮上传同名 `.xlsx`；WorkBuddy 用编辑前冻结的版本 ID/SHA 回传，服务端发布为同一工作副本的新版本，旧版保留。需部署 API/MCP、重启服务并安装新版插件；无需数据库迁移。
+
+0.1.52：A–I 定向 PDF 支持已核对的 25 页参考版式与 22 页 A4 版式，仍只 OCR 第 1、3 页的 B–I 区域。服务端修复版式不符时的归档无限重试，并能补偿旧版留下的等待态。
+
+0.1.51：`file-agent-a-i-scoped-excel` 一轮支持 1–20 份 PDF/DOC/DOCX，每份来源填写一行；首次另带一份 Excel，后续在任务文字中写明完整已发布 `.xlsx` 文件名。`scoped_excel_sources_ingest` 按可信附件顺序绑定来源，PDF 仍只做 B–I 定向 OCR，Word 使用真实正文证据；所有行一次写入并发布同一目标新版本。
+
+0.1.50：首次上传 PDF + Excel；后续只上传一份 PDF 时可通过完整目标文件名续写，自动补 A 序号并安全扩展数据区。
+
+0.1.49：A–I 任务调用 `excel_writeback_apply` 时，`rows` 每行只传 B–I 八个值；MCP 根据冻结目标列数补齐 A 与 J–AA 的 Python 空值，避免 WorkBuddy 宿主改写显式 `null` 占位。空白字段在 `payload` 中只传 `blank_reason`。
+
+0.1.48：A–I 任务中，B 列引文若为“单位 计算机科学与工程学院”，OCR 引文保留完整标签，提交值、候选值和 Excel B 格只填写“计算机科学与工程学院”；服务端在 OCR 提交与写回发布时校验。
+
+0.1.47：A–I 流程冻结新上传 XLS 目标时必须传真实 `sheet_name` 与 `layout.header_range/data_range`；缺失布局的复杂模板由服务端入队前返回 `TARGET_EXCEL_LAYOUT_REQUIRED`，不再先耗时转换后给出笼统失败。失败后修正参数须使用新的 `request_key`。
+
+0.1.46：新增 `file-agent-excel-grid-archive`，把 WorkBuddy 真实逐格网格转换为符合服务器契约的 SHEET unit 与表头 TABLE_CELL 坐标；A–I、盖章模板和累计表流程在目标 Excel 归档前引用它。多行表头保留真实文字和字符偏移，A–I 约束仅在定向任务启用。
+
+0.1.45：本轮上传 Excel 与唯一已发布目标同名时，WorkBuddy 继续以上传表为新目标；服务端发布成功后归档旧目标，按文件名只命中新表。归档工作副本的文档与版本 ID 可搭配本轮上传暂存版的提取 run ID，服务端严格校验来源并映射到归档复制 run。`file-agent-a-i-scoped-excel` 仍只裁剪 PDF 第 1、3 页的 B–I 相关区域，J–AA 不参与 OCR 和写入。需同步部署对应 API 代码、重启 API 与文件队列 worker。
+
+0.1.41：Excel 新建、按文件名续写和已发布行定向更正默认经证据与版本校验后直写；
+仅用户明确要求先复核时等待确认。重复上传仍须展示候选对比链接并等待用户选择。
+本轮有新上传目标 Excel 时必须注册独立新目标，不能按旧文件名追加；只有没有新目标上传时才按
+文件名读取旧表字段并续写。此版同时更新 API/MCP 默认参数；安装新套件、更新服务并重开 WorkBuddy 会话后生效。
+
+0.1.37：新增并行的 `file-agent-excel-writeback` Skill 与 `excel_writeback_*` MCP 工具。
+由 WorkBuddy 本机定向修改冻结的 XLSX 副本，File Agent 核对来源、目标版本和工作簿差异后发布同名新版本；
+旧 `structured_dataset_*` 路径不变。启用时 API 与 MCP 都设置 `WORKBUDDY_EXCEL_WRITEBACK_ENABLED=true`，
+并保留 `WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED=true`；需部署最新 API/MCP，重启 API/MCP 进程，
+再安装 `file-agent-marketplace-0.1.37.zip` 并重启 WorkBuddy。当前新路径只处理已注册的 `.xlsx` 目标；
+新上传 Excel 先受控注册，`.xls` 先由服务器完成格式提升。真实 WorkBuddy 宿主效果仍需安装后验收。
+
+0.1.36：盖章项目专用 Skill 默认在真实读取与证据校验后直接发布 Excel，不等待人为复核；
+用户本轮明确要求先复核时才进入确认路径。普通显式内容提取仍默认复核，OCR 复用逻辑未变。
+0.1.35 修复完整提取状态错配和旧任务受控恢复，并要求先验收 Excel 网格再读取 PDF。
+0.1.34 将专用模板物理 B–I 列视为身份列，免盖章审批和资格判断但保留原文证据。
+0.1.33 已支持复杂 Excel 模板在预览前检查真实表头坐标、转换失败返回可行动终态。
+0.1.32 已支持整栏属实无需明确项号、逐列候选预览/确认/commit 驱动服务器 Excel 发布，
+完整列条件满足时只在人员数据格末尾加一次 √，不改表头、不逐小项加勾。签字仍非必需，Provider 不固定。
+必须同步更新 API/worker/MCP 并迁移至 `20260922_0002`；仅更新 Skill 不会启用新任务接口。
+安装 `file-agent-marketplace-0.1.37.zip` 后完全退出并重开 WorkBuddy、新建会话。
+以本段和当前 Skill 为准；下面是历史变更说明，其中旧签字/标题文字规则已经失效。
+
+打包：项目根运行 `python integrations/workbuddy/build_marketplace.py`。
+本地升级服务：`python -m http.server 8175 --bind 127.0.0.1 --directory integrations/workbuddy`。
+下载地址：`http://127.0.0.1:8175/file-agent-marketplace-0.1.50.zip`。
+
+2026-09-22 盖章审批规则更新（历史套件 0.1.31）：审批声明、盖章证据和唯一项目映射成立即可，签字不再是必需条件。
+盖章证据可由 `type=Image` 且 OCR 返回“圆章”的元素、印章检测区域或图内红色圆形印记检测结果提供；每项仍须带 PDF 页码。
+安装 `file-agent-marketplace-0.1.31.zip` 后新建 WorkBuddy 会话。
+
+2026-09-22 确认保存和复杂模板修复（套件 0.1.29）：MCP 预览缓存可用短参数提交，支持确认并保存；
+租约过期受控恢复且不重做 OCR。复杂模板指定 `layout.header_range/data_range`，支持最多 40 列和完整长标题，
+只填预留行，保留序号、合并表头与尾注。更新时先执行 `alembic upgrade head`，再重启 API、worker 和 MCP；
+安装 `file-agent-marketplace-0.1.29.zip` 后新建 WorkBuddy 会话。代码测试不等于真实宿主验收。
+
+2026-09-22 Excel 原样续写与落盘完整性修复（套件 0.1.28）：上传的 `.xlsx` 目标表改为在 OOXML 包内
+只更新指定工作表、关联表格和筛选范围，保留其他工作表、样式、公式、合并单元格、数据验证、图表与绘图部件；
+服务器只发布一个与用户所见同名的普通工作副本，并继续用 DocumentVersion 保存历史。导出前强制校验累计
+revision 与成员链，存在断链或没有已确认记录时明确失败，不再把只有标题行的 Excel 报告为成功。更新时安装
+`file-agent-marketplace-0.1.28.zip`，部署最新 API/MCP 代码并完全重启 API、队列 worker 和 WorkBuddy。
+
+2026-09-22 旧版 XLS 累计目标编排（套件 0.1.27）：本轮唯一新上传 `.xls` 可以被规划为新目标，内容仍由
+WorkBuddy 真实电子表格能力读取；预览必须同时展示源 `.xls` 和最终 `.xlsx` 文件名。submit 后只有当后端
+`structured_dataset_create_from_excel` 真实提供受控转换参数与异步任务结果时才执行格式提升；当前后端能力
+未启用时安全失败并要求用户另传 `.xlsx`，不得用模型、`structured_dataset_create`、Shell 或临时转换冒充成功。
+更新时安装 `file-agent-marketplace-0.1.27.zip` 并完全重启 WorkBuddy。
+
+2026-09-22 标题级对勾与 Excel 落盘闭环（套件 0.1.26）：`√` 只追加到“其下全部必需小项均已验证”的
+标题末尾，小项文字始终保持原样；部分通过、存在待复核项或无法映射标题字段时，标题不加勾。新建、更新或
+追加 Excel 的任务在 append/query 成功后必须执行 `structured_dataset_export`，且只有返回完整工作副本、文档、
+版本和文件名标识后才能报告完成。更新时安装 `file-agent-marketplace-0.1.26.zip` 并完全重启 WorkBuddy。
+
+2026-09-22 签字盖章双证据与无编号定位（套件 0.1.25）：盖章审批 Skill 要求签字和盖章同时存在，
+只有签字或只有章均不算通过；残缺声明只读取可确定片段。未识别到序号时从同栏第一条真实数据行跨页连续
+计数，必要时回查之前页面；仍有多个候选时，只能在同一栏、同一签字盖章审批区域内选择最后一项并记录
+`LAST_ITEM_FALLBACK`，不能选择整份文件末项。更新时安装 `file-agent-marketplace-0.1.25.zip` 并完全重启 WorkBuddy。
+
+2026-09-21 Excel 对勾与复核分流（套件 0.1.24，已由 0.1.26 的标题级规则取代）：该版本曾对每个 verified
+审批内容文本生成 `原文字√`；0.1.26 起禁止给小项逐项加勾。原始 OCR 和 evidence quote 始终保持不变。
+提示词明确要求
+无需复核/确认或直接生成并保存时走 `DIRECT_SAVE`；明确要求预览/复核/确认或未说明时走
+`REVIEW_REQUIRED`。直接路径仍排除 review 项并执行目标、同名和版本校验。更新时安装
+`file-agent-marketplace-0.1.24.zip` 并完全重启 WorkBuddy。
+
+2026-09-21 盖章审批项识别扩展（套件 0.1.23）：`file-agent-sealed-item-extraction` 新增
+`①②③…⑳` 带圈序号规范化；审批声明未限定子选项但能唯一绑定编号项时，整项及其全部子选项视为通过；
+文字无法区分具体编号项时，可用紧邻编号前且位置可验证的勾选标记辅助选择。勾选不能替代签章/审批声明，
+位置不清或证据冲突仍进入待复核。更新时安装 `file-agent-marketplace-0.1.23.zip` 并完全重启 WorkBuddy。
+
+2026-09-21 WorkBuddy 结构化结果兼容（套件 0.1.22）：针对部分宿主只保留 MCP 普通文本内容、丢弃
+`structuredContent` 与 `ResourceLink` 的行为，claim 现在把同一份严格校验 JSON 同时放入
+`structuredContent` 和第一条普通文本，并继续附带 `ResourceLink`。JSON 包含短期租约、固定版本、哈希、
+保存策略和已校验 `source.resource_uri`；Skill 只允许使用这份 MCP 原样 JSON 作为兼容输入，禁止直接读取
+原始本地附件、配置或私有 API。更新时安装 `file-agent-marketplace-0.1.22.zip`，加载最新 MCP 源码并完全
+重启 WorkBuddy。
+
+2026-09-21 claim 来源字段修复（套件 0.1.21）：补齐严格 MCP 输出模型中的后端相对
+`source.resource_url`，避免 claim 已成功下载文件，却在向 WorkBuddy 返回结果时触发
+`DocumentExtractionClaimOutput source.resource_url extra_forbidden`。回归测试改为走 FastMCP 对外调用路径，
+确保实际执行 `outputSchema` 校验。更新时安装 `file-agent-marketplace-0.1.21.zip`，加载最新 MCP 源码并
+完全重启 WorkBuddy。
+
+2026-09-21 文档提取契约修复（套件 0.1.20）：`document_extraction_claim` 现在通过 MCP
+`outputSchema` 明确返回租约、固定版本、哈希、保存策略和已校验资源；确认前只允许展示
+`document_extraction_preview.preview_result`。插件禁止读取 `mcp.json`、连接器配置、环境变量或认证材料，
+也禁止用 Shell、curl、临时脚本或私有 API 绕过工具。旧版 `.xls` 与 `.xlsx` 作为
+`SPREADSHEET` 来源由 WorkBuddy 真实电子表格能力读取，并保留工作表名及单元格行列坐标。
+更新时安装 `file-agent-marketplace-0.1.20.zip`，加载最新 API/MCP 源码并完全重启 WorkBuddy。
+
+2026-09-21 多行任务文字匹配修复（套件 0.1.19）：修复 Hook 保留换行、WorkBuddy transcript 直接删除换行时，
+MCP 把同一任务文字判定为不一致并驳回导入的问题。可信匹配现在忽略 Unicode 空白差异，但非空白字符序列必须
+完全一致；固定会话、时间窗、附件宿主引用和唯一候选校验保持不变。更新套件后还必须加载最新 MCP 源码，
+并完全重启 WorkBuddy。
+
+2026-09-21 PDF 盖章属实项提取（套件 0.1.18）：新增 `file-agent-sealed-item-extraction` Skill。
+当用户只要求把 PDF 中盖章声明“第 X 项至第 Y 项属实”覆盖的项目写入 Excel 时，Skill 必须
+同时验证签章区域、属实声明、编号范围和项目原文；证据不完整的项目只展示待复核，不写入。
+预览和用户确认规则、Excel 文件名续写与版本管理继续复用现有流程。更新时安装
+`file-agent-marketplace-0.1.18.zip` 并完全重启 WorkBuddy。
+
+2026-09-21 WorkBuddy 图片 OCR 执行边界修正（套件 0.1.17）：无论是直接归档还是显式字段提取，
+WorkBuddy 入口中的图片都必须在 WorkBuddy 宿主侧通过当前可用的 OCR 能力识别，但不固定
+`tencent-docs ocr.extract` 或 `tencent-docs-ocr`。提交时 `provider_name` 必须保留实际调用来源；宿主没有
+可用 OCR 时任务保持阻塞或失败，不降级到 File Agent 内部 OCR、模型视觉或通用读取工具。
+更新时安装 `file-agent-marketplace-0.1.17.zip`，部署最新 API/MCP 代码并完全重启 API、worker 和 WorkBuddy。
+
+2026-09-20 Excel 目标表与按文件名续写（套件 0.1.15）：本轮新上传 `.xlsx` 优先成为新的目标表；
+没有新 Excel 时可按完整文件名解析已有目标，或根据提示词字段创建指定名称的新表。显式提取仍须先展示实际
+字段值和证据，用户确认并完成正文提交后才允许注册/创建数据集、追加和导出。服务器当前工作副本、文件列表和
+下载名称保持一致，后续通过同名文件继续追加并创建同一 Document 的新版本。更新时安装
+`file-agent-marketplace-0.1.15.zip`，部署最新 API/MCP 代码、执行数据库迁移并完全重启 WorkBuddy。
+
+2026-09-20 预览展示与证据追加修复（套件 0.1.14）：`document_extraction_preview` 现在把仅供当前
+WorkBuddy 会话展示和调整的完整 `preview_result` 返回给 Agent，发送到 File Agent 服务器的预览请求仍只有
+结果指纹与计数，不含正文。Skill 强制展示实际字段值、原文和来源后才能询问确认。同时修复
+`structured_dataset_append` 携带 `evidence_refs.source_unit_id` 时 Python UUID 无法 JSON 序列化的问题，
+避免任务看似完成但 Excel 只有标题行。更新时安装 `file-agent-marketplace-0.1.14.zip`，部署最新 MCP 代码并
+完全重启 WorkBuddy；本补丁不增加数据库迁移。
+
+2026-09-20 显式提取确认补充（套件 0.1.13）：用户明确要求从附件提取正文、字段或表格时，插件以
+`WORKBUDDY_DOCUMENT + CONFIRM_BEFORE_SAVE` 导入。WorkBuddy 先登记不含正文的结果指纹并展示逐文件
+提取结果；用户在后续消息明确确认后，才提交完全相同的正文并继续累计表写入或导出。只要求归档、分类或
+整理时仍使用 `DIRECT_ARCHIVE`，归档内部解析/OCR 不增加确认。更新时安装
+`file-agent-marketplace-0.1.13.zip`，同时部署 API/MCP 新代码、执行数据库迁移并完全重启 WorkBuddy。
+
+2026-09-20 单一累计表文件补充（套件 0.1.12）：`structured_dataset_export` 现在把累计 Excel 发布为
+服务器 `WORKING_COPY_STORAGE_ROOT/structured-datasets` 下的一个普通工作副本。后续导出继续更新同一
+逻辑文件并创建新的 `DocumentVersion`；文件列表不增加第二个同名文件，当前文件和版本信息均可通过
+服务器接口读取与下载。WorkBuddy 的 `ResourceLink` 只是宿主交付副本，不是唯一保存位置。更新时安装
+`file-agent-marketplace-0.1.12.zip`，同时部署 API/MCP 新代码并执行数据库迁移，然后完全重启 WorkBuddy。
+
 2026-09-20 文档累计表补充（套件 0.1.11）：新增图片、DOC/DOCX、PDF 的宿主正文提取与累计 Excel
 编排。连接器 1.0.3 同时开启 `WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED` 和
 `WORKBUDDY_DOCUMENT_EXTRACTION_ENABLED`，并允许可信的 `workbuddy_attachment_ingest`、
@@ -34,9 +184,9 @@ Markdown 链接，之后才能询问继续上传、使用已有文件或取消�
 不是 WorkBuddy 官方稳定附件 API；DOC、XLSX 已有自动化覆盖，仍需各自完成真实 GUI 验收。
 该文档引用捕获能力从 0.1.6 沿用；中文称呼需重新安装 0.1.7 套件，并完全重启 WorkBuddy。
 
-当前试点版本：**0.1.11**。0.1.6 在 0.1.5 的附件捕获修复上补齐 WorkBuddy 外部 OCR 编排：图片进入
+当前试点版本：**0.1.34**。0.1.6 在 0.1.5 的附件捕获修复上补齐 WorkBuddy 外部 OCR 编排：图片进入
 `WAITING_EXTERNAL_EXTRACTION` 后，不再只查询状态，而是由 Agent 调用 `extraction_claim` 领取固定页，
-使用 WorkBuddy 已启用的腾讯文档 `ocr.extract` 识别，再通过 `extraction_submit` 回填，最后继续查重、
+使用 WorkBuddy 已启用的 OCR 能力识别，再通过 `extraction_submit` 回填实际 Provider，最后继续查重、
 归档和分类。File Agent 后端不会因此启用内部 OCR。
 
 0.1.5 已修复 Windows Hook 把宿主 UTF-8 管道按 GBK 解码导致的中文乱码；
@@ -91,7 +241,7 @@ HTTP 服务运行期间有效；不能把未发布到 GitHub 的仓库地址当�
 和字节，不收到用户本机绝对路径。
 当前试点不会自动清理 `document-cache`；长期试用需监控磁盘占用，不要在批次上传或重试期间删除其中的快照。
 
-`bridge_state_dir` 与 `FILE_AGENT_WORKBUDDY_BRIDGE_STATE_DIR` 必须完全一致，且不能指向附件缓存目录或项目源代码目录。重启 WorkBuddy 后，上传图片并输入“把这个附件归档并分类”。只有生成本轮可信提交单时，AI 才能调用 `workbuddy_submission_ingest`。若图片等待外部提取，插件 Skill 会继续调用 `extraction_claim`、腾讯文档 `ocr.extract` 和 `extraction_submit`，不能仅重复 `batch_get`/`job_get`。只查看或讨论附件时不会导入。
+`bridge_state_dir` 与 `FILE_AGENT_WORKBUDDY_BRIDGE_STATE_DIR` 必须完全一致，且不能指向附件缓存目录或项目源代码目录。重启 WorkBuddy 后，上传图片并输入“把这个附件归档并分类”。只有生成本轮可信提交单时，AI 才能调用 `workbuddy_submission_ingest`。若图片等待外部提取，插件 Skill 会继续调用 `extraction_claim`，从 WorkBuddy 当前已安装且已授权、能返回真实 OCR 文本的能力中选择工具，再调用 `extraction_submit`；不能写死 Provider，也不能仅重复 `batch_get`/`job_get`。只查看或讨论附件时不会导入。
 
 WorkBuddy 5.5.3 本机已安装并启用的腾讯文档个人版工具当前声明：`ocr.extract` 返回按顺序的
 `texts: string[]`，打开位置参数后还返回 `text_detections`；不承诺置信度、Provider 版本或请求 ID，

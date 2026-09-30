@@ -18,7 +18,8 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
 
     tools = asyncio.run(mcp.list_tools())
     names = {tool.name for tool in tools}
-    assert names == {
+    # 基础导入工具必须完整；结构化表格和更正工具可以按功能开关额外注册。
+    assert {
         "file_ingest",
         "file_batch_ingest",
         "workbuddy_attachment_ingest",
@@ -48,7 +49,13 @@ def test_server_imports_and_registers_complete_ingest_tool_set() -> None:
         "extraction_submit",
         "ingest_retry",
         "ingest_cancel",
-    }
+        "scoped_excel_pdf_append_ingest",
+    } <= names
+    if "excel_writeback_checkout" in names:
+        assert {"excel_writeback_apply", "excel_writeback_preview", "excel_writeback_confirm",
+                "excel_writeback_publish", "excel_writeback_correction_checkout",
+                "excel_writeback_correction_apply", "excel_writeback_correction_confirm",
+                "excel_writeback_correction_publish"} <= names
     descriptions = {tool.name: tool.description or "" for tool in tools}
     assert "不能只重复查询状态" in descriptions["workbuddy_submission_ingest"]
     assert "重复调用本工具不会完成 OCR" in descriptions["batch_get"]

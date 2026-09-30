@@ -11,13 +11,15 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from xml.sax.saxutils import quoteattr
 
 import pytest
 
-from file_agent_mcp.attachment_transfer import AttachmentTransferService
+from file_agent_mcp.attachment_transfer import AttachmentTransferService, WorkBuddyAttachment
 from file_agent_mcp.client import WorkBuddyAttachmentRegistry
 from file_agent_mcp.workbuddy_submission import (
+    TrustedSubmission,
     WorkBuddySubmissionService,
     _host_document_paths,
     _message_matches_prompt,
@@ -34,6 +36,40 @@ def test_prompt_match_normalizes_workbuddy_utf16_surrogate_pair() -> None:
     }
 
     assert _message_matches_prompt(message, host_prompt)
+
+
+def test_prompt_match_ignores_removed_multiline_whitespace() -> None:
+    """Hook 保留多行文字而 transcript 删除换行时仍应匹配同一任务。"""
+
+    host_prompt = "请用文件助手处理本轮 PDF。\n\n只读取盖章确认的项目。"
+    message = {
+        "content": [
+            {
+                "type": "input_text",
+                "text": "请用文件助手处理本轮 PDF。只读取盖章确认的项目。",
+            }
+        ],
+    }
+
+    assert _message_matches_prompt(message, host_prompt)
+
+
+def test_prompt_match_still_rejects_non_whitespace_changes() -> None:
+    """空白兼容不得放宽为内容模糊匹配。"""
+
+    message = {
+        "content": [
+            {
+                "type": "input_text",
+                "text": "请用文件助手处理本轮 PDF。读取全部项目。",
+            }
+        ],
+    }
+
+    assert not _message_matches_prompt(
+        message,
+        "请用文件助手处理本轮 PDF。\n只读取盖章确认的项目。",
+    )
 
 
 class FakeAttachmentClient:
@@ -91,6 +127,195 @@ def _document_message(*, path: Path, prompt: str, created_at: float) -> dict:
             ),
         }],
     }
+
+
+def test_manual_excel_revision_requires_one_trusted_same_named_attachment(tmp_path) -> None:
+    filename = "教授汇总.xlsx"
+    file_path = tmp_path / filename
+    file_path.write_bytes(b"excel")
+    registry = WorkBuddyAttachmentRegistry([tmp_path])
+    service = WorkBuddySubmissionService(
+        transfer=AttachmentTransferService(FakeAttachmentClient(), registry),
+        registry=registry, state_dir=tmp_path,
+    )
+    submission = SimpleNamespace(submission_id="submission-1",
+        user_request=f"补全并上传{filename}", attachments=[{"filename": filename}])
+    service.load = lambda *, submission_ref: submission
+    service._resolve_attachment = lambda item: SimpleNamespace(
+        filename=item["filename"], local_path=file_path, size_bytes=file_path.stat().st_size)
+    result, attachment = service.manual_excel_revision_attachment(
+        submission_ref="ref", target_filename=filename)
+    assert result is submission and attachment.local_path == file_path
+    submission.user_request += " 另一张表.xlsx"
+    with pytest.raises(ValueError, match="MANUAL_EXCEL_FILENAME_CHANGED"):
+        service.manual_excel_revision_attachment(
+            submission_ref="ref", target_filename="另一张表.xlsx")
+    submission.attachments.append({"filename": filename})
+    with pytest.raises(ValueError, match="MANUAL_EXCEL_ATTACHMENTS"):
+        service.manual_excel_revision_attachment(
+            submission_ref="ref", target_filename=filename)
+
+
+def test_scoped_excel_accepts_documents_in_second_host_reminder(tmp_path) -> None:
+    """WorkBuddy may put the verified PDF/XLS references in additional-data."""
+
+    home = tmp_path / ".workbuddy"
+    transcript = home / "projects" / "session.jsonl"
+    transcript.parent.mkdir(parents=True)
+    state = home / "bridge-state"
+    (state / "submissions").mkdir(parents=True)
+    stage = state / "document-cache"
+    stage.mkdir()
+    pdf = tmp_path / "source.pdf"
+    xls = tmp_path / "target.xls"
+    pdf.write_bytes(b"pdf-source")
+    xls.write_bytes(b"xls-target")
+    paths = [str(pdf), str(xls)]
+    prompt = "只读取 PDF 对应列，并写入本轮 XLS"
+    created_at = time.time()
+    text = (
+        '<system-reminder data-role="user-context"><user_info>host</user_info></system-reminder>\n'
+        '<system-reminder data-role="additional-data">\n'
+        '<user_references>\n'
+        + "\n".join(json.dumps(path) for path in paths)
+        + '\n</user_references>\n<attached_files>\n'
+        + "\n".join(f'<file path={quoteattr(path)} />' for path in paths)
+        + '</attached_files>\n</system-reminder>\n'
+        + f'<user_query>{prompt}</user_query>'
+    )
+    message = {
+        "id": "two-reminder-message", "role": "user", "sessionId": "session-1",
+        "timestamp": int((created_at - 3) * 1000),
+        "content": [{"type": "input_text", "text": text}],
+    }
+    assert _host_document_paths(message, prompt=prompt) == paths
+    message["content"][0]["text"] = text.replace(
+        json.dumps(str(pdf)), json.dumps(str(tmp_path / "other.pdf")), 1,
+    )
+    assert _host_document_paths(message, prompt=prompt) == []
+    message["content"][0]["text"] = text
+    transcript.write_text(json.dumps(message) + "\n", encoding="utf-8")
+    ref = "wbsub_v1_55555555555555555555555555555555"
+    (state / "submissions" / f"{ref}.json").write_text(json.dumps({
+        "status": "PENDING_TRANSCRIPT", "session_id": "session-1",
+        "created_at": created_at, "prompt": prompt,
+        "transcript_path": str(transcript), "attachments": [],
+    }), encoding="utf-8")
+    client = FakeAttachmentClient()
+    registry = WorkBuddyAttachmentRegistry([stage])
+    service = WorkBuddySubmissionService(
+        transfer=AttachmentTransferService(client, registry), registry=registry,
+        state_dir=state, transcript_roots=[transcript.parent],
+    )
+
+    result = asyncio.run(service.ingest_scoped_excel(submission_ref=ref))
+
+    assert result["target_filename"] == xls.name
+    assert result["source_filename"] == pdf.name
+    assert [item[2] for item in client.uploaded] == [xls.name, pdf.name]
+
+
+def test_scoped_pdf_only_append_resolves_explicit_published_filename_first(tmp_path) -> None:
+    calls = []
+    target_revision = [1]
+
+    class TargetClient:
+        async def dataset_request(self, method, path):
+            calls.append(("resolve", method, path))
+            return {"status": "ACTIVE", "filename": "教授汇总.xlsx", "revision": target_revision[0],
+                    "document_version_id": "current-version", "layout": {
+                        "header_range": "A2:AA4", "data_range": "A5:AA6"}}
+
+    class Transfer:
+        client = TargetClient()
+
+        async def ingest_resolved(self, **kwargs):
+            calls.append(("ingest", kwargs))
+            return {"id": "pdf-batch"}
+
+    service = WorkBuddySubmissionService(transfer=Transfer(),
+        registry=WorkBuddyAttachmentRegistry([tmp_path]), state_dir=tmp_path)
+    submission = TrustedSubmission("wbsub_v1_" + "a" * 32, "submission-1",
+        "把本轮 PDF 追加到教授汇总.xlsx", [{"filename": "第二人.pdf"}])
+    service.load = lambda *, submission_ref: submission
+    service._resolve_attachment = lambda item: SimpleNamespace(filename=item["filename"])
+    result = asyncio.run(service.ingest_scoped_pdf_append(
+        submission_ref=submission.submission_ref, target_filename="教授汇总.xlsx"))
+    assert result["target_filename"] == "教授汇总.xlsx"
+    assert [call[0] for call in calls] == ["resolve", "ingest"]
+    assert calls[0][2].endswith("%E6%95%99%E6%8E%88%E6%B1%87%E6%80%BB.xlsx")
+    assert calls[1][1]["extraction_profile"] == "SCOPED_EXCEL_SOURCE"
+    calls.clear()
+    with pytest.raises(ValueError, match="SCOPED_APPEND_TARGET_REQUIRED"):
+        asyncio.run(service.ingest_scoped_pdf_append(
+            submission_ref=submission.submission_ref, target_filename="其他表.xlsx"))
+    assert not calls
+    target_revision[0] = 0
+    with pytest.raises(ValueError, match="SCOPED_APPEND_TARGET_INVALID"):
+        asyncio.run(service.ingest_scoped_pdf_append(
+            submission_ref=submission.submission_ref, target_filename="教授汇总.xlsx"))
+    assert [call[0] for call in calls] == ["resolve"]
+    calls.clear()
+    target_revision[0] = 1
+    service.load = lambda *, submission_ref: TrustedSubmission(
+        submission.submission_ref, "submission-2", submission.user_request,
+        [{"filename": "第二人.pdf"}, {"filename": "第三人.pdf"}])
+    with pytest.raises(ValueError, match="SCOPED_APPEND_ATTACHMENTS"):
+        asyncio.run(service.ingest_scoped_pdf_append(
+            submission_ref=submission.submission_ref, target_filename="教授汇总.xlsx"))
+
+
+def test_scoped_sources_ingest_groups_pdf_and_word_but_preserves_attachment_order(tmp_path) -> None:
+    calls = []
+
+    class TargetClient:
+        async def dataset_request(self, method, path):
+            calls.append(("resolve", method, path))
+            return {"status": "ACTIVE", "filename": "教授汇总.xlsx", "revision": 1,
+                    "document_version_id": "current-version", "layout": {
+                        "header_range": "A1:AA1", "data_range": "A2:AA3"}}
+
+    class Transfer:
+        client = TargetClient()
+
+        async def ingest_resolved(self, **kwargs):
+            calls.append(("ingest", kwargs))
+            return {"id": kwargs["extraction_profile"]}
+
+    service = WorkBuddySubmissionService(transfer=Transfer(),
+        registry=WorkBuddyAttachmentRegistry([tmp_path]), state_dir=tmp_path)
+    attachments = [WorkBuddyAttachment(attachment_id=f"a-{index}", filename=filename,
+        local_path=tmp_path / filename, size_bytes=1, mtime_ns=1, sha256="a" * 64)
+        for index, filename in enumerate(("甲.docx", "乙.pdf", "丙.doc", "丁.pdf"))]
+    prompt = "把四份材料的 A–I 填入教授汇总.xlsx"
+    submission = TrustedSubmission("wbsub_v1_" + "b" * 32, "submission-batch", prompt,
+        [{"filename": item.filename} for item in attachments])
+    service.load = lambda *, submission_ref: submission
+    service._resolve_attachment = lambda item: next(
+        attachment for attachment in attachments if attachment.filename == item["filename"])
+    result = asyncio.run(service.ingest_scoped_sources(
+        submission_ref=submission.submission_ref, target_filename="教授汇总.xlsx"))
+
+    assert [item["filename"] for item in result["source_order"]] == [item.filename for item in attachments]
+    assert [item["source_index"] for item in result["source_order"]] == list(range(4))
+    assert [call[0] for call in calls] == ["resolve", "ingest", "ingest"]
+    assert calls[1][1]["extraction_profile"] == "SCOPED_EXCEL_SOURCE"
+    assert [item.filename for item in calls[1][1]["attachments"]] == ["乙.pdf", "丁.pdf"]
+    assert calls[2][1]["extraction_profile"] == "WORKBUDDY_DOCUMENT"
+    assert [item.filename for item in calls[2][1]["attachments"]] == ["甲.docx", "丙.doc"]
+    assert result["target_kind"] == "EXISTING"
+    excel = WorkBuddyAttachment(attachment_id="target", filename="新汇总.xls",
+        local_path=tmp_path / "新汇总.xls", size_bytes=1, mtime_ns=1, sha256="b" * 64)
+    attachments.append(excel)
+    service.load = lambda *, submission_ref: TrustedSubmission(
+        submission.submission_ref, "submission-initial", "只填 A–I",
+        [{"filename": item.filename} for item in (attachments[0], excel, *attachments[1:4])])
+    calls.clear()
+    initial = asyncio.run(service.ingest_scoped_sources(submission_ref=submission.submission_ref))
+    assert [item["filename"] for item in initial["source_order"]] == ["甲.docx", "乙.pdf", "丙.doc", "丁.pdf"]
+    assert [call[1]["extraction_profile"] for call in calls] == [
+        "WORKBUDDY_DOCUMENT", "SCOPED_EXCEL_SOURCE", "WORKBUDDY_DOCUMENT"]
+    assert initial["target_kind"] == "UPLOADED" and initial["target_filename"] == "新汇总.xls"
 
 
 @pytest.mark.parametrize("suffix", [".doc", ".docx", ".pdf", ".xls", ".xlsx", ".txt"])
@@ -230,6 +455,76 @@ def test_document_hook_to_mcp_bridge_end_to_end(monkeypatch, tmp_path) -> None:
     assert uploaded["uploaded_count"] == 1
     assert client.uploaded[0][2] == source.name
     assert client.uploaded[0][1].parent == stage.resolve()
+
+
+def test_document_hook_to_mcp_bridge_accepts_multiline_prompt_flattened_by_host(
+    monkeypatch, tmp_path
+) -> None:
+    """复现 Hook 保留换行、WorkBuddy transcript 直接删除换行的真实导入路径。"""
+
+    home = tmp_path / ".workbuddy"
+    projects = home / "projects"
+    projects.mkdir(parents=True)
+    transcript = projects / "session.jsonl"
+    transcript.write_text("", encoding="utf-8")
+    state = home / "bridge-state"
+    stage = state / "document-cache"
+    stage.mkdir(parents=True)
+    source = tmp_path / "盖章材料.pdf"
+    source.write_bytes(b"pdf-multiline-prompt-test")
+    monkeypatch.setenv("FILE_AGENT_WORKBUDDY_HOME", str(home))
+    monkeypatch.setenv("CODEBUDDY_PLUGIN_DATA", str(state))
+    prompt = "请用文件助手处理本轮 PDF。\n\n只读取盖章确认的项目。"
+    hook = _load_capture_module()
+    result = hook.capture_submission(
+        {
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "session-1",
+            "transcript_path": str(transcript),
+            "prompt": prompt,
+        }
+    )
+    ref = re.search(
+        r"ref=(wbsub_v1_[a-f0-9]{32})",
+        result["hookSpecificOutput"]["additionalContext"],
+    )
+    assert ref is not None
+    manifest = json.loads(
+        (state / "submissions" / f"{ref.group(1)}.json").read_text(encoding="utf-8")
+    )
+    transcript_prompt = prompt.replace("\n", "")
+    transcript.write_text(
+        json.dumps(
+            _document_message(
+                path=source,
+                prompt=transcript_prompt,
+                created_at=manifest["created_at"] - 6,
+            ),
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    client = FakeAttachmentClient()
+    registry = WorkBuddyAttachmentRegistry([stage])
+    service = WorkBuddySubmissionService(
+        transfer=AttachmentTransferService(client, registry),
+        registry=registry,
+        state_dir=state,
+        transcript_roots=[projects],
+    )
+
+    uploaded = asyncio.run(
+        service.ingest(
+            submission_ref=ref.group(1),
+            user_request=None,
+            placement_mode="BY_CATEGORY",
+            rule_profile="content_based",
+        )
+    )
+
+    assert uploaded["uploaded_count"] == 1
+    assert client.uploaded[0][2] == source.name
 
 
 def _load_capture_module():

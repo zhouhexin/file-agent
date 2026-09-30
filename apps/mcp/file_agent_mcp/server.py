@@ -68,6 +68,23 @@ if (
 
     register_document_extraction_tools(mcp, _client, _local_download_dir)
 
+# 完整 Excel 文件由 WorkBuddy 编辑并回传；仅显式打开时注册，不改旧工具路由。
+if (
+    os.getenv("WORKBUDDY_EXCEL_WRITEBACK_ENABLED", "false").lower() == "true"
+    and os.getenv("WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED", "false").lower() == "true"
+):
+    from .excel_writeback_tools import register_excel_writeback_tools
+
+    register_excel_writeback_tools(mcp, _client, _local_download_dir)
+
+if (
+    os.getenv("WORKBUDDY_EXCEL_WRITEBACK_ENABLED", "false").lower() == "true"
+    and os.getenv("WORKBUDDY_DOCUMENT_EXTRACTION_ENABLED", "false").lower() == "true"
+):
+    from .scoped_pdf_tools import register_scoped_pdf_tools
+
+    register_scoped_pdf_tools(mcp, _client, _local_download_dir)
+
 
 @mcp.tool(
     name="file_ingest",
@@ -143,7 +160,13 @@ async def file_batch_ingest(
 
 @mcp.tool(
     name="workbuddy_attachment_ingest",
-    description="导入用户在本轮 WorkBuddy 消息中明确提交的附件，并自动分类、命名、落位和索引。",
+    description=(
+        "导入用户在本轮 WorkBuddy 消息中明确提交的附件。纯归档使用 DIRECT_ARCHIVE；"
+        "显式内容提取使用 WORKBUDDY_DOCUMENT；通常使用 CONFIRM_BEFORE_SAVE 并等待预览确认。"
+        "盖章项目专用 Skill 默认直写，或用户明确授权其他任务直接保存时，使用 DIRECT_ARCHIVE，"
+        "仍须完成真实提取和证据校验。图片必须由 WorkBuddy "
+        "宿主侧可用 OCR 能力识别并记录实际 Provider，不得降级到 File Agent 内部 OCR。"
+    ),
     structured_output=True,
 )
 async def workbuddy_attachment_ingest(
@@ -153,6 +176,7 @@ async def workbuddy_attachment_ingest(
     placement_mode: Literal["BY_CATEGORY", "NEUTRAL"] = "BY_CATEGORY",
     rule_profile: Literal["content_based", "legacy_school_materials"] = "content_based",
     extraction_profile: Literal["DEFAULT", "WORKBUDDY_DOCUMENT"] = "DEFAULT",
+    extraction_save_policy: Literal["DIRECT_ARCHIVE", "CONFIRM_BEFORE_SAVE"] = "DIRECT_ARCHIVE",
 ) -> dict[str, Any]:
     """接收 WorkBuddy 附件缓存引用；调用本身即构成本轮附件的提交授权。"""
 
@@ -168,6 +192,7 @@ async def workbuddy_attachment_ingest(
             placement_mode=placement_mode,
             rule_profile=rule_profile,
             extraction_profile=extraction_profile,
+            extraction_save_policy=extraction_save_policy,
         )
     finally:
         await client.close()
@@ -434,8 +459,13 @@ async def file_download(working_copy_id: str) -> Any:
         "查重、归档和分类。文件助手是面向用户的中文称呼。仅在当前消息包含 "
         "FILE_AGENT_HOST_SUBMISSION 且用户说‘请用文件助手’处理附件，或明确"
         "要求导入、归档、整理或分类附件时调用；不得要求或填写本地路径、附件 ID。"
+        "显式内容提取必须传 WORKBUDDY_DOCUMENT；普通任务默认 CONFIRM_BEFORE_SAVE。"
+        "盖章项目专用 Skill 默认直写，或用户明确授权其他任务直接保存时，使用 DIRECT_ARCHIVE；"
+        "纯归档内部解析也使用 DIRECT_ARCHIVE，不追加内容确认。"
+        "无论保存策略如何，图片都必须由 WorkBuddy 宿主侧可用 OCR 能力处理，"
+        "provider_name 记录实际来源，不得使用 File Agent 内部 OCR。"
         "调用后必须用 batch_get 检查逐文件状态；若为 WAITING_EXTERNAL_EXTRACTION，"
-        "应立即进入 extraction_claim、宿主 OCR、extraction_submit 流程，不能只重复查询状态。"
+        "应根据任务字段进入 document_extraction_* 或旧 extraction_* 流程，不能只重复查询状态。"
     ),
     structured_output=True,
 )
@@ -445,6 +475,7 @@ async def workbuddy_submission_ingest(
     placement_mode: Literal["BY_CATEGORY", "NEUTRAL"] = "BY_CATEGORY",
     rule_profile: Literal["content_based", "legacy_school_materials"] = "content_based",
     extraction_profile: Literal["DEFAULT", "WORKBUDDY_DOCUMENT"] = "DEFAULT",
+    extraction_save_policy: Literal["DIRECT_ARCHIVE", "CONFIRM_BEFORE_SAVE"] = "DIRECT_ARCHIVE",
 ) -> dict[str, Any]:
     """按插件提交单导入当前会话附件；用户任务由 Hook 冻结，模型不能伪造附件范围。"""
 
@@ -461,7 +492,58 @@ async def workbuddy_submission_ingest(
             placement_mode=placement_mode,
             rule_profile=rule_profile,
             extraction_profile=extraction_profile,
+            extraction_save_policy=extraction_save_policy,
         )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="scoped_excel_submission_ingest",
+    description="只填 A–I 时，从本轮可信提交单固定一份 PDF 来源和一份 XLS/XLSX 目标；PDF 进入定向区域 OCR，目标走正常 Excel 工作副本。",
+    structured_output=True,
+)
+async def scoped_excel_submission_ingest(submission_ref: str) -> dict[str, Any]:
+    client = _client()
+    try:
+        registry = WorkBuddyAttachmentRegistry.from_environment()
+        transfer = AttachmentTransferService(client, registry)
+        return await WorkBuddySubmissionService.from_environment(
+            transfer=transfer, registry=registry).ingest_scoped_excel(submission_ref=submission_ref)
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="scoped_excel_pdf_append_ingest",
+    description="后续只上传一份 PDF 时，按本轮任务文字中的完整 .xlsx 文件名锁定唯一已发布目标；PDF 仍只进入 B–I 定向 OCR。",
+    structured_output=True,
+)
+async def scoped_excel_pdf_append_ingest(submission_ref: str, target_filename: str) -> dict[str, Any]:
+    client = _client()
+    try:
+        registry = WorkBuddyAttachmentRegistry.from_environment()
+        transfer = AttachmentTransferService(client, registry)
+        return await WorkBuddySubmissionService.from_environment(
+            transfer=transfer, registry=registry).ingest_scoped_pdf_append(
+                submission_ref=submission_ref, target_filename=target_filename)
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="scoped_excel_sources_ingest",
+    description="本轮固定 1–20 份 PDF/DOC/DOCX 来源；首次另带一份 Excel，后续按任务文字中的完整 .xlsx 文件名追加。按附件顺序每份一行。",
+    structured_output=True,
+)
+async def scoped_excel_sources_ingest(submission_ref: str, target_filename: str | None = None) -> dict[str, Any]:
+    client = _client()
+    try:
+        registry = WorkBuddyAttachmentRegistry.from_environment()
+        transfer = AttachmentTransferService(client, registry)
+        return await WorkBuddySubmissionService.from_environment(
+            transfer=transfer, registry=registry).ingest_scoped_sources(
+                submission_ref=submission_ref, target_filename=target_filename)
     finally:
         await client.close()
 
@@ -616,8 +698,11 @@ async def batch_resume(batch_id: str) -> dict[str, Any]:
     name="batch_get",
     description=(
         "恢复批次、逐文件状态和所有尚待选择的重复确认。若条目状态为 "
-        "WAITING_EXTERNAL_EXTRACTION，必须从条目 result.external_extraction_task_id 取得任务 ID，"
-        "随后调用 extraction_claim、WorkBuddy 可用 OCR 和 extraction_submit；重复调用本工具不会完成 OCR。"
+        "WAITING_EXTERNAL_EXTRACTION，result.document_extraction_task_id 使用 document_extraction_*；"
+        "只有 result.external_extraction_task_id 才使用旧 extraction_claim/OCR/extraction_submit。"
+        "显式内容提取按导入时冻结的保存策略执行：CONFIRM_BEFORE_SAVE 等待用户确认，"
+        "专用 Skill 或明确授权的 DIRECT_ARCHIVE 直接提交；重复调用本工具不会完成提取。"
+        "对于旧任务，重复调用本工具不会完成 OCR。"
         "已发布的成功条目同时返回 primary_category 和 classification_outcome，"
         "应逐文件展示主分类路径与分类结果状态；本回执不提供分类证据或关键词。"
     ),

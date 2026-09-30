@@ -78,6 +78,7 @@ class AttachmentTransferService:
         placement_mode: str,
         rule_profile: str,
         extraction_profile: str = "DEFAULT",
+        extraction_save_policy: str = "DIRECT_ARCHIVE",
     ) -> dict[str, Any]:
         """按一次 WorkBuddy 提交事件导入全部附件，空任务文字仍执行默认整理。"""
 
@@ -91,8 +92,14 @@ class AttachmentTransferService:
             raise ValueError("placement_mode 只能是 BY_CATEGORY 或 NEUTRAL")
         if rule_profile not in {"content_based", "legacy_school_materials"}:
             raise ValueError("rule_profile 不是 File Agent 允许的固定规则集")
-        if extraction_profile not in {"DEFAULT", "WORKBUDDY_DOCUMENT"}:
+        if extraction_profile not in {"DEFAULT", "WORKBUDDY_DOCUMENT", "SCOPED_EXCEL_SOURCE"}:
             raise ValueError("extraction_profile 不是 File Agent 允许的固定提取模式")
+        if extraction_save_policy not in {"DIRECT_ARCHIVE", "CONFIRM_BEFORE_SAVE"}:
+            raise ValueError("extraction_save_policy 不是 File Agent 允许的固定保存策略")
+        if extraction_save_policy == "CONFIRM_BEFORE_SAVE" and extraction_profile != "WORKBUDDY_DOCUMENT":
+            raise ValueError("CONFIRM_BEFORE_SAVE 必须与 WORKBUDDY_DOCUMENT 一起使用")
+        if extraction_save_policy == "CONFIRM_BEFORE_SAVE" and not (user_request or "").strip():
+            raise ValueError("显式内容提取必须保留用户任务文字")
 
         manifest = [self._resolve_attachment(raw) for raw in attachments]
         return await self.ingest_resolved(
@@ -102,6 +109,7 @@ class AttachmentTransferService:
             placement_mode=placement_mode,
             rule_profile=rule_profile,
             extraction_profile=extraction_profile,
+            extraction_save_policy=extraction_save_policy,
         )
 
     async def ingest_resolved(
@@ -113,6 +121,7 @@ class AttachmentTransferService:
         placement_mode: str,
         rule_profile: str,
         extraction_profile: str = "DEFAULT",
+        extraction_save_policy: str = "DIRECT_ARCHIVE",
     ) -> dict[str, Any]:
         """传输已由受控入口解析的附件快照。
 
@@ -130,8 +139,14 @@ class AttachmentTransferService:
             raise ValueError("placement_mode 只能是 BY_CATEGORY 或 NEUTRAL")
         if rule_profile not in {"content_based", "legacy_school_materials"}:
             raise ValueError("rule_profile 不是 File Agent 允许的固定规则集")
-        if extraction_profile not in {"DEFAULT", "WORKBUDDY_DOCUMENT"}:
+        if extraction_profile not in {"DEFAULT", "WORKBUDDY_DOCUMENT", "SCOPED_EXCEL_SOURCE"}:
             raise ValueError("extraction_profile 不是 File Agent 允许的固定提取模式")
+        if extraction_save_policy not in {"DIRECT_ARCHIVE", "CONFIRM_BEFORE_SAVE"}:
+            raise ValueError("extraction_save_policy 不是 File Agent 允许的固定保存策略")
+        if extraction_save_policy == "CONFIRM_BEFORE_SAVE" and extraction_profile != "WORKBUDDY_DOCUMENT":
+            raise ValueError("CONFIRM_BEFORE_SAVE 必须与 WORKBUDDY_DOCUMENT 一起使用")
+        if extraction_save_policy == "CONFIRM_BEFORE_SAVE" and not (user_request or "").strip():
+            raise ValueError("显式内容提取必须保留用户任务文字")
         attachment_ids = [item.attachment_id for item in attachments]
         if len(attachment_ids) != len(set(attachment_ids)):
             raise ValueError("同一次提交中的 attachment_id 不能重复")
@@ -142,6 +157,7 @@ class AttachmentTransferService:
             placement_mode=placement_mode,
             rule_profile=rule_profile,
             extraction_profile=extraction_profile,
+            extraction_save_policy=extraction_save_policy,
         )
         batch_payload = {
                 "client_id": "workbuddy-attachment",
@@ -163,6 +179,8 @@ class AttachmentTransferService:
         # 默认入口必须发送与旧版本完全相同的载荷，避免既有提交单重试改变请求摘要。
         if extraction_profile != "DEFAULT":
             batch_payload["extraction_profile"] = extraction_profile
+        if extraction_save_policy != "DIRECT_ARCHIVE":
+            batch_payload["extraction_save_policy"] = extraction_save_policy
         batch = await self.client.create_batch(batch_payload)
         batch_id = str(batch["id"])
         if batch.get("manifest_status") == "SEALED":
@@ -274,6 +292,7 @@ class AttachmentTransferService:
         placement_mode: str,
         rule_profile: str,
         extraction_profile: str = "DEFAULT",
+        extraction_save_policy: str = "DIRECT_ARCHIVE",
     ) -> str:
         """计算进入后端请求指纹的附件清单和冻结策略摘要。"""
 
@@ -285,6 +304,8 @@ class AttachmentTransferService:
             }
         if extraction_profile != "DEFAULT":
             manifest["extraction_profile"] = extraction_profile
+        if extraction_save_policy != "DIRECT_ARCHIVE":
+            manifest["extraction_save_policy"] = extraction_save_policy
         canonical = json.dumps(
             manifest,
             ensure_ascii=False,

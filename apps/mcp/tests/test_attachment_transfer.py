@@ -96,6 +96,51 @@ def test_workbuddy_attachments_become_logical_manifest_and_upload(tmp_path) -> N
     assert str(cache) not in repr(client.items)
 
 
+def test_explicit_extraction_policy_is_frozen_without_changing_archive_default(tmp_path) -> None:
+    """显式提取必须传确认策略；纯归档默认载荷仍与旧协议一致。"""
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    attachment = cache / "登记表.docx"
+    attachment.write_bytes(b"docx")
+    client = FakeAttachmentClient()
+    service = AttachmentTransferService(client, WorkBuddyAttachmentRegistry([cache]))
+    common = {
+        "attachments": [
+            {"attachment_id": "att-1", "filename": attachment.name, "local_path": str(attachment)}
+        ],
+        "placement_mode": "BY_CATEGORY",
+        "rule_profile": "content_based",
+    }
+
+    asyncio.run(service.ingest(
+        submission_id="explicit-extraction",
+        user_request="提取姓名和金额",
+        extraction_profile="WORKBUDDY_DOCUMENT",
+        extraction_save_policy="CONFIRM_BEFORE_SAVE",
+        **common,
+    ))
+    assert client.batch_payload["extraction_profile"] == "WORKBUDDY_DOCUMENT"
+    assert client.batch_payload["extraction_save_policy"] == "CONFIRM_BEFORE_SAVE"
+
+    asyncio.run(service.ingest(
+        submission_id="direct-archive",
+        user_request="归档并分类",
+        **common,
+    ))
+    assert "extraction_profile" not in client.batch_payload
+    assert "extraction_save_policy" not in client.batch_payload
+
+    with pytest.raises(ValueError, match="必须保留用户任务文字"):
+        asyncio.run(service.ingest(
+            submission_id="missing-request",
+            user_request=None,
+            extraction_profile="WORKBUDDY_DOCUMENT",
+            extraction_save_policy="CONFIRM_BEFORE_SAVE",
+            **common,
+        ))
+
+
 def test_attachment_registry_rejects_file_outside_authorized_cache(tmp_path) -> None:
     """模型即使提交任意绝对路径，也不能让 MCP 读取授权缓存根之外的文件。"""
 

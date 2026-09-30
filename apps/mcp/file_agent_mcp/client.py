@@ -623,6 +623,49 @@ class FileAgentIntegrationClient:
         response = await self._request(self.http.request(method, f"/api/structured-datasets{path}", json=payload), operation="累计表格")
         return self._business_json(response)
 
+    async def excel_writeback_request(self, method: str, path: str, payload: dict | None = None) -> dict[str, Any]:
+        """新 Excel 回传入口使用固定路径，不复用旧表格写入工具名。"""
+        response = await self._request(
+            self.http.request(method, f"/api/excel-writeback{path}", json=payload),
+            operation="Excel 文件回传",
+        )
+        return self._business_json(response)
+
+    async def upload_excel_writeback(self, *, task_id: str, result_digest: str,
+                                     file_sha256: str, payload: dict, path: Path,
+                                     filename: str, correction: bool = False) -> dict[str, Any]:
+        """仅上传已在 MCP 固定缓存根内核验的结果文件，不传本机路径给后端。"""
+        with path.open("rb") as source:
+            response = await self._request(
+                self.http.post(
+                    f"/api/excel-writeback/{'corrections/' if correction else ''}tasks/{_path_segment(task_id)}/publish",
+                    data={"result_digest": result_digest, "file_sha256": file_sha256,
+                          "payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                                                     separators=(",", ":"))},
+                    files={"file": (filename, source,
+                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+                ), operation="发布 WorkBuddy 生成的 Excel",
+            )
+        return self._business_json(response)
+
+    async def upload_manual_excel_revision(self, *, filename: str, request_key: str,
+                                           base_document_version_id: str, base_sha256: str,
+                                           base_revision: int, file_sha256: str,
+                                           path: Path) -> dict[str, Any]:
+        """上传本轮已验证的同名附件；目标和基线由服务端再次核对。"""
+        with path.open("rb") as source:
+            response = await self._request(
+                self.http.post("/api/excel-writeback/manual-revisions/publish",
+                    data={"filename": filename, "request_key": request_key,
+                          "base_document_version_id": base_document_version_id,
+                          "base_sha256": base_sha256, "base_revision": str(base_revision),
+                          "file_sha256": file_sha256},
+                    files={"file": (filename, source,
+                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}),
+                operation="回传手工补全的 Excel",
+            )
+        return self._business_json(response)
+
     async def document_extraction_request(self, method: str, task_id: str, suffix: str, payload: dict | None = None) -> dict[str, Any]:
         """调用固定的 WorkBuddy 文档提取契约，不开放任意 HTTP 路径。"""
 
@@ -722,6 +765,11 @@ class FileAgentIntegrationClient:
 
         return await self.document_extraction_request("GET", task_id, "")
 
+    async def document_extraction_resume(self, *, task_id: str) -> dict[str, Any]:
+        """仅恢复服务端已验证的完整提交，不触发宿主重新识别。"""
+
+        return await self.document_extraction_request("POST", task_id, "/resume")
+
     async def document_extraction_claim(self, *, task_id: str, worker_id: str, output_dir: Path) -> dict[str, Any]:
         """领取文档任务并流式下载固定原文件，完成大小与 SHA-256 双重校验。"""
 
@@ -744,6 +792,34 @@ class FileAgentIntegrationClient:
 
         return await self.document_extraction_request(
             "POST", task_id, "/renew", {"worker_id": worker_id, "lease_token": lease_token}
+        )
+
+    async def document_extraction_prepare_confirmation(
+        self,
+        *,
+        task_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """只登记本地提取结果指纹和计数，正文不能进入该 API。"""
+
+        return await self.document_extraction_request(
+            "POST", task_id, "/confirmation-previews", payload
+        )
+
+    async def document_extraction_confirm(
+        self,
+        *,
+        task_id: str,
+        confirmation_id: str,
+        result_digest: str,
+    ) -> dict[str, Any]:
+        """记录用户对固定结果指纹的确认。"""
+
+        return await self.document_extraction_request(
+            "POST",
+            task_id,
+            f"/confirmation-previews/{_path_segment(confirmation_id)}/confirm",
+            {"result_digest": result_digest},
         )
 
     async def document_extraction_submit(self, *, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -973,6 +1049,21 @@ class FileAgentIntegrationClient:
             error = payload.get("error", {}) if isinstance(payload, dict) else {}
             code = str(error.get("code") or "INTEGRATION_API_ERROR")
             message = str(error.get("message") or f"HTTP {response.status_code}")
+            if code == "VALIDATION_ERROR" and isinstance(error.get("details"), list):
+                # 只公开白名单字段位置和校验类型，不回显正文、值、令牌或任意服务端上下文。
+                details = []
+                for item in error["details"][:12]:
+                    if not isinstance(item, dict):
+                        continue
+                    location = item.get("location", [])
+                    if not isinstance(location, list):
+                        continue
+                    safe = [str(part) for part in location if re.fullmatch(r"[A-Za-z0-9_]+", str(part))]
+                    kind = str(item.get("type", "validation_error"))
+                    if re.fullmatch(r"[a-z0-9_]+", kind):
+                        details.append(f"{'.'.join(safe)} ({kind})")
+                if details:
+                    message += " 字段：" + "; ".join(details)
             raise RuntimeError(f"{code}: {message}")
         if not isinstance(payload, dict):
             raise RuntimeError("File Agent 返回了无效业务响应")

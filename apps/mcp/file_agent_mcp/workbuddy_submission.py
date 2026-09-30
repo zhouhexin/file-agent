@@ -18,6 +18,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from .attachment_transfer import AttachmentTransferService, WorkBuddyAttachment
 from .client import WorkBuddyAttachmentRegistry, file_sha256
@@ -99,6 +100,7 @@ class WorkBuddySubmissionService:
         placement_mode: str,
         rule_profile: str,
         extraction_profile: str = "DEFAULT",
+        extraction_save_policy: str = "DIRECT_ARCHIVE",
     ) -> dict[str, Any]:
         """导入本轮受信提交单；任务文字只能为空或与 Hook 捕获的原文一致。"""
 
@@ -115,7 +117,129 @@ class WorkBuddySubmissionService:
             placement_mode=placement_mode,
             rule_profile=rule_profile,
             extraction_profile=extraction_profile,
+            extraction_save_policy=extraction_save_policy,
         )
+
+    def manual_excel_revision_attachment(self, *, submission_ref: str, target_filename: str):
+        """只从本轮已验证提交单取得一份同名 XLSX，不创建新归档目标。"""
+        submission = self.load(submission_ref=submission_ref)
+        if (not target_filename or Path(target_filename).name != target_filename
+                or not target_filename.lower().endswith(".xlsx")
+                or target_filename not in submission.user_request):
+            raise ValueError("MANUAL_EXCEL_TARGET_REQUIRED: 任务文字必须包含完整目标 .xlsx 文件名")
+        if len(submission.attachments) != 1:
+            raise ValueError("MANUAL_EXCEL_ATTACHMENTS: 本轮必须恰好上传一份补全后的 XLSX")
+        attachment = self._resolve_attachment(submission.attachments[0])
+        if attachment.filename != target_filename:
+            raise ValueError("MANUAL_EXCEL_FILENAME_CHANGED: 上传文件名必须与目标完全一致")
+        if attachment.size_bytes > 32 * 1024 * 1024:
+            raise ValueError("MANUAL_EXCEL_TOO_LARGE: 上传 Excel 超过 32 MiB")
+        return submission, attachment
+
+    async def ingest_scoped_excel(self, *, submission_ref: str) -> dict[str, Any]:
+        """从同一可信提交单拆分 PDF 来源和 Excel 目标，避免 PDF 进入全文归档。"""
+
+        submission = self.load(submission_ref=submission_ref)
+        manifest = [self._resolve_attachment(item) for item in submission.attachments]
+        pdfs = [item for item in manifest if Path(item.filename).suffix.lower() == ".pdf"]
+        excels = [item for item in manifest if Path(item.filename).suffix.lower() in {".xls", ".xlsx"}]
+        if len(manifest) != 2 or len(pdfs) != 1 or len(excels) != 1:
+            raise ValueError("SCOPED_EXCEL_ATTACHMENTS: 本轮必须恰好提交一份 PDF 和一份 XLS/XLSX")
+        key = hashlib.sha256(submission.submission_id.encode()).hexdigest()[:32]
+        target = await self.transfer.ingest_resolved(
+            submission_id=f"scoped-{key}-target", attachments=excels,
+            user_request=submission.user_request, placement_mode="NEUTRAL",
+            rule_profile="content_based", extraction_profile="WORKBUDDY_DOCUMENT",
+            extraction_save_policy="DIRECT_ARCHIVE")
+        source = await self.transfer.ingest_resolved(
+            submission_id=f"scoped-{key}-source", attachments=pdfs,
+            user_request=submission.user_request, placement_mode="NEUTRAL",
+            rule_profile="content_based", extraction_profile="SCOPED_EXCEL_SOURCE",
+            extraction_save_policy="DIRECT_ARCHIVE")
+        return {"target": target, "source": source, "target_filename": excels[0].filename,
+                "source_filename": pdfs[0].filename, "required_pdf_columns": list("BCDEFGHI"),
+                "write_columns": list("ABCDEFGHI")}
+
+    async def ingest_scoped_pdf_append(self, *, submission_ref: str, target_filename: str) -> dict[str, Any]:
+        """只接收本轮 PDF，先按用户明确写出的完整名称锁定已发布目标。"""
+        submission = self.load(submission_ref=submission_ref)
+        manifest = [self._resolve_attachment(item) for item in submission.attachments]
+        if len(manifest) != 1 or Path(manifest[0].filename).suffix.lower() != ".pdf":
+            raise ValueError("SCOPED_APPEND_ATTACHMENTS: 本轮必须恰好提交一份 PDF")
+        if (not target_filename or Path(target_filename).name != target_filename
+                or not target_filename.lower().endswith(".xlsx")
+                or target_filename not in submission.user_request):
+            raise ValueError("SCOPED_APPEND_TARGET_REQUIRED: 本轮任务文字必须明确包含完整目标 .xlsx 文件名")
+        target = await self.transfer.client.dataset_request(
+            "GET", f"/targets/by-filename?filename={quote(target_filename, safe='')}")
+        if (target.get("status") != "ACTIVE"
+                or str(target.get("filename") or "").casefold() != target_filename.casefold()
+                or int(target.get("revision") or 0) < 1 or not target.get("document_version_id")
+                or not target.get("layout")):
+            raise ValueError("SCOPED_APPEND_TARGET_INVALID: 目标必须是唯一、已发布且具有真实布局的 XLSX")
+        key = hashlib.sha256(submission.submission_id.encode()).hexdigest()[:32]
+        source = await self.transfer.ingest_resolved(
+            submission_id=f"scoped-{key}-append-source", attachments=manifest,
+            user_request=submission.user_request, placement_mode="NEUTRAL",
+            rule_profile="content_based", extraction_profile="SCOPED_EXCEL_SOURCE",
+            extraction_save_policy="DIRECT_ARCHIVE")
+        return {"target": target, "source": source, "target_filename": target["filename"],
+                "source_filename": manifest[0].filename, "required_pdf_columns": list("BCDEFGHI"),
+                "write_columns": list("ABCDEFGHI")}
+
+    async def ingest_scoped_sources(self, *, submission_ref: str,
+                                    target_filename: str | None = None) -> dict[str, Any]:
+        """固定一至二十份 PDF/Word 来源，按原附件顺序为每份生成一行。"""
+        submission = self.load(submission_ref=submission_ref)
+        manifest = [self._resolve_attachment(item) for item in submission.attachments]
+        excels = [item for item in manifest if Path(item.filename).suffix.lower() in {".xls", ".xlsx"}]
+        sources = [item for item in manifest if Path(item.filename).suffix.lower() in {".pdf", ".doc", ".docx"}]
+        if (not 1 <= len(sources) <= 20 or len(manifest) != len(sources) + len(excels)
+                or len(excels) != (0 if target_filename is not None else 1)):
+            raise ValueError("SCOPED_SOURCES_ATTACHMENTS: 首次需一份 Excel 与 1–20 份 PDF/Word，后续只需 1–20 份 PDF/Word")
+        key = hashlib.sha256(submission.submission_id.encode()).hexdigest()[:32]
+        if target_filename is None:
+            target = await self.transfer.ingest_resolved(
+                submission_id=f"scoped-{key}-target", attachments=excels,
+                user_request=submission.user_request, placement_mode="NEUTRAL",
+                rule_profile="content_based", extraction_profile="WORKBUDDY_DOCUMENT",
+                extraction_save_policy="DIRECT_ARCHIVE")
+            target_name = excels[0].filename
+            target_kind = "UPLOADED"
+        else:
+            if (not target_filename or Path(target_filename).name != target_filename
+                    or not target_filename.lower().endswith(".xlsx")
+                    or target_filename not in submission.user_request):
+                raise ValueError("SCOPED_APPEND_TARGET_REQUIRED: 本轮任务文字必须明确包含完整目标 .xlsx 文件名")
+            target = await self.transfer.client.dataset_request(
+                "GET", f"/targets/by-filename?filename={quote(target_filename, safe='')}")
+            if (target.get("status") != "ACTIVE"
+                    or str(target.get("filename") or "").casefold() != target_filename.casefold()
+                    or int(target.get("revision") or 0) < 1 or not target.get("document_version_id")
+                    or not target.get("layout")):
+                raise ValueError("SCOPED_APPEND_TARGET_INVALID: 目标必须是唯一、已发布且具有真实布局的 XLSX")
+            target_name = target["filename"]
+            target_kind = "EXISTING"
+        pdfs = [item for item in sources if Path(item.filename).suffix.lower() == ".pdf"]
+        words = [item for item in sources if Path(item.filename).suffix.lower() in {".doc", ".docx"}]
+        batches = {}
+        for kind, items, profile in (("pdf", pdfs, "SCOPED_EXCEL_SOURCE"),
+                                     ("word", words, "WORKBUDDY_DOCUMENT")):
+            if not items:
+                continue
+            batches[kind] = await self.transfer.ingest_resolved(
+                submission_id=f"scoped-{key}-{kind}", attachments=items,
+                user_request=submission.user_request, placement_mode="NEUTRAL",
+                rule_profile="content_based", extraction_profile=profile,
+                extraction_save_policy="DIRECT_ARCHIVE")
+        source_order = [{"source_index": index, "attachment_id": item.attachment_id,
+                         "client_item_id": item.api_payload()["client_item_id"],
+                         "filename": item.filename,
+                         "kind": "PDF" if Path(item.filename).suffix.lower() == ".pdf" else "WORD"}
+                        for index, item in enumerate(sources)]
+        return {"target": target, "target_kind": target_kind, "target_filename": target_name,
+                "source_batches": batches, "source_order": source_order,
+                "required_source_columns": list("BCDEFGHI"), "write_columns": list("ABCDEFGHI")}
 
     def load(self, *, submission_ref: str) -> TrustedSubmission:
         """读取一个未过期、非软链接且结构完整的插件提交单。"""
@@ -376,7 +500,7 @@ class WorkBuddySubmissionService:
 
 
 def _host_document_paths(message: dict[str, Any], *, prompt: str | None = None) -> list[str]:
-    """仅解析 WorkBuddy 5.5.3 的宿主附件区，拒绝用户正文伪造的同名 XML。"""
+    """只解析 user_query 之前的宿主附件区，拒绝用户正文伪造的同名 XML。"""
 
     content = message.get("content")
     if not isinstance(content, list) or not content or not isinstance(content[0], dict):
@@ -386,16 +510,33 @@ def _host_document_paths(message: dict[str, Any], *, prompt: str | None = None) 
     marker = '<system-reminder data-role="user-context">'
     if not isinstance(text, str) or not text.startswith(marker) or len(text) > 1024 * 1024:
         return []
-    reminder_end = text.find("</system-reminder>")
-    query_start = text.find("<user_query>")
-    query_end = text.find("</user_query>", query_start)
-    if reminder_end < 0 or query_start < reminder_end or query_end <= query_start:
+    closing = "</system-reminder>"
+    reminder_end = text.find(closing)
+    if reminder_end < 0:
+        return []
+    hosts = [text[len(marker):reminder_end]]
+    remainder = text[reminder_end + len(closing):].lstrip()
+    # Newer WorkBuddy messages put attachments in a second, host-owned block.
+    additional_marker = '<system-reminder data-role="additional-data">'
+    if remainder.startswith(additional_marker):
+        additional_end = remainder.find(closing, len(additional_marker))
+        if additional_end < 0:
+            return []
+        hosts.append(remainder[len(additional_marker):additional_end])
+        remainder = remainder[additional_end + len(closing):].lstrip()
+    if not remainder.startswith("<user_query>"):
+        return []
+    query_end = remainder.find("</user_query>", len("<user_query>"))
+    if query_end < 0:
         return []
     if prompt is not None and _normalize(prompt) not in _normalize(
-        text[query_start + len("<user_query>"):query_end]
+        remainder[len("<user_query>"):query_end]
     ):
         return []
-    host = text[:reminder_end]
+    attachment_hosts = [host for host in hosts if "<attached_files>" in host or "<user_references>" in host]
+    if len(attachment_hosts) != 1:
+        return []
+    host = attachment_hosts[0]
     if host.count("<attached_files>") != 1 or host.count("</attached_files>") != 1:
         return []
     if host.count("<user_references>") != 1 or host.count("</user_references>") != 1:
@@ -430,12 +571,18 @@ def _host_document_paths(message: dict[str, Any], *, prompt: str | None = None) 
 
 
 def _normalize(value: str) -> str:
-    """统一宿主 Unicode 与空白差异，避免合法附件消息匹配失败。"""
+    """统一宿主 Unicode 并忽略空白差异，避免多行任务文字匹配失败。
+
+    WorkBuddy 的 Hook 输入保留换行，transcript 渲染可能直接删除换行。
+    如果把所有空白压成单个空格，“上一行 下一行”仍无法匹配
+    “上一行下一行”。这里只忽略 Unicode 空白，非空白字符序列仍必须完全一致。
+    会话、时间窗、附件宿主引用和唯一候选校验继续独立生效。
+    """
 
     scalar_text = value.encode("utf-16-le", errors="surrogatepass").decode(
         "utf-16-le", errors="replace"
     )
-    return " ".join(scalar_text.split())
+    return "".join(scalar_text.split())
 
 
 def _message_matches_prompt(message: dict[str, Any], prompt: str) -> bool:

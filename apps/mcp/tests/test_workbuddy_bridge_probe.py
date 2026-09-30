@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -44,8 +45,8 @@ def test_attachment_skill_drives_external_ocr_instead_of_polling() -> None:
     ).read_text(encoding="utf-8")
     assert "WAITING_EXTERNAL_EXTRACTION" in skill
     assert "extraction_claim" in skill
-    assert "ocr.extract" in skill
-    assert "--accurate --positions" in skill
+    assert "已安装且已授权的 OCR 能力" in skill
+    assert "不得在文件助手插件中写死某个 OCR Skill、Provider" in skill
     assert "extraction_submit" in skill
     assert "仅重复 `batch_get` 或 `job_get` 不会完成提取" in skill
     assert "不得要求文件助手后端临时自行 OCR" in skill
@@ -63,10 +64,33 @@ def test_current_marketplace_requires_duplicate_comparison_link() -> None:
         (marketplace / ".codebuddy-plugin" / "marketplace.json").read_text(encoding="utf-8")
     )
     skill = (marketplace / "file-agent-plugin" / "skills" / "file-agent" / "SKILL.md").read_text(encoding="utf-8")
-    assert manifest["version"] == "0.1.11"
+    dataset_skill = (
+        marketplace / "file-agent-plugin" / "skills" / "file-agent-structured-dataset" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    sealed_skill = (
+        marketplace / "file-agent-plugin" / "skills" / "file-agent-sealed-item-extraction" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    # 市场清单与插件源码版本一致即可；不要把升级包锁死在旧测试版本。
+    assert re.fullmatch(r"\d+\.\d+\.\d+", manifest["version"])
+    # 这里只验证包能力边界；保存与勾选行为由 API/MCP 的实际调用测试覆盖。
+    for tool in ("structured_dataset_preview", "structured_dataset_confirm", "structured_dataset_commit"):
+        assert tool in dataset_skill
+    assert "references/task-payload.md" in dataset_skill
+    assert "excel_published=true" in dataset_skill
+    assert "WHOLE_SECTION" in sealed_skill
+    assert "签字不是审批通过的必需条件" in sealed_skill
+    # 不把真实印章限制为旧样例里的红色圆章。
+    assert "圆章、方章、长方形章均可" in sealed_skill
+    assert "本人承诺/本人签名" in sealed_skill
+    assert "LAST_ITEM_FALLBACK" in sealed_skill
+    assert "①②③" in sealed_skill
+    assert "不修改 Excel 表头" in sealed_skill
+    assert "title_excel_value" not in sealed_skill
     assert listing["plugins"][0]["version"] == manifest["version"]
     assert "extraction_claim" in skill
-    assert "ocr.extract" in skill
+    assert "实际调用的 OCR Provider 或工具标识" in skill
+    assert "不得写死或冒充" in skill
+    assert "所有 WorkBuddy 图片均执行本宿主侧流程" in skill
     assert "extraction_submit" in skill
     assert "请用文件助手归档并分类本轮附件" in skill
     assert ".doc/.docx/.pdf/.xls/.xlsx/.txt" in skill
@@ -78,6 +102,20 @@ def test_current_marketplace_requires_duplicate_comparison_link() -> None:
     assert "duplicate_comparison_get 返回的 comparison_url" in skill
     assert "[打开“<候选文件名>”对比页面]" in skill
     assert "不得声称插件已经替用户自动打开浏览器窗口" in skill
+    assert 'extraction_save_policy="CONFIRM_BEFORE_SAVE"' in skill
+    assert 'extraction_save_policy="DIRECT_ARCHIVE"' in skill
+    assert "document_extraction_preview" in skill
+    assert "document_extraction_confirm" in skill
+    assert "preview_result.units" in skill
+    assert "不得只说“已提取”“请确认”" in skill
+    assert 'kind="SHEET"' in skill
+    assert "包括旧版 `.xls` 和 `.xlsx`" in skill
+    assert "不得读取 MCP 配置、环境变量" in skill
+    assert "不得用本地 Markdown、临时 JSON、脚本输出" in skill
+    assert "claim 第一条普通内容中由同一 MCP Tool 返回的完整 JSON" in skill
+    assert "也不得绕过本流程直接读取宿主原始本地附件" in skill
+    assert "file-agent-sealed-item-extraction" in skill
+    assert "不得用 `structured_dataset_create`、模型重建、Shell 或临时转换" in skill
 
 
 def test_capture_creates_pending_reference_and_never_exposes_path(monkeypatch, tmp_path) -> None:

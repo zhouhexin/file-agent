@@ -25,3 +25,12 @@ Windows 示例：
 连接器保留 `workbuddy_attachment_ingest` 和 `workbuddy_submission_ingest`，用于配合同套件中的可信附件 Hook。标准连接器本身不会生成附件提交单；只有本轮上下文已经包含 `FILE_AGENT_HOST_SUBMISSION`，或宿主直接提供稳定提交 ID、附件 ID、原文件名和位于预配置缓存根内的真实文件引用时，才能调用对应附件工具。
 
 缺少这些宿主事实时，不得猜测本地路径、附件 ID 或提交 ID。用户明确指定已授权目录时，继续使用 `file_batch_ingest`。
+
+定向 A–I 填表使用 `scoped_excel_sources_ingest`：一次可固定 1–20 份 PDF/DOC/DOCX，首次另带一份目标 Excel，续写则在任务文字中写明完整已发布 `.xlsx` 文件名。PDF 走 B–I 区域 OCR，Word 使用正式正文提取结果；每份来源一行、一次发布。旧单份 PDF 入口继续可用。
+
+并行的完整 Excel 回传工具由 `mcp.json` 中的 `WORKBUDDY_EXCEL_WRITEBACK_ENABLED=true` 注册，
+还需 API 端同名开关和结构化数据集开关。更新 MCP 源码并完全重启连接器后，
+应能看到 `excel_writeback_checkout/apply/preview/confirm/publish` 与独立的 `excel_writeback_correction_checkout/apply/confirm/publish`；新 Skill 位于市场插件
+`file-agent-excel-writeback`，旧表格 Skill 与工具不变。正式启用前须用真实 WorkBuddy 会话验收。
+
+只填 A–I 的后续追加使用 `scoped_excel_pdf_append_ingest(submission_ref, target_filename)`：本轮只上传一份 PDF，任务文字明确包含已发布目标的完整 `.xlsx` 文件名。入口唯一解析当前目标并只导入 PDF 为定向 OCR 来源；随后按当前版本 checkout、apply、publish，每次新增一人并生成同名新版本。
