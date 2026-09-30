@@ -63,6 +63,12 @@ function classificationLabel(file: OrganizationFilePageResponse['files'][number]
 }
 
 function classificationStatus(file: OrganizationFilePageResponse['files'][number]) {
+  if (file.publication_status === 'DB_COMMITTED') {
+    return <span className="classification-status neutral">Excel 正在发布</span>;
+  }
+  if (file.publication_status === 'NEEDS_REPAIR') {
+    return <span className="classification-status neutral">Excel 发布需修复</span>;
+  }
   if (file.pending_primary) {
     return <span className="classification-status neutral">分类落位处理中</span>;
   }
@@ -296,7 +302,7 @@ export function ClassificationFilesPage({
                         <a className="classification-download" href={file.download_url}>
                           <Download size={15} /> 下载
                         </a>
-                      ) : token ? (
+                      ) : token && !file.publication_status ? (
                         <button
                           type="button"
                           className="classification-download"

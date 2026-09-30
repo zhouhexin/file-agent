@@ -1198,14 +1198,22 @@ planner_shadow_comparisons:
 
 新增三个独立模型，不改变现有 OCR 与结构化事实表：
 
-- `structured_datasets`：共享 workspace、创建人审计、名称、固定 `schema_json`、revision、创建幂等摘要。
+- `structured_datasets`：共享 workspace、创建人审计、名称、用户可见 `target_filename`、
+  `target_sheet_name`、固定 `schema_json`、上传模板已有行 `base_rows_json`、
+  `target_source_version_id`、revision、创建幂等摘要和唯一 `working_copy_id`。
 - `structured_dataset_members`：引用单图 `structured_extraction_run_id` 和 `document_version_id`，保存追加键、
   载荷摘要与 appended_revision；唯一约束为 dataset+version、dataset+append_key。
-- `structured_dataset_exports`：dataset+revision 唯一的 XLSX 快照，包含独立 ID、存储引用、SHA-256 和大小。
+- `structured_dataset_exports`：dataset+revision 唯一的 XLSX 版本，包含独立 ID、内部不可变存储引用、
+  SHA-256、大小和唯一 `document_version_id`。
 
 created_by 不参与数据集读写权限限制；所有登录用户共享。成员不复制字段值，来源外键采用 RESTRICT，
 聚合导出不伪造单 Document 的 Artifact 关系。首期 schema 固定、成员只追加，导出按需生成；
 详情见 [Demo 方案](2026-09-18-workbuddy-structured-dataset-demo.md)。
+
+迁移 `20260920_0003` 把每个数据集绑定到唯一普通 `WorkingCopy`，每个 export 绑定一个
+`DocumentVersion`。迁移 `20260920_0005` 增加 Excel 目标文件名、工作表、上传模板已有行和来源版本。
+当前可见工作副本使用与用户展示相同的真实 `.xlsx` basename；内部 `.versions` 文件不作为第二个普通文件
+显示。重命名只同步当前可见工作副本和数据集目标名，历史版本路径保持不可变。
 
 迁移 `20260908_0001` 顺接 `20260901_0001`，建立 P1 批次业务事实。它不替代
 `upload_archive_records` 或 `filesystem_jobs`：前者记录一个上传版本的归档状态，后者记录一次阶段执行，
@@ -1283,6 +1291,26 @@ ingest_request_executions
 `after_revision`，证明首次自动整理来自冻结批次策略且只发生一次。迁移`20260908_0005`新增上述附带请求
 执行映射；其安全回执可重建，但不能替代AgentRun、ToolInvocation或文件事实。
 
+迁移 `20260920_0004` 新增 `document_extraction_confirmations`，用于 WorkBuddy 显式内容提取的保存前确认：
+
+```text
+document_extraction_confirmations
+- id uuid/string(36) pk
+- task_id fk external_extraction_tasks.id on delete cascade
+- user_id fk users.id on delete cascade
+- source_version_id fk document_versions.id on delete restrict
+- source_sha256 / result_digest
+- revision；unique(task_id, revision)
+- preview_key；unique(task_id, preview_key)
+- status WAITING_CONFIRMATION | CONFIRMED | SUPERSEDED | SAVED
+- summary_json：只含 provider、覆盖状态和 unit/block 数量
+- confirmed_at / saved_at / created_at / updated_at timestamptz
+```
+
+该表不得保存正文、OCR 全文、units、blocks、租约 token 或本地路径。批次 `policy_json` 的
+`extraction_save_policy=CONFIRM_BEFORE_SAVE` 要求最终结果摘要与最新 `CONFIRMED` 指纹完全一致后，
+才能创建 `DocumentPage/DocumentElement`；缺少该字段的旧批次按 `DIRECT_ARCHIVE` 兼容。
+
 迁移 `20260908_0002` 增加版本化重复确认和同批内容组：
 
 ```text
@@ -1311,3 +1339,17 @@ ingest_duplicate_group_members
 
 确认必须同时核验 review 修订、候选 ID 及候选工作副本版本/哈希/修订。`WAIT_AND_REUSE` 只能引用同批组
 中固定的主条目；主条目失败或取消时，等待成员不得自动转为“保留两份”。
+
+## 2026-09-22：Excel 任务与字段展示（迁移 20260922_0002）
+
+新增 structured_dataset_tasks：UUID 字符串主键、user_id、request_key（联合唯一）、result_digest、
+review_mode、status、manifest_json/payload_json/progress_json/result_json/error_json（JSONB）、
+confirmed_at/created_at/updated_at（时区时间）。未确认仅元数据/摘要，确认后才存 payload。
+structured_extraction_fields.presentation_json 保存审批范围、条件计算、留空原因及缺失评分标识，旧行为默认空对象。
+structured_datasets.active_task_id 为可空稳定任务引用，用行锁与阶段事务隔离同目标任务和旧 append/export。
+所有来源在同一追加事务校验，失败不保留半批；发布失败保留进度以恢复，不新增重复成员。
+## 累计 Excel 发布记录（2026-09-24）
+
+`structured_dataset_publications` 记录同一数据集从数据库当前版本到同名可见工作副本的跨资源发布状态。`dataset_id`、`working_copy_id`、`candidate_document_version_id`、`candidate_sha256`、`candidate_storage_path`、`visible_relative_path` 固定一次发布的目标；可选 `task_id` 关联 WorkBuddy 预览任务，`base_document_version_id` 保留基线；`status` 为 `DB_COMMITTED`、`COMPLETED` 或 `NEEDS_REPAIR`，`attempt_count`、`error_code` 用于安全恢复。`result_json` 只保存轻量发布回执，`cleanup_json` 只保存受控相对路径的旧可见入口清理参数，`agent_run_id` 关联 Tool/ChangeSet 审计。迁移为 `20260924_0001`，依赖 `20260922_0002`。未完成记录必须阻止当前版本下载、追加、重命名和移动；历史不可变版本不随同名工作副本覆盖。
+
+`structured_dataset_corrections` 是已发布人员行的不可变逐格更正事件：`dataset_id + dataset_revision` 与 `task_id` 各自唯一，`record_id` 绑定原成员记录，`row_number` 固定实际数据行，`changes_json` 仅保存经证据核验的最新字段投影。原 `structured_extraction_runs` 与 `structured_dataset_members` 不回写；查询按 revision 顺序覆盖当前投影，旧 Excel 由 `DocumentVersion` 和历史导出保留。更正任务固定需逐格确认，发布仍走 `structured_dataset_publications`。迁移 `20260924_0002` 依赖 `20260924_0001`。

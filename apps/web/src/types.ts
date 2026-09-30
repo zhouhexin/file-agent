@@ -53,6 +53,7 @@ export type OrganizationFileItem = {
   primary_category_status: 'AUTO_APPLIED' | 'CONFIRMED' | string | null;
   classification_outcome: 'CLASSIFIED' | 'OTHER' | string;
   placement_status: string;
+  publication_status?: 'DB_COMMITTED' | 'NEEDS_REPAIR' | null;
   effective_primary: OrganizationPrimary | null;
   pending_primary: OrganizationPrimary | null;
   legacy_location: boolean;

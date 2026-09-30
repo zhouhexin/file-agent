@@ -5,22 +5,37 @@
 > [三格式扩展方案](2026-09-20-workbuddy-document-to-excel-demo-extension-plan.md)。该扩展目前处于方案阶段，
 > 本文下面描述的现有实现仍以单页图片为范围。
 > 实施扩展请按[可执行开发计划](2026-09-20-workbuddy-document-to-excel-development-plan.md)逐步开发和验收。
+>
+> 2026-09-21 保存规则修订：显式内容提取按本轮提示词进入复核后保存或明确授权的直接保存路径；未明确跳过
+> 复核时仍默认先展示并等待确认。详见
+> [显式内容提取复核分流方案](2026-09-20-workbuddy-explicit-extraction-confirmation.md)。
+>
+> 2026-09-20 故障修订：MCP 的 `structured_dataset_append` 必须使用 JSON 模式序列化嵌套
+> `evidence_refs.source_unit_id`，避免 Python UUID 导致请求发送前失败。append 失败或正式查询结果为零时，
+> Skill 必须停止，不能继续导出只有标题行的 Excel，也不能把该链路报告为完成。
 
 ## 当前范围（2026-09-18 用户修订）
 
-先增加可运行的小 Demo，尽量复用已完成能力。所有登录用户共同操作共享工作副本和 Demo 数据集；不增加所有者限制、用户授权管理或额外确认页面。原有插件入口及上传、OCR、分类和文件操作语义保持兼容。
+先增加可运行的小 Demo，尽量复用已完成能力。所有登录用户共同操作共享工作副本和 Demo 数据集；不增加所有者限制或用户授权管理。显式内容提取根据提示词进入复核确认或明确授权的直接保存路径，不新增确认页面。原有插件入口及纯归档、OCR、分类和文件操作语义保持兼容。
 
 本文件是本轮 Demo 的直接实施依据；[完整方案](2026-09-18-workbuddy-image-structured-extraction-integration-plan.md) 的 v2 OCR 调度、schema 演进、复杂权限和后台自动刷新留待 Demo 验证后完善。此前审查中的“旧入口冲突”修正为入口兼容提醒，不作为新增能力的阻塞条件。
 
 ## 最小链路
 
-1. 图片经过现有 WorkBuddy 附件导入、OCR 和整理，成为共享 ACTIVE 工作副本。
-2. 新增工具创建一个共享累计表格，首次固定字段 schema；用户不需要额外授权或选择所有者。
-3. 新增 source 工具返回当前工作副本的版本、哈希和已持久化的完整 OCR 页面。WorkBuddy 按表格 schema 整理字段，回传每条记录的原文及页码。
-4. 新增 append 工具验证版本、哈希、原文支持和字段类型，复用 StructuredExtractionRun/Field 保存单图结果；数据集只引用该运行。
-5. 查询累计记录及确定性合计；显式导出工具生成当前 revision 的 XLSX 快照。不同用户可以继续追加、查询和下载。
+1. 明确提取请求固定使用 `WORKBUDDY_DOCUMENT`，并按提示词冻结为
+   `REVIEW_REQUIRED + CONFIRM_BEFORE_SAVE` 或 `DIRECT_SAVE + DIRECT_ARCHIVE`。
+2. 复核路径读取固定文件后调用 preview，展示逐文件结果并等待后续确认，再 confirm/submit；直接路径完成同等
+   证据判定后直接 submit。两条路径都在 submit 成功前不创建数据集、不保存正文、不追加记录、不导出 Excel。
+3. 新增工具创建一个共享累计表格，首次固定字段 schema；用户不需要额外权限授权或选择所有者。
+4. source 工具返回按冻结策略提交并验收的工作副本版本、哈希和完整页面。WorkBuddy 按表格 schema 整理字段，回传每条记录的原文及定位证据。
+5. append 工具验证版本、哈希、原文支持和字段类型，复用 StructuredExtractionRun/Field 保存单文件结果；数据集只引用该运行。
+6. 查询累计记录及确定性合计；显式导出工具把当前 revision 发布为服务器上的唯一普通工作副本。
+   后续导出只为同一逻辑文件增加 `DocumentVersion` 并更新当前版本，不生成第二个独立文件。
+   不同用户可以继续追加、查询和下载。
 
-不要求新的 OCR claim/submit，也不在默认导入的 user_request 中再次安排结构化任务。需要上传时沿用现有宿主入口；已有工作副本可直接开始本 Demo。
+纯归档产生的既有 ACTIVE 工作副本可直接开始旧图片 Demo；用户在本轮明确要求提取新附件内容时，必须走
+`document_extraction_get/claim` 后按冻结路径执行 `preview/confirm/submit` 或直接 `submit`，不得在没有本轮
+明确跳过复核表达时把默认归档授权替代结果确认。
 
 ## 简化选择
 
@@ -30,7 +45,8 @@
 - 工作副本版本和成功解析运行是源事实；服务端从完整页面生成结构化运行所需的可定位元素，记录来源运行，不调用 OCR/LLM Provider，不修改旧页面或索引。
 - 非空字段必须能在指定页原文中定位。找不到或类型不符时保留待复核状态；缺失必填字段或任一待复核字段的记录不计入默认查询、合计和正式 Excel，返回排除数量。可查询全部记录用于检查。
 - 一张图片内容版本在同一数据集只能追加一次；相同键同载荷返回原结果，不同载荷返回冲突。数据库锁保证成员和 revision 一起提交。
-- Excel 按需生成，复用现有原子 XLSX writer 和公式安全处理，保存独立导出记录。导出失败不回滚追加；重复导出同一 revision 复用文件。
+- Excel 按需生成，复用现有原子 XLSX writer 和公式安全处理，发布为单一普通工作副本并保留版本记录。
+  导出失败不回滚追加；重复导出同一 revision 复用同一文件版本。
 - 新写入通过固定白名单的最小 LangGraph dispatch 执行，沿用 AgentRun、ToolInvocation、ChangeSet 记录，不把正文写入审计快照。
 - 保留现有登录、稳定 ID、版本校验及存储路径保护。这些是现有基础能力，不新增用户授权功能。
 
@@ -62,10 +78,11 @@ WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED=true
 
 > 新建一张“登记汇总”累计表，字段是姓名和金额。把已整理的这两张图片里的每条记录追加进去，告诉我累计多少条，最后导出 Excel。
 
-字段类型示例：姓名 `string`，金额 `decimal`。WorkBuddy 依次执行 `structured_dataset_create`、每图
-`structured_dataset_source/append`、`structured_dataset_query`、`structured_dataset_export`。
+字段类型示例：姓名 `string`，金额 `decimal`。WorkBuddy 先提取并展示两张图片的结果；用户回复明确确认后，
+才依次执行 confirm/submit、`structured_dataset_create`、每图 `structured_dataset_source/append`、
+`structured_dataset_query`、`structured_dataset_export`。
 要测试另一用户，只需用另一登录用户现有 Token 启动 MCP，使用 list/get 找到同一表格，再查询或追加。
-不需要授予所有者权限，不需要二次批准。
+不需要授予所有者权限；这里的内容确认只用于证明用户接受已展示的提取结果，不是数据集权限审批。
 
 后续可以说：
 
@@ -124,8 +141,10 @@ WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED=true
 金额使用 Decimal 运算，sum 为十进制字符串，过滤后先汇总再分页。即使 include_review=true，待复核记录
 也不纳入 sum。字段证据包含原文、真实页码；本 Demo 从旧 OCR 全文复用，缺失 bbox 保持空，不补造坐标。
 
-导出 API URL 需要现有登录。WorkBuddy 的 export Tool 会使用 MCP Token 下载到已有受控缓存，并返回
-`ResourceLink`，用户可从宿主拿到实际 XLSX，不必自己处理 API 认证。
+导出 API URL 需要现有登录。服务器先把 XLSX 版本保存到
+`WORKING_COPY_STORAGE_ROOT/structured-datasets` 并注册为普通工作副本；WorkBuddy 的 export Tool 再使用
+MCP Token 下载当前版本到已有受控缓存并返回 `ResourceLink`。宿主缓存只是交付副本，不是唯一事实存储。
+完整发布约束见 [累计表格单一工作副本发布方案](2026-09-20-structured-dataset-working-copy-publication.md)。
 
 关闭开关会关闭全部 Demo 路由和新 MCP 工具；旧能力继续工作，Demo 数据保留。此阶段没有历史 revision 查询
 接口，但已经生成的固定 export ID 保留旧快照；当前查询只读最新 revision。

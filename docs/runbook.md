@@ -7,6 +7,15 @@
 
 ## 1. Python 环境
 
+### WorkBuddy 0.1.29 配套升级（2026-09-22）
+
+使用既有 Python 环境，在 `apps/api` 执行 `python -m alembic upgrade head`，确认迁移到 `20260922_0001`，
+再重启 API、处理队列 worker 和 MCP。安装新版 WorkBuddy 插件后重新建立会话，不在旧会话使用缓存工具 schema。
+新版支持复杂模板显式 `layout.header_range/data_range`；不要把固定示例坐标直接套到其他模板。
+正文草稿位于 MCP 下载缓存的 `extraction-drafts` 子目录，含原文及租约，仅供本机受控工具恢复；
+不能放入公开 HTTP 目录或提交到仓库，确认/重试期间不要清理。任务终结后可由管理员按本机数据保留策略清理。
+部署与真实宿主验收进度以 `docs/2026-09-22-workbuddy-confirm-save-recovery-plan.md` 为准。
+
 后端使用用户当前已经配置好的 `/opt/homebrew/anaconda3/envs/py311/bin/python` 环境，不强制创建新虚拟环境，不强制切换到 `uv`、Poetry 或其他包管理方式。
 
 当前已验证的运行方式是在项目根目录执行命令，避免进入 `apps/api` 后 shell 解析到不同的 Python 解释器。
@@ -908,6 +917,10 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
   -m app.modules.file_lifecycle.watcher
 ```
 
+`STRUCTURED_EXTRACTION` worker 同时消费累计目标表的 `STRUCTURED_DATASET_TARGET_PREPARE` 任务。
+启用 WorkBuddy `.xls` 目标表格式提升时必须保持该 worker 运行；API 只返回 HTTP 202 和任务 ID，
+不会在请求线程中启动 LibreOffice。
+
 API 启动钩子、scheduler 和 watcher 都只创建 `filesystem_jobs`。实际 SHA-256 查重、归档、扫描、源侧分析、后台物化、布局修复和暂存清理由 worker 完成。受管目录扫描对新增文件不再预先完整哈希；每批立即创建 `SOURCE_ANALYSIS` 任务，源侧分析完成后即可通过摘要和正文索引检索、回答，并自动创建低优先级 `MATERIALIZE_WORKING_COPY`，逐步把全部受管文件同步到共享工作目录。全量同步未完成期间，检索同时覆盖活动工作副本和未物化但已分析的源文件；用户查询、阅读或选择到的最终相关源文件会复用同一幂等任务并提升优先级，回答不等待物理复制。物化复用源侧页面和索引，不重复 LibreOffice 转换；上传归档的即时副本仍由 `IMPORT` 兼容处理。尚未完成源侧分析的文件只能参与元数据候选，涉及正文或总结时必须先完成分析，不能编造内容结论。`REPAIR_WORKING_COPY_LAYOUT` 会先把旧根前缀以及历史“待整理/待确认”路径迁到 `shared/<root_key>/<源相对路径>`，并写入 `SYSTEM_LAYOUT_REPAIR` 路径记录。GRAPH worker 完成一次性 Neo4j bootstrap 和正式分类 Outbox 增量投影，API 重启不再同步执行 `sync_all()`。任务通过租约和幂等键恢复，每个任务最多尝试三次；达到上限后保持 `FAILED`。ops/admin 可在 `/admin/failed-files` 查看失败文件，状态接口为：
 
 周期性受管目录协调采用递增的 `scan_generation`：同一根已有 `PENDING/RUNNING` 扫描时复用活动任务；
@@ -1483,3 +1496,136 @@ python -m pytest apps/mcp/tests/test_dataset_tools.py apps/mcp/tests/test_client
 - 测试命令。
 - 新增或删除可直接调用的接口。
 - 当前限制被解除，例如接入数据库、真实文件解析、大模型 Planner 或鉴权。
+
+## WorkBuddy Excel 统一任务升级（0.1.32）
+
+1. 同步最新 API、worker、MCP 代码。先备份数据库，再在 API 环境运行 alembic upgrade head；
+   当前新增 head 为 20260922_0002。未在本次开发操作中自动执行生产迁移。
+2. 重启 API、消费 STRUCTURED_EXTRACTION/归档相关队列的 worker，以及 WorkBuddy 使用的 MCP 进程。
+3. 安装 integrations/workbuddy/file-agent-marketplace-0.1.32.zip，新建会话；
+   检查新增 structured_dataset_preview/confirm/commit/task_get 是否可见。
+4. 先用合成模板与材料验收：预览无写入、确认或明确直接保存后发布、数据格末尾勾、
+   表头/其他工作表不变、列表/实际 basename/下载名一致、版本递增、重复 commit 不增行。
+5. WAITING_DEPENDENCY/PREPARING_TARGET 不能报完成；按固定来源或转换 job 检查，完成后继续同任务 commit。
+   发布失败不重复 append；目标占用先恢复原任务，不能用直接数据库改状态或本地编辑绕过。
+6. 升级服务可用 python -m http.server 8175 --bind 127.0.0.1 --directory integrations/workbuddy。
+   8175 仅提供 ZIP，不是 API 端口；包内 Skill 更新不能替代服务器代码与迁移。
+
+## WorkBuddy 复杂模板安全修复（0.1.33）
+
+本次没有新增数据库迁移。先同步 API、STRUCTURED_EXTRACTION worker 和 MCP 代码并重启对应进程，
+再安装 `integrations/workbuddy/file-agent-marketplace-0.1.33.zip`，完全退出并重开 WorkBuddy。
+旧 `.xls` 复杂模板若 WorkBuddy 只返回普通 SHEET 文字、没有真实 TABLE_CELL 坐标，
+现在应在转换排队前返回 `TARGET_EXCEL_HEADER_CELLS_MISSING`；不要反复提交同一预览，
+需换用能读取真实网格的宿主能力或上传可读取的 `.xlsx`。转换任务的校验失败会使父表格任务
+进入 `NEEDS_INPUT`，其他最终失败为 `FAILED`；`task_get` 返回 job ID、错误码和 `create_new_preview`。
+旧版已失败但父状态仍是 `PREPARING_TARGET` 的任务，读取状态时也会显示失败终态。
+这些变更不自动迁移或修改既有用户 Excel；成功任务仍按原目标版本与工作副本发布。
+
+## 盖章项目模板身份列（0.1.34）
+
+同步最新 API/MCP 代码并重启进程，安装 `integrations/workbuddy/file-agent-marketplace-0.1.34.zip` 后
+重开 WorkBuddy。无新增数据库迁移。仅在盖章项目专用 Skill 中，把目标 Excel 物理 B–I 列作为
+身份字段直接按真实原文填写；这些列不要求盖章审批或资格 `assessment`，也不加勾。
+仍需检查逐格原文证据和本轮预览/直接保存授权。A 列及 B–I 以外的业务列保持原规则；
+普通结构化表格任务不得设置 `identity_column_range`。建议用一份含 A:J 的合成模板验收：
+B–I 直接填值且无勾，J 的盖章资格列仍须审批并仅在整列满足时末尾加一个 `√`。
+
+## WorkBuddy 完整提取任务长等待修复（0.1.35，待部署）
+
+同步 API、MCP 代码并重启 API 与 WorkBuddy MCP/宿主，安装
+`integrations/workbuddy/file-agent-marketplace-0.1.35.zip`；本次没有新增数据库迁移。
+完整文档提交的任务状态是 `COMPLETE`，再次领取应返回 `EXTRACTION_ALREADY_COMPLETED`，
+不再重复识别。若历史任务已有完整 WorkBuddy 提取运行、却因旧版状态错配显示 `CLAIMED` 或
+`WAITING_EXTERNAL_EXTRACTION`，从原任务 ID 调用 MCP `document_extraction_resume`；服务端只在
+源版本/哈希、提交指纹、完整运行和页面均匹配时继续原归档任务，返回原 `filesystem_job_id`，
+重复调用不得创建新 job。没有完整结果时恢复返回 `EXTRACTION_RECOVERY_NOT_AVAILABLE`，应按原
+提取路径处理，不能伪造提交。
+
+盖章项目专用任务必须先验收上传 Excel 的真实工作表和表头网格，再领取 PDF 任务。
+旧 `.xls` 复杂模板若当前 WorkBuddy Provider 只能给纯文本、没有真实 `TABLE_CELL` 坐标，
+应立即报告并请用户换用可返回结构化网格的能力或上传 `.xlsx`；不得先等待 PDF OCR。
+已有 OCR 结果的复用策略没有变化。部署后以真实 WorkBuddy 会话验收，不把局部测试当作已完成验收。
+
+## 盖章项目专用 Skill 默认直写（0.1.36，待部署）
+
+安装 `integrations/workbuddy/file-agent-marketplace-0.1.36.zip`，同步最新 MCP 工具说明并重启
+WorkBuddy/MCP；本轮只调整专用规则与工具路由说明，不新增数据库迁移，也不修改 OCR 结果复用。
+该专用流程默认使用 `WORKBUDDY_DOCUMENT + DIRECT_ARCHIVE` 与 `DIRECT_SAVE`：真实读取、目标
+网格和证据校验后，技术性 `structured_dataset_preview` 固定候选指纹，随即 `commit` 发布 Excel，
+不等待人为确认。用户本轮明确要求先复核时仍按 `CONFIRM_BEFORE_SAVE/REVIEW_REQUIRED` 执行。
+普通显式提取继续默认复核。缺少真实单元格坐标、印章证据、可写记录或目标版本冲突时必须停止，
+不能因为跳过人为确认而跳过安全校验或生成只有标题行的文件。
+
+## WorkBuddy 文档提交租约过期后的恢复（2026-09-23）
+
+若 WorkBuddy 长时间读取后提交失败，先通过任务查询区分 `CLAIMED` 且
+`extraction_run_id=null` 的未保存任务和已经保存完整运行的任务。前者若确认记录是
+`CONFIRMED`、`saved_at=null`，应在更新 API 代码并重启 API 后，用原 WorkBuddy 会话的
+固定本地草稿重新领取有效租约，按原 `result_digest` 提交相同正文；MCP 缓存提交工具
+可在租约过期时续接，但不得重新编造证据或直接追加 Excel。缓存草稿遗失时须重新读取
+来源、预览/确认或按专用直写规则重新建立固定提交，不可从数据库摘要反推正文。
+
+此次后端修复使续租失败立即回滚、完整结果提交的同步数据库步骤不再占用异步事件循环。
+无需数据库迁移，也不需因该修复重启 worker 或重新打包插件；必须重启运行旧代码的 API。
+诊断锁等待时可只读查看 `pg_stat_activity` 的 `state`、`wait_event_type` 与
+`pg_blocking_pids(pid)`。仅在确认具体过期会话、业务提交尚未成功后，才由运维定向终止
+对应 PostgreSQL backend；不要批量杀连接或直接改任务状态。API `/openapi.json`
+可用于检测事件循环响应；`/api/health` 还检查图谱服务，可能因外部依赖耗时，
+不能单独用它判断文档提交接口是否仍被锁住。
+
+## WorkBuddy 目标 Excel 已提取但仍等待归档（2026-09-23）
+
+若目标 Excel 的文档任务为 `COMPLETE`、近似查重记录为 `RESOLVED/CONTINUE_UPLOAD`，
+而上传条目和归档记录仍为 `WAITING_EXTERNAL_EXTRACTION`、归档 job 为空，属于旧版
+`COMPLETE` 与 `COMPLETED` 判断错配。更新 API 代码并重启 API 后，先通过原任务 ID
+调用受控 `document_extraction_resume`；它只在固定源版本、哈希、提交指纹、完整运行和
+已确认近似查重决定均吻合时补建原 ARCHIVE job。不能用 SQL 直接把状态改为成功，也不要
+重新 OCR 或重新提交重复决定。ARCHIVE/IMPORT worker 完成工作副本后，再对原表格任务
+调用 `structured_dataset_commit`；该调用会先同步异步归档的上传条目投影，再验证活动
+工作副本与 WorkBuddy 运行。只有返回 `COMPLETED` 且文件列表、实际文件名与下载
+均验证通过，才能报告 Excel 已生成。此修复无需数据库迁移或插件重新打包。
+若旧 `.xls` 转换后出现 `TARGET_EXCEL_SCHEMA_CONFLICT`，先逐项核对 Sheet、完整布局、
+物理列和表头；服务器仅兼容合并表头的 ` / ` 层级分隔符与重复叶标题的真实列号后缀。
+任何字段文字、列顺序或文件名变化仍应停止，不能手工修改已确认草稿绕过指纹。
+若 `structured_dataset_commit` 返回 `APPROVAL_DECLARATION_REQUIRED`，先看错误详情中的
+`column`、`record_index` 和字段标题；`task_get` 也保留这些定位元数据。尚无数据修订时，
+原任务进入 `NEEDS_INPUT`，不可通过重复提交同一摘要修复。重新核对 PDF/OCR：L 列年度优秀的
+`declaration` 与 `seal` 应引用同一段真实方章内原文；普通审批列不得用错字或截断的
+“属实”声明凑数。重建候选、预览和摘要；不能直接改旧任务或放宽审批校验。新任务首次提交
+会在旧 `.xls` 格式转换前先拒绝这些明显无效的审批引文，以免再次产生只有表头的目标副本。
+## 累计 Excel 发布加固部署与恢复（2026-09-24）
+
+2026-09-28 修订：Excel 新建、续写和已发布行定向更正默认直写，仅用户明确要求先复核时才等待确认；
+重复文件确认及目标歧义选择不变。本节下文有关“更正必须人工确认”的旧表述以此修订为准。
+详见 [Excel 直写与目标选择修订](2026-09-28-workbuddy-excel-direct-save-and-target-selection.md)。
+
+本次代码引入 `structured_dataset_publications` 和 `structured_dataset_corrections`，不能只替换 API 或插件文件。先备份数据库和 `WORKING_COPY_STORAGE_ROOT`，保持 `WORKBUDDY_EXCEL_WRITEBACK_ENABLED=false`，在部署窗口执行 `python -m alembic -c apps/api/alembic.ini upgrade head`，确认当前 head 为 `20260924_0002`，再重启 API 与消费 `STRUCTURED_EXTRACTION` 的 worker。API 启动时和该 worker 每约 30 秒会重试 `DB_COMMITTED` 发布记录。旧 `structured_dataset_export` 也使用相同发布记录，因此这一步对旧功能同样必要。MCP 端 Excel writer、新增的 `excel_writeback_correction_checkout/apply/confirm/publish` 和 Skill 均需部署；真实 WorkBuddy 测试前更新插件并新开会话，不要仅更新 Skill 文本。修正当前已发布行时先用数据集 query 取得稳定 `record_id`，再核对实际数据行号；更正必须逐格预览并确认，不能再次 append。
+
+若任务或旧 `.xls` 格式提升 Job 显示 `PUBLISHING`，或当前工作副本下载返回 HTTP 423，先只读核对 `structured_dataset_publications` 的状态、候选版本 ID/SHA、`working_copies.current_version_id` 和同名可见文件哈希；不要删除目标文件、直接改任务状态或重新追加同一来源。API/worker 恢复器只从不可变版本补发并幂等完成，不重新创建成员或版本。连续 5 次文件同步失败会置 `NEEDS_REPAIR`，需人工查明存储权限、磁盘和版本一致性后再处理；不要盲目清表或重置 `active_task_id`。旧历史导出可以按版本下载，但当前版本在同步完成前不能作为已发布结果交付。
+
+已绑定任务和基线版本的 `DATASET_VISIBLE_SYNC_FAILED` / `NEEDS_REPAIR` 可用受控命令补发。先确认文件占用/权限故障已解除，并从独立只读对账得到当前可见文件 SHA-256；该值必须与发布记录的基线或候选版本一致。命令默认只读，确认输出中的候选哈希与发布记录一致后再加 `--apply`：
+
+```powershell
+cd apps/api
+python -m app.scripts.repair_structured_dataset_publication --publication-id <publication-id> --expected-visible-sha256 <visible-sha256>
+python -m app.scripts.repair_structured_dataset_publication --publication-id <publication-id> --expected-visible-sha256 <visible-sha256> --apply
+```
+
+命令在数据库行锁下复核当前版本、任务、不可变候选、基线和可见文件，再调用原发布协调器；可见文件有未知修改、候选损坏或数据库关联不一致时拒绝覆盖。完成后核对发布记录/任务 `COMPLETED`、同名文件 SHA 等于候选 SHA、`active_task_id` 已清空，以及成员数量未增加。其他 `NEEDS_REPAIR` 错误码仍需单独对账处理。
+
+## WorkBuddy 手工补全 Excel 回传（2026-09-29）
+
+先部署当前 API 与 MCP 代码并重启相应进程，再安装 `integrations/workbuddy/file-agent-marketplace-0.1.53.zip`、新开 WorkBuddy 会话。用户编辑前对完整文件名调用 `excel_manual_revision_checkout`，保存返回的版本 ID、SHA 和 revision；上传补好的同名 XLSX 时，以本轮可信 `submission_ref` 和这三个冻结值调用 `excel_manual_revision_publish`。仅在 `COMPLETED` 且下载字节与上传文件一致时交付。不能把补全文件再走首次目标注册或普通附件归档；若服务器版本变化，重新 checkout 最新文件并重新合并用户补充值。完整约束见 `docs/2026-09-29-workbuddy-manual-excel-revision.md`。
+
+新回传接口整个 multipart 请求限制 36 MiB，单 XLSX 限制 32 MiB；还会拒绝超过 64 MiB 解压量、单 XML 部件超过 16 MiB、异常 ZIP/OOXML 结构。反向代理应配置与 36 MiB 上限协调的请求体限制。真实验收至少分别覆盖直接保存、人工复核、旧导出、同名连续追加、文件列表状态、下载字节和文档版本；未完成 PostgreSQL 迁移与真实 WorkBuddy 验收前不要开启新入口灰度。
+
+## WorkBuddy 已保存正文定向读取提速（2026-09-24）
+
+部署更新后的 API、MCP 与插件 Skill 后，新会话可先调用 `structured_dataset_source(mode="INDEX")`
+获取固定版本、提取运行及区段序号，不回传正文；再用相同 ID 和重复查询参数 `unit_orders=0&unit_orders=3`
+只读所需区段。MCP 的 `unit_orders` 参数是整数列表。旧调用不带 `mode/unit_orders` 时仍返回完整正文。
+来源证据、印章、身份、审批和 Excel 版本校验都不变；索引页号不可当作已读取的证据。若模板页码
+不匹配，须补读相关区段或整份已缓存正文，不能省略必要的判断。等待异步依赖时查询原任务状态，
+不要在状态未变化时反复调用 `structured_dataset_commit`。此改动不需要新增数据库迁移，
+但必须重启 API 和 WorkBuddy MCP 并安装新版插件后新开会话；真实端到端耗时仍需重新测量。

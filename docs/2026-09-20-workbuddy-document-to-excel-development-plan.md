@@ -4,6 +4,25 @@
 状态：待执行；本文不表示功能已经实现或验收。
 需求依据：[三格式扩展方案](2026-09-20-workbuddy-document-to-excel-demo-extension-plan.md)。
 
+> 2026-09-20 设计修订：用户明确要求提取正文、字段或表格时，必须先展示提取结果并在后续消息中取得确认，
+> 确认后才允许把正文和结构化记录保存到 File Agent。纯归档内部提取保持直接提交。完整安全契约见
+> [显式内容提取保存前确认方案](2026-09-20-workbuddy-explicit-extraction-confirmation.md)，该方案优先于本文中
+> “提取完成后直接 submit/source/append”的旧步骤。
+
+> 2026-09-20 目标表设计修订：支持本轮上传 Excel 作为新目标、按完整文件名续写已有目标以及提示词新建目标；
+> 当前可见文件名、稳定 ID、版本冻结和同名冲突规则以
+> [Excel 目标表与按文件名持续追加规范](2026-09-20-workbuddy-excel-target-continuation-spec.md) 为准。
+
+> 2026-09-21 图片 OCR 来源修订：所有 WorkBuddy 入口图片，无论 `DIRECT_ARCHIVE` 还是
+> `CONFIRM_BEFORE_SAVE`，都必须由 WorkBuddy 宿主侧的可用 OCR 能力识别。不固定 Skill、工具或
+> Provider；`provider_name` 必须回填实际来源。宿主 OCR 不可用时关闭式阻塞/失败，不得使用模型觉、
+> 通用读取工具或 File Agent 内部 OCR 降级。普通网页/API 非 WorkBuddy 入口继续保留原 OCR 配置能力。
+
+> 2026-09-21 复核分流修订：显式内容提取根据本轮提示词冻结两条路径。明确要求无需复核/确认、直接生成并保存
+> 时使用 `DIRECT_SAVE + DIRECT_ARCHIVE`，submit 后继续 Excel 写入；明确要求预览/复核/确认或没有说明时使用
+> `REVIEW_REQUIRED + CONFIRM_BEFORE_SAVE`。表达冲突先澄清。盖章审批仅在标题下全部必需小项均验证通过时
+> 写入 `标题√`，小项文字不加勾，原始证据不变。
+
 ## 1. 执行规则与交付范围
 
 按 D00 → D10 顺序执行。每一步完成代码、对应测试和记录后才能勾选；不以“接口已写”“fake 已通过”代替后续真实宿主验收。本文给出确定的接口、状态及修改边界，实施中如必须改变这些契约，先同步本文和 API 文档再继续。
@@ -14,10 +33,14 @@
 
 1. 新通道的 OCR、Word/PDF 正文与表格读取、必要转换及渲染都在 WorkBuddy 宿主工具中完成。File Agent 允许读取字节计算哈希、识别文件类型及 PDF 页数，不提取业务正文。
 2. 新通道宿主失败时明确失败/待重试，不调用服务器 Word/PDF 解析、LibreOffice 或 OCR 兜底。
-3. 老图片 Demo、旧 OCR v1、旧附件/目录导入和已完成的文件操作保持兼容。不要通过全局禁用解析功能来满足第 1 条。
+3. 老图片 Demo 和旧 OCR v1 保持接口兼容，WorkBuddy 附件及本地目录图片统一要求宿主侧 OCR，
+   同时保留每次实际 `provider_name`，不设固定 Provider 白名单；普通网页/API 上传和已完成文件操作不受影响。
+   不要通过全局禁用解析功能来满足第 1 条。
 4. 所有已登录用户可以操作共享 ACTIVE 工作副本和数据集；上传暂存、个人会话和任务租约保留现有隔离，不新增 owner 授权页面或权限模型。
 5. Excel 由 File Agent 生成。首轮支持新建累计表、向既有累计表追加并导出；不实现任意 Excel 模板的单元格回填。
 6. 原件不可变；每次业务写入可审计，字段不能只来自模型猜测或短摘要。
+7. 批次冻结 `extraction_save_policy`：纯归档为 `DIRECT_ARCHIVE`；显式内容提取按提示词冻结为
+   `DIRECT_SAVE + DIRECT_ARCHIVE` 或 `REVIEW_REQUIRED + CONFIRM_BEFORE_SAVE`。两种显式提取链路不得在执行中切换。
 
 格式：PNG/JPG/JPEG/WebP/BMP、DOCX/DOC、PDF。Word 内嵌图片、PDF 页内混合图文若宿主不能完整读取，返回 PARTIAL，不宣称全量成功。首轮不保证复杂续表、嵌套表和跨文件实体合并。
 
@@ -43,9 +66,15 @@
 | `extraction_profile` | `DEFAULT` 或 `WORKBUDDY_DOCUMENT`，默认前者 |
 | `extra_request_executor` | `FILE_AGENT` 或 `WORKBUDDY`，默认前者；新模式固定后者 |
 | `provider_contract_version` | `workbuddy-document-v1` |
+| `extraction_save_policy` | `DIRECT_ARCHIVE` 或 `CONFIRM_BEFORE_SAVE`，默认前者 |
 | `DocumentExtractionRun.extractor` | `workbuddy-external-document` |
 | API/MCP 新开关 | `WORKBUDDY_DOCUMENT_EXTRACTION_ENABLED=false` |
 | 图片数据集原开关 | 继续使用 `WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED` |
+
+累计 Excel 的最终发布调整为单一普通工作副本：首次 export 在
+`WORKING_COPY_STORAGE_ROOT/structured-datasets` 创建一个 `WorkingCopy`，后续 export 只为同一
+`Document` 增加版本并更新 `current_version_id`。不再同时维护独立 derivative 导出文件和普通文件；
+详见 `docs/2026-09-20-structured-dataset-working-copy-publication.md`。
 | 集成接口总开关 | 继续使用 `INTEGRATION_INGEST_ENABLED` |
 
 新建本功能批次要求总开关、数据集 Demo 开关、新文档开关均开启；旧 `INTEGRATION_EXTERNAL_OCR_ENABLED` 只控制旧 OCR 通道，不决定新通道是否可以回退。所有新开关默认关闭。
@@ -64,6 +93,7 @@
 | 同上 | 新增 `result_summary_json`，同类型同默认 | 最新验收覆盖状态、计数、工具来源、失败原因，不保存全文或租约 token |
 | `document_versions` | 新增 `extraction_policy_json`，同类型同默认 | 永久标记本内容版本由宿主提取，丢失正文也不能回落服务器解析 |
 | `ingest_batches.policy_json` | `extraction_profile`、`extra_request_executor` | 冻结本次编排方式 |
+| `document_extraction_confirmations` | 任务、来源版本、结果指纹、状态、摘要计数 | 显式提取的预览/确认事实；不保存正文 |
 | `document_pages.metadata_json` | 见下方固定 metadata | 保存区段顺序、来源及覆盖语义 |
 | `document_elements.metadata_json` | 区段 ID、原 block ID、可靠位置 | 正式字段证据来源 |
 
@@ -95,9 +125,13 @@ API 基础路径 `/api/integrations/v1/document-extraction-tasks`，复用现有
 | POST | `/{task_id}/claim` | `document_extraction_claim`，领取并由 MCP 下载受控原文件 |
 | POST | `/{task_id}/renew` | `document_extraction_renew`，延长当前租约 |
 | GET | `/{task_id}/source` | MCP 内部原文件下载，不开放任意 URL 参数 |
+| POST | `/{task_id}/confirmation-previews` | `document_extraction_preview`，只登记完整结果指纹和计数，不接收正文 |
+| POST | `/{task_id}/confirmation-previews/{confirmation_id}/confirm` | `document_extraction_confirm`，绑定用户确认与固定指纹 |
 | POST | `/{task_id}/results` | `document_extraction_submit`，整文件结果回传 |
 
-五条 API 路由放入独立 `external_extraction/document_router.py`，四个 MCP 工具放入 `document_extraction_tools.py`；不要让现有 v1 工具按参数猜测新旧契约。
+七条 API 路由放入独立 `external_extraction/document_router.py`，六个 MCP 工具放入
+`document_extraction_tools.py`；不要让现有 v1 工具按参数猜测新旧契约。`CONFIRM_BEFORE_SAVE` 的 submit
+必须重新计算完整载荷指纹并匹配最新 `CONFIRMED` 记录；`DIRECT_ARCHIVE` 不要求 preview/confirm。
 
 claim 输入沿用严格 `worker_id`；renew 输入 `worker_id + lease_token`。download 要求当前用户、匹配 worker、有效租约，token 放 header，不进 URL/日志。claim 输出为：
 
@@ -121,9 +155,9 @@ claim 输入沿用严格 `worker_id`；renew 输入 `worker_id + lease_token`。
 }
 ```
 
-以上 JSON 是字段示意，测试 fixture 用真实合法 UUID/哈希。PDF `page_count` 由服务器只读容器元信息取得，不调用 `page.get_text` 或渲染。Word 为 null；图片为 1。
+以上 JSON 是字段示意，测试 fixture 用真实合法 UUID/哈希。PDF `page_count` 由服务器只读容器元信息取得，不调用 `page.get_text` 或渲染。Word 和电子表格为 null；图片为 1。`.xls`/`.xlsx` 的 `source_kind` 为 `SPREADSHEET`，由 WorkBuddy 的真实电子表格能力读取，不进入图片 OCR。
 
-MCP claim 必须实际下载并核对长度及 SHA-256 后，返回宿主可消费的 ResourceLink/缓存引用；下载失败不能返回“已准备好”。缓存路径来自现有受控下载目录，用户回复不展示本地绝对路径。服务器资源 URL 必须由客户端按固定 task_id 构造，不跟随外部重定向。
+MCP claim 必须实际下载并核对长度及 SHA-256 后，返回宿主可消费的 ResourceLink/缓存引用；下载失败不能返回“已准备好”。claim 的租约、版本、哈希、保存策略和资源信息必须作为 MCP 结构化结果交给 WorkBuddy。考虑到部分 WorkBuddy 版本只保留普通文本内容，MCP 还必须把经过同一输出模型校验的等价 JSON 放入第一条文本内容；该 JSON 是工具协议兼容表示，不是 Agent 自行重建。两种表示必须逐字段一致，且一句摘要永远不能代替完整结果。不能迫使宿主读取配置、原始本地附件或直连私有 API。缓存路径来自现有受控下载目录，仅作为受控工具结果供宿主读取，用户回复不得展示。服务器资源 URL 必须由客户端按固定 task_id 构造，不跟随外部重定向。
 
 ### 3.4 submit 严格输入
 
@@ -146,14 +180,15 @@ MCP claim 必须实际下载并核对长度及 SHA-256 后，返回宿主可消�
 每个 unit：
 
 - `unit_id`：1–120 字符，在本次文件内唯一；`order` 从 0 开始连续。
-- `kind`：`IMAGE_PAGE/PDF_PAGE/TEXT_SECTION`。
-- `page_number`：正整数或 null；PDF 必须覆盖容器的 1..N，图片必须为 1，Word 首轮固定 null。
+- `kind`：`IMAGE_PAGE/PDF_PAGE/TEXT_SECTION/SHEET`。
+- `page_number`：正整数或 null；PDF 必须覆盖容器的 1..N，图片必须为 1，Word 和电子表格固定 null。
+- `sheet_name`：仅 `SHEET` 必填，必须是宿主真实读取的工作表名；同一提交内不能重复。
 - `status`：`READ/BLANK/FAILED/UNSUPPORTED`。
 - `text`：完整原文区段，允许空；READ 必须有非空正文，BLANK 不得带正文。
 - `blocks`：总计不超过 2000 个，强类型结构，字段见下。
 - `error`：FAILED/UNSUPPORTED 必须提供结构化原因；BLANK 必须在 `blank_reason` 说明实际读取结果，不能凭空推断。
 
-block 固定字段：`block_id`（文件内唯一）、`kind=PARAGRAPH/TABLE_ROW/TABLE_CELL/TEXT`、`text`、`start`、`end`，可选 `table_id,row_index,column_index,bbox`。start/end 是 unit.text 的 Unicode 字符索引，左闭右开，服务端检查 `text == unit.text[start:end]`；不能精确定位时不提交 block。表格坐标只保存真实返回值，不根据模型补造。bbox 使用归一化 `[0,1]` 的 left/top/right/bottom，仅真实图像/PDF 页允许，缺失则 null。
+block 固定字段：`block_id`（文件内唯一）、`kind=PARAGRAPH/TABLE_ROW/TABLE_CELL/TEXT`、`text`、`start`、`end`，可选 `table_id,row_index,column_index,bbox`。start/end 是 unit.text 的 Unicode 字符索引，左闭右开，服务端检查 `text == unit.text[start:end]`；不能精确定位时不提交 block。表格坐标只保存真实返回值，不根据模型补造；`SHEET` 的 `TABLE_CELL` 必须同时带真实 `row_index`、`column_index`。bbox 使用归一化 `[0,1]` 的 left/top/right/bottom，仅真实图像/PDF 页允许，缺失则 null。
 
 全文 chars 按 units.text 总和计算，block 重复文本另计入最大 4 MiB 的整个请求体。应用路由读取 JSON 前限制请求字节，防止只在 Pydantic 后检查。文件本身大小沿用部署上传上限，MCP 下载上限必须与之兼容，不能误用导出 XLSX 的 32 MiB 上限。
 

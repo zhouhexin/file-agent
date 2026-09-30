@@ -4,6 +4,19 @@
 
 ## 1. General Rules
 
+### 2026-09-22 累计表与宿主提取增量契约
+
+- `POST /api/structured-datasets/from-excel` 增加可选 `layout={header_range,data_range}`，
+  两区域列必须相同，表头最多40列/前100行，数据最多1000行；空布局保留简单表兼容行为。
+  字段标签最多4000字符，create/append 支持最多40字段。
+- get/resolve 返回冻结 `layout`；错误包括 `TARGET_EXCEL_LAYOUT_REQUIRED`、
+  `TARGET_EXCEL_LAYOUT_INVALID`、`TARGET_EXCEL_DATA_RANGE_FULL`。
+- export 返回 `excel_published`、`saved_to_server`、`confirmed_record_count`（新提交且通过校验的累计记录数）
+  与 `base_record_count`，不能以旧模板记录证明本轮成功。
+- MCP preview 增加 `confirmation_id`、`cached_result_digest`、`content_saved=false`；
+  confirm 可用 `save_cached_result=true`，独立 `document_extraction_submit_cached(task_id,result_digest)`
+  仍受服务器确认和来源校验。`content_saved=true` 只代表正文验收，不代表 Excel 已发布。
+
 ### 1.1 Base URL
 
 ```text
@@ -1894,6 +1907,35 @@ GET /api/admin/planner-shadow/metrics?limit=5000
 `WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED` 开关控制。完整 API 请求、查询与导出行为见
 [Demo 契约](2026-09-18-workbuddy-structured-dataset-demo.md#api-契约)。
 
+2026-09-20 起，累计 Excel 增加以下目标解析接口：
+
+```text
+POST /api/structured-datasets/from-excel
+GET  /api/structured-datasets/targets/by-filename?filename=<完整文件名.xlsx>
+```
+
+`from-excel` 接受已发布的当前 `.xlsx` 或 `.xls` 工作副本 Document/Version ID。`.xlsx` 同步读取真实非空工作表、标题和已有行；
+`.xls` 必须同时提交属于同一当前版本的已完成 WorkBuddy `extraction_run_id` 和
+`legacy_target_policy=CONVERT_TO_XLSX`。服务端返回 HTTP 202、`PREPARING_TARGET` 和
+`filesystem_job_id`，由 `STRUCTURED_EXTRACTION` worker 复用受控 LibreOffice 派生件链路异步提升为 `.xlsx`。
+任务完成后以原幂等键重试可取得最终 `dataset_id + working_copy_id + document_id + document_version_id` 绑定。
+格式提升保留同一 Document/WorkingCopy，源 `.xls` 作为隐藏历史版本，普通文件列表只显示最终 `.xlsx`。
+未指定工作表且存在多个
+非空工作表时返回 `TARGET_EXCEL_SHEET_AMBIGUOUS`。按文件名解析使用当前共享工作区活动文件的完整文件名精确
+匹配；零个或多个命中分别返回 `TARGET_EXCEL_NOT_FOUND`、`TARGET_EXCEL_AMBIGUOUS`，不得自动选择。
+
+`POST /api/structured-datasets` 可额外接收最终 `filename`；省略时以 `name` 生成可读 `.xlsx` 名称。
+数据集详情和解析结果返回实际 `filename`、`sheet_name`、稳定工作副本/文档/版本 ID。已经发布为工作副本的
+目标再次 `records` 追加时，必须同时提交 `target_working_copy_id`、`target_document_id` 和
+`target_document_version_id`；缺失或确认期间版本变化分别返回 `TARGET_EXCEL_BINDING_REQUIRED`、
+`TARGET_EXCEL_VERSION_CONFLICT`。当前真实 Excel 标题与冻结 schema 不一致时返回
+`TARGET_EXCEL_SCHEMA_CONFLICT`。
+
+当前可见文件物理 basename、文件列表名称和下载名称必须完全一致；历史内容只在同一 Document 的
+DocumentVersion 与内部 `.versions` 路径中保留。受控重命名同步 `WorkingCopy.filename` 和数据集目标文件名，
+不移动或覆盖内部历史版本。详细规则见
+[Excel 目标表与按文件名持续追加规范](2026-09-20-workbuddy-excel-target-continuation-spec.md)。
+
 该接口面默认由 `INTEGRATION_INGEST_ENABLED=false` 关闭；试点部署显式设为 `true` 后才接受请求。
 关闭时所有 `/api/integrations/v1` 路由统一返回 `503 / INTEGRATION_INGEST_DISABLED`，不能只依赖
 WorkBuddy 是否展示工具来控制外部导入权限。
@@ -1932,6 +1974,14 @@ POST /api/integrations/v1/extraction-tasks/{task_id}/claim
 POST /api/integrations/v1/extraction-tasks/{task_id}/renew
 GET  /api/integrations/v1/extraction-tasks/{task_id}/pages/{page_number}
 POST /api/integrations/v1/extraction-tasks/{task_id}/results
+GET  /api/integrations/v1/document-extraction-tasks/{task_id}
+POST /api/integrations/v1/document-extraction-tasks/{task_id}/claim
+POST /api/integrations/v1/document-extraction-tasks/{task_id}/resume
+POST /api/integrations/v1/document-extraction-tasks/{task_id}/renew
+GET  /api/integrations/v1/document-extraction-tasks/{task_id}/source
+POST /api/integrations/v1/document-extraction-tasks/{task_id}/confirmation-previews
+POST /api/integrations/v1/document-extraction-tasks/{task_id}/confirmation-previews/{confirmation_id}/confirm
+POST /api/integrations/v1/document-extraction-tasks/{task_id}/results
 ```
 
 2026-09-13 的公开对比例外：仅 `duplicate-comparison`、`duplicate-comparison/content`、
@@ -1953,6 +2003,8 @@ POST /api/integrations/v1/extraction-tasks/{task_id}/results
   "ingest_policy": "AUTO_ORGANIZE",
   "placement_mode": "BY_CATEGORY",
   "rule_profile": "content_based",
+  "extraction_profile": "DEFAULT",
+  "extraction_save_policy": "DIRECT_ARCHIVE",
   "user_request": null,
   "conversation_id": null
 }
@@ -1962,6 +2014,34 @@ POST /api/integrations/v1/extraction-tasks/{task_id}/results
 不得接收本地绝对路径。`user_request=null` 只表示没有额外总结或读取请求，seal 后的文件仍默认进入
 分类、命名、按主分类落位和索引流水线。同一 `user_id + client_id + idempotency_key` 的完全相同请求
 返回原批次；载荷不同返回 `IDEMPOTENCY_CONFLICT`。
+
+`extraction_save_policy` 默认 `DIRECT_ARCHIVE`，保持纯归档内部解析/OCR直接提交。用户明确要求提取正文、
+字段或表格时，受控 WorkBuddy 入口必须提交 `extraction_profile=WORKBUDDY_DOCUMENT` 和非空原始任务文字。
+普通显式提取默认 `CONFIRM_BEFORE_SAVE`；盖章项目专用 Skill 默认 `DIRECT_ARCHIVE` 直接保存，
+其他任务只有用户明确授权直接保存时才可使用该策略。确认模式先通过
+`confirmation-previews` 登记本机计算的完整结果 SHA-256；预览请求只接受来源、Provider、覆盖状态和计数，
+未知的 `units/text/blocks` 字段会被拒绝。用户看到结果并在后续消息明确确认后调用 confirm；最终 results
+必须与确认指纹完全一致，否则分别返回 `EXTRACTION_CONFIRMATION_REQUIRED` 或
+`EXTRACTION_RESULT_CHANGED_AFTER_CONFIRMATION`，且不得创建正文页面或结构化记录。
+
+WorkBuddy 图片必须由宿主侧的可用 OCR 能力识别，但不绑定具体 Skill、工具或 Provider。
+`client_id=workbuddy-attachment` 或 `workbuddy-local` 的旧分页 OCR `results`，以及
+`WORKBUDDY_DOCUMENT` 图片的预览和最终 `results`，都必须用非空 `provider_name` 记录实际调用的
+OCR Provider 或工具标识；后端不对名称设置固定白名单。WorkBuddy 图片无法创建外部 OCR 任务时
+关闭式失败，不得继续归档后调用 File Agent 内部 OCR。该限制不改变普通网页/API 非 WorkBuddy 图片的
+OCR Provider 配置。
+
+`WORKBUDDY_DOCUMENT` 的 `.xls` 与 `.xlsx` 来源统一返回 `source_kind=SPREADSHEET`，不进入图片 OCR。
+提交结果中的每个工作表必须使用 `kind=SHEET`、真实 `sheet_name` 且不带 `page_number`；工作表内
+`TABLE_CELL` block 必须包含真实 `row_index` 与 `column_index`。同一结果中工作表名重复、缺少表名或混入
+其他 unit kind 时返回 422，不能发布正文。MCP `document_extraction_claim` 必须把租约、版本、哈希、保存策略
+和已校验资源作为结构化结果返回；`document_extraction_preview.preview_result` 是确认前向用户展示的唯一结果来源。
+
+文档提取的完整任务状态为 `COMPLETE`（底层 `DocumentExtractionRun` 仍为 `COMPLETED`）。完整结果
+提交后再次 claim 返回 `EXTRACTION_ALREADY_COMPLETED`；同一提交键和载荷重放返回 `ok=true`。
+`POST .../{task_id}/resume` 及 MCP `document_extraction_resume` 仅接受已有固定提交键/指纹、完整运行、
+已保存页面且源版本 SHA-256 一致的任务；若原导入条目仍在等待外部提取，则幂等推进原归档链，
+否则只规范化误领状态。不重新读取/OCR、不重存正文，也不能用此接口跳过用户确认。
 
 追加清单请求按页提交，单次最多 200 项：
 
@@ -2055,3 +2135,60 @@ Document，只在对应条目保留失败回执。接收成功后在同一事务
 租约token；结果提交校验用户、租约、源版本、SHA-256和完整任务页集合。相同`submission_key`与相同结果
 返回原结果，不同结果返回冲突。允许部分提取时任务返回`PARTIAL`、保存失败页和覆盖率并继续保守整理，
 不能把失败页伪装为完整正文，也不会隐式调用旧内部OCR。
+
+## 2026-09-22：统一 Excel 任务（0.1.32）
+
+新增 POST /api/structured-datasets/tasks/preview、GET /tasks/{task_id}、POST /tasks/{task_id}/confirm、
+POST /tasks/{task_id}/commit（后三项同前缀）。任务按当前用户隔离；写入仍经 LangGraph 白名单和 ChangeSet。
+preview 接收 request_key、result_digest、review_mode、manifest；拒绝候选正文。confirm 只接指纹；
+commit 首次接指纹与严格 TaskPayload，之后只接指纹恢复。MCP 的 preview 在本地缓存候选，confirm 自动调用 commit，
+依赖未完成返回未发布状态。HTTP 200 只代表阶段成功，不能替代 status=COMPLETED/excel_published=true。
+返回文件名、稳定对象与版本、本轮记录/单元格/勾数量；真正完成须核验当前工作副本及版本文件。
+具体 schema 与状态见修复方案和插件 references/task-payload.md。旧细粒度接口保持兼容。
+
+可选字段 fragments（精确原文拼接）、blank_reason、approval（含 WHOLE_SECTION 无编号整栏）、
+assessment（完整标题、ALL/ANY/AT_LEAST、minimum/required_groups、白名单比较、未确定原因）同时用于 API/MCP。
+query 返回原事实与 display_value，export 只用展示值加一次末尾勾；不改正文/表头。
+旧字段缺省不改变行为；缺失评分的已授权统一任务须经原文证据/类型验证，不冒充 OCR 高分。
+
+### 0.1.33 复杂模板错误与任务终态
+
+旧 `.xls` 的复杂 `layout` 若固定 WorkBuddy 提取运行没有表头范围内真实 `TABLE_CELL` 坐标，
+`from-excel` 在创建转换 job 前返回 HTTP 422、`TARGET_EXCEL_HEADER_CELLS_MISSING`。
+统一任务的 `commit` 对该确定性模板错误返回 `status=NEEDS_INPUT`、`error.code` 和
+`next_action=create_new_preview`，不创建数据集或 Excel。worker 最终转换失败会同步父任务：
+校验类错误为 `NEEDS_INPUT`，其他终态为 `FAILED`；`task_get` 同时返回 `filesystem_job_id`。
+对于更新前已悬挂的任务，`task_get` 会根据固定失败 job 呈现失败终态。
+`FAILED`/`NEEDS_INPUT` 不应再对同一 task_id 反复 commit，需修正来源或模板并重新预览。
+上传 `.xlsx` 若提供 WorkBuddy `extraction_run_id`，服务端也将其真实网格与当前文件逐格核对。
+
+### 0.1.34 盖章项目专用模板的 B–I 身份列
+
+仅 `file-agent-sealed-item-extraction` 专用流程可在统一表格任务 `manifest` 中显式传
+`identity_column_range="B:I"`，并须同时设置 `sealed_only=true`、绑定实际覆盖物理 B–I 列的
+已上传或既有 Excel 模板。该标记不由普通表格任务自动设置；省略时原有“所有非空业务列须有
+`approval`”的行为保持不变。B–I 身份格仍须逐格提供可验证的 `evidence_refs` 或 `fragments`，
+但不要求盖章 `approval`，不接受 `assessment`，导出不加 `√`。B–I 外的业务列仍按盖章和资格规则校验，
+预览确认、目标版本和发布规则不变。
+
+## 2026-09-23：并行的 WorkBuddy 完整 Excel 回传
+
+独立开关 `WORKBUDDY_EXCEL_WRITEBACK_ENABLED=true` 且既有结构化数据集开关开启时，
+新增 `POST /api/excel-writeback/checkout`、`GET /api/excel-writeback/tasks/{task_id}`、
+`POST /api/excel-writeback/tasks/{task_id}/preview`、`POST /api/excel-writeback/tasks/{task_id}/confirm`、
+`POST /api/excel-writeback/tasks/{task_id}/publish`。旧 `/api/structured-datasets` 完全保留。
+checkout 按完整文件名唯一解析已注册 XLSX，固定数据集、工作副本、DocumentVersion、SHA-256、
+revision、工作表、完整字段和布局；同键异目标/版本冲突。preview 只接候选与文件共同摘要以及文件 SHA-256，
+确认模式必须用同一摘要 confirm。publish 是 multipart：`result_digest`、`file_sha256`、
+`payload_json`（严格 `TaskPayload`）和同名 `.xlsx` 文件，最大 32 MiB。服务端核对来源证据、
+当前版本 CAS、逐格展示值与未授权 OOXML 改动，才新增同一 Document 的版本并更新当前工作副本；
+失败不返回 `excel_published=true`。MCP `excel_writeback_apply` 在 WorkBuddy 本机按冻结基线写入，
+不把候选表格交给旧服务端导出器重新生成。完整设计和边界见
+`docs/2026-09-23-workbuddy-excel-writeback-proposal.md`。
+## Excel 回传发布状态（2026-09-24）
+
+`POST /api/excel-writeback/tasks/{task_id}/publish` 与旧 `POST /api/structured-datasets/{dataset_id}/exports` 可能返回 `status=PUBLISHING`、`excel_published=false`、`saved_to_server=false`；这代表数据库已登记不可变候选，但同名可见工作副本还未通过哈希核验，客户端不得告知用户“已完成”。任务轮询在真正完成后才返回 `COMPLETED`。当前工作副本下载、目标解析/查询及变更计划在发布未完成时返回 HTTP 423；`GET /api/working-copies` 的 `publication_status` 可为 `DB_COMMITTED` 或 `NEEDS_REPAIR`。历史不可变导出不因新版本待同步而删除。回传请求体超过 36 MiB 或 XLSX 安全阈值时返回 HTTP 413；损坏/危险 OOXML 返回 422。
+
+已发布数据行更正使用独立路由：`POST /api/excel-writeback/corrections/checkout`、`GET /api/excel-writeback/corrections/tasks/{task_id}`、`POST /api/excel-writeback/corrections/tasks/{task_id}/preview`、`POST /api/excel-writeback/corrections/tasks/{task_id}/confirm`、`POST /api/excel-writeback/corrections/tasks/{task_id}/publish`。checkout 必须指定服务器当前完整文件名、稳定 `record_id`、实际 `row_number` 和幂等键；返回冻结工作副本版本、来源提取运行及该行旧值。更正候选逐格指定 `field_key/before/after/field`，只可引用同一已归档来源版本，必须经确认后发布；旧的新增行回传端点仍禁止改写既有非空格。成功后同一记录产生数据集新 revision 和工作副本新 DocumentVersion，不新增人员行。候选版本变化、旧值不符、额外改单元格或缺少审批证据均拒绝。
+
+手工补全整份 Excel 使用 `POST /api/excel-writeback/manual-revisions/publish`。multipart 包含 `filename`、`request_key`、`base_document_version_id`、`base_sha256`、`base_revision`、`file_sha256` 和同名 `.xlsx` 文件；请求体仍受 36 MiB、文件受 32 MiB 上限。服务端唯一解析已发布同名目标，核对冻结基线、XLSX 安全结构和现有人员行，拒绝清空旧非空格、新增人员、表头/工作表/合并结构或公式变化。成功后只为同一 WorkingCopy 发布新 DocumentVersion；原来源成员和旧版本不变。WorkBuddy 先用 `excel_manual_revision_checkout` 取得编辑前基线，再以本轮可信附件调用 `excel_manual_revision_publish`。详见 `docs/2026-09-29-workbuddy-manual-excel-revision.md`。

@@ -6,6 +6,10 @@ File Agent 不是传统网盘，也不是只会问答的知识库系统。用户
 
 ## 文档
 
+- `docs/2026-09-23-workbuddy-generic-extraction-excel-template-safety-plan.md`：WorkBuddy 提取、旧 XLS 网格预检、完整提取状态恢复和 Excel 版本化发布边界。
+- `docs/2026-09-22-workbuddy-confirm-save-recovery-plan.md`：WorkBuddy 确认保存、复杂模板修复及实际验收进度。
+  本轮新增迁移 `20260922_0001`，部署必须先迁移再重启 API/worker/MCP，并更新 WorkBuddy 插件至 0.1.29。
+
 - `agent.md`：最高级开发规范，后续开发必须优先遵守。
 - `docs/automatic-organization-conversational-access-implementation-plan.md`：当前阶段“上传后自动整理、通过对话访问文件”的直接实施与验收依据。
 - `docs/conversational-file-agent-development-blueprint.md`：总体开发蓝图。
@@ -167,6 +171,19 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules
 旧图片兼容路径只需原 Demo 开关。启动和试用见
 [Demo 操作说明](docs/2026-09-18-workbuddy-structured-dataset-demo.md)。
 
+并行的 WorkBuddy 完整 Excel 回传路径使用独立 `excel_writeback_*` 工具与
+`file-agent-excel-writeback` Skill，旧 `structured_dataset_*` 路径保持可用。
+2026-09-28 起，Excel 新建、按文件名续写及定向更正默认在证据和版本校验通过后直接发布；
+仅用户明确要求先复核时才等待人工确认。重复文件仍须用户决定。新上传 Excel 始终建立独立新目标，
+只有本轮没有新目标上传且指定已有文件名时才向旧表追加。详见
+[Excel 直写与目标选择修订](docs/2026-09-28-workbuddy-excel-direct-save-and-target-selection.md)。
+API/MCP 两侧额外设置 `WORKBUDDY_EXCEL_WRITEBACK_ENABLED=true` 后启用；仍需保留结构化数据集开关。
+新路径由 WorkBuddy 本地定向写入 XLSX、服务端校验并发布同名新版本；设计与限制见
+[完整文件回传方案](docs/2026-09-23-workbuddy-excel-writeback-proposal.md)。
+针对已验收 PDF 的定向读取，`structured_dataset_source` 可选 `mode=INDEX` 返回无正文区段目录，
+再用 `unit_orders` 只取本轮需要的已保存正文；省略参数仍返回原完整结果。此读取不重新 OCR，
+字段、印章和版本校验均保持原规则。新用法需同步部署 API、MCP 与 WorkBuddy Skill。
+
 ## MVP 目标
 
 ```text
@@ -188,3 +205,8 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules
 ```
 psql -h 172.17.16.2 -U fileagent_user -d fileAgent
 ```
+### WorkBuddy Excel 回传发布加固（2026-09-24）
+
+本节提及“已发布行更正必须人工确认”的旧策略由 2026-09-28 修订取代；其他发布安全检查仍保留。
+
+新旧累计 Excel 发布、已发布行更正及旧 `.xls` 异步格式提升共用持久化发布记录。部署新代码前必须先执行 `python -m alembic -c apps/api/alembic.ini upgrade head`（目标 head：`20260924_0002`），随后重启 API 和 `STRUCTURED_EXTRACTION` worker；真实 WorkBuddy 回传前还需更新 MCP/插件。已发布行更正使用独立 `excel_writeback_correction_*` 工具，必须先展示逐格差异并确认；新行直接保存规则不变。发布中任务显示 `PUBLISHING`，当前文件下载返回 423，文件列表的 `publication_status` 显示待同步或需修复状态；只有同名可见文件完成哈希核验后才返回 `COMPLETED`。新回传端点总请求体上限 36 MiB，单个 XLSX 上限 32 MiB；具体部署与恢复操作见 `docs/runbook.md`，不得通过删除目标文件或直接改数据库状态来重试。
