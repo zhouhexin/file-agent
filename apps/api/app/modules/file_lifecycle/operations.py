@@ -26,8 +26,10 @@ from app.db.models import (
     DocumentVersion,
     FileObject,
     FileRenameReviewItem,
+    ManagedFile,
     OperationConfirmation,
     OperationPlan,
+    StructuredDataset,
     TrashEntry,
     UploadArchiveRecord,
     ToolInvocation,
@@ -225,6 +227,8 @@ class WorkingCopyOperationService:
             )
             if working_copy is None or working_copy.status != "ACTIVE":
                 raise HTTPException(status_code=404, detail="Working copy not found")
+            from app.modules.structured_datasets.publication import assert_publication_ready
+            assert_publication_ready(self.db, working_copy_id=working_copy.id)
             version = self.db.get(DocumentVersion, working_copy.current_version_id) if working_copy.current_version_id else None
             if version is None:
                 raise HTTPException(status_code=409, detail="Working copy version is missing")
@@ -820,6 +824,8 @@ class WorkingCopyOperationService:
         expected_status = "TRASHED" if operation_type == "RESTORE_WORKING_COPIES" else "ACTIVE"
         if working_copy is None or working_copy.status != expected_status:
             raise RuntimeError("工作副本不存在或不处于活动状态")
+        from app.modules.structured_datasets.publication import assert_publication_ready
+        assert_publication_ready(self.db, working_copy_id=working_copy.id)
         before = dict(item.get("before") or {})
         after = dict(item.get("after") or {})
         if (
@@ -833,18 +839,35 @@ class WorkingCopyOperationService:
         root = self.db.get(WorkingCopyRoot, working_copy.working_copy_root_id)
         if version is None or root is None:
             raise RuntimeError("工作副本关系不完整")
+        dataset = self.db.query(StructuredDataset).filter_by(
+            working_copy_id=working_copy.id
+        ).one_or_none()
         if operation_type == "MOVE_WORKING_COPIES":
             self._validate_category_move_snapshot(
                 item=item,
                 working_copy=working_copy,
                 root=root,
             )
-        before_storage_path = version.storage_path
-        source = (
-            self.storage.trash_path(before_storage_path)
-            if operation_type == "RESTORE_WORKING_COPIES"
-            else self.storage.working_copy_path(before_storage_path)
-        )
+        if operation_type == "RESTORE_WORKING_COPIES" and dataset is not None:
+            restore_entry = self.db.get(
+                TrashEntry,
+                (item.get("before") or {}).get("trash_entry_id"),
+            )
+            if restore_entry is None:
+                raise RuntimeError("回收站条目已失效")
+            before_storage_path = restore_entry.trash_relative_path
+            source = self.storage.trash_path(before_storage_path)
+        else:
+            before_storage_path = (
+                f"{root.relative_storage_path}/{working_copy.relative_path}"
+                if dataset is not None
+                else version.storage_path
+            )
+            source = (
+                self.storage.trash_path(before_storage_path)
+                if operation_type == "RESTORE_WORKING_COPIES"
+                else self.storage.working_copy_path(before_storage_path)
+            )
         if self.storage.sha256_file(source) != working_copy.content_sha256:
             self._mark_path_record_stale(item=item)
             raise RuntimeError("工作副本内容已经变化，请重新生成计划")
@@ -856,6 +879,7 @@ class WorkingCopyOperationService:
                 root=root,
                 source=source,
                 current_user=current_user,
+                dataset=dataset,
             )
             return {**result, "operation_type": operation_type}
         if operation_type == "RESTORE_WORKING_COPIES":
@@ -866,12 +890,13 @@ class WorkingCopyOperationService:
                 root=root,
                 source=source,
                 item=item,
+                dataset=dataset,
             )
             return {**result, "operation_type": operation_type}
         root_prefix = f"{root.relative_storage_path}/"
-        if not version.storage_path.startswith(root_prefix):
+        if not before_storage_path.startswith(root_prefix):
             raise RuntimeError("工作副本当前版本不属于当前工作副本根")
-        source_relative_path = version.storage_path[len(root_prefix) :]
+        source_relative_path = before_storage_path[len(root_prefix) :]
         source_identity = self.executor.capture_source_identity(
             root_relative_path=root.relative_storage_path,
             source_relative_path=source_relative_path,
@@ -919,8 +944,16 @@ class WorkingCopyOperationService:
         working_copy.revision += 1
         working_copy.updated_at = operation_time
         working_copy.last_operation_plan_id = plan.id
-        version.storage_path = after_storage_path
-        version.filename = working_copy.filename
+        if dataset is None:
+            version.storage_path = after_storage_path
+            version.filename = working_copy.filename
+        else:
+            dataset.target_filename = working_copy.filename
+            managed_file = self.db.get(ManagedFile, working_copy.managed_file_id)
+            if managed_file is not None:
+                managed_file.relative_path = after_relative_path
+                managed_file.relative_path_hash = working_copy.relative_path_hash
+                managed_file.filename = working_copy.filename
         file_object = self.db.query(FileObject).filter(FileObject.document_id == working_copy.document_id).first()
         if file_object is not None:
             file_object.storage_backend = "working_copy_local"
@@ -1003,6 +1036,7 @@ class WorkingCopyOperationService:
         root: WorkingCopyRoot,
         source: Path,
         current_user: User,
+        dataset: StructuredDataset | None,
     ) -> dict[str, Any]:
         """把工作副本移入回收站并保留原始文件和消息引用。"""
 
@@ -1032,8 +1066,9 @@ class WorkingCopyOperationService:
         working_copy.revision += 1
         working_copy.last_operation_plan_id = plan.id
         working_copy.updated_at = now
-        version.storage_tier = "TRASH"
-        version.storage_path = trash_relative_path
+        if dataset is None:
+            version.storage_tier = "TRASH"
+            version.storage_path = trash_relative_path
         file_object = self.db.query(FileObject).filter(FileObject.document_id == working_copy.document_id).first()
         if file_object is not None:
             file_object.storage_backend = "trash_local"
@@ -1136,6 +1171,7 @@ class WorkingCopyOperationService:
         root: WorkingCopyRoot,
         source: Path,
         item: dict[str, Any],
+        dataset: StructuredDataset | None,
     ) -> dict[str, Any]:
         """把回收站内容恢复为活动工作副本，原始文件保持不变。"""
 
@@ -1159,9 +1195,17 @@ class WorkingCopyOperationService:
         working_copy.revision += 1
         working_copy.last_operation_plan_id = plan.id
         working_copy.updated_at = now
-        version.storage_tier = "WORKING_COPY"
-        version.storage_path = after_storage_path
-        version.filename = working_copy.filename
+        if dataset is None:
+            version.storage_tier = "WORKING_COPY"
+            version.storage_path = after_storage_path
+            version.filename = working_copy.filename
+        else:
+            dataset.target_filename = working_copy.filename
+            managed_file = self.db.get(ManagedFile, working_copy.managed_file_id)
+            if managed_file is not None:
+                managed_file.relative_path = after_relative_path
+                managed_file.relative_path_hash = working_copy.relative_path_hash
+                managed_file.filename = working_copy.filename
         entry.status = "RESTORED"
         entry.restored_at = now
         entry.updated_at = now

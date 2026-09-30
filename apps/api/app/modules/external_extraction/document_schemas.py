@@ -70,7 +70,7 @@ class DocumentExtractionBlock(StrictDocumentExtractionInput):
     """可定位的正文、表格行或单元格；服务端核对切片，不相信客户端偏移。"""
 
     block_id: str = Field(min_length=1, max_length=120)
-    kind: Literal["PARAGRAPH", "TABLE_ROW", "TABLE_CELL", "TEXT"]
+    kind: Literal["PARAGRAPH", "TABLE_ROW", "TABLE_CELL", "TEXT", "SEAL"]
     text: str = Field(min_length=1, max_length=20_000)
     start: int = Field(ge=0)
     end: int = Field(gt=0)
@@ -87,11 +87,12 @@ class DocumentExtractionBlock(StrictDocumentExtractionInput):
 
 
 class DocumentExtractionUnit(StrictDocumentExtractionInput):
-    """一个真实页面或 Word 有序文本区段，不能伪造 Word 物理页码。"""
+    """一个真实页面、Word 有序文本区段或电子表格工作表。"""
 
     unit_id: str = Field(min_length=1, max_length=120)
-    kind: Literal["IMAGE_PAGE", "PDF_PAGE", "TEXT_SECTION"]
+    kind: Literal["IMAGE_PAGE", "PDF_PAGE", "TEXT_SECTION", "SHEET"]
     page_number: int | None = Field(default=None, ge=1)
+    sheet_name: str | None = Field(default=None, min_length=1, max_length=255)
     order: int = Field(ge=0)
     status: Literal["READ", "BLANK", "FAILED", "UNSUPPORTED"]
     text: str = Field(default="", max_length=MAX_DOCUMENT_EXTRACTION_TEXT_CHARS)
@@ -101,10 +102,14 @@ class DocumentExtractionUnit(StrictDocumentExtractionInput):
 
     @model_validator(mode="after")
     def validate_content(self) -> "DocumentExtractionUnit":
-        if self.kind == "TEXT_SECTION" and self.page_number is not None:
-            raise ValueError("Word 文本区段不能伪造 page_number")
+        if self.kind in {"TEXT_SECTION", "SHEET"} and self.page_number is not None:
+            raise ValueError("Word 文本区段和电子表格工作表不能伪造 page_number")
         if self.kind in {"IMAGE_PAGE", "PDF_PAGE"} and self.page_number is None:
             raise ValueError("图片和 PDF 区段必须提供真实 page_number")
+        if self.kind == "SHEET" and not self.sheet_name:
+            raise ValueError("SHEET 必须提供真实 sheet_name")
+        if self.kind != "SHEET" and self.sheet_name is not None:
+            raise ValueError("只有 SHEET 可以提供 sheet_name")
         if self.status == "READ" and not self.text:
             raise ValueError("READ 区段必须包含正文")
         if self.status == "BLANK" and (self.text or not self.blank_reason):
@@ -120,8 +125,13 @@ class DocumentExtractionUnit(StrictDocumentExtractionInput):
             seen.add(block.block_id)
             if block.end > len(self.text) or self.text[block.start:block.end] != block.text:
                 raise ValueError("block 文本或字符范围与 unit 正文不一致")
-            if block.bbox is not None and self.kind == "TEXT_SECTION":
-                raise ValueError("Word 文本区段不能伪造 bbox")
+            if block.bbox is not None and self.kind in {"TEXT_SECTION", "SHEET"}:
+                raise ValueError("Word 文本区段和电子表格工作表不能伪造 bbox")
+            if block.kind == "SEAL" and (self.kind not in {"IMAGE_PAGE", "PDF_PAGE"} or block.bbox is None):
+                raise ValueError("印章区块必须来自真实 PDF/图片页面并带位置")
+            if self.kind == "SHEET" and block.kind == "TABLE_CELL":
+                if block.row_index is None or block.column_index is None:
+                    raise ValueError("SHEET 的 TABLE_CELL 必须提供真实行列索引")
         return self
 
 
@@ -136,6 +146,9 @@ class DocumentExtractionClaimResponse(StrictDocumentExtractionInput):
     lease_expires_at: datetime
     source: dict
     limits: dict
+    extraction_save_policy: Literal["DIRECT_ARCHIVE", "CONFIRM_BEFORE_SAVE"]
+    confirmation_required: bool
+    confirmation: dict = Field(default_factory=dict)
 
 
 class DocumentExtractionSubmitRequest(StrictDocumentExtractionInput):
@@ -186,6 +199,41 @@ class DocumentExtractionSubmitRequest(StrictDocumentExtractionInput):
         return len(json.dumps(self.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
+class DocumentExtractionPreviewRequest(StrictDocumentExtractionInput):
+    """确认前只登记本地计算的结果指纹和有限摘要，绝不接收正文或 blocks。"""
+
+    worker_id: str = Field(min_length=1, max_length=160)
+    lease_token: str = Field(min_length=20, max_length=500)
+    preview_key: str = Field(min_length=1, max_length=200)
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_version_id: UUID
+    result_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    provider_name: str = Field(min_length=1, max_length=120)
+    coverage_status: Literal["COMPLETE", "PARTIAL", "FAILED"]
+    unit_count: int = Field(ge=0, le=MAX_DOCUMENT_EXTRACTION_UNITS)
+    block_count: int = Field(ge=0, le=MAX_DOCUMENT_EXTRACTION_BLOCKS)
+
+
+class DocumentExtractionConfirmationRequest(StrictDocumentExtractionInput):
+    """把后续用户确认绑定到已经展示过的确定结果指纹。"""
+
+    result_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class DocumentExtractionConfirmationResponse(StrictDocumentExtractionInput):
+    """确认状态投影不返回正文、租约或本地资源。"""
+
+    id: str
+    task_id: str
+    revision: int
+    result_digest: str
+    status: Literal["WAITING_CONFIRMATION", "CONFIRMED", "SUPERSEDED", "SAVED"]
+    summary: dict = Field(default_factory=dict)
+    confirmed_at: datetime | None = None
+    saved_at: datetime | None = None
+    reused: bool = False
+
+
 class DocumentExtractionTaskResponse(StrictDocumentExtractionInput):
     """安全任务投影，不返回正文、租约 token 或服务器路径。"""
 
@@ -199,6 +247,9 @@ class DocumentExtractionTaskResponse(StrictDocumentExtractionInput):
     retryable: bool = False
     error: dict = Field(default_factory=dict)
     extraction_run_id: str | None = None
+    extraction_save_policy: Literal["DIRECT_ARCHIVE", "CONFIRM_BEFORE_SAVE"]
+    confirmation_required: bool
+    confirmation: dict = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
 
@@ -214,14 +265,27 @@ class DocumentExtractionSubmitResponse(StrictDocumentExtractionInput):
     filesystem_job_id: str | None = None
 
 
+class DocumentExtractionResumeResponse(StrictDocumentExtractionInput):
+    """恢复只推进已验证的完整结果，不表示重新提交正文。"""
+
+    task: DocumentExtractionTaskResponse
+    resumed: bool
+    next_stage: str
+    filesystem_job_id: str | None = None
+
+
 __all__ = [
     "DOCUMENT_EXTRACTION_CONTRACT_VERSION",
     "MAX_DOCUMENT_EXTRACTION_BLOCKS",
     "MAX_DOCUMENT_EXTRACTION_PAYLOAD_BYTES",
     "MAX_DOCUMENT_EXTRACTION_TEXT_CHARS",
     "DocumentExtractionClaimResponse",
+    "DocumentExtractionConfirmationRequest",
+    "DocumentExtractionConfirmationResponse",
+    "DocumentExtractionPreviewRequest",
     "DocumentExtractionSubmitRequest",
     "DocumentExtractionSubmitResponse",
+    "DocumentExtractionResumeResponse",
     "DocumentExtractionTaskResponse",
     "ExternalExtractionClaimRequest",
     "ExternalExtractionRenewRequest",

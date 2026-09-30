@@ -198,6 +198,12 @@ class IngestionWorkflow:
 
         if not item.upload_document_version_id:
             return False
+        # 定向来源仅作为本次表格任务的证据附件，不创建完整归档工作副本。
+        # 它的完成事实是独立契约的 SCOPE_COMPLETE，不能被归档记录的等待态回退。
+        batch = self.db.get(IngestBatch, item.batch_id)
+        if (batch is not None and (batch.policy_json or {}).get("extraction_profile") == "SCOPED_EXCEL_SOURCE"
+                and item.status == "SUCCEEDED" and (item.result_json or {}).get("scoped_pdf_status") == "SCOPE_COMPLETE"):
+            return False
         if item.status in {"SUCCEEDED", "PARTIAL"} and item.final_document_id:
             # 终态已经绑定稳定最终对象后不能被较早的子任务状态回退为 RUNNING。
             return False

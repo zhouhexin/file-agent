@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 from app.core.config import get_settings
 from app.db.models import (
@@ -1839,4 +1840,32 @@ def test_lifecycle_worker_persists_attempts_stops_retrying_and_logs_traceback(
         assert all("unsafe" not in item["exception_traceback"] for item in failure_logs)
     finally:
         get_settings.cache_clear()
+        clear_overrides()
+
+
+def test_scoped_pdf_layout_error_fails_without_retry(monkeypatch):
+    """不支持的 PDF 版式应直接失败并返回可定位错误，不能反复显示归档中。"""
+
+    _client, session_factory = client_with_database()
+    with session_factory() as db:
+        job = FilesystemJob(job_type="CHECK_UPLOAD_DUPLICATES", queue_name="DUPLICATE_CHECK",
+            status="PENDING", payload_json={}, result_json={}, max_attempts=3)
+        db.add(job)
+        db.commit()
+        job_id = job.id
+
+    def reject_layout(*, db, job):
+        raise HTTPException(status_code=422, detail={"code": "SCOPE_LOCATION_UNRESOLVED"})
+
+    monkeypatch.setattr("app.modules.managed_files.worker._process_job", reject_layout)
+    try:
+        with pytest.raises(HTTPException):
+            process_next_filesystem_job(session_factory=session_factory,
+                worker_id="scoped-layout-worker", queue_names={"DUPLICATE_CHECK"})
+        with session_factory() as db:
+            failed = db.get(FilesystemJob, job_id)
+            assert failed.status == "FAILED"
+            assert failed.attempt_count == 1
+            assert "B–I 定向 OCR" in failed.error_message
+    finally:
         clear_overrides()

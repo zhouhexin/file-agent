@@ -37,6 +37,7 @@ from app.modules.files.extraction_repository import FileExtractionRepository
 from app.modules.ingestion.workflow import IngestionWorkflow
 
 
+
 EXTERNAL_OCR_CONTRACT_VERSION = "workbuddy-ocr-v1"
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -216,6 +217,9 @@ class ExternalExtractionService:
         """验收完整页集合、写入正式页面文本，并继续近似查重或归档。"""
 
         task, item, batch = self._owned_task(task_id=task_id, user_id=current_user.id, for_update=True)
+        version = self.db.get(DocumentVersion, task.source_version_id)
+        if version is None:
+            self._raise(409, "SOURCE_VERSION_MISSING", "OCR 源版本不存在。")
         digest = self._submission_digest(payload)
         if task.last_submission_key == payload.submission_key:
             if task.last_submission_digest != digest:
@@ -233,9 +237,8 @@ class ExternalExtractionService:
                 "OCR 提交必须覆盖任务固定的完整页面集合。",
                 details={"expected": sorted(expected_pages), "submitted": sorted(submitted_pages)},
             )
-        version = self.db.get(DocumentVersion, task.source_version_id)
-        document = self.db.get(Document, version.document_id) if version else None
-        if version is None or document is None:
+        document = self.db.get(Document, version.document_id)
+        if document is None:
             self._raise(409, "SOURCE_VERSION_MISSING", "OCR 源版本不存在。")
         repository = FileExtractionRepository(self.db, current_user.id)
         run = repository.create_extraction_run(

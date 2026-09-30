@@ -20,7 +20,24 @@ def test_database_migrations_have_one_current_head() -> None:
 
     scripts = _migration_scripts()
 
-    assert scripts.get_heads() == ["20260920_0002"]
+    # 已发布行更正新增独立审计表，不分叉现有发布恢复迁移链。
+    assert scripts.get_heads() == ["20260924_0002"]
+    assert scripts.get_revision("20260924_0002").down_revision == "20260924_0001"
+    assert scripts.get_revision("20260924_0001").down_revision == "20260922_0002"
+    assert scripts.get_revision("20260922_0002").down_revision == "20260922_0001"
+    assert scripts.get_revision("20260922_0001").down_revision == "20260920_0006"
+    target_filename_backfill = scripts.get_revision("20260920_0006")
+    assert target_filename_backfill is not None
+    assert target_filename_backfill.down_revision == "20260920_0005"
+    excel_target_revision = scripts.get_revision("20260920_0005")
+    assert excel_target_revision is not None
+    assert excel_target_revision.down_revision == "20260920_0004"
+    confirmation_revision = scripts.get_revision("20260920_0004")
+    assert confirmation_revision is not None
+    assert confirmation_revision.down_revision == "20260920_0003"
+    publication_revision = scripts.get_revision("20260920_0003")
+    assert publication_revision is not None
+    assert publication_revision.down_revision == "20260920_0002"
     document_revision = scripts.get_revision("20260920_0002")
     assert document_revision is not None
     assert document_revision.down_revision == "20260920_0001"

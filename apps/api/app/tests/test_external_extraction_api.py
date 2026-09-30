@@ -99,6 +99,66 @@ def _prepare_image_task(client, SessionLocal, headers: dict[str, str]) -> tuple[
         return batch_id, item["id"], task.id
 
 
+def test_workbuddy_image_fails_closed_when_external_ocr_is_disabled(monkeypatch, tmp_path) -> None:
+    """WorkBuddy 图片缺少宿主 OCR 通道时不得继续归档并触发服务器内部识别。"""
+
+    monkeypatch.setenv("FILE_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("INTEGRATION_EXTERNAL_OCR_ENABLED", "false")
+    get_settings.cache_clear()
+    client, SessionLocal = client_with_database()
+    content = b"workbuddy-image-must-not-reach-server-ocr"
+    digest = hashlib.sha256(content).hexdigest()
+    try:
+        headers = _auth(client)
+        batch_id = client.post(
+            "/api/integrations/v1/ingest-batches",
+            headers=headers,
+            json={
+                "client_id": "workbuddy-attachment",
+                "request_id": "ocr-required-request",
+                "idempotency_key": "ocr-required-event",
+                "source_root_ref": "workbuddy-attachments",
+                "relative_directory": "submitted-attachments",
+                "recursive": False,
+            },
+        ).json()["id"]
+        item = client.post(
+            f"/api/integrations/v1/ingest-batches/{batch_id}/items",
+            headers=headers,
+            json={
+                "items": [{
+                    "client_item_id": "required-image-1",
+                    "source_root_ref": "workbuddy-attachments",
+                    "source_relative_path": "submitted-attachments/required-image-1/page.png",
+                    "original_filename": "page.png",
+                    "size_bytes": len(content),
+                    "mtime_ns": 1,
+                    "expected_sha256": digest,
+                }]
+            },
+        ).json()["items"][0]
+        client.post(
+            f"/api/integrations/v1/ingest-batches/{batch_id}/seal",
+            headers=headers,
+        )
+        accepted = client.put(
+            f"/api/integrations/v1/ingest-batches/{batch_id}/items/{item['id']}/content",
+            headers=headers,
+            files={"file": ("page.png", content, "image/png")},
+        )
+        with SessionLocal() as db:
+            job = db.get(FilesystemJob, accepted.json()["filesystem_job_id"])
+            assert job is not None
+            with pytest.raises(RuntimeError, match="WORKBUDDY_OCR_REQUIRED"):
+                FileLifecycleJobProcessor(db).process(job)
+            assert db.query(ExternalExtractionTask).count() == 0
+            assert db.query(FilesystemJob).filter_by(
+                job_type="ARCHIVE_UPLOAD_TO_MANAGED_ROOT"
+            ).count() == 0
+    finally:
+        clear_overrides()
+
+
 def test_external_ocr_claim_page_submit_and_idempotent_replay(monkeypatch, tmp_path) -> None:
     """外部 OCR 正文必须随归档复制到工作副本，正式分析不得再次调用内部 OCR。"""
 
@@ -148,7 +208,7 @@ def test_external_ocr_claim_page_submit_and_idempotent_replay(monkeypatch, tmp_p
                     "text": "国家励志奖学金申请材料",
                     "confidence": 0.93,
                     "blocks": [],
-                    "provider_name": "workbuddy-ocr",
+                    "provider_name": "workbuddy-ocr-engine-a",
                     "provider_version": "1",
                     "provider_request_id": "provider-1",
                     "error": None,
@@ -176,6 +236,7 @@ def test_external_ocr_claim_page_submit_and_idempotent_replay(monkeypatch, tmp_p
             page_row = db.query(DocumentPage).filter(DocumentPage.extraction_run_id == item.extraction_run_id).one()
             assert page_row.text_content == "国家励志奖学金申请材料"
             assert page_row.metadata_json["ocr_confidence"] == 0.93
+            assert page_row.metadata_json["ocr_provider"] == "workbuddy-ocr-engine-a"
 
         # 继续跑完归档、工作副本发布和分析，保护外部 OCR 正文跨版本复用边界。
         processed = 0
@@ -294,7 +355,7 @@ def test_mixed_pdf_sends_only_blank_page_and_preserves_native_text(monkeypatch, 
                     "text": "OCR text for scanned second page",
                     "confidence": 0.91,
                     "blocks": [],
-                    "provider_name": "fake-ocr",
+                    "provider_name": "tencent-docs-ocr",
                 }],
             },
         )
@@ -348,7 +409,7 @@ def test_external_ocr_rejects_wrong_page_scope_and_invalid_lease(monkeypatch, tm
                     {
                         "page_number": 2,
                         "text": "wrong page",
-                        "provider_name": "fake",
+                        "provider_name": "tencent-docs-ocr",
                         "blocks": [],
                     }
                 ],
@@ -392,7 +453,7 @@ def test_external_ocr_partial_result_is_preserved_and_continues_conservatively(m
                 "pages": [{
                     "page_number": 1,
                     "text": "",
-                    "provider_name": "fake-ocr",
+                    "provider_name": "tencent-docs-ocr",
                     "blocks": [],
                     "error": {"code": "UNREADABLE", "message": "图像无法识别"},
                 }],
@@ -482,7 +543,7 @@ def test_partial_external_ocr_can_retry_only_failed_pages_before_publish(monkeyp
                 "pages": [{
                     "page_number": 1,
                     "text": "",
-                    "provider_name": "fake",
+                    "provider_name": "tencent-docs-ocr",
                     "blocks": [],
                     "error": {"code": "TEMPORARY", "message": "暂时失败"},
                 }],
@@ -505,7 +566,7 @@ def test_partial_external_ocr_can_retry_only_failed_pages_before_publish(monkeyp
                 "pages": [{
                     "page_number": 1,
                     "text": "重试后识别成功",
-                    "provider_name": "fake",
+                    "provider_name": "tencent-docs-ocr",
                     "blocks": [],
                     "error": None,
                 }],

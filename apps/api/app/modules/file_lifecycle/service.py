@@ -34,6 +34,7 @@ from app.db.models import (
     DocumentPage,
     DocumentSearchProfile,
     DocumentVersion,
+    ExternalExtractionTask,
     FileObject,
     FileRenameReviewItem,
     FilesystemJob,
@@ -216,6 +217,38 @@ def working_copy_search_artifacts_ready(db: Session, working_copy: WorkingCopy) 
     """兼容返回布尔值的扫描器调用，真实判断统一由状态函数完成。"""
 
     return working_copy_search_artifact_status(db, working_copy)["ready"]
+
+
+def _prepare_ingest_external_extraction(
+    *,
+    db: Session,
+    item: IngestItem,
+    version: DocumentVersion | None,
+) -> ExternalExtractionTask | None:
+    """为导入文件选择宿主提取任务，并对 WorkBuddy 图片禁止服务器 OCR 回退。"""
+
+    from app.modules.external_extraction.document_service import (
+        WorkBuddyDocumentExtractionService,
+    )
+    from app.modules.external_extraction.policy import requires_workbuddy_image_ocr
+    from app.modules.external_extraction.service import ExternalExtractionService
+
+    from app.modules.external_extraction.scoped_service import ScopedPdfExtractionService
+
+    task = ScopedPdfExtractionService(db).prepare_for_ingest_item(item=item)
+    if task is None:
+        task = WorkBuddyDocumentExtractionService(db).prepare_for_ingest_item(item=item)
+    if task is None:
+        task = ExternalExtractionService(db).prepare_for_ingest_item(item=item)
+    batch = db.get(IngestBatch, item.batch_id)
+    if task is None and requires_workbuddy_image_ocr(batch=batch, version=version):
+        # 配置缺失或宿主通道不可用时必须关闭式失败；继续归档会让后续分析调用
+        # File Agent 内部 OCR，违反 WorkBuddy 图片的固定执行责任。
+        raise RuntimeError(
+            "WORKBUDDY_OCR_REQUIRED: WorkBuddy 图片必须由 WorkBuddy OCR 识别，"
+            "请启用 INTEGRATION_EXTERNAL_OCR_ENABLED 后重试。"
+        )
+    return task
 
 
 class UploadLifecycleService:
@@ -429,10 +462,20 @@ class UploadLifecycleService:
         elif request.decision == "CONTINUE_UPLOAD":
             extraction_task = None
             if ingest_item is not None:
+                extraction_task = _prepare_ingest_external_extraction(
+                    db=self.db,
+                    item=ingest_item,
+                    version=upload_version,
+                )
+            extraction_ready = extraction_task is None or extraction_task.status == "COMPLETED"
+            from app.modules.external_extraction.document_schemas import DOCUMENT_EXTRACTION_CONTRACT_VERSION
+
+            if extraction_task is not None and extraction_task.provider_contract_version == DOCUMENT_EXTRACTION_CONTRACT_VERSION:
                 from app.modules.external_extraction.document_service import WorkBuddyDocumentExtractionService
 
-                extraction_task = WorkBuddyDocumentExtractionService(self.db).prepare_for_ingest_item(item=ingest_item)
-            if extraction_task is not None and extraction_task.status != "COMPLETED":
+                # 文档契约以 COMPLETE 结束；还须核对已保存页面、源哈希及固定运行，不能只信状态字面值。
+                extraction_ready = WorkBuddyDocumentExtractionService(self.db).completed_result_available(extraction_task)
+            if not extraction_ready:
                 # 精确重复已经由用户明确选择继续；宿主正文完成后只评估新的近似候选。
                 self.db.query(UploadDuplicateCandidate).filter(
                     UploadDuplicateCandidate.duplicate_review_id == review.id
@@ -1155,7 +1198,8 @@ class FileLifecycleJobProcessor:
             "EXECUTE_CLASSIFICATION_PLACEMENT",
         }
 
-    def record_failure(self, *, job: FilesystemJob, error_message: str, retrying: bool) -> None:
+    def record_failure(self, *, job: FilesystemJob, error_message: str, retrying: bool,
+                       error_code: str | None = None) -> None:
         """把 worker 失败同步到上传归档状态，运行日志不能替代业务状态。"""
 
         if job.job_type == "RUN_INGEST_EXTRA_REQUEST":
@@ -1180,7 +1224,7 @@ class FileLifecycleJobProcessor:
         review = self.repository.get_review_by_version(version_id)
         if archive is not None and job.job_type in {"CHECK_UPLOAD_DUPLICATES", "ARCHIVE_UPLOAD_TO_MANAGED_ROOT"}:
             archive.status = "RETRY_WAIT" if retrying else "FAILED"
-            archive.last_error_code = "FILESYSTEM_JOB_FAILED"
+            archive.last_error_code = error_code or "FILESYSTEM_JOB_FAILED"
             archive.last_error_message = error_message
             archive.next_retry_at = (
                 utcnow() + timedelta(seconds=self.settings.upload_archive_retry_interval_seconds)
@@ -1265,6 +1309,35 @@ class FileLifecycleJobProcessor:
             elif review.status == "WAITING_CONFIRMATION":
                 # 防御性检查：状态表偶发不一致时以待用户确认作为更严格边界。
                 continue
+            elif (archive.status == "RETRY_WAIT" and current_job is not None
+                  and current_job.job_type == "CHECK_UPLOAD_DUPLICATES"
+                  and current_job.status == "COMPLETED"
+                  and (current_job.result_json or {}).get("status") == "RETRY_WAIT"):
+                # 旧 worker 把确定性的版式 422 误记为重试；下一次又把该任务标记为
+                # 幂等完成，留下无 OCR 任务的永久等待态。仅为定向 PDF 重建一次查重任务。
+                item = self.db.get(IngestItem, review.ingest_item_id) if review.ingest_item_id else None
+                batch = self.db.get(IngestBatch, item.batch_id) if item is not None else None
+                existing_task = (self.db.query(ExternalExtractionTask.id)
+                                 .filter_by(ingest_item_id=item.id).first()) if item is not None else None
+                if (batch is None or (batch.policy_json or {}).get("extraction_profile") != "SCOPED_EXCEL_SOURCE"
+                        or existing_task is not None):
+                    archive.status = "FAILED"
+                    review.status = "FAILED"
+                    archive.next_retry_at = None
+                    continue
+                child = FilesystemJobQueue(self.db).create_job(
+                    job_type="CHECK_UPLOAD_DUPLICATES", queue_name="DUPLICATE_CHECK",
+                    root_id=None, created_by=review.user_id,
+                    deduplication_key=f"upload-duplicate:{archive.upload_document_version_id}:scoped-recover-v1",
+                    payload={"upload_document_version_id": archive.upload_document_version_id,
+                             "duplicate_review_id": review.id, "user_id": review.user_id,
+                             "workspace_id": review.workspace_id},
+                )
+                archive.status = "DUPLICATE_CHECK_PENDING"
+                archive.last_error_code = None
+                archive.last_error_message = None
+                archive.next_retry_at = None
+                review.status = "CHECKING"
             elif review.decision != "CONTINUE_UPLOAD":
                 # 取消上传或使用已有文件是终态；补偿任务不得把它重新送入归档。
                 continue
@@ -1442,12 +1515,11 @@ class FileLifecycleJobProcessor:
         if ingest_item is not None:
             # WorkBuddy 新通道把扫描件 OCR 委托给外部客户端。阶段任务写入等待事实后立即结束，
             # 不持有 worker 租约轮询，也不会偷偷回退到旧内部 OCR Provider。
-            from app.modules.external_extraction.document_service import WorkBuddyDocumentExtractionService
-            from app.modules.external_extraction.service import ExternalExtractionService
-
-            extraction_task = WorkBuddyDocumentExtractionService(self.db).prepare_for_ingest_item(item=ingest_item)
-            if extraction_task is None:
-                extraction_task = ExternalExtractionService(self.db).prepare_for_ingest_item(item=ingest_item)
+            extraction_task = _prepare_ingest_external_extraction(
+                db=self.db,
+                item=ingest_item,
+                version=version,
+            )
             if extraction_task is not None:
                 archive.status = "WAITING_EXTERNAL_EXTRACTION"
                 review.status = "WAITING_EXTERNAL_EXTRACTION"
@@ -4488,8 +4560,12 @@ class WorkingCopyQueryService:
         """列出系统共享工作目录中的工作副本。"""
 
         shared_workspace_id = get_shared_workspace_id(self.db)
+        from app.db.models import StructuredDatasetPublication
+        pending = {item.working_copy_id: item.status for item in self.db.query(
+            StructuredDatasetPublication).filter(StructuredDatasetPublication.status.in_(
+                ("DB_COMMITTED", "NEEDS_REPAIR"))).all()}
         return [
-            self._to_response(copy, root)
+            self._to_response(copy, root).model_copy(update={"publication_status": pending.get(copy.id)})
             for copy, root in self.repository.list_user_working_copies(
                 workspace_id=shared_workspace_id,
                 user_id=current_user.id,
@@ -4501,7 +4577,10 @@ class WorkingCopyQueryService:
 
         copy = self._owned(working_copy_id=working_copy_id, current_user=current_user)
         root = self.db.get(WorkingCopyRoot, copy.working_copy_root_id)
-        return self._to_response(copy, root)
+        from app.modules.structured_datasets.publication import pending_publication
+        pending = pending_publication(self.db, working_copy_id=copy.id)
+        return self._to_response(copy, root).model_copy(
+            update={"publication_status": pending.status if pending else None})
 
     def lineage(self, *, working_copy_id: str, current_user: User) -> WorkingCopyLineageResponse:
         """返回工作副本、原始文件与导入哈希的关系。"""
@@ -4590,6 +4669,8 @@ class WorkingCopyQueryService:
         """解析活动工作副本下载路径；回收站文件必须先恢复。"""
 
         copy = self._owned(working_copy_id=working_copy_id, current_user=current_user)
+        from app.modules.structured_datasets.publication import assert_publication_ready
+        assert_publication_ready(self.db, working_copy_id=copy.id)
         if copy.status != "ACTIVE":
             raise HTTPException(status_code=410, detail="文件已删除，请先恢复。")
         version = self.db.get(DocumentVersion, copy.current_version_id) if copy.current_version_id else None

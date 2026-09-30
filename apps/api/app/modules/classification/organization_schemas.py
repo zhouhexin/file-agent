@@ -61,6 +61,7 @@ class OrganizationFileItemResponse(BaseModel):
     primary_category_status: str | None = None
     classification_outcome: str = "OTHER"
     placement_status: str = "PENDING"
+    publication_status: str | None = None
     effective_primary: OrganizationPrimaryResponse | None = None
     pending_primary: OrganizationPrimaryResponse | None = None
     legacy_location: bool = False

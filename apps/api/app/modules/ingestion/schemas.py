@@ -56,7 +56,9 @@ class IngestBatchCreateRequest(BaseModel):
     placement_mode: Literal["BY_CATEGORY", "NEUTRAL"] = "BY_CATEGORY"
     rule_profile: Literal["content_based", "legacy_school_materials"] = "content_based"
     # DEFAULT 保持旧导入和服务器附加请求行为；新值只能由受控 WorkBuddy 入口使用。
-    extraction_profile: Literal["DEFAULT", "WORKBUDDY_DOCUMENT"] = "DEFAULT"
+    extraction_profile: Literal["DEFAULT", "WORKBUDDY_DOCUMENT", "SCOPED_EXCEL_SOURCE"] = "DEFAULT"
+    # 纯归档沿用直接提交；只有用户明确要求提取内容时才冻结保存前确认策略。
+    extraction_save_policy: Literal["DIRECT_ARCHIVE", "CONFIRM_BEFORE_SAVE"] = "DIRECT_ARCHIVE"
     user_request: str | None = Field(default=None, max_length=20_000)
     conversation_id: str | None = Field(default=None, min_length=1, max_length=36)
 
@@ -90,6 +92,17 @@ class IngestBatchCreateRequest(BaseModel):
             return None
         normalized = value.strip()
         return normalized or None
+
+    @model_validator(mode="after")
+    def validate_extraction_confirmation_policy(self) -> "IngestBatchCreateRequest":
+        """确认策略只能用于有明确任务文字的 WorkBuddy 完整文档提取。"""
+
+        if self.extraction_save_policy == "CONFIRM_BEFORE_SAVE":
+            if self.extraction_profile != "WORKBUDDY_DOCUMENT":
+                raise ValueError("CONFIRM_BEFORE_SAVE 只能用于 WORKBUDDY_DOCUMENT")
+            if not self.user_request:
+                raise ValueError("显式内容提取必须保留用户任务文字")
+        return self
 
 
 class IngestItemCreate(BaseModel):

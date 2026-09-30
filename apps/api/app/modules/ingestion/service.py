@@ -94,7 +94,7 @@ class IngestionService:
         workspace_id = current_user.default_workspace_id
         if not workspace_id:
             self._raise_error(409, "DEFAULT_WORKSPACE_REQUIRED", "当前用户缺少默认工作区。")
-        if request.extraction_profile == "WORKBUDDY_DOCUMENT":
+        if request.extraction_profile in {"WORKBUDDY_DOCUMENT", "SCOPED_EXCEL_SOURCE"}:
             settings = get_settings()
             # 新模式从批次创建即关闭式校验，防止 worker 发现开关关闭后落回旧 OCR 或
             # 服务器 Word/PDF 解析。累计表 Demo 同时是该功能的唯一首轮输出边界。
@@ -124,11 +124,13 @@ class IngestionService:
         }
         # 默认旧批次的 policy JSON 必须保持原形。只有新模式才固化额外执行者，避免
         # 历史回执、重试比较和外部客户端把无语义的默认字段当成策略变更。
-        if request.extraction_profile == "WORKBUDDY_DOCUMENT":
+        if request.extraction_profile in {"WORKBUDDY_DOCUMENT", "SCOPED_EXCEL_SOURCE"}:
             policy.update({
-                "extraction_profile": "WORKBUDDY_DOCUMENT",
+                "extraction_profile": request.extraction_profile,
                 "extra_request_executor": "WORKBUDDY",
             })
+            if request.extraction_save_policy != "DIRECT_ARCHIVE":
+                policy["extraction_save_policy"] = request.extraction_save_policy
         try:
             batch = self.repository.create_batch(
                 user_id=current_user.id,
@@ -1476,6 +1478,8 @@ class IngestionService:
         # 仍命中同一指纹；新模式显式纳入摘要，防止同一提交事件静默切换执行责任。
         if payload.get("extraction_profile") == "DEFAULT":
             payload.pop("extraction_profile", None)
+        if payload.get("extraction_save_policy") == "DIRECT_ARCHIVE":
+            payload.pop("extraction_save_policy", None)
         canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

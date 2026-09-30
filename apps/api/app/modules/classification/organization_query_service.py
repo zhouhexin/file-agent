@@ -11,6 +11,7 @@ from app.db.models import (
     ClassificationPlacementOperation,
     DocumentCategory,
     DocumentOrganizationDecision,
+    StructuredDatasetPublication,
     WorkingCopy,
 )
 from app.modules.classification.loader import load_default_taxonomy
@@ -225,6 +226,12 @@ class ClassificationOrganizationQueryService:
             .all()
         )
         copy_ids = [item.id for item in copies]
+        # 同名 Excel 发布尚未完成时，分类文件列表也必须显式展示状态并隐藏下载链接。
+        publication_by_copy = {item.working_copy_id: item.status for item in self.db.query(
+            StructuredDatasetPublication).filter(
+                StructuredDatasetPublication.working_copy_id.in_(copy_ids),
+                StructuredDatasetPublication.status.in_(("DB_COMMITTED", "NEEDS_REPAIR")),
+            ).all()} if copy_ids else {}
         decisions = self._latest_decisions(set(copy_ids)) if copy_ids else {}
         pending_by_copy = self._pending_primary_by_copy(set(copy_ids)) if copy_ids else {}
         if copy_ids:
@@ -250,7 +257,8 @@ class ClassificationOrganizationQueryService:
                 if relation is not None
                 else None
             )
-            public_links = public_file_links(working_copy.id) if include_public_links else {}
+            public_links = (public_file_links(working_copy.id) if include_public_links
+                            and working_copy.id not in publication_by_copy else {})
             files.append(
                 OrganizationFileItemResponse(
                     working_copy_id=working_copy.id,
@@ -270,6 +278,7 @@ class ClassificationOrganizationQueryService:
                         else "CLASSIFIED"
                     ),
                     placement_status=str(working_copy.placement_status or "PENDING"),
+                    publication_status=publication_by_copy.get(working_copy.id),
                     effective_primary=effective_primary,
                     pending_primary=pending_primary,
                     legacy_location=working_copy.id in legacy_ids,

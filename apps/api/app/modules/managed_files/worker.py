@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -25,6 +26,8 @@ from app.core.logging import (
 )
 from app.db.models import (
     AgentRun,
+    ChangeItem,
+    ChangeSet,
     FilesystemJob,
     ManagedFile,
     ManagedFileRevision,
@@ -32,6 +35,7 @@ from app.db.models import (
     ToolInvocation,
     User,
     WorkingCopy,
+    WorkingCopyPathRecord,
     WorkingCopyRoot,
     utcnow,
 )
@@ -74,6 +78,8 @@ from app.modules.structured_extraction.worker import (
     process_structured_extraction_job_isolated,
     reconcile_waiting_structured_extraction_runs,
 )
+from app.modules.structured_datasets.schemas import DatasetCreateFromExcel
+from app.modules.structured_datasets.service import StructuredDatasetService
 from app.modules.managed_files.source_analysis import (
     ManagedFileRevisionService,
     ManagedSourceAnalysisService,
@@ -176,6 +182,8 @@ def _job_completion_summary(job: FilesystemJob) -> str | None:
             f"records={int(result.get('record_count') or 0)} "
             f"review={int(result.get('review_count') or 0)}"
         )
+    if job.job_type == "STRUCTURED_DATASET_TARGET_PREPARE":
+        return f"dataset_ready={result.get('status') == 'READY'}"
     if job.job_type == "ANALYZE_MANAGED_FILE_REVISION":
         return f"source_revision_ready={result.get('status') == 'READY'}"
     if job.job_type == "REFRESH_MANAGED_SOURCE_CLASSIFICATION":
@@ -316,14 +324,18 @@ def process_next_filesystem_job(
                 finally:
                     heartbeat.stop()
                 db.commit()
+                _finalize_structured_dataset_target_files(job=job, session_factory=session_factory)
+                db.expire(job)
+                publication_pending = job.status == "PUBLISHING"
                 _print_worker_status(
-                    "任务完成",
+                    "等待可见文件发布" if publication_pending else "任务完成" if job.status == "COMPLETED" else "任务需修复",
                     job=job,
                     duration_ms=int((time.perf_counter() - started_at) * 1000),
-                    message=_job_completion_summary(job),
+                    message=("候选版本已登记；由发布恢复器继续同步" if publication_pending
+                             else _job_completion_summary(job)),
                 )
                 log_event(
-                    "filesystem.worker.completed",
+                    "filesystem.worker.publication_pending" if publication_pending else "filesystem.worker.completed" if job.status == "COMPLETED" else "filesystem.worker.needs_repair",
                     agent_run_id=job_id,
                     job_id=job_id,
                     status=job.status,
@@ -356,12 +368,17 @@ def process_next_filesystem_job(
                             "error_reference": request_id,
                         }
                         queue = FilesystemJobQueue(failed_db)
+                        retrying_async_target = False
                         if FileLifecycleJobProcessor.supports(failed_job.job_type):
-                            retrying = failed_job.attempt_count < failed_job.max_attempts
+                            deterministic_error = isinstance(exc, HTTPException) and 400 <= exc.status_code < 500
+                            detail = exc.detail if deterministic_error and isinstance(exc.detail, dict) else {}
+                            business_code = str(detail.get("code") or "")
+                            retrying = not deterministic_error and failed_job.attempt_count < failed_job.max_attempts
                             FileLifecycleJobProcessor(failed_db).record_failure(
                                 job=failed_job,
                                 error_message=public_error,
                                 retrying=retrying,
+                                error_code=business_code if business_code.startswith("SCOPE_") else None,
                             )
                             if retrying:
                                 queue.mark_retry(
@@ -388,17 +405,42 @@ def process_next_filesystem_job(
                                 retry_after_seconds=min(300, 2 ** failed_job.attempt_count),
                                 event_details=failure_details,
                             )
+                        elif (
+                            failed_job.job_type == "STRUCTURED_DATASET_TARGET_PREPARE"
+                            and failed_job.attempt_count < failed_job.max_attempts
+                            and not (isinstance(exc, HTTPException) and exc.status_code < 500)
+                        ):
+                            retrying_async_target = True
+                            queue.mark_retry(
+                                job=failed_job,
+                                error_message=public_error,
+                                retry_after_seconds=min(60, 2 ** failed_job.attempt_count),
+                                event_details=failure_details,
+                            )
                         else:
                             queue.mark_failed(
                                 job=failed_job,
                                 error_message=public_error,
                                 event_details=failure_details,
                             )
-                        _mark_agent_run_failed_for_job(
-                            db=failed_db,
-                            job=failed_job,
-                            error_message=public_error,
-                        )
+                        if not retrying_async_target:
+                            if failed_job.job_type == "STRUCTURED_DATASET_TARGET_PREPARE":
+                                # 校验类失败不重试；把安全错误码写回父表格任务供 WorkBuddy 恢复。
+                                from app.modules.structured_datasets.tasks import mark_target_preparation_failed
+                                detail = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, dict) else {}
+                                allowed_code = str(detail.get("code") or "")
+                                needs_input = isinstance(exc, HTTPException) and exc.status_code < 500
+                                code = (allowed_code if needs_input and allowed_code.startswith("TARGET_EXCEL_")
+                                        else "TARGET_EXCEL_CONVERSION_FAILED")
+                                message = ("模板读取或表头校验失败；请用真实单元格网格重新预览目标 Excel。"
+                                           if needs_input else public_error)
+                                mark_target_preparation_failed(failed_db, failed_job, code=code,
+                                                               message=message, needs_input=needs_input)
+                            _mark_agent_run_failed_for_job(
+                                db=failed_db,
+                                job=failed_job,
+                                error_message=public_error,
+                            )
                         failed_db.commit()
                         _print_worker_status(
                             "任务失败",
@@ -423,7 +465,16 @@ def run_filesystem_worker(
 ) -> None:
     """持续轮询指定数据库任务队列，实现归档、导入与 API 资源隔离。"""
 
+    last_dataset_recovery = 0.0
     while True:
+        if (queue_names is None or "STRUCTURED_EXTRACTION" in queue_names) and time.monotonic() - last_dataset_recovery >= 30:
+            last_dataset_recovery = time.monotonic()
+            try:
+                from app.modules.structured_datasets.publication import recover_pending_publications
+                recover_pending_publications(session_factory, limit=20)
+            except Exception as exc:
+                log_event("structured_dataset.publication.recovery_failed", level="ERROR",
+                          status="FAILED", error_code=type(exc).__name__)
         try:
             processed = process_next_filesystem_job(
                 session_factory=session_factory,
@@ -634,6 +685,140 @@ def process_next_classification_graph_outbox(
         db.close()
 
 
+def _finalize_structured_dataset_target_files(*, job: FilesystemJob,
+                                              session_factory: Callable[[], Session] = SessionLocal) -> None:
+    """数据库提交后补发 XLSX；失败由持久发布记录和周期恢复器接管。"""
+
+    if job.job_type != "STRUCTURED_DATASET_TARGET_PREPARE":
+        return
+    publication_id = str((job.payload_json or {}).get("publication_id") or "")
+    if publication_id and job.status == "PUBLISHING":
+        from app.modules.structured_datasets.publication import finalize_publication
+        with session_factory() as db:
+            finalize_publication(db, publication_id)
+        return
+    if job.status != "COMPLETED":
+        return
+    cleanup = dict((job.payload_json or {}).get("legacy_cleanup") or {})
+    if not cleanup:
+        return
+    try:
+        FileLifecycleStorageService().retire_dataset_legacy_current_file(**cleanup)
+    except Exception as exc:
+        # 数据库和新 XLSX 已经提交；旧入口清理失败时保留字节更安全，并通过日志交由重试调用/运维修复。
+        log_event(
+            "structured_dataset.legacy_visible_cleanup_failed",
+            level="ERROR",
+            job_id=job.id,
+            status="NEEDS_REPAIR",
+            error_code=exc.__class__.__name__,
+            exception_traceback=format_exception_traceback(exc),
+            message="累计目标表已发布，但旧 XLS 可见入口清理失败。",
+        )
+
+
+def _process_structured_dataset_target_prepare(*, db: Session, job: FilesystemJob) -> None:
+    """完成旧版 XLS 目标表格式提升，并收束原 MCP 调用的审计状态。"""
+
+    payload = dict(job.payload_json or {})
+    user = db.get(User, job.created_by) if job.created_by else None
+    if user is None:
+        raise ValueError("STRUCTURED_DATASET_TARGET_PREPARE 缺少有效创建用户")
+    request = DatasetCreateFromExcel.model_validate(payload.get("request") or {})
+    result = StructuredDatasetService(db, user).prepare_legacy_excel_target(request)
+    publication_id = result.pop("_publication_id", None)
+    legacy_cleanup = dict(result.pop("_legacy_cleanup", {}) or {})
+    if legacy_cleanup and not publication_id:
+        job.payload_json = {
+            **dict(job.payload_json or {}),
+            "legacy_cleanup": legacy_cleanup,
+        }
+    result = {**result, "filesystem_job_id": job.id}
+    if publication_id:
+        from app.db.models import StructuredDatasetPublication
+        publication = db.get(StructuredDatasetPublication, publication_id)
+        publication.result_json = result
+        publication.agent_run_id = str(payload.get("agent_run_id") or "") or None
+        job.payload_json = {**dict(job.payload_json or {}), "publication_id": publication_id}
+        job.status = "PUBLISHING"
+        job.result_json = {**result, "status": "PUBLISHING", "excel_published": False,
+                           "saved_to_server": False}
+        job.lease_owner = None
+        job.lease_expires_at = None
+        job.execution_token = None
+        job.updated_at = utcnow()
+    else:
+        FilesystemJobQueue(db).mark_completed(job=job, result=result)
+
+    changeset_id = str(payload.get("changeset_id") or "")
+    changeset = db.get(ChangeSet, changeset_id) if changeset_id else None
+    if changeset is not None:
+        changeset.status = "PENDING" if publication_id else "COMPLETED"
+        changeset.summary = ("旧版 Excel 已完成格式提升，等待同名工作副本发布。" if publication_id
+                             else "旧版 Excel 已提升为 XLSX 并注册为累计目标表。")
+        queued_item = (
+            db.query(ChangeItem)
+            .filter(
+                ChangeItem.changeset_id == changeset.id,
+                ChangeItem.change_type == "STRUCTURED_DATASET_TARGET_PREPARATION_QUEUED",
+            )
+            .first()
+        )
+        if queued_item is not None:
+            queued_item.execution_status = "PENDING" if publication_id else "COMPLETED"
+            queued_item.after_value_json = result
+        db.add(ChangeItem(
+            changeset_id=changeset.id,
+            target_type="DATASET",
+            target_id=result.get("dataset_id"),
+            target_document_id=result.get("document_id"),
+            change_type="STRUCTURED_DATASET_TARGET_FORMAT_PROMOTED",
+            after_value_json=result,
+            source="workbuddy-dataset-demo",
+            confidence=1.0,
+            evidence_json={
+                "source_document_version_id": result.get("source_document_version_id"),
+                "conversion_artifact_id": result.get("conversion_artifact_id"),
+            },
+            execution_status="PENDING" if publication_id else "COMPLETED",
+        ))
+
+    invocation_id = str(payload.get("tool_invocation_id") or "")
+    invocation = db.get(ToolInvocation, invocation_id) if invocation_id else None
+    if invocation is not None:
+        invocation.status = "RUNNING" if publication_id else "COMPLETED"
+        invocation.output_json = result
+        invocation.finished_at = None if publication_id else utcnow()
+    agent_run_id = str(payload.get("agent_run_id") or "")
+    run = db.get(AgentRun, agent_run_id) if agent_run_id else None
+    if run is not None:
+        run.status = "PUBLISHING" if publication_id else "COMPLETED"
+        run.error_message = None
+        run.final_response = ("旧版 Excel 已完成格式提升，等待同名工作副本发布。" if publication_id
+                              else f"旧版 Excel 已完成格式提升并注册为目标表：{result.get('filename') or ''}")
+        run.graph_state_json = {
+            "status": run.status,
+            "filesystem_job_id": job.id,
+            "dataset_id": result.get("dataset_id"),
+            "document_version_id": result.get("document_version_id"),
+        }
+        run.updated_at = utcnow()
+
+    path_record = (
+        db.query(WorkingCopyPathRecord)
+        .filter(
+            WorkingCopyPathRecord.working_copy_id == result.get("working_copy_id"),
+            WorkingCopyPathRecord.operation_type == "DATASET_TARGET_FORMAT_PROMOTED",
+        )
+        .order_by(WorkingCopyPathRecord.sequence_number.desc())
+        .first()
+    )
+    if path_record is not None:
+        path_record.agent_run_id = run.id if run is not None else None
+        path_record.tool_invocation_id = invocation.id if invocation is not None else None
+        path_record.changeset_id = changeset.id if changeset is not None else None
+
+
 def _process_job(*, db: Session, job: FilesystemJob) -> None:
     """按任务类型执行具体处理逻辑。"""
 
@@ -643,6 +828,9 @@ def _process_job(*, db: Session, job: FilesystemJob) -> None:
         return
     if job.job_type == "STRUCTURED_IMAGE_EXTRACTION":
         process_structured_extraction_job(db=db, job=job)
+        return
+    if job.job_type == "STRUCTURED_DATASET_TARGET_PREPARE":
+        _process_structured_dataset_target_prepare(db=db, job=job)
         return
     if job.job_type == "REFRESH_MANAGED_SOURCE_CLASSIFICATION":
         revision_id = str(
@@ -1372,6 +1560,51 @@ def _mark_agent_run_failed_for_job(
 ) -> None:
     """异步分类任务整体失败时同步结束原 AgentRun，避免前端永久等待。"""
 
+    if job.job_type == "STRUCTURED_DATASET_TARGET_PREPARE":
+        payload = dict(job.payload_json or {})
+        agent_run_id = str(payload.get("agent_run_id") or "")
+        run = db.get(AgentRun, agent_run_id) if agent_run_id else None
+        if run is not None:
+            run.status = "FAILED"
+            run.error_message = "TARGET_EXCEL_CONVERSION_FAILED"
+            run.final_response = "旧版 Excel 格式提升失败，原文件未修改。"
+            run.graph_state_json = {
+                "status": "FAILED",
+                "filesystem_job_id": job.id,
+                "error_code": "TARGET_EXCEL_CONVERSION_FAILED",
+            }
+            run.updated_at = utcnow()
+        invocation_id = str(payload.get("tool_invocation_id") or "")
+        invocation = db.get(ToolInvocation, invocation_id) if invocation_id else None
+        if invocation is not None:
+            invocation.status = "FAILED"
+            invocation.output_json = {
+                "status": "FAILED",
+                "filesystem_job_id": job.id,
+                "error": {"code": "TARGET_EXCEL_CONVERSION_FAILED", "message": error_message},
+            }
+            invocation.finished_at = utcnow()
+        changeset_id = str(payload.get("changeset_id") or "")
+        changeset = db.get(ChangeSet, changeset_id) if changeset_id else None
+        if changeset is not None:
+            changeset.status = "FAILED"
+            changeset.summary = "旧版 Excel 格式提升失败，原文件未修改。"
+            item = (
+                db.query(ChangeItem)
+                .filter(
+                    ChangeItem.changeset_id == changeset.id,
+                    ChangeItem.change_type == "STRUCTURED_DATASET_TARGET_PREPARATION_QUEUED",
+                )
+                .first()
+            )
+            if item is not None:
+                item.execution_status = "FAILED"
+                item.after_value_json = {
+                    **dict(item.after_value_json or {}),
+                    "status": "FAILED",
+                    "error_code": "TARGET_EXCEL_CONVERSION_FAILED",
+                }
+        return
     if fail_structured_extraction_agent_run(
         db=db,
         job=job,
@@ -2016,6 +2249,15 @@ def _load_managed_classification_rows(*, db: Session, payload: dict) -> list[tup
 def _public_job_error_message(*, job: FilesystemJob, error: Exception) -> str:
     """普通用户可查询的分类 Job 不返回底层路径、连接信息或异常细节。"""
 
+    if job.job_type == "CHECK_UPLOAD_DUPLICATES" and isinstance(error, HTTPException) and isinstance(error.detail, dict):
+        if error.detail.get("code") == "SCOPE_LOCATION_UNRESOLVED":
+            return "PDF 版式不符合已核对的 B–I 定向 OCR 范围；请提供适用的版式，原文件未修改。"
+    if job.job_type == "STRUCTURED_DATASET_TARGET_PREPARE":
+        if isinstance(error, HTTPException) and isinstance(error.detail, dict):
+            code = error.detail.get("code")
+            if code == "TARGET_EXCEL_LAYOUT_REQUIRED":
+                return "TARGET_EXCEL_LAYOUT_REQUIRED：目标表的首行不是完整字段表头；请按真实网格提供工作表、表头和数据区域，原文件未修改。"
+        return "旧版 Excel 格式提升失败，原文件未修改；请根据 job_id 查看服务器日志。"
     if job.job_type == "CLASSIFY_MANAGED_FILES":
         return "受管文件后台分类失败，请稍后重试或联系管理员。"
     if job.job_type == "STRUCTURED_IMAGE_EXTRACTION":

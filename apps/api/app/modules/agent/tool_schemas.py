@@ -27,7 +27,8 @@ class StructuredFieldSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
-    label: str = Field(min_length=1, max_length=80)
+    # Excel 审批模板可用完整条件作为列标题，不能截断条件或强制模型另造字段。
+    label: str = Field(min_length=1, max_length=4000)
     field_type: Literal[
         "string",
         "integer",

@@ -24,12 +24,44 @@ class FileLifecycleStorageService:
 
         self.settings = settings or get_settings()
 
-    def dataset_export_path(self, dataset_id: str, export_id: str) -> Path:
-        """按服务端 UUID 定位聚合导出，不允许调用者提交文件路径。"""
+    def dataset_working_version_relative_path(
+        self,
+        *,
+        dataset_id: str,
+        export_id: str,
+        version_number: int,
+    ) -> str:
+        """生成累计表格唯一工作副本的不可变内部版本路径。"""
         from uuid import UUID
 
-        relative = f"derivatives/structured-datasets/{UUID(dataset_id)}/{UUID(export_id)}.xlsx"
-        return self._resolve_under(Path(self.settings.file_storage_root), relative)
+        if version_number < 1:
+            raise ValueError("version_number 必须大于零")
+        return (
+            f"structured-datasets/{UUID(dataset_id)}/.versions/"
+            f"{version_number:06d}-{UUID(export_id)}.xlsx"
+        )
+
+    def dataset_source_version_relative_path(
+        self,
+        *,
+        dataset_id: str,
+        document_version_id: str,
+        version_number: int,
+        suffix: str,
+    ) -> str:
+        """生成格式提升前源版本的受控隐藏路径，不把旧格式暴露成第二个普通文件。"""
+
+        from uuid import UUID
+
+        normalized_suffix = str(suffix or "").lower()
+        if version_number < 1:
+            raise ValueError("version_number 必须大于零")
+        if normalized_suffix not in {".xls", ".xlsx"}:
+            raise ValueError("数据集源版本只允许受控 Excel 后缀")
+        return (
+            f"structured-datasets/{UUID(dataset_id)}/.source-versions/"
+            f"{version_number:06d}-{UUID(document_version_id)}{normalized_suffix}"
+        )
 
     def upload_path(self, storage_path: str) -> Path:
         """解析上传暂存相对路径，拒绝路径穿越。"""
@@ -79,6 +111,72 @@ class FileLifecycleStorageService:
 
         target = self.working_copy_path(relative_path)
         return self._atomic_copy(source=source, target=target, expected_sha256=expected_sha256)
+
+    def publish_dataset_current_file(
+        self,
+        *,
+        version_relative_path: str,
+        current_relative_path: str,
+        expected_sha256: str,
+    ) -> Path:
+        """把数据集不可变版本原子发布到同一工作副本的用户可见文件名。
+
+        该窄接口只允许累计数据集更新自己的当前文件；历史内容继续保存在隐藏版本路径，
+        不能被普通文件操作或客户端路径覆盖。
+        """
+
+        source = self.working_copy_path(version_relative_path)
+        target = self.working_copy_path(current_relative_path)
+        if not source.is_file() or self.sha256_file(source) != expected_sha256:
+            raise ValueError("累计表格版本文件缺失或哈希不一致")
+        if target.is_file() and self.sha256_file(target) == expected_sha256:
+            return target
+        target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = -1
+        temporary: Path | None = None
+        try:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".fa-dataset-",
+                suffix=".part",
+                dir=target.parent,
+            )
+            temporary = Path(temporary_name)
+            with source.open("rb") as source_handle, os.fdopen(descriptor, "wb") as target_handle:
+                descriptor = -1
+                shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+                target_handle.flush()
+                os.fsync(target_handle.fileno())
+            if self.sha256_file(temporary) != expected_sha256:
+                raise ValueError("累计表格当前文件发布后哈希不一致")
+            os.replace(temporary, target)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return target
+
+    def retire_dataset_legacy_current_file(
+        self,
+        *,
+        legacy_relative_path: str,
+        expected_legacy_sha256: str,
+        current_relative_path: str,
+        expected_current_sha256: str,
+    ) -> None:
+        """在新 XLSX 已完整发布后移除旧 XLS 可见入口；隐藏源版本仍保留用于版本追溯。"""
+
+        legacy = self.working_copy_path(legacy_relative_path)
+        current = self.working_copy_path(current_relative_path)
+        if not current.is_file() or self.sha256_file(current) != expected_current_sha256:
+            raise ValueError("新 XLSX 当前文件尚未安全发布")
+        if legacy == current:
+            raise ValueError("旧格式入口与新格式入口不能相同")
+        if not legacy.exists():
+            return
+        if not legacy.is_file() or self.sha256_file(legacy) != expected_legacy_sha256:
+            raise ValueError("旧 XLS 当前文件已变化，拒绝移除")
+        legacy.unlink()
 
     def stage_working_copy(
         self,

@@ -485,10 +485,30 @@ class StructuredDataset(Base):
     workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspaces.id"), nullable=False)
     created_by: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # 文件名是用户后续继续追加的可见入口；稳定对象关联仍由 working_copy_id 提供。
+    target_filename: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    target_sheet_name: Mapped[str] = mapped_column(Text, nullable=False, default="Sheet1")
+    # 明确布局用于复杂模板续写；空对象保留旧版简单表格追加语义。
+    target_layout_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
     schema_json: Mapped[list] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=False)
+    # 上传 Excel 中已有的数据必须在后续导出时保留；这里只保存标量值，不保存公式、宏或路径。
+    base_rows_json: Mapped[list] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=list
+    )
+    target_source_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     creation_key: Mapped[str] = mapped_column(String(64), nullable=False)
     creation_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 发布任务跨多次短事务占用目标，防止其他请求把尚未完成的批次一起导出。
+    active_task_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    working_copy_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("working_copies.id", ondelete="SET NULL"),
+        nullable=True, unique=True, index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
@@ -510,8 +530,26 @@ class StructuredDatasetMember(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
+class StructuredDatasetCorrection(Base):
+    """已发布记录的不可变逐格更正；原提取运行和成员仍保留作历史证据。"""
+
+    __tablename__ = "structured_dataset_corrections"
+    __table_args__ = (
+        UniqueConstraint("dataset_id", "dataset_revision", name="uq_dataset_correction_revision"),
+        UniqueConstraint("task_id", name="uq_dataset_correction_task"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    dataset_id: Mapped[str] = mapped_column(String(36), ForeignKey("structured_datasets.id", ondelete="RESTRICT"), nullable=False, index=True)
+    task_id: Mapped[str] = mapped_column(String(36), ForeignKey("structured_dataset_tasks.id", ondelete="RESTRICT"), nullable=False)
+    record_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    dataset_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    changes_json: Mapped[dict] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class StructuredDatasetExport(Base):
-    """跨文档 XLSX 快照独立管理，不伪造单文档派生件关系。"""
+    """数据集 revision 到唯一累计表工作副本文档版本的发布记录。"""
 
     __tablename__ = "structured_dataset_exports"
     __table_args__ = (UniqueConstraint("dataset_id", "dataset_revision", name="uq_dataset_export_revision"),)
@@ -521,7 +559,61 @@ class StructuredDatasetExport(Base):
     storage_path: Mapped[str] = mapped_column(Text, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    document_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="SET NULL"),
+        nullable=True, unique=True, index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class StructuredDatasetTask(Base):
+    """用户范围内可恢复的表格任务；确认前只存指纹，候选正文确认后保存。"""
+
+    __tablename__ = "structured_dataset_tasks"
+    __table_args__ = (UniqueConstraint("user_id", "request_key", name="uq_dataset_task_request"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    request_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    result_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    review_mode: Mapped[str] = mapped_column(String(30), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="WAITING_CONFIRMATION")
+    manifest_json: Mapped[dict] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict)
+    payload_json: Mapped[dict] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict)
+    progress_json: Mapped[dict] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict)
+    result_json: Mapped[dict] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict)
+    error_json: Mapped[dict] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict)
+    confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class StructuredDatasetPublication(Base):
+    """数据库先提交、同名可见文件随后同步的持久化恢复记录。"""
+
+    __tablename__ = "structured_dataset_publications"
+    __table_args__ = (
+        UniqueConstraint("task_id", name="uq_dataset_publication_task"),
+        Index("uq_dataset_publication_open", "dataset_id", unique=True,
+              postgresql_where=text("status IN ('DB_COMMITTED', 'NEEDS_REPAIR')"),
+              sqlite_where=text("status IN ('DB_COMMITTED', 'NEEDS_REPAIR')")),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    dataset_id: Mapped[str] = mapped_column(String(36), ForeignKey("structured_datasets.id", ondelete="RESTRICT"), nullable=False, index=True)
+    working_copy_id: Mapped[str] = mapped_column(String(36), ForeignKey("working_copies.id", ondelete="RESTRICT"), nullable=False, index=True)
+    task_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("structured_dataset_tasks.id", ondelete="SET NULL"), nullable=True, index=True)
+    base_document_version_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    candidate_document_version_id: Mapped[str] = mapped_column(String(36), ForeignKey("document_versions.id", ondelete="RESTRICT"), nullable=False)
+    candidate_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    visible_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="DB_COMMITTED", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    result_json: Mapped[dict] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict)
+    cleanup_json: Mapped[dict] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict)
+    agent_run_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
 class StructuredExtractionRun(Base):
@@ -597,10 +689,13 @@ class StructuredExtractionField(Base):
     )
     record_index: Mapped[int] = mapped_column(Integer, nullable=False)
     field_key: Mapped[str] = mapped_column(String(64), nullable=False)
-    field_label: Mapped[str] = mapped_column(String(80), nullable=False)
+    # 审批模板的完整条件可能超过 80 字符；与有界 schema 保持一致，不截断证据语义。
+    field_label: Mapped[str] = mapped_column(Text, nullable=False)
     field_type: Mapped[str] = mapped_column(String(40), nullable=False)
     raw_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     normalized_value_json: Mapped[Any] = mapped_column(JSON, nullable=True)
+    # 展示标记、条件判定和留空原因不混入原文及 normalized_value。
+    presentation_json: Mapped[dict] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict)
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     page_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -2726,6 +2821,43 @@ class ExternalExtractionTask(Base):
     error_json: Mapped[dict] = mapped_column(
         JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class DocumentExtractionConfirmation(Base):
+    """显式内容提取的保存前确认，只记录结果指纹而不保存正文。"""
+
+    __tablename__ = "document_extraction_confirmations"
+    __table_args__ = (
+        UniqueConstraint("task_id", "revision", name="uq_document_extraction_confirmation_revision"),
+        UniqueConstraint("task_id", "preview_key", name="uq_document_extraction_confirmation_preview_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    task_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("external_extraction_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    preview_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    result_digest: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="WAITING_CONFIRMATION", index=True
+    )
+    summary_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=dict
+    )
+    confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    saved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False

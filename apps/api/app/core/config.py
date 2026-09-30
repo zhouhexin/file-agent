@@ -338,6 +338,7 @@ class Settings(BaseModel):
     pp_structure_max_image_pixels: int = DEFAULT_PP_STRUCTURE_MAX_IMAGE_PIXELS
     pp_structure_max_pdf_pages: int = DEFAULT_PP_STRUCTURE_MAX_PDF_PAGES
     workbuddy_structured_dataset_demo_enabled: bool = False
+    workbuddy_excel_writeback_enabled: bool = False
     structured_extraction_enabled: bool = False
     structured_extraction_layout_provider: str = "pp_structure_v3"
     structured_extraction_llm_provider: str = "disabled"
@@ -1219,6 +1220,7 @@ def get_settings() -> Settings:
             maximum=500,
         ),
         workbuddy_structured_dataset_demo_enabled=os.getenv("WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED", "false").lower() == "true",
+        workbuddy_excel_writeback_enabled=os.getenv("WORKBUDDY_EXCEL_WRITEBACK_ENABLED", "false").lower() == "true",
         structured_extraction_enabled=os.getenv(
             "STRUCTURED_EXTRACTION_ENABLED", "false"
         ).lower()

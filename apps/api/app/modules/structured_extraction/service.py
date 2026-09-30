@@ -631,6 +631,7 @@ class StructuredExtractionService:
         fields: list[StructuredFieldSpec],
         candidates: CandidateExtraction,
         elements: list[EvidenceElement],
+        unscored_fields: set[tuple[int, str]] | None = None,
     ) -> StructuredExtractionResult:
         """复用字段规范化和持久化，不调用 OCR/LLM，不提交外层事务。
 
@@ -639,7 +640,7 @@ class StructuredExtractionService:
         """
         result, normalized_fields = self._normalize_candidates(
             run=run, layout_extraction_run_id=layout_extraction_run_id,
-            fields=fields, candidates=candidates, elements=elements,
+            fields=fields, candidates=candidates, elements=elements, unscored_fields=unscored_fields,
         )
         self.repository.complete_run(
             run=run, fields=normalized_fields, field_schema=result.field_schema,
@@ -657,6 +658,7 @@ class StructuredExtractionService:
         fields: list[StructuredFieldSpec],
         candidates: CandidateExtraction,
         elements: list[EvidenceElement],
+        unscored_fields: set[tuple[int, str]] | None = None,
     ) -> tuple[StructuredExtractionResult, list[tuple[int, NormalizedField]]]:
         """补齐缺失字段并执行确定性归一化、证据和质量判定。"""
 
@@ -696,6 +698,7 @@ class StructuredExtractionService:
                     raw_text
                     and status in {"NORMALIZED", "EXTRACTED"}
                     and confidence < self.settings.structured_extraction_high_confidence
+                    and (candidate_record.record_index, field.key) not in (unscored_fields or set())
                 ):
                     status = "NEEDS_REVIEW"
                     warnings = list(dict.fromkeys([*warnings, "LOW_CONFIDENCE"]))

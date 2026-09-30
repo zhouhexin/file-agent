@@ -6,6 +6,8 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.modules.agent.tool_schemas import StructuredFieldSpec
+from app.modules.structured_extraction.workbook_layout import WorkbookLayout
+from .assessment import ApprovalScope, FieldAssessment, SourceQuote
 
 
 class StrictInput(BaseModel):
@@ -18,7 +20,8 @@ class DatasetCreate(StrictInput):
     """创建共享表格时一次固定字段；不配置 owner 或授权。"""
 
     name: str = Field(min_length=1, max_length=100)
-    fields: list[StructuredFieldSpec] = Field(min_length=1, max_length=20)
+    filename: str | None = Field(default=None, min_length=1, max_length=240)
+    fields: list[StructuredFieldSpec] = Field(min_length=1, max_length=40)
     idempotency_key: str = Field(min_length=1, max_length=120)
 
     @model_validator(mode="after")
@@ -35,13 +38,56 @@ class DatasetCreate(StrictInput):
         return self
 
 
+class DatasetCreateFromExcel(StrictInput):
+    """把已入库的当前 Excel 工作副本注册为新的累计目标表。"""
+
+    document_id: UUID
+    document_version_id: UUID | None = None
+    extraction_run_id: UUID | None = None
+    sheet_name: str | None = Field(default=None, min_length=1, max_length=120)
+    legacy_target_policy: Literal["CONVERT_TO_XLSX"] | None = None
+    layout: WorkbookLayout | None = None
+    idempotency_key: str = Field(min_length=1, max_length=120)
+
+
 class FieldCandidate(StrictInput):
     """字段原文必须带回宿主正文中的稳定区段与可定位引文。"""
 
     raw_text: str | None = Field(default=None, max_length=4000)
     page_number: int | None = Field(default=1, ge=1)
-    evidence_refs: list["DatasetEvidenceRef"] = Field(default_factory=list, max_length=4)
+    evidence_refs: list["DatasetEvidenceRef"] = Field(default_factory=list, max_length=20)
     confidence: float | None = Field(default=None, ge=0, le=1)
+    fragments: list[SourceQuote] = Field(default_factory=list, max_length=100)
+    source_only_fragments: list[SourceQuote] = Field(default_factory=list, max_length=100)
+    blank_reason: str | None = Field(default=None, min_length=1, max_length=1000)
+    approval: ApprovalScope | None = None
+    assessment: FieldAssessment | None = None
+
+    @model_validator(mode="after")
+    def validate_presentation(self):
+        """原文拼接与空白说明互斥，对勾判定必须携带审批证据。"""
+        if self.fragments:
+            joined = "\n".join(ref.quote for ref in self.fragments)
+            if self.raw_text is not None and self.raw_text != joined:
+                raise ValueError("fragments 必须与 raw_text 逐字拼接一致")
+            if len(joined) > 4000:
+                raise ValueError("字段拼接内容超过 4000 字符")
+            self.raw_text = joined
+        if self.blank_reason and self.raw_text:
+            raise ValueError("有内容字段不能同时声明留空")
+        if self.source_only_fragments:
+            # 无章状态只能绑定已经逐字验证的片段；不能由调用方提供另一个展示文本。
+            all_refs = [ref.model_dump() for ref in self.fragments]
+            only_refs = [ref.model_dump() for ref in self.source_only_fragments]
+            if not self.fragments or len(only_refs) != len({str(ref) for ref in only_refs}) or any(ref not in all_refs for ref in only_refs):
+                raise ValueError("SOURCE_ONLY 必须逐一引用字段 fragments 中的唯一原文片段")
+            if self.assessment:
+                raise ValueError("SOURCE_ONLY 片段不能作为标题资格通过依据")
+            if self.approval and len(only_refs) == len(all_refs):
+                raise ValueError("全部无章片段不得借用审批证据")
+        if self.assessment and (not self.approval or not self.raw_text):
+            raise ValueError("标题条件判定必须具有字段内容及审批证据")
+        return self
 
 
 class DatasetEvidenceRef(StrictInput):
@@ -66,7 +112,7 @@ class DatasetEvidenceRef(StrictInput):
 class RecordCandidate(StrictInput):
     """记录索引按提交顺序由后端生成。"""
 
-    fields: dict[str, FieldCandidate] = Field(max_length=20)
+    fields: dict[str, FieldCandidate] = Field(max_length=40)
 
 
 class DatasetAppend(StrictInput):
@@ -76,9 +122,25 @@ class DatasetAppend(StrictInput):
     document_version_id: UUID
     extraction_run_id: UUID
     source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    content_origin: Literal["WORKBUDDY"] | None = None
+    content_origin: Literal["WORKBUDDY", "WORKBUDDY_SCOPED"] | None = None
+    target_working_copy_id: UUID | None = None
+    target_document_id: UUID | None = None
+    target_document_version_id: UUID | None = None
     idempotency_key: str = Field(min_length=1, max_length=120)
     records: list[RecordCandidate] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_target_binding(self):
+        """按文件名续写时三个稳定目标引用必须同时出现，禁止半绑定。"""
+
+        target_values = (
+            self.target_working_copy_id,
+            self.target_document_id,
+            self.target_document_version_id,
+        )
+        if any(target_values) and not all(target_values):
+            raise ValueError("目标 Excel 的 working_copy/document/version 必须同时提供")
+        return self
 
 
 class QueryFilter(StrictInput):

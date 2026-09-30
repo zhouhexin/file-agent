@@ -10,6 +10,7 @@ from app.core.api_errors import internal_error_response, register_api_error_hand
 from app.core.config import get_settings, validate_classification_runtime_settings
 from app.core.database import SessionLocal, init_database
 from app.core.logging import cleanup_old_logs, log_context, log_event, new_request_id
+from app.core.request_limits import ExcelWritebackBodyLimitMiddleware
 from app.core.security import TokenDecodeError, decode_access_token
 from app.modules.agent.router import (
     admin_agent_runs_router,
@@ -37,7 +38,10 @@ from app.modules.file_lifecycle.scheduler import enqueue_reconciliation_jobs
 from app.modules.file_lifecycle.shared_workspace import get_or_create_shared_workspace
 from app.modules.integrations.router import router as integrations_router
 from app.modules.external_extraction.document_router import router as document_extraction_router
+from app.modules.external_extraction.scoped_router import router as scoped_pdf_router
 from app.modules.structured_datasets.router import router as structured_datasets_router
+from app.modules.structured_datasets.writeback_router import router as excel_writeback_router
+from app.modules.structured_datasets.publication import recover_pending_publications
 from app.modules.managed_files.router import router as managed_files_router
 from app.modules.operations.router import router as operations_router
 from app.modules.retrieval.router import router as retrieval_router
@@ -63,6 +67,8 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         get_or_create_shared_workspace(db)
         db.commit()
+    # 启动只补偿少量记录，避免大量历史任务使 API 启动长时间阻塞；其余由 worker 周期恢复。
+    recover_pending_publications(SessionLocal, limit=2)
     if settings.managed_root_reconcile_on_startup and settings.filesystem_async_jobs_enabled:
         # 启动钩子只提交持久化任务；全量扫描、归档和复制由独立 worker 完成。
         with SessionLocal() as db:
@@ -80,6 +86,7 @@ async def lifespan(app: FastAPI):
 # 避免 Agent Runtime 扩展后把 main.py 变成混杂的调度中心。
 app = FastAPI(title="File Agent API", lifespan=lifespan)
 app.include_router(structured_datasets_router)
+app.include_router(excel_writeback_router)
 register_api_error_handlers(app)
 
 
@@ -165,6 +172,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 最外层先计数，避免 multipart 在路由的 32 MiB 检查前已写满临时磁盘。
+app.add_middleware(ExcelWritebackBodyLimitMiddleware)
+
 app.include_router(agent_router)
 app.include_router(agent_runs_router)
 app.include_router(admin_agent_runs_router)
@@ -181,6 +191,7 @@ app.include_router(file_rename_router)
 app.include_router(file_lifecycle_router)
 app.include_router(integrations_router)
 app.include_router(document_extraction_router)
+app.include_router(scoped_pdf_router)
 app.include_router(managed_files_router)
 app.include_router(operations_router)
 app.include_router(retrieval_router)
