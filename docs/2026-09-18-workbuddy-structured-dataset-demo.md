@@ -1,5 +1,7 @@
 # WorkBuddy 累计表格 Demo
 
+> 当前状态（2026-10-09）：应用户要求，WorkBuddy 插件已移除 `file-agent-structured-dataset` Skill 及其任务参数参考。下文保留为历史方案；服务端 `structured_dataset_*` 工具与 API 本次未删除。教授汇总表 B–I/L 填写、按文件名追加和手工补全回传分别由当前专用 Skill 处理。
+
 > 2026-09-20 需求扩展：在现有图片 Demo 上增加 Word/PDF 内容抽取到 Excel；OCR 及 Word/PDF 正文、
 > 表格提取全部由 WorkBuddy 完成，File Agent 负责接收、校验、保存和生成 Excel。详见
 > [三格式扩展方案](2026-09-20-workbuddy-document-to-excel-demo-extension-plan.md)。该扩展目前处于方案阶段，

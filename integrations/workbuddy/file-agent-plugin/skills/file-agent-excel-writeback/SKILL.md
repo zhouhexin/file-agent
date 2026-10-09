@@ -1,6 +1,6 @@
 ---
 name: file-agent-excel-writeback
-description: 用户明确要求由 WorkBuddy 写入完整 Excel 并回传 File Agent 保存时使用；新上传模板或按文件名追加均可，旧 structured_dataset_* 路线保持可用。
+description: 用户明确要求由 WorkBuddy 写入完整 Excel 并回传 File Agent 保存时使用；新上传模板或按文件名追加均可。教授汇总表 B–I/L 定向填表与手工补全同名文件回传分别使用其专用 Skill。
 ---
 
 # WorkBuddy 写完整 Excel，服务器验证发布
@@ -39,8 +39,8 @@ File Agent 只核对正式来源、审批证据、当前目标版本与文件差
    等任务实际完成后重试，不让 WorkBuddy 自行转换或重建原模板。
 3. 只从 checkout 的当前 Excel 读字段和已有内容，不能用上次本地缓存。读取来源材料沿用主 Skill 的
    WorkBuddy 文档提取任务和真实可用 Provider，不固定 OCR 提供商、不回退到程序内部 OCR。
-   需要盖章范围判断时同时遵守 `file-agent-sealed-item-extraction` 的审批、来源事实、身份列、
-   整列资格和末尾单次 `√` 规则；无章事实允许写入的范围以该专用 Skill 为准。来源已有正式
+   需要按印章判断属实范围、资格或业务列时，报告当前插件不支持并停止该填表任务；
+   不得用本通用写回流程代替盖章核验，也不得自动缩小为 B–I/L。来源已有正式
    提取结果时，先用 `structured_dataset_source(mode="INDEX")` 取得区段目录与固定运行 ID，
    将各列所需区段合并后用 `mode="FULL", unit_orders=[...]` 分批读取真实原文；同一来源、同一
    运行的已读取区段在本轮复用，不逐列重取完整 PDF。若索引不足以定位，读取必要续页或整份

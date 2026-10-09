@@ -1375,9 +1375,9 @@ class StructuredDatasetService:
         }
 
     def _scoped_source(self, document_id, *, version_id, extraction_run_id, mode, unit_orders):
-        """只向来源用户的明确表格任务暴露两块 OCR 原文。"""
+        """只向来源用户的明确表格任务暴露冻结的身份和考核 OCR 区域。"""
         from app.db.models import ExternalExtractionTask, IngestBatch, IngestItem
-        from app.modules.external_extraction.scoped_schemas import CONTRACT
+        from app.modules.external_extraction.scoped_schemas import CONTRACT, DISCOVERY_CONTRACT, FIXED_25_CONTRACT, LEGACY_CONTRACT
 
         if not version_id or not extraction_run_id:
             fail("SCOPED_SOURCE_BINDING_REQUIRED", "定向来源必须绑定版本和提取运行。", 422)
@@ -1385,7 +1385,9 @@ class StructuredDatasetService:
         run = self.db.get(DocumentExtractionRun, str(extraction_run_id))
         task = self.db.query(ExternalExtractionTask).filter_by(
             source_version_id=str(version_id), extraction_run_id=str(extraction_run_id),
-            provider_contract_version=CONTRACT, status="SCOPE_COMPLETE").one_or_none()
+            status="SCOPE_COMPLETE").filter(
+            ExternalExtractionTask.provider_contract_version.in_([
+                LEGACY_CONTRACT, CONTRACT, DISCOVERY_CONTRACT, FIXED_25_CONTRACT])).one_or_none()
         item = self.db.get(IngestItem, task.ingest_item_id) if task else None
         batch = self.db.get(IngestBatch, item.batch_id) if item else None
         if (version is None or run is None or task is None or batch is None or batch.user_id != self.user.id
@@ -1394,10 +1396,13 @@ class StructuredDatasetService:
                 or run.extractor != "workbuddy-scoped-pdf" or version.sha256 != task.source_sha256):
             fail("SCOPED_SOURCE_NOT_READY", "定向来源未完成或不属于当前用户和版本。", 409)
         pages = self.db.query(DocumentPage).filter_by(extraction_run_id=run.id).all()
-        if len(pages) != 2 or {p.page_number for p in pages} != {1, 3}:
+        region_specs = (task.source_manifest_json or {}).get("regions", [])
+        if (len(pages) != len(region_specs) or
+                {((p.metadata_json or {}).get("region_id"), p.page_number) for p in pages}
+                != {(region["region_id"], region["page_number"]) for region in region_specs}):
             fail("SCOPED_SOURCE_NOT_READY", "定向区域证据不完整。", 409)
         pages.sort(key=lambda p: int((p.metadata_json or {}).get("unit_order", 0)))
-        if unit_orders is not None and not set(unit_orders) <= {0, 1}:
+        if unit_orders is not None and not set(unit_orders) <= set(range(len(pages))):
             fail("SOURCE_UNIT_NOT_FOUND", "所选区域不属于本次冻结范围。", 422)
         units = []
         for page in pages:
@@ -1412,16 +1417,27 @@ class StructuredDatasetService:
         field_refs = {}
         for column, ref in (task.result_summary_json or {}).get("field_refs", {}).items():
             page = next((p for p in pages if (p.metadata_json or {}).get("region_id") == ref.get("region_id")), None)
+            if column == "L" and ref.get("status") == "NOT_FOUND":
+                field_refs[column] = {"source_unit_id": None, "page_number": None,
+                    "region_id": None, "status": "NOT_FOUND", "value": None, "years": []}
+                continue
             if page:
-                field_refs[column] = {"source_unit_id": page.id, "page_number": page.page_number,
-                    "region_id": ref["region_id"], "start": ref["start"], "end": ref["end"],
-                    **({"quote": page.text_content[ref["start"]:ref["end"]]} if mode == "FULL" else {})}
+                if column == "L":
+                    field_refs[column] = {"source_unit_id": page.id, "page_number": page.page_number,
+                        "region_id": ref["region_id"], "status": ref["status"], "value": ref["value"],
+                        "years": [{"year": item["year"], "start": item["start"], "end": item["end"],
+                                   **({"quote": page.text_content[item["start"]:item["end"]]}
+                                      if mode == "FULL" else {})} for item in ref["years"]]}
+                else:
+                    field_refs[column] = {"source_unit_id": page.id, "page_number": page.page_number,
+                        "region_id": ref["region_id"], "start": ref["start"], "end": ref["end"],
+                        **({"quote": page.text_content[ref["start"]:ref["end"]]} if mode == "FULL" else {})}
         return {"document_id": str(document_id), "document_version_id": version.id,
             "filename": version.filename, "source_sha256": version.sha256, "extraction_run_id": run.id,
             "content_origin": "WORKBUDDY_SCOPED", "source_kind": "WORKBUDDY_SCOPED",
             "scope_digest": (task.source_manifest_json or {}).get("scope_digest"),
             "coverage": (task.result_summary_json or {}).get("coverage", {}),
-            "total_source_unit_count": 2, "source_units": units, "field_refs": field_refs, "pages": []}
+            "total_source_unit_count": len(pages), "source_units": units, "field_refs": field_refs, "pages": []}
 
     def append(self, dataset_id, request: DatasetAppend):
         """在同一事务锁定数据集，保存单图事实及成员，再推进 revision。"""
@@ -1474,14 +1490,16 @@ class StructuredDatasetService:
             if not (self.workflow_task_id and getattr(self, "scoped_write_scope", False)
                     and request.content_origin == "WORKBUDDY_SCOPED"
                     and first_column == 1 and len(fields) >= 9):
-                fail("SCOPED_WRITE_SCOPE_REQUIRED", "定向来源只能用于 A–I 限列回传任务。", 422)
+                fail("SCOPED_WRITE_SCOPE_REQUIRED", "定向来源只能用于受控限列回传任务。", 422)
             required_keys = {field.key for index, field in enumerate(fields) if 1 <= index <= 8}
             for row in request.records:
                 if not required_keys <= set(row.fields):
                     fail("SCOPED_EVIDENCE_REQUIRED", "缺少 B–I 来源字段。", 422)
+                allow_review = getattr(self, "scoped_review_scope", False)
                 if any(row.fields.get(field.key) and row.fields[field.key].raw_text
-                       for index, field in enumerate(fields) if index == 0 or index >= 9):
-                    fail("SCOPED_WRITE_SCOPE_INVALID", "A 或 J 列以后不能从 PDF 写值。", 422)
+                       for index, field in enumerate(fields)
+                       if index == 0 or (index >= 9 and not (allow_review and index == 11))):
+                    fail("SCOPED_WRITE_SCOPE_INVALID", "定向来源只能写入 B–I 与获授权的 L 列。", 422)
         if any(set(row.fields) - keys for row in request.records):
             fail("UNKNOWN_FIELD", "提交包含当前表格未定义的字段。", 422)
         run = self.repository.create_run(

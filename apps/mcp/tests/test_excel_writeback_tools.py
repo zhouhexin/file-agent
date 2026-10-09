@@ -13,7 +13,29 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import Font, PatternFill
 
-from file_agent_mcp.excel_writeback_tools import _scoped_a_i_rows, register_excel_writeback_tools
+from file_agent_mcp.excel_writeback_tools import (
+    _scoped_a_i_rows, _scoped_identity_review_rows, register_excel_writeback_tools,
+)
+
+
+def test_scoped_identity_review_rows_only_populates_b_i_and_l():
+    """桥接层内部补空位，避免宿主把 JSON null 改写为非空值。"""
+    values = {column: column for column in "BCDEFGHI"}
+    rows = _scoped_identity_review_rows([{**values, "L": "2022、2024"}, values], 27)
+    assert len(rows) == 2
+    assert all(len(row) == 27 for row in rows)
+    assert rows[0][1:9] == list("BCDEFGHI")
+    assert rows[0][11] == "2022、2024"
+    assert rows[1][11] is None
+    partial = _scoped_identity_review_rows([{"B": "学院", "I": "2016.6"}], 27)[0]
+    assert partial[1] == "学院" and partial[8] == "2016.6"
+    assert all(partial[index] is None for index in range(2, 8))
+    assert all(row[0] is None and row[9] is None and row[10] is None
+               and all(value is None for value in row[12:]) for row in rows)
+    with pytest.raises(ValueError, match="SCOPED_WRITE_SCOPE_INVALID"):
+        _scoped_identity_review_rows([{**values, "J": "越界"}], 27)
+    with pytest.raises(ValueError, match="SCOPED_WRITE_SCOPE_INVALID"):
+        _scoped_identity_review_rows([{"B": None}], 27)
 from file_agent_mcp.client import WorkBuddyAttachmentRegistry
 from file_agent_mcp.workbuddy_submission import WorkBuddySubmissionService
 from file_agent_mcp.xlsx_writeback import patch_existing_cells, patch_workbook

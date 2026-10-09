@@ -27,10 +27,13 @@ def main():
     with zipfile.ZipFile(output) as archive:
         assert archive.testzip() is None
         assert ".codebuddy-plugin/marketplace.json" in archive.namelist()
-        assert "file-agent-plugin/skills/file-agent-structured-dataset/references/task-payload.md" in archive.namelist()
+        assert "file-agent-plugin/skills/file-agent-structured-dataset/SKILL.md" not in archive.namelist()
+        assert "file-agent-plugin/skills/file-agent-structured-dataset/references/task-payload.md" not in archive.namelist()
         assert "file-agent-plugin/skills/file-agent-a-i-scoped-excel/SKILL.md" in archive.namelist()
         assert "file-agent-plugin/skills/file-agent-a-i-scoped-excel/references/a-i-source-map.md" in archive.namelist()
-        assert "file-agent-plugin/skills/file-agent-full-professor-excel/SKILL.md" in archive.namelist()
+        assert "file-agent-plugin/skills/file-agent-full-professor-excel/SKILL.md" not in archive.namelist()
+        assert "file-agent-plugin/skills/file-agent-sealed-item-extraction/SKILL.md" not in archive.namelist()
+        assert "file-agent-plugin/skills/file-agent-sealed-item-extraction/references/column-source-map.md" not in archive.namelist()
         assert "file-agent-plugin/skills/file-agent-excel-grid-archive/SKILL.md" in archive.namelist()
         assert "file-agent-plugin/skills/file-agent-excel-grid-archive/scripts/grid_to_payload.py" in archive.namelist()
         assert "file-agent-plugin/skills/file-agent-manual-excel-revision/SKILL.md" in archive.namelist()

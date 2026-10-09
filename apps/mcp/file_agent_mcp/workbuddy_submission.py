@@ -157,8 +157,8 @@ class WorkBuddySubmissionService:
             rule_profile="content_based", extraction_profile="SCOPED_EXCEL_SOURCE",
             extraction_save_policy="DIRECT_ARCHIVE")
         return {"target": target, "source": source, "target_filename": excels[0].filename,
-                "source_filename": pdfs[0].filename, "required_pdf_columns": list("BCDEFGHI"),
-                "write_columns": list("ABCDEFGHI")}
+                "source_filename": pdfs[0].filename, "required_pdf_columns": [*list("BCDEFGHI"), "L"],
+                "write_columns": [*list("ABCDEFGHI"), "L"]}
 
     async def ingest_scoped_pdf_append(self, *, submission_ref: str, target_filename: str) -> dict[str, Any]:
         """只接收本轮 PDF，先按用户明确写出的完整名称锁定已发布目标。"""
@@ -184,8 +184,8 @@ class WorkBuddySubmissionService:
             rule_profile="content_based", extraction_profile="SCOPED_EXCEL_SOURCE",
             extraction_save_policy="DIRECT_ARCHIVE")
         return {"target": target, "source": source, "target_filename": target["filename"],
-                "source_filename": manifest[0].filename, "required_pdf_columns": list("BCDEFGHI"),
-                "write_columns": list("ABCDEFGHI")}
+                "source_filename": manifest[0].filename, "required_pdf_columns": [*list("BCDEFGHI"), "L"],
+                "write_columns": [*list("ABCDEFGHI"), "L"]}
 
     async def ingest_scoped_sources(self, *, submission_ref: str,
                                     target_filename: str | None = None,
@@ -243,8 +243,8 @@ class WorkBuddySubmissionService:
                         for index, item in enumerate(sources)]
         return {"target": target, "target_kind": target_kind, "target_filename": target_name,
                 "source_batches": batches, "source_order": source_order,
-                "required_source_columns": list("BCDEFGHI") if not full_professor else list("BCDEFGHIJKLMNOPQRSTUVWXYZ") + ["AA"],
-                "write_columns": list("ABCDEFGHI") if not full_professor else list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") + ["AA"]}
+                "required_source_columns": [*list("BCDEFGHI"), "L"] if not full_professor else list("BCDEFGHIJKLMNOPQRSTUVWXYZ") + ["AA"],
+                "write_columns": [*list("ABCDEFGHI"), "L"] if not full_professor else list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") + ["AA"]}
 
     def load(self, *, submission_ref: str) -> TrustedSubmission:
         """读取一个未过期、非软链接且结构完整的插件提交单。"""

@@ -533,7 +533,7 @@ async def scoped_excel_pdf_append_ingest(submission_ref: str, target_filename: s
 
 @mcp.tool(
     name="scoped_excel_sources_ingest",
-    description="本轮固定 1–20 份 PDF/DOC/DOCX 来源；首次另带一份 Excel，后续按任务文字中的完整 .xlsx 文件名追加。按附件顺序每份一行。",
+    description="本轮固定 1–20 份 PDF/DOC/DOCX 来源；首次另带一份 Excel，后续按完整 .xlsx 文件名追加。按附件顺序每份一行，定向填写 B–I 及 L 优秀年度。",
     structured_output=True,
 )
 async def scoped_excel_sources_ingest(submission_ref: str, target_filename: str | None = None) -> dict[str, Any]:

@@ -1,10 +1,12 @@
 # WorkBuddy 职称汇总表 B–AA 同轮识别与低成本执行方案
 
+> 历史方案：2026-10-09 应用户要求，从当前 WorkBuddy 插件中删除 `file-agent-full-professor-excel` 和 `file-agent-sealed-item-extraction` Skill。下文记录此前实现与设计，相关 Skill 链接仅供历史参考，不再代表当前插件可调用能力；后端完整列接口本次未删除。
+
 日期：2026-09-30
 
 实施进度（2026-09-30）：已新增 `file-agent-full-professor-excel` Skill、独立可信多 PDF 导入入口、`A:AA` 完整行任务契约、OCR 待核对展示及单次 Excel 发布校验。当前首版沿用 `WORKBUDDY_DOCUMENT` 的完整页面读取契约：每份 PDF 最多执行一次全页 OCR，归档后只把 B–AA 相关页的正式 unit 批量交给模型，保留印章图像证据。对这份 25 页扫描样本，相关栏目跨越大多数页面；首版主要节省重复 OCR、重复上下文和多次 Excel 发布，**不声称已实现按区域裁剪或减少 OCR 页数**。下文 2.2 的区域图、跨任务区域缓存以及 3.2 的自动硬预算仍是下一阶段设计，不能把 Skill 的一次读取约束当作已经具备服务端成本预算器。
 
-状态：首版已开发，后续增强见上文实施进度。首期适用于上传目标 Excel 与扫描 PDF 的首次填表，以及向已发布的 `申报人员业绩汇总-教学科研型教授.xlsx` 按文件名追加新 PDF 人员行。Word 来源须在能提供等价原始印章图像、位置和审批范围后单独扩展，纯 Word 文字不能充当盖章证据。现有 A–I 定向技能继续服务用户**明确只要求 A–I** 的任务；完整填表任务使用新的 B–AA 同轮契约，不能先运行 A–I 技能发布一版，再补 J–AA。本轮用户明确要求按印章判断业务列，因此须同时遵守 [`file-agent-sealed-item-extraction`](../integrations/workbuddy/file-agent-plugin/skills/file-agent-sealed-item-extraction/SKILL.md) 及其 [A–AA 列来源路由](../integrations/workbuddy/file-agent-plugin/skills/file-agent-sealed-item-extraction/references/column-source-map.md)。
+状态：首版已开发，后续增强见上文实施进度。首期适用于上传目标 Excel 与扫描 PDF 的首次填表，以及向已发布的 `申报人员业绩汇总-教学科研型教授.xlsx` 按文件名追加新 PDF 人员行。Word 来源须在能提供等价原始印章图像、位置和审批范围后单独扩展，纯 Word 文字不能充当盖章证据。现有 A–I 定向技能继续服务用户**明确只要求 A–I** 的任务；完整填表任务使用新的 B–AA 同轮契约，不能先运行 A–I 技能发布一版，再补 J–AA。当时的印章业务列设计还依赖 `file-agent-sealed-item-extraction` 及其 A–AA 列来源路由；两者已从当前插件移除。
 
 ## 1. 目标与样本事实
 

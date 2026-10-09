@@ -1,5 +1,19 @@
 # WorkBuddy 只填 A–I 列的定向 PDF OCR 方案
 
+> 2026-10-09 更新：插件已删除 `file-agent-full-professor-excel` Skill。以下 2026-10-08 的全列路由说明属于历史记录；当前明确要求 A–AA 全列与印章核验时报告不支持，不改走 B–I/L 定向流程。
+
+## 2026-10-08 追加入口选择修正
+
+未指定列范围的“把 PDF/Word 信息追加到已发布的教授业绩汇总 `.xlsx`”默认选择 `file-agent-a-i-scoped-excel`，只写 B–I 与 L；“直接保存、返回新增行号、新版本和下载链接”仅指定保存方式与回执，不扩大列范围。`file-agent-full-professor-excel` 仅在用户本轮明确提出 A–AA 全列同时填写并核对印章时选择。此规则同时写进入口 Skill 和两个业务 Skill 的简介/前置条件，以防 WorkBuddy 直接命中全列 Skill 时绕过入口说明。它只调整 Skill 路由，不改变后端提取正则或写回契约。需发布新插件版本并重新安装，已安装的 0.1.56 缓存不会自动读取仓库改动。
+
+## 2026-10-08 更新：原 Skill 扩展 L 列考核优秀年度
+
+当前 `file-agent-a-i-scoped-excel` 同时填写 A–I 与物理 L 列。L 仅取来源文件“任现职以来的考核情况”栏目中，考核结果明确为“优秀”的四位年度；升序去重并以 `、` 连接。合格、称职等年度不写入；无优秀年度或 OCR 文字无法辨认时 L 留空并记录明确原因。J、K、M–AA 继续不提取或写入，不做印章、资格或业绩判断。本次是在原 Skill 上扩展，其他同类 Skill 不参与这条任务。
+
+新版 `workbuddy-scoped-pdf-v2` PDF 任务只裁剪三处：第 1 页 `cover_identity`、第 3 页 `basic_profile`、末页 `annual_review`。25 页参考 PDF 的末页栏目已人工核对；22 页 A4 版只采用较宽的末页候选框，须由真实 OCR 读出栏目标题后才能提交，实际版式仍待 WorkBuddy 宿主验收。不得向 OCR 发送整篇 PDF、自动扩页或为不确定文字重复读取。B–I 的值与 L 的年度证据一起提交，L 的状态分别为 `EXCELLENT_FOUND`、`NO_EXCELLENT`、`UNREADABLE`。旧版 v1 已签发任务仍可按原两区契约完成，但新版 `A:I,L` 写回只接受包含末页考核区的 v2 来源。
+
+写回载荷设置 `write_scope="A:I,L"`、`required_pdf_columns="B:I,L"`，完整目标表头必须覆盖 L。WorkBuddy `apply.rows` 仅传 B–I 八值与可选 L 字符串；服务端根据冻结 schema 补齐 A、J、K、M–AA 空位，避免宿主把 `null` 改写。PDF 的 L 值必须逐年匹配冻结 OCR 原文引文；Word 则从正式正文 unit 的该栏目引文取值。单轮 1–20 份 PDF/Word 来源仍是每份一行、一次发布同名 `.xlsx` 新版本。沿用现有任务、来源页、数据集、文件版本和审计表，不需要数据库迁移。旧文下文描述的是 2026-09-28 的 A–I 基线，遇到列范围差异以本节为准。
+
 日期：2026-09-28
 
 状态：已实现 WorkBuddy 0.1.50 Skill、可信附件拆分、定向 PDF 区域 OCR API/MCP、B–I 证据验收及 A–I 限列 Excel 回传；首次上传表取代唯一同名已发布旧目标，后续可只上传一份 PDF 并按完整 `.xlsx` 文件名向同一目标追加。B–I 八值行绕过宿主 `null` 占位传输。自动 API/MCP 回归通过；真实 WorkBuddy 宿主 OCR 效果需安装本版套件验收。服务端 PDF 完成条件只覆盖 B–I 八列。

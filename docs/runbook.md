@@ -1632,6 +1632,8 @@ python -m app.scripts.repair_structured_dataset_publication --publication-id <pu
 
 ## WorkBuddy 教授业绩 A–AA 整行填表（2026-09-30）
 
+> 历史流程：2026-10-09 已从插件移除 `file-agent-full-professor-excel` Skill。以下 0.1.55 操作说明仅供旧版本排障；当前插件不提供 A–AA 完整填报，明确请求该能力时停止并说明不支持。
+
 部署当前 API 与 MCP 代码，保持 `WORKBUDDY_STRUCTURED_DATASET_DEMO_ENABLED=true`、
 `WORKBUDDY_DOCUMENT_EXTRACTION_ENABLED=true`、`WORKBUDDY_EXCEL_WRITEBACK_ENABLED=true`，
 重启 API、文件队列 worker 与 MCP，再安装 `integrations/workbuddy/file-agent-marketplace-0.1.55.zip` 并新开 WorkBuddy 会话。
@@ -1640,3 +1642,17 @@ python -m app.scripts.repair_structured_dataset_publication --publication-id <pu
 `file-agent-full-professor-excel` 完成 PDF 一次读取、逐列印章验证、整行写回和一次发布。
 只有返回 `COMPLETED`、`excel_published=true` 及当前版本下载资源才算成功；待核对 OCR 格可见但不参与核验或合计。
 本版不新增数据库迁移，OCR 仍使用完整页面契约，不能宣称已按区域减少 OCR 页数。
+
+## WorkBuddy 定向教授汇总表 L 列倒序找页（2026-10-08）
+
+当前 Skill 已切换到[固定第 25 页 v4 方案](2026-10-08-workbuddy-l-fixed-page25-plan.md)：新签发任务只冻结第 1、3、25 页；不足 25 页或第 25 页裁剪图无真实考核栏目时 L 留空，不向前查找。未完成的 v2/v3 可调用 `scoped_pdf_fixed25_upgrade`（API 为 `POST /api/integrations/v1/scoped-pdf-sources/{task_id}/fixed25-upgrade`）受控重签。须同时部署 API/MCP、重启服务并重新安装插件 0.1.62；无数据库迁移。下文 v3 倒序说明仅供旧任务排障。
+
+0.1.61 补充：v4 的 B–I 可逐列留空，PDF `fields` 仅包含有证据的列；写回候选对缺失列使用 `SOURCE_FIELD_NOT_FOUND` 或 `OCR_UNREADABLE`，`rows` 省略这些物理列键。服务端仍校验所有已填写值的正式来源证据，L 继续只看第 25 页。需同步更新 API/MCP 和插件，无数据库迁移。
+
+新签发的定向 PDF 任务使用 `workbuddy-scoped-pdf-v3`。部署同一版本的 API、MCP 和插件 `0.1.59`，重启 API、文件队列 worker 与 MCP，再完全退出并重开 WorkBuddy、新建会话；只更新 Skill 文本不能使用新工具。保持现有集成、文档提取、结构化数据集和 Excel 写回开关配置。本次发现进度写入已有任务 JSON，不新增数据库迁移；旧 v1/v2 任务本身不改写，未完成的 v2 可按下文受控重签。
+
+新 MCP 工具 `scoped_pdf_review_probe` 每次只下载服务端当前候选页；`scoped_pdf_review_probe_submit` 回传该页真实 OCR 文本、图像 SHA 与栏目标题框；`scoped_pdf_review_region` 仅在找到栏目后下载冻结的真实栏目图。对应 API 为 `GET /api/integrations/v1/scoped-pdf-sources/{task_id}/review-probe`、`GET .../review-probe/image`、`POST .../review-probe/results`。工作流按末页至首页逐页递减，命中即停；查完仍未找到时 L 留空，原因是 `ANNUAL_REVIEW_NOT_FOUND`。正式写回仍要求 B–I 和 L 同轮提交，且使用定位后当前 `scope_digest`。详见 [倒序找页方案](2026-10-08-workbuddy-l-reverse-page-discovery-plan.md)。
+
+2026-10-08 补充：0.1.59 增加已签发但未完成的 v2 固定末页任务升级。先用 `scoped_pdf_source_get` 看 `provider_contract_version`；若为 v2，调用 `scoped_pdf_review_discovery_upgrade(task_id)`，用返回的新 `task_id` 重新 claim，再走倒序找页。对应 API 为 `POST /api/integrations/v1/scoped-pdf-sources/{task_id}/review-discovery-upgrade`。旧租约、旧 L 图像和旧 `scope_digest` 立即作废；不要向旧任务重试提交。升级过程复用原归档 PDF，不重新上传，也不需要数据库迁移。安装插件 0.1.59 前仍须同步部署 API/MCP 并重启；仅替换本地 Skill 不会让服务端接受升级调用。
+
+如果新版任务已显示 `FOUND`，但下载的 `annual_review` PNG 没有真实考核正文，调用 `scoped_pdf_review_region_reject` 提交该图 SHA、当前 Worker/token 与 `HEADING_ABSENT` 或 `SECTION_OUTSIDE_CROP`。服务端退回到前一页继续查找，不能把签字/审批文字提交为 L。对应 API 为 `POST /api/integrations/v1/scoped-pdf-sources/{task_id}/review-region/reject`；退回后须使用新的 `scope_digest`。真实栏目只有非优秀年度或字迹不清时按原栏目留空，不用退回接口跳页。

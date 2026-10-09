@@ -1,6 +1,24 @@
 # 文件助手 WorkBuddy 附件桥接
 
-当前套件 **0.1.55**：新增 `file-agent-full-professor-excel`，首次可用一份 Excel 与 1–20 份 PDF 填写 A–AA 全列，后续只上传 PDF 并按完整 `.xlsx` 文件名续写。PDF 正文一次读取并复用页证据；模糊 OCR 在 Excel 中明确标记，不触发重复识别，也不计入核验或对勾。完整行同轮一次发布，旧 A–I Skill 保持独立。需部署 API/MCP、重启服务并安装新版插件；无需数据库迁移。
+当前套件 **0.1.64**：移除 `file-agent-structured-dataset` Skill 及其任务参数参考，清理附件桥接的旧累计表路由和打包依赖。教授汇总表 B–I/L 与按文件名追加仍用 `file-agent-a-i-scoped-excel`，手工补全同名 Excel 回传仍用 `file-agent-manual-excel-revision`；通用完整 Excel 写回由现有 `file-agent-excel-writeback` 承担。服务端 `structured_dataset_*` 工具与 API 本次未删除。插件更新后需重新安装或让 WorkBuddy 重新装载。
+
+0.1.63：移除 `file-agent-sealed-item-extraction` Skill 及其列来源表，清理现行入口对它的引用。教授汇总表继续使用 `file-agent-a-i-scoped-excel` 的 B–I 与 L 定向流程；盖章属实项目提取、A–AA 全列及印章核验请求报告当前插件不支持，不自动缩小任务。
+
+0.1.62：移除 `file-agent-full-professor-excel` Skill。普通教授汇总表追加继续使用 `file-agent-a-i-scoped-excel` 的 B–I 与 L 定向流程；明确要求 A–AA 全列及印章核验时报告当前插件不支持，不自动缩小任务。
+
+0.1.61：`file-agent-a-i-scoped-excel` 的 B–I 允许逐列留空，已有值仍须逐字引用来源，缺失列标明 `SOURCE_FIELD_NOT_FOUND` 或 `OCR_UNREADABLE`，不阻止该来源追加一行。PDF L 列仍只看物理第 25 页。
+
+0.1.60：PDF L 列只看物理第 25 页。页数不足或第 25 页裁剪图没有真实考核栏目时 L 留空，不再向前找页。新任务为 v4；未完成 v2/v3 可用 `scoped_pdf_fixed25_upgrade` 重签，旧租约失效。
+
+0.1.59：已签发但未完成的 v2 固定末页任务可用 `scoped_pdf_review_discovery_upgrade` 受控重签为 v3。该倒序流程仅为历史兼容，当前 Skill 不再调用。
+
+0.1.58：`file-agent-a-i-scoped-excel` 的 L 列从 PDF 实际末页向前逐页定位“任现职以来的考核情况”，找到后冻结真实页码和栏目范围；优先用 PDF 文字层，扫描件每次仅向 OCR 发一页定位图。命中后复用完整的定位 OCR 文本或只补一次栏目 OCR；查至首页未找到则 L 留空并记录原因。
+
+0.1.57：未指定列范围的“把 PDF/Word 信息追加到已发布的教授业绩汇总 `.xlsx`”默认由 `file-agent-a-i-scoped-excel` 处理 B–I 与 L；只有本轮明确要求 A–AA 全列同时填写且核对印章时才进入 `file-agent-full-professor-excel`。插件 Skill 的简介、入口前置条件及桥接路由均已同步，避免仅凭“已有表追加、直接保存、给链接”误选整篇 PDF 的全列流程。
+
+0.1.56：原 `file-agent-a-i-scoped-excel` 增加物理 L 列，只从“任现职以来的考核情况”提取考核优秀年度。新版 PDF 只 OCR 第 1、3 页和末页三个冻结区域，B–I 与 L 同轮写入；无优秀或文字不清时 L 留空并标记，J、K、M–AA 不处理。首次一份 Excel 与 1–20 份 PDF/Word，后续按完整 `.xlsx` 文件名追加并发布。需同步部署 API/MCP、重启服务并安装新版插件；无需数据库迁移。
+
+0.1.55：新增 `file-agent-full-professor-excel`，首次可用一份 Excel 与 1–20 份 PDF 填写 A–AA 全列，后续只上传 PDF 并按完整 `.xlsx` 文件名续写。PDF 正文一次读取并复用页证据；模糊 OCR 在 Excel 中明确标记，不触发重复识别，也不计入核验或对勾。完整行同轮一次发布。
 
 0.1.54：`file-agent-manual-excel-revision` 支持把与本轮上传文件完全一致的服务器可见 Excel 直接编辑结果登记为新版本。用户基于已发布 Excel 手工补全后，本轮上传同名 `.xlsx`；WorkBuddy 用编辑前冻结的版本 ID/SHA 回传，服务端发布为同一工作副本的新版本，旧版保留。
 
@@ -45,7 +63,7 @@
 
 打包：项目根运行 `python integrations/workbuddy/build_marketplace.py`。
 本地升级服务：`python -m http.server 8175 --bind 127.0.0.1 --directory integrations/workbuddy`。
-下载地址：`http://127.0.0.1:8175/file-agent-marketplace-0.1.55.zip`。
+下载地址：`http://127.0.0.1:8175/file-agent-marketplace-0.1.62.zip`。
 
 2026-09-22 盖章审批规则更新（历史套件 0.1.31）：审批声明、盖章证据和唯一项目映射成立即可，签字不再是必需条件。
 盖章证据可由 `type=Image` 且 OCR 返回“圆章”的元素、印章检测区域或图内红色圆形印记检测结果提供；每项仍须带 PDF 页码。

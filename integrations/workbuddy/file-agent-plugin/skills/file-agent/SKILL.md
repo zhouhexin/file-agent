@@ -5,7 +5,7 @@ description: 当本轮上下文含 FILE_AGENT_HOST_SUBMISSION，且用户要求�
 
 # 文件助手附件桥接
 
-用户要求教授业绩汇总模板 A–AA 全列同时填写、核对印章并控制 OCR 重复调用时，转用 `file-agent-full-professor-excel`；用户明确只填写 A–I 时仍用 `file-agent-a-i-scoped-excel`。完整任务的 PDF 使用独立的 `full_professor_excel_sources_ingest`，不得走 A–I 区域契约。
+用户把 PDF/Word 信息追加到已发布的教授业绩汇总 `.xlsx`，或者首次上传该模板填表，而没有明确写出列范围时，默认使用 `file-agent-a-i-scoped-excel`，同轮只填 B–I 身份列和 L 考核优秀年度。提示词中的“追加到已有 Excel”“直接保存”“给新增行号、新版本和下载链接”只说明目标与保存方式，不能视为 A–AA 全列授权。用户若明确要求 A–AA 全列同时填写并核对印章，报告当前插件不提供完整教授表填报 Skill 并停止，不得擅自改成 B–I 与 L 定向任务。
 
 仅在当前轮出现 `FILE_AGENT_HOST_SUBMISSION ref=...`，且用户明确要求将本轮附件导入、归档、整理、解析、OCR、提取内容或分类时调用。“文件助手”是面向用户的中文称呼，用户无需输入英文产品名；例如“请用文件助手归档并分类本轮附件”或“从刚上传的文件提取姓名和金额”。不提称呼但任务明确时同样可以调用；只说“文件助手”而未给出文件任务，不得导入。可信文档引用当前支持 `.doc/.docx/.pdf/.xls/.xlsx/.txt`；图片必须由宿主提供 `image_blob_ref`。`count=pending` 是 WorkBuddy 5.5.3/插件 0.1.15 的正常延迟解析状态，不是失败。
 
@@ -36,7 +36,7 @@ description: 当本轮上下文含 FILE_AGENT_HOST_SUBMISSION，且用户要求�
 
 `workbuddy_submission_ingest(submission_ref=<ref>, extraction_profile=..., extraction_save_policy=...)`
 
-有可信提交单引用时必须调用 `workbuddy_submission_ingest`，不得从引用中自行重建附件字段。只有宿主直接提供稳定提交 ID、附件 ID、原文件名和位于预配置缓存根内的真实文件引用时，才允许调用 `workbuddy_attachment_ingest`；不得索取或猜测 `local_path`、附件 ID、文件名及提交 ID。如果用户只是查看附件、讨论附件内容，或没有表达交给文件助手保存/处理的意图，不调用导入工具。
+本 Skill 的普通附件导入有可信提交单引用时必须调用 `workbuddy_submission_ingest`，不得从引用中自行重建附件字段。已路由到 B–I/L 定向填表、手工补全 Excel 回传或完整 Excel 写回 Skill 的任务，使用各自规定的专用接收工具，不先调用普通导入。只有宿主直接提供稳定提交 ID、附件 ID、原文件名和位于预配置缓存根内的真实文件引用时，才允许调用 `workbuddy_attachment_ingest`；不得索取或猜测 `local_path`、附件 ID、文件名及提交 ID。如果用户只是查看附件、讨论附件内容，或没有表达交给文件助手保存/处理的意图，不调用导入工具。
 
 如果用户要求归档本轮上传的附件，但当前轮没有 `FILE_AGENT_HOST_SUBMISSION ref=...`，应说明附件桥接尚未提供可信提交单并停止本次导入。不得用 Bash、`cp`、`Copy-Item` 将附件复制到授权目录，也不得用 `file_batch_ingest` 冒充本轮附件导入。用户另外明确指定已授权本地目录的批量导入不受这条附件边界影响。
 
@@ -60,12 +60,10 @@ description: 当本轮上下文含 FILE_AGENT_HOST_SUBMISSION，且用户要求�
 
 ## 文档内容提取与确认流程
 
-**Excel 任务分流**：如果用户要求生成或追加 Excel，以下单文档确认流程不作为最终保存链。
-读取来源后，只有用户明确要求先复核时才走 REVIEW_REQUIRED：只做 document_extraction_preview 缓存，随后按累计表 Skill 生成完整逐列
-structured_dataset_preview；展示所有列内容和留空原因后才请求一次确认。确认时调用
-structured_dataset_confirm，由其提交固定文档草稿并推进服务器 Excel 发布。
-DIRECT_SAVE 按原授权 submit 后调用累计表任务的 preview(DIRECT_SAVE)/commit，不另加确认。
-无明确项号不阻止整栏属实内容填写；签字不必需。只有 excel_published=true 才报告 Excel 保存成功。
+**Excel 任务分流**：教授汇总表 B–I/L 填表与按文件名追加交给 `file-agent-a-i-scoped-excel`，
+手工补全后的同名 Excel 回传交给 `file-agent-manual-excel-revision`；其他明确要求完整 Excel 写回的任务
+交给现有 `file-agent-excel-writeback`。各 Skill 按自己的接收、复核和发布工具执行；以下单文档确认流程
+不作为 Excel 的最终保存链。只有对应发布工具返回 `excel_published=true` 才报告 Excel 保存成功。
 
 对每个带 `document_extraction_task_id` 的条目：
 
@@ -109,13 +107,12 @@ DIRECT_SAVE 按原授权 submit 后调用累计表任务的 preview(DIRECT_SAVE)
    MCP 重用本地草稿并受控恢复租约，不再由模型重建长正文；正文变化必须重新 preview 并确认。
    同一错误最多修正重试一次；禁止反复领取任务、重复 OCR 或写本地替代 Excel 冒充服务端成功。
 
-用户要求把提取结果累计到表格时，使用本节开头的 Excel 任务分流和
-`file-agent-structured-dataset` Skill，不先结束于单文档确认成功；禁止本地 Office 替代服务器发布。
-如果本轮唯一新上传的目标表是旧版 `.xls`，仍由 WorkBuddy 真实电子表格能力读取和预览；submit 后必须交给
-`file-agent-structured-dataset` 的“旧版 XLS 目标表格式提升”流程。后端工具未真实提供该能力时安全失败并要求
-用户另传 `.xlsx`，不得用 `structured_dataset_create`、模型重建、Shell 或临时转换冒充目标注册成功。
-如果用户要求 PDF 只保留盖章声明中“第几项至第几项属实”覆盖的项目，必须同时应用
-`file-agent-sealed-item-extraction`，在预览中排除所有未形成完整盖章证据链的项目。
+用户要求把提取结果写入 Excel 时，使用本节开头的 Excel 任务分流，不先结束于单文档确认成功；
+禁止本地 Office 替代服务器发布。如果本轮新上传的目标表是旧版 `.xls`，由适用的填表 Skill 按真实网格
+读取并交给服务器受控提升为 `.xlsx`；对应工具未提供该能力时安全失败并要求用户另传 `.xlsx`，
+不得用模型重建、Shell 或临时转换冒充目标注册成功。
+如果用户要求 PDF 只保留盖章声明覆盖的项目、核对印章或据此填写业绩列，报告当前插件不支持并停止该填表任务；
+不得改走普通表格流程，也不得自动缩小为 B–I/L 定向填表。
 
 ## 认证配置安全边界
 

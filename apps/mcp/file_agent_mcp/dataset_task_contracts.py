@@ -129,8 +129,8 @@ class TaskManifest(StrictInput):
     sealed_only: bool = False
     identity_column_range: Literal["B:I"] | None = Field(default=None, exclude_if=lambda value: value is None)
     source_fact_column_range: Literal["J:P"] | None = Field(default=None, exclude_if=lambda value: value is None)
-    write_scope: Literal["A:I", "A:AA"] | None = Field(default=None, exclude_if=lambda value: value is None)
-    required_pdf_columns: Literal["B:I"] | None = Field(default=None, exclude_if=lambda value: value is None)
+    write_scope: Literal["A:I", "A:I,L", "A:AA"] | None = Field(default=None, exclude_if=lambda value: value is None)
+    required_pdf_columns: Literal["B:I", "B:I,L"] | None = Field(default=None, exclude_if=lambda value: value is None)
     extraction_confirmations: list[ExtractionConfirmationRef] = Field(default_factory=list, max_length=21)
 
     @model_validator(mode="after")
@@ -147,12 +147,16 @@ class TaskManifest(StrictInput):
                 raise ValueError("完整教授表必须精确覆盖物理 A:AA 列")
         elif (self.write_scope is None) != (self.required_pdf_columns is None):
             raise ValueError("定向写入范围与 PDF 必填范围必须同时提供")
-        if self.write_scope == "A:I":
+        if self.write_scope in {"A:I", "A:I,L"}:
             if self.target.new is not None or self.target.layout is None or self.sealed_only or self.identity_column_range or self.source_fact_column_range:
-                raise ValueError("A–I 定向写入需要已有模板的真实布局，且不能混用盖章任务")
+                raise ValueError("定向写入需要已有模板的真实布局，且不能混用盖章任务")
+            if self.required_pdf_columns != ("B:I,L" if self.write_scope == "A:I,L" else "B:I"):
+                raise ValueError("定向写入与 PDF 必填列范围不一致")
             left = _header_left_column(self.target.layout)
-            if left != 1 or len(self.target.labels) < 9:
-                raise ValueError("A–I 定向写入要求目标真实物理列从 A 开始并覆盖 I")
+            from openpyxl.utils.cell import range_boundaries
+            right = range_boundaries(self.target.layout.header_range)[2]
+            if left != 1 or right < (12 if self.write_scope == "A:I,L" else 9) or len(self.target.labels) < (12 if self.write_scope == "A:I,L" else 9):
+                raise ValueError("定向写入要求目标真实物理列从 A 开始并覆盖全部指定列")
         if self.source_fact_column_range is not None:
             if not self.sealed_only or self.identity_column_range != "B:I" or self.target.new is not None:
                 raise ValueError("J:P 无章来源事实仅适用于盖章专用 Excel 模板")
@@ -201,7 +205,7 @@ class TaskPayload(StrictInput):
     @model_validator(mode="after")
     def validate_coverage(self):
         """必填完整列及留空原因在发送前即可发现。"""
-        if (self.manifest.write_scope in {"A:I", "A:AA"}
+        if (self.manifest.write_scope in {"A:I", "A:I,L", "A:AA"}
                 and [record.source_index for record in self.records] != list(range(len(self.manifest.sources)))):
             raise ValueError("A–I 批量任务必须每份来源恰好对应一行，并按附件顺序排列")
         for record in self.records:
@@ -213,14 +217,30 @@ class TaskPayload(StrictInput):
             for index, field in enumerate(record.fields):
                 if not field.raw_text and not field.blank_reason:
                     raise ValueError("每个空列必须提供留空原因")
-                if self.manifest.write_scope == "A:I":
+                if self.manifest.write_scope in {"A:I", "A:I,L"}:
                     column = left + index
                     if column == 1 and (field.raw_text or field.blank_reason != "TARGET_DERIVED"):
                         raise ValueError("A 列只能沿用目标模板序号")
-                    if 2 <= column <= 9 and (not field.raw_text or not field.evidence_refs or field.assessment or field.approval):
-                        raise ValueError("B–I 必须逐列提供来源原文证据且不得做资格判定")
-                    if column >= 10 and (field.raw_text or field.blank_reason != "OUT_OF_SCOPE" or field.evidence_refs or field.fragments or field.assessment or field.approval):
-                        raise ValueError("J 列及以后必须为 OUT_OF_SCOPE")
+                    if 2 <= column <= 9:
+                        if field.raw_text:
+                            if (len(field.evidence_refs) != 1 or field.assessment or field.approval
+                                    or field.fragments or field.source_only_fragments):
+                                raise ValueError("B–I 已填写字段必须有唯一原文证据且不得做资格判定")
+                        elif (self.manifest.write_scope != "A:I,L"
+                              or field.blank_reason not in {"SOURCE_FIELD_NOT_FOUND", "OCR_UNREADABLE"}
+                              or field.evidence_refs or field.fragments or field.source_only_fragments
+                              or field.assessment or field.approval):
+                            raise ValueError("B–I 留空须给出缺失或无法辨认原因，且不得附证据或资格判定")
+                    if column == 12 and self.manifest.write_scope == "A:I,L":
+                        if field.raw_text:
+                            if (not re.fullmatch(r"(?:19|20)\d{2}(?:、(?:19|20)\d{2})*", field.raw_text)
+                                    or not field.evidence_refs or field.fragments or field.assessment or field.approval):
+                                raise ValueError("L 列只能填写有原文证据的优秀年度")
+                        elif (field.blank_reason not in {"NO_EXCELLENT_YEARS", "ANNUAL_REVIEW_UNREADABLE", "ANNUAL_REVIEW_NOT_FOUND"}
+                              or field.evidence_refs or field.fragments or field.assessment or field.approval):
+                            raise ValueError("L 列留空须说明考核优秀年度状态")
+                    elif column >= 10 and (field.raw_text or field.blank_reason != "OUT_OF_SCOPE" or field.evidence_refs or field.fragments or field.assessment or field.approval):
+                        raise ValueError("范围外业务列必须为 OUT_OF_SCOPE")
                 if self.manifest.write_scope == "A:AA":
                     column = left + index
                     if column == 1 and (field.raw_text or field.blank_reason != "TARGET_DERIVED" or field.ocr_status):

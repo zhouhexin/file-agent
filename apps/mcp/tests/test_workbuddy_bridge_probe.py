@@ -54,7 +54,7 @@ def test_attachment_skill_drives_external_ocr_instead_of_polling() -> None:
 
 
 def test_current_marketplace_requires_duplicate_comparison_link() -> None:
-    """当前市场源码必须保留重复对比流程并保持清单版本一致。"""
+    """当前市场保留重复对比与 B–I/L 路由，且不包含已移除的 Skill。"""
 
     marketplace = Path(__file__).resolve().parents[3] / "integrations" / "workbuddy"
     manifest = json.loads(
@@ -64,28 +64,18 @@ def test_current_marketplace_requires_duplicate_comparison_link() -> None:
         (marketplace / ".codebuddy-plugin" / "marketplace.json").read_text(encoding="utf-8")
     )
     skill = (marketplace / "file-agent-plugin" / "skills" / "file-agent" / "SKILL.md").read_text(encoding="utf-8")
-    dataset_skill = (
-        marketplace / "file-agent-plugin" / "skills" / "file-agent-structured-dataset" / "SKILL.md"
-    ).read_text(encoding="utf-8")
-    sealed_skill = (
-        marketplace / "file-agent-plugin" / "skills" / "file-agent-sealed-item-extraction" / "SKILL.md"
-    ).read_text(encoding="utf-8")
+    skills = marketplace / "file-agent-plugin" / "skills"
+    scoped_skill = (skills / "file-agent-a-i-scoped-excel" / "SKILL.md").read_text(encoding="utf-8")
+    manual_skill = (skills / "file-agent-manual-excel-revision" / "SKILL.md").read_text(encoding="utf-8")
     # 市场清单与插件源码版本一致即可；不要把升级包锁死在旧测试版本。
     assert re.fullmatch(r"\d+\.\d+\.\d+", manifest["version"])
-    # 这里只验证包能力边界；保存与勾选行为由 API/MCP 的实际调用测试覆盖。
-    for tool in ("structured_dataset_preview", "structured_dataset_confirm", "structured_dataset_commit"):
-        assert tool in dataset_skill
-    assert "references/task-payload.md" in dataset_skill
-    assert "excel_published=true" in dataset_skill
-    assert "WHOLE_SECTION" in sealed_skill
-    assert "签字不是审批通过的必需条件" in sealed_skill
-    # 不把真实印章限制为旧样例里的红色圆章。
-    assert "圆章、方章、长方形章均可" in sealed_skill
-    assert "本人承诺/本人签名" in sealed_skill
-    assert "LAST_ITEM_FALLBACK" in sealed_skill
-    assert "①②③" in sealed_skill
-    assert "不修改 Excel 表头" in sealed_skill
-    assert "title_excel_value" not in sealed_skill
+    for removed in ("file-agent-structured-dataset", "file-agent-sealed-item-extraction",
+                    "file-agent-full-professor-excel"):
+        assert not (skills / removed / "SKILL.md").exists()
+    assert "scoped_excel_sources_ingest" in scoped_skill
+    assert "target_filename" in scoped_skill
+    assert "excel_writeback_publish" in scoped_skill
+    assert "excel_manual_revision_publish" in manual_skill
     assert listing["plugins"][0]["version"] == manifest["version"]
     assert "extraction_claim" in skill
     assert "实际调用的 OCR Provider 或工具标识" in skill
@@ -114,8 +104,12 @@ def test_current_marketplace_requires_duplicate_comparison_link() -> None:
     assert "不得用本地 Markdown、临时 JSON、脚本输出" in skill
     assert "claim 第一条普通内容中由同一 MCP Tool 返回的完整 JSON" in skill
     assert "也不得绕过本流程直接读取宿主原始本地附件" in skill
-    assert "file-agent-sealed-item-extraction" in skill
-    assert "不得用 `structured_dataset_create`、模型重建、Shell 或临时转换" in skill
+    assert "file-agent-a-i-scoped-excel" in skill
+    assert "file-agent-manual-excel-revision" in skill
+    assert "file-agent-excel-writeback" in skill
+    assert "file-agent-structured-dataset" not in skill
+    assert "file-agent-sealed-item-extraction" not in skill
+    assert "不得用模型重建、Shell 或临时转换" in skill
 
 
 def test_capture_creates_pending_reference_and_never_exposes_path(monkeypatch, tmp_path) -> None:

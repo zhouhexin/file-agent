@@ -66,6 +66,23 @@ def _scoped_a_i_rows(rows: list[list], label_count: int) -> list[list]:
     return normalized
 
 
+def _scoped_identity_review_rows(rows: list[dict], label_count: int) -> list[list]:
+    """仅接收已确认的 B–I 子集和可选 L；缺列由工具补空位。"""
+    if label_count < 12:
+        raise ValueError("SCOPED_WRITE_SCOPE_INVALID: 目标必须覆盖 L 列")
+    normalized = []
+    allowed = set("BCDEFGHI") | {"L"}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) - allowed:
+            raise ValueError("SCOPED_WRITE_SCOPE_INVALID: 每行只提交已确认的 B–I 值与可选 L 年度")
+        if any(value is None or isinstance(value, bool)
+               or (isinstance(value, str) and not value.strip()) for value in row.values()):
+            raise ValueError("SCOPED_WRITE_SCOPE_INVALID: 行映射不得包含显式空值")
+        normalized.append([None, *[row.get(column) for column in "BCDEFGHI"], None, None,
+                           row.get("L"), *([None] * (label_count - 12))])
+    return normalized
+
+
 def _full_professor_rows(rows: list[list | dict], label_count: int) -> list[list]:
     """完整任务优先按物理列键传非空值，由工具补齐空位与 A 序号。"""
     if label_count != 27:
@@ -148,7 +165,8 @@ def register_excel_writeback_tools(mcp, client_factory, download_dir):
 
     @mcp.tool(name="excel_writeback_apply", description=(
         "由 WorkBuddy 提供已提取并判定的每列最终展示值；A–I 定向任务的 rows 每行只传 B–I 八个值，"
-        "本机补齐 A 和 J 列以后的空位；A–AA 完整任务每行优先按物理列键传 B–AA 非空值，本机补空位和 A 序号。"
+        "B–I 加 L 定向任务每行传已确认的 B–I 子集及可选 L 的物理列键映射，由本机补齐其他空位；"
+        "A–AA 完整任务每行优先按物理列键传 B–AA 非空值，本机补空位和 A 序号。"
         "本机只在冻结基线的目标工作表新增数据格，"
         "原字节保留其余工作簿部件。完成后自动登记候选和文件共同指纹。"), structured_output=True)
     async def apply(task_id: UUID, payload: TaskPayload,
@@ -181,11 +199,13 @@ def register_excel_writeback_tools(mcp, client_factory, download_dir):
                 if left != 1:
                     raise ValueError("SCOPED_WRITE_SCOPE_INVALID: 目标数据区必须从 A 列开始")
                 rows = _scoped_a_i_rows(rows, len(task["labels"]))
+            elif payload.manifest.write_scope == "A:I,L":
+                rows = _scoped_identity_review_rows(rows, len(task["labels"]))
             elif payload.manifest.write_scope == "A:AA":
                 rows = _full_professor_rows(rows, len(task["labels"]))
             patch_workbook(baseline=baseline, output=output, sheet_name=task["sheet_name"] or "Sheet1",
                            labels=task["labels"], rows=rows, layout=task["layout"],
-                           scoped_a_i=payload.manifest.write_scope in {"A:I", "A:AA"})
+                           scoped_a_i=payload.manifest.write_scope in {"A:I", "A:I,L", "A:AA"})
             body = payload.model_dump(mode="json")
             sha = file_sha256(output)
             digest = writeback_digest(body, sha)

@@ -295,11 +295,13 @@ class ExcelWritebackService:
                 record.source_index for record in payload.records):
             fail("WRITEBACK_ROWS_MISMATCH", "多来源记录必须按来源顺序排列。", 422)
         scoped = payload.manifest.write_scope == "A:I"
+        scoped_review = payload.manifest.write_scope == "A:I,L"
+        limited = scoped or scoped_review
         full_row = payload.manifest.write_scope == "A:AA"
-        if scoped and (payload.manifest.required_pdf_columns != "B:I"
+        if limited and (payload.manifest.required_pdf_columns != ("B:I,L" if scoped_review else "B:I")
                        or [record.source_index for record in payload.records]
                        != list(range(len(payload.manifest.sources)))):
-            fail("SCOPED_WRITE_SCOPE_INVALID", "每份定向来源必须按顺序绑定一行及 B–I 八列。", 422)
+            fail("SCOPED_WRITE_SCOPE_INVALID", "每份定向来源必须按顺序绑定一行及指定列。", 422)
         self.datasets.workflow_task_id = task.id
         from openpyxl.utils.cell import range_boundaries
         left = range_boundaries(target.layout["header_range"])[0] if target.layout else 1
@@ -310,7 +312,8 @@ class ExcelWritebackService:
         self.datasets.hr_annual_key = next((spec["key"] for offset, spec in enumerate(dataset.schema_json)
             if left + offset == 12 and payload.manifest.sealed_only), None)
         dataset.active_task_id = task.id
-        self.datasets.scoped_write_scope = scoped
+        self.datasets.scoped_write_scope = limited
+        self.datasets.scoped_review_scope = scoped_review
         self.datasets.full_row_ocr_mode = full_row
         start_revision = dataset.revision
         for source_index, source_ref in enumerate(payload.manifest.sources):
@@ -320,10 +323,18 @@ class ExcelWritebackService:
             scoped_pdf = source["source_kind"] == "WORKBUDDY_SCOPED"
             scoped_word = (source["source_kind"] == "WORKBUDDY_DOCUMENT"
                            and Path(source["filename"]).suffix.lower() in {".doc", ".docx"})
-            if scoped and not (scoped_pdf or scoped_word):
+            if limited and not (scoped_pdf or scoped_word):
                 fail("SCOPED_SOURCE_NOT_READY", "来源必须是已完成的定向 PDF 或 Word 正文。", 422)
-            if scoped and scoped_pdf and source["coverage"].get("resolved_columns") != list("BCDEFGHI"):
-                fail("SCOPED_SOURCE_NOT_READY", "PDF 来源没有完成 B–I 定向 OCR。", 422)
+            if limited and scoped_pdf:
+                resolved = source["coverage"].get("resolved_columns")
+                if scoped_review:
+                    actual = source["field_refs"]
+                    if (not isinstance(resolved, list) or len(resolved) != len(set(resolved))
+                            or set(resolved) != set(actual)
+                            or not set(resolved) <= set("BCDEFGHI") | {"L"} or "L" not in resolved):
+                        fail("SCOPED_SOURCE_NOT_READY", "PDF 来源的已提取列与冻结证据不一致。", 422)
+                elif resolved != list("BCDEFGHI"):
+                    fail("SCOPED_SOURCE_NOT_READY", "PDF 来源没有完成指定列的定向 OCR。", 422)
             if full_row and (source["source_kind"] != "WORKBUDDY_DOCUMENT"
                              or Path(source["filename"]).suffix.lower() != ".pdf"
                              or source["coverage"].get("status") != "COMPLETE"):
@@ -332,37 +343,82 @@ class ExcelWritebackService:
             for candidate in (record for record in payload.records if record.source_index == source_index):
                 values = {}
                 for offset, (spec, field) in enumerate(zip(dataset.schema_json, candidate.fields)):
-                    if scoped:
+                    if limited:
                         column = left + offset
                         if column == 1 and (field.raw_text or field.blank_reason != "TARGET_DERIVED"):
                             fail("SCOPED_WRITE_SCOPE_INVALID", "A 列必须沿用模板序号。", 422)
-                        if column >= 10 and (field.raw_text or field.blank_reason != "OUT_OF_SCOPE"
+                        if column == 12 and scoped_review:
+                            from app.modules.external_extraction.scoped_schemas import excellent_years, has_review_heading
+                            if field.approval or field.assessment or field.fragments or field.source_only_fragments:
+                                fail("SCOPED_REVIEW_INVALID", "L 列只能填写优秀年度，不进行资格或盖章判定。", 422)
+                            if scoped_pdf:
+                                review_ref = source["field_refs"].get("L")
+                                if not review_ref:
+                                    fail("SCOPED_REVIEW_MISSING", "PDF 来源缺少冻结的考核情况证据。", 422)
+                                if review_ref["status"] == "EXCELLENT_FOUND":
+                                    expected_refs = list({(item["start"], item["end"]): item
+                                                          for item in review_ref["years"]}.values())
+                                    if field.raw_text != review_ref["value"] or len(field.evidence_refs) != len(expected_refs):
+                                        fail("SCOPED_REVIEW_MISMATCH", "L 列只允许冻结的优秀年度。", 422)
+                                    if any(str(actual.source_unit_id) != review_ref["source_unit_id"]
+                                           or actual.quote != frozen["quote"] or actual.start != frozen["start"]
+                                           or actual.end != frozen["end"]
+                                           for actual, frozen in zip(field.evidence_refs, expected_refs)):
+                                        fail("SCOPED_REVIEW_MISMATCH", "L 列引文不属于冻结的考核情况区域。", 422)
+                                else:
+                                    reason = ({"NO_EXCELLENT": "NO_EXCELLENT_YEARS",
+                                               "UNREADABLE": "ANNUAL_REVIEW_UNREADABLE",
+                                               "NOT_FOUND": "ANNUAL_REVIEW_NOT_FOUND"}
+                                              .get(review_ref["status"]))
+                                    if field.raw_text or field.blank_reason != reason or field.evidence_refs:
+                                        fail("SCOPED_REVIEW_MISMATCH", "L 列留空原因与考核区域结果不一致。", 422)
+                            else:
+                                if field.raw_text:
+                                    quoted_years = sorted({year for evidence in field.evidence_refs
+                                        if has_review_heading(evidence.quote)
+                                        for year in excellent_years(evidence.quote)})
+                                    if not quoted_years or field.raw_text != "、".join(map(str, quoted_years)):
+                                        fail("SCOPED_REVIEW_MISMATCH", "Word 的 L 列须引用考核栏目中的优秀年度。", 422)
+                                else:
+                                    text = "\n".join(str(unit.get("text") or "") for unit in source["source_units"])
+                                    heading = has_review_heading(text)
+                                    if ((field.blank_reason == "ANNUAL_REVIEW_NOT_FOUND") != (not heading)
+                                            or (heading and field.blank_reason == "NO_EXCELLENT_YEARS"
+                                                and excellent_years(text))):
+                                        fail("SCOPED_REVIEW_MISMATCH", "Word 的 L 列留空原因与正文不一致。", 422)
+                        elif column >= 10 and (field.raw_text or field.blank_reason != "OUT_OF_SCOPE"
                                              or field.evidence_refs or field.fragments or field.source_only_fragments
                                              or field.approval or field.assessment):
-                            fail("SCOPED_WRITE_SCOPE_INVALID", "J 列及以后不得提取或写入。", 422)
+                            fail("SCOPED_WRITE_SCOPE_INVALID", "范围外业务列不得提取或写入。", 422)
                         if 2 <= column <= 9:
                             ref = (source["field_refs"].get(get_column_letter(column))
                                    if scoped_pdf else None)
-                            if (not field.raw_text or len(field.evidence_refs) != 1
-                                    or field.approval or field.assessment or field.fragments
-                                    or field.source_only_fragments):
-                                fail("SCOPED_EVIDENCE_REQUIRED", "B–I 每列必须引用本文件的正式原文。", 422,
-                                     column=get_column_letter(column))
-                            evidence = field.evidence_refs[0]
-                            if scoped_pdf:
-                                if (not ref or str(evidence.source_unit_id) != ref["source_unit_id"]
-                                        or evidence.quote != ref["quote"]
-                                        or evidence.start != ref["start"] or evidence.end != ref["end"]):
-                                    fail("SCOPED_EVIDENCE_MISMATCH", "字段证据与冻结 PDF OCR 结果不一致。", 422,
+                            if field.raw_text:
+                                if (len(field.evidence_refs) != 1 or field.approval or field.assessment
+                                        or field.fragments or field.source_only_fragments):
+                                    fail("SCOPED_EVIDENCE_REQUIRED", "B–I 已填写列必须引用本文件的正式原文。", 422,
                                          column=get_column_letter(column))
-                            if "".join(field.raw_text.split()) not in "".join(evidence.quote.split()):
-                                fail("SCOPED_EVIDENCE_MISMATCH", "字段值不在本文件原文引文中。", 422,
+                                evidence = field.evidence_refs[0]
+                                if scoped_pdf:
+                                    if (not ref or str(evidence.source_unit_id) != ref["source_unit_id"]
+                                            or evidence.quote != ref["quote"]
+                                            or evidence.start != ref["start"] or evidence.end != ref["end"]):
+                                        fail("SCOPED_EVIDENCE_MISMATCH", "字段证据与冻结 PDF OCR 结果不一致。", 422,
+                                             column=get_column_letter(column))
+                                if "".join(field.raw_text.split()) not in "".join(evidence.quote.split()):
+                                    fail("SCOPED_EVIDENCE_MISMATCH", "字段值不在本文件原文引文中。", 422,
+                                         column=get_column_letter(column))
+                                if column == 2:
+                                    from app.modules.external_extraction.scoped_schemas import labeled_b_column_value
+                                    name = labeled_b_column_value(evidence.quote)
+                                    if name is not None and field.raw_text != name:
+                                        fail("SCOPED_B_VALUE_INVALID", "B 列只能填写“单位/学院”标签后的学院名称。", 422)
+                            elif (not scoped_review
+                                  or field.blank_reason not in {"SOURCE_FIELD_NOT_FOUND", "OCR_UNREADABLE"}
+                                  or ref is not None or field.evidence_refs or field.fragments
+                                  or field.source_only_fragments or field.approval or field.assessment):
+                                fail("SCOPED_FIELD_BLANK_INVALID", "B–I 留空必须无冻结值并给出有效原因。", 422,
                                      column=get_column_letter(column))
-                            if column == 2:
-                                from app.modules.external_extraction.scoped_schemas import labeled_b_column_value
-                                name = labeled_b_column_value(evidence.quote)
-                                if name is not None and field.raw_text != name:
-                                    fail("SCOPED_B_VALUE_INVALID", "B 列只能填写“单位/学院”标签后的学院名称。", 422)
                     value = field.model_dump(mode="json")
                     try:
                         value["evidence_refs"] = [validate_quote(ref, source["source_units"])
@@ -376,7 +432,7 @@ class ExcelWritebackService:
                 continue
             request_data = {key: source[key] for key in (
                 "document_id", "document_version_id", "extraction_run_id", "source_sha256")}
-            request_data.update(records=records, content_origin="WORKBUDDY_SCOPED" if scoped and scoped_pdf else "WORKBUDDY",
+            request_data.update(records=records, content_origin="WORKBUDDY_SCOPED" if limited and scoped_pdf else "WORKBUDDY",
                                 idempotency_key=f"writeback-{task.id}-{source_index}",
                                 target_working_copy_id=working.id, target_document_id=working.document_id,
                                 target_document_version_id=current.id)
@@ -388,14 +444,15 @@ class ExcelWritebackService:
         expected = [[record["fields"][field["key"]].get(
             "display_value", record["fields"][field["key"]]["value"])
             for field in dataset.schema_json] for record in added]
-        if scoped or full_row:
+        if limited or full_row:
             for row in expected:
                 row[0] = None
-                if scoped:
+                if limited:
                     for offset in range(9, len(row)):
-                        row[offset] = None
+                        if not (scoped_review and offset == 11):
+                            row[offset] = None
         inserted = self._verify_workbook(base_path=base_path, candidate_path=file_path,
-                                         dataset=dataset, expected_rows=expected, scoped_a_i=scoped or full_row)
+                                         dataset=dataset, expected_rows=expected, scoped_a_i=limited or full_row)
         if inserted:
             updated_layout = dict(dataset.target_layout_json)
             left_col, top_row, right_col, bottom_row = range_boundaries(updated_layout["data_range"])

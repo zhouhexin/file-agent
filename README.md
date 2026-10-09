@@ -16,6 +16,8 @@ File Agent 不是传统网盘，也不是只会问答的知识库系统。用户
 - `docs/superpowers/plans/2026-06-24-file-agent-mvp-implementation-plan.md`：MVP 开发计划。
 - `docs/database-schema.md`：数据库结构设计。
 - `docs/api-contract.md`：API 契约。
+- `docs/2026-10-08-workbuddy-l-reverse-page-discovery-plan.md`：WorkBuddy 教授汇总表 L 列从 PDF 末页向前定位的 v3 契约、费用边界与验收。
+- `docs/2026-10-08-workbuddy-l-fixed-page25-plan.md`：当前 v4 契约仅检查 PDF 物理第 25 页，取不到时 L 留空，不继续找页。
 - `docs/langgraph-runtime-issues.md`：LangGraph Runtime 当前问题与改造路线。
 - `docs/adaptive-planner-execution-loop-implementation-plan.md`：Catalog 驱动 Planner、步骤级执行循环、能力建议和 Shadow 灰度的当前实施依据。
 - `docs/langgraph-framework-decision.md`：选择 LangGraph 作为 Agent Runtime 底层编排框架的架构决策。
@@ -172,7 +174,7 @@ PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python -m app.modules
 [Demo 操作说明](docs/2026-09-18-workbuddy-structured-dataset-demo.md)。
 
 并行的 WorkBuddy 完整 Excel 回传路径使用独立 `excel_writeback_*` 工具与
-`file-agent-excel-writeback` Skill，旧 `structured_dataset_*` 路径保持可用。
+`file-agent-excel-writeback` Skill；服务端 `structured_dataset_*` 工具仍保留，但当前 WorkBuddy 插件不再提供通用累计表 Skill。
 2026-09-28 起，Excel 新建、按文件名续写及定向更正默认在证据和版本校验通过后直接发布；
 仅用户明确要求先复核时才等待人工确认。重复文件仍须用户决定。新上传 Excel 始终建立独立新目标，
 只有本轮没有新目标上传且指定已有文件名时才向旧表追加。详见
@@ -181,11 +183,12 @@ API/MCP 两侧额外设置 `WORKBUDDY_EXCEL_WRITEBACK_ENABLED=true` 后启用；
 新路径由 WorkBuddy 本地定向写入 XLSX、服务端校验并发布同名新版本；设计与限制见
 [完整文件回传方案](docs/2026-09-23-workbuddy-excel-writeback-proposal.md)。
 
-教授业绩汇总 A–AA 同轮填表使用独立 WorkBuddy Skill `file-agent-full-professor-excel` 和
-`full_professor_excel_sources_ingest`：首次一份 Excel 加 1–20 份 PDF，后续只上传 PDF 并在任务文字中指定完整目标 `.xlsx` 文件名。
-PDF 每份一次完整页面读取，按相关页复用正文与印章证据；OCR 不清的格子标记待核对，完整行只发布一个新版本。
-需同时部署 API/MCP 并安装插件 0.1.55；当前未实现区域裁剪 OCR 或自动成本硬预算，见
-[完整列实施方案](docs/2026-09-30-workbuddy-j-aa-incremental-extraction-plan.md)。
+教授业绩汇总当前由 WorkBuddy `file-agent-a-i-scoped-excel` 处理可核验的 B–I 与 L 列，其他列不填写。
+插件已移除通用累计表 `file-agent-structured-dataset` Skill；按文件名追加仍由 B–I/L 定向 Skill 执行，
+手工补全后回传由 `file-agent-manual-excel-revision` 执行。
+2026-10-09 起，插件已移除 `file-agent-full-professor-excel` 与 `file-agent-sealed-item-extraction` Skill；
+明确要求 A–AA 全列、盖章属实项目提取或印章核验的请求须报告当前插件不支持，不得自动缩小为定向填表。
+原完整列设计保留为[历史方案](docs/2026-09-30-workbuddy-j-aa-incremental-extraction-plan.md)。
 针对已验收 PDF 的定向读取，`structured_dataset_source` 可选 `mode=INDEX` 返回无正文区段目录，
 再用 `unit_orders` 只取本轮需要的已保存正文；省略参数仍返回原完整结果。此读取不重新 OCR，
 字段、印章和版本校验均保持原规则。新用法需同步部署 API、MCP 与 WorkBuddy Skill。

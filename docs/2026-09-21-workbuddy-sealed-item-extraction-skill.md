@@ -2,7 +2,7 @@
 
 日期：2026-09-21
 
-状态：已实现 Skill 编排规则，待真实 WorkBuddy PDF 样本验收。
+状态：历史方案。2026-10-09 应用户只保留 B–I/L 定向填表的要求，当前 WorkBuddy 插件已移除本 Skill 及其列来源表；下文不再代表可调用能力。服务端相关契约本次未删除。
 
 ## 1. 需求
 
@@ -140,7 +140,7 @@ WorkBuddy 宿主 PDF/OCR/版面识别
 
 ## 9. 2026-09-23 固定模板按列来源路由
 
-专用 Skill 新增 [A–AA 列来源路由](../integrations/workbuddy/file-agent-plugin/skills/file-agent-sealed-item-extraction/references/column-source-map.md)，
+专用 Skill 当时新增 A–AA 列来源路由；该文件已随 Skill 从当前插件移除，
 覆盖“教学科研教授”工作表每个物理列、这份 25 页教授评审表的候选 PDF 页与栏目、跨页条件和无 PDF
 来源的序号/资格审查/备注。该文件是每轮使用此模板前必须读取的候选定位表，不是事实或审批证据。
 
