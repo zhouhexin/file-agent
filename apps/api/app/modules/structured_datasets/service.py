@@ -1276,8 +1276,10 @@ class StructuredDatasetService:
             fail("USE_WORKING_DOCUMENT", "请使用已整理工作副本的 Document ID。")
         suffix = Path(version.filename).suffix.lower()
         is_image = suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-        if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".pdf", ".doc", ".docx"}:
-            fail("DEMO_DOCUMENT_REQUIRED", "Demo 仅支持图片、PDF、DOC 或 DOCX 工作副本。", 422)
+        if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".pdf", ".doc", ".docx", ".xls", ".xlsx"}:
+            fail("DEMO_DOCUMENT_REQUIRED", "仅支持已归档的图片、PDF 或 Office 工作副本。", 422)
+        if suffix in {".xls", ".xlsx"} and content_origin != "WORKBUDDY":
+            fail("WORKBUDDY_CONTENT_REQUIRED", "Excel 来源必须绑定已验收的 WorkBuddy 真实单元格提取运行。", 422)
         query = self.db.query(DocumentExtractionRun).filter_by(
             document_id=document_id, document_version_id=version.id, status="COMPLETED",
         )
@@ -1446,10 +1448,12 @@ class StructuredDatasetService:
         payload_for_digest = request.model_dump(mode="json", exclude={"idempotency_key"})
         if payload_for_digest.get("content_origin") is None:
             payload_for_digest.pop("content_origin", None)
+        if not payload_for_digest.get("supplemental_sources"):
+            payload_for_digest.pop("supplemental_sources", None)
         for record in payload_for_digest.get("records", []):
             for value in record.get("fields", {}).values():
                 # 新可选字段不改变旧请求指纹，保证升级后原幂等键仍可恢复。
-                for optional in ("fragments", "blank_reason", "approval", "assessment", "ocr_status", "ocr_unit_id"):
+                for optional in ("fragments", "blank_reason", "approval", "assessment", "ocr_status", "ocr_unit_id", "teacher_render"):
                     if not value.get(optional):
                         value.pop(optional, None)
                 if not value.get("evidence_refs"):
@@ -1473,6 +1477,26 @@ class StructuredDatasetService:
                              extraction_run_id=str(request.extraction_run_id), content_origin=request.content_origin)
         if source["source_sha256"] != request.source_sha256:
             fail("SOURCE_SNAPSHOT_CHANGED", "文件内容哈希与提交时不一致。")
+        source_version_ids = [source["document_version_id"]]
+        if request.supplemental_sources:
+            if not self.workflow_task_id or not getattr(self, "template_all_mode", False):
+                fail("SOURCE_GROUP_NOT_ALLOWED", "多来源合并仅允许冻结的模板写回任务。", 422)
+            for binding in request.supplemental_sources:
+                extra = self.source(str(binding.document_id), version_id=str(binding.document_version_id),
+                                    extraction_run_id=str(binding.extraction_run_id), content_origin="WORKBUDDY")
+                if extra["source_sha256"] != binding.source_sha256 or extra["source_kind"] != "WORKBUDDY_DOCUMENT":
+                    fail("SOURCE_SNAPSHOT_CHANGED", "补充来源正文、版本或哈希不匹配。", 422)
+                source_version_ids.append(extra["document_version_id"])
+                source["source_units"].extend({**unit, "source_document_version_id": extra["document_version_id"],
+                                                "source_extraction_run_id": extra["extraction_run_id"]}
+                                               for unit in extra["source_units"])
+        if len(set(source_version_ids)) != len(source_version_ids):
+            fail("SOURCE_GROUP_DUPLICATE", "同一来源版本不能在一行中重复使用。", 422)
+        used = {version_id for (versions,) in self.db.query(
+            StructuredDatasetMember.source_versions_json).filter_by(dataset_id=dataset.id).all()
+            for version_id in (versions or [])}
+        if used.intersection(source_version_ids):
+            fail("SOURCE_ALREADY_APPENDED", "本轮材料已有来源版本加入该表格。", 409)
         if source["source_kind"] == "WORKBUDDY_DOCUMENT" and request.content_origin != "WORKBUDDY":
             fail("WORKBUDDY_CONTENT_REQUIRED", "Word/PDF 追加必须明确固定 WorkBuddy 正文来源。")
         if not request.records:
@@ -1526,7 +1550,11 @@ class StructuredDatasetService:
         }
         derived_pages = self.db.query(DocumentPage).filter_by(extraction_run_id=layout.id).order_by(DocumentPage.page_number).all()
         for index, page in enumerate(derived_pages):
-            page.metadata_json = {**page.metadata_json, "source_extraction_run_id": source["extraction_run_id"],
+            page.metadata_json = {**page.metadata_json,
+                                  "source_extraction_run_id": source["source_units"][index].get(
+                                      "source_extraction_run_id", source["extraction_run_id"]),
+                                  "source_document_version_id": source["source_units"][index].get(
+                                      "source_document_version_id", source["document_version_id"]),
                                   "source_unit_id": source["source_units"][index]["source_unit_id"]}
         candidates = []
         presentations = {}
@@ -1592,6 +1620,19 @@ class StructuredDatasetService:
                     label, column = field_locations[key]
                     fail(code, message.strip(), 422, record_index=index,
                          field_key=key, field_label=label, column=column)
+                if value.teacher_render:
+                    if not (self.workflow_task_id and getattr(self, "template_all_mode", False)):
+                        fail("TEACHER_RENDER_NOT_ALLOWED", "教师引进格式只允许专用模板任务。", 422)
+                    from .teacher_render import render_teacher_cell
+                    try:
+                        rendered, render_audit = render_teacher_cell(
+                            value, column=field_locations[key][1], db=self.db)
+                    except ValueError as exc:
+                        code, _, message = str(exc).partition(":")
+                        fail(code, message.strip(), 422, record_index=index, field_key=key,
+                             field_label=field_locations[key][0], column=field_locations[key][1])
+                    presentation["teacher_rendered_value"] = rendered
+                    presentation["teacher_render_audit"] = render_audit
                 presentations[index, key] = presentation
                 if fragment_refs:
                     # 多段原文先逐一校验，再形成仅供本次结构化运行的派生证据。
@@ -1699,7 +1740,8 @@ class StructuredDatasetService:
         dataset.revision += 1
         member = StructuredDatasetMember(dataset_id=dataset.id, structured_extraction_run_id=run.id,
             document_version_id=source["document_version_id"], append_key=request.idempotency_key,
-            payload_digest=payload_digest, appended_revision=dataset.revision)
+            payload_digest=payload_digest, appended_revision=dataset.revision,
+            source_versions_json=source_version_ids)
         self.db.add(member)
         self.db.add(ChangeItem(changeset_id=changeset_id, target_type="DATASET", target_id=dataset.id,
             target_document_id=source["document_id"], change_type="STRUCTURED_DATASET_APPENDED",
@@ -1727,9 +1769,11 @@ class StructuredDatasetService:
             if dataset.target_source_version_id
             else None
         )
+        funding_rows = (dataset.target_sheet_name == "使用登记汇总"
+                        and any(field.get("key") == "usage_amount" for field in dataset.schema_json or []))
         records = [
             {
-                "record_id": f"base:{dataset.id}:{index}",
+                "record_id": f"base:{dataset.id}:{row.get('_funding_row_id') or row.get('sequence', index) if funding_rows else index}",
                 "document_id": source_version.document_id if source_version else None,
                 "document_version_id": source_version.id if source_version else None,
                 "fields": {

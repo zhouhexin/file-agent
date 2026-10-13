@@ -70,7 +70,7 @@ class TaskManifest(StrictInput):
     sealed_only: bool = False
     identity_column_range: Literal["B:I"] | None = Field(default=None, exclude_if=lambda value: value is None)
     source_fact_column_range: Literal["J:P"] | None = Field(default=None, exclude_if=lambda value: value is None)
-    write_scope: Literal["A:I", "A:I,L", "A:AA"] | None = Field(default=None, exclude_if=lambda value: value is None)
+    write_scope: Literal["A:I", "A:I,L", "A:AA", "TEMPLATE_ALL"] | None = Field(default=None, exclude_if=lambda value: value is None)
     required_pdf_columns: Literal["B:I", "B:I,L"] | None = Field(default=None, exclude_if=lambda value: value is None)
     extraction_confirmations: list[ExtractionConfirmationRef] = Field(default_factory=list, max_length=21)
 
@@ -86,6 +86,15 @@ class TaskManifest(StrictInput):
             left, _, right, _ = range_boundaries(self.target.layout["header_range"])
             if left != 1 or right != 27 or len(self.target.labels) != 27:
                 raise ValueError("完整教授表必须精确覆盖物理 A:AA 列")
+        elif self.write_scope == "TEMPLATE_ALL":
+            from openpyxl.utils.cell import range_boundaries
+            names = [index for index, label in enumerate(self.target.labels)
+                     if re.sub(r"\s*\[[A-Z]+\]$", "", label.split(" / ")[-1]).strip() == "姓名"]
+            if (self.target.new is not None or self.target.layout is None or self.required_pdf_columns is not None
+                    or self.sealed_only or self.identity_column_range or self.source_fact_column_range
+                    or self.target.labels[0].strip() not in {"序号", "编号"}
+                    or range_boundaries(self.target.layout["header_range"])[0] != 1 or len(names) != 1):
+                raise ValueError("模板全列填表须绑定真实 Excel 布局，不能混用教授表策略")
         elif (self.write_scope is None) != (self.required_pdf_columns is None):
             raise ValueError("定向写入范围与 PDF 必填范围必须同时提供")
         if self.write_scope in {"A:I", "A:I,L"}:
@@ -123,6 +132,7 @@ class TaskField(FieldCandidate):
 class TaskRecord(StrictInput):
     """字段按目标列顺序完整提供，防止重复标题和遗漏列。"""
     source_index: int = Field(ge=0, le=19)
+    source_indices: list[int] = Field(default_factory=list, max_length=20, exclude_if=lambda value: not value)
     fields: list[TaskField] = Field(min_length=1, max_length=40)
 
 
@@ -137,6 +147,18 @@ class TaskPayload(StrictInput):
         if (self.manifest.write_scope in {"A:I", "A:I,L", "A:AA"}
                 and [row.source_index for row in self.records] != list(range(len(self.manifest.sources)))):
             raise ValueError("定向批量任务必须每份来源恰好对应一行，并按附件顺序排列")
+        if self.manifest.write_scope == "TEMPLATE_ALL":
+            assigned = [index for row in self.records for index in row.source_indices]
+            if (sorted(assigned) != list(range(len(self.manifest.sources)))
+                    or any(not row.source_indices or row.source_indices[0] != row.source_index
+                           or len(set(row.source_indices)) != len(row.source_indices) for row in self.records)
+                    or [row.source_index for row in self.records] != sorted(row.source_index for row in self.records)):
+                raise ValueError("每份来源必须恰好归属一位人员，首个来源为该行主来源")
+            name_offset = next(index for index, label in enumerate(self.manifest.target.labels)
+                               if re.sub(r"\s*\[[A-Z]+\]$", "", label.split(" / ")[-1]).strip() == "姓名")
+            if any(len(row.fields) <= name_offset or not row.fields[name_offset].raw_text or not row.fields[name_offset].evidence_refs
+                   for row in self.records):
+                raise ValueError("每位人员必须有正式正文支持的姓名")
         for row in self.records:
             if row.source_index >= len(self.manifest.sources):
                 raise ValueError("来源索引越界")
@@ -149,6 +171,17 @@ class TaskPayload(StrictInput):
             for index, field in enumerate(row.fields):
                 if not field.raw_text and not field.blank_reason:
                     raise ValueError("每个空列必须提供留空原因")
+                if self.manifest.write_scope == "TEMPLATE_ALL":
+                    column = left + index
+                    if column == 1 and self.manifest.target.labels[index].strip() in {"序号", "编号"}:
+                        if field.raw_text or field.blank_reason != "TARGET_DERIVED" or field.evidence_refs:
+                            raise ValueError("模板序号列只能由目标表生成")
+                    elif field.raw_text:
+                        if (not field.evidence_refs or field.approval or field.assessment or field.ocr_status
+                                or field.source_only_fragments):
+                            raise ValueError("模板已填写字段须有真实原文证据，且不得作资格或印章判定")
+                    elif field.evidence_refs or field.fragments or field.approval or field.assessment:
+                        raise ValueError("模板空字段不得携带证据或资格判定")
                 if self.manifest.write_scope in {"A:I", "A:I,L"}:
                     column = left + index
                     if column == 1 and (field.raw_text or field.blank_reason != "TARGET_DERIVED"):

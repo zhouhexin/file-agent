@@ -56,3 +56,6 @@ exclude = [
   "logs*",
   "storage*",
 ]
+
+[tool.setuptools.package-data]
+"app.modules.reference_catalogs" = ["assets/*.xls"]

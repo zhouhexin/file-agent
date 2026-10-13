@@ -16,7 +16,7 @@ from sqlalchemy import func
 
 from app.db.models import DocumentExtractionConfirmation, DocumentVersion, StructuredDatasetExport, StructuredDatasetTask, utcnow
 from app.modules.structured_extraction.export import _xlsx_worksheet_path
-from .assessment import validate_quote, validate_approval_claim
+from .assessment import excel_content_key, excel_display_text, validate_quote, validate_approval_claim
 from .schemas import DatasetAppend
 from .service import StructuredDatasetService, fail
 from .task_schemas import TaskPayload
@@ -298,13 +298,33 @@ class ExcelWritebackService:
         scoped_review = payload.manifest.write_scope == "A:I,L"
         limited = scoped or scoped_review
         full_row = payload.manifest.write_scope == "A:AA"
+        template_all = payload.manifest.write_scope == "TEMPLATE_ALL"
+        from openpyxl.utils.cell import range_boundaries
+        left = range_boundaries(target.layout["header_range"])[0] if target.layout else 1
+        if template_all:
+            name_offset = next(index for index, label in enumerate(target.labels)
+                               if re.sub(r"\s*\[[A-Z]+\]$", "", label.split(" / ")[-1]).strip() == "姓名")
+            id_offset = next((index for index, label in enumerate(target.labels)
+                              if re.sub(r"\s*\[[A-Z]+\]$", "", label.split(" / ")[-1]).strip() == "身份证号"), None)
+            names = [str(record.fields[name_offset].raw_text).strip() for record in payload.records]
+            if len(set(names)) != len(names):
+                fail("TEMPLATE_PERSON_DUPLICATE", "本轮有重复姓名，须先核实身份并合并材料。", 422)
+            _, top, _, bottom = range_boundaries(target.layout["data_range"])
+            book = load_workbook(base_path, read_only=True, data_only=True)
+            try:
+                sheet = book[target.sheet_name or "Sheet1"]
+                existing_names = {str(sheet.cell(row, left + name_offset).value).strip()
+                                  for row in range(top, bottom + 1)
+                                  if sheet.cell(row, left + name_offset).value is not None}
+            finally:
+                book.close()
+            if existing_names.intersection(names):
+                fail("TEMPLATE_PERSON_ALREADY_PRESENT", "目标表已有同名人员，请核实后再追加。", 409)
         if limited and (payload.manifest.required_pdf_columns != ("B:I,L" if scoped_review else "B:I")
                        or [record.source_index for record in payload.records]
                        != list(range(len(payload.manifest.sources)))):
             fail("SCOPED_WRITE_SCOPE_INVALID", "每份定向来源必须按顺序绑定一行及指定列。", 422)
         self.datasets.workflow_task_id = task.id
-        from openpyxl.utils.cell import range_boundaries
-        left = range_boundaries(target.layout["header_range"])[0] if target.layout else 1
         self.datasets.source_fact_keys = {
             spec["key"] for offset, spec in enumerate(dataset.schema_json)
             if payload.manifest.source_fact_column_range == "J:P" and left + offset in {10, 11, 13, 15, 16}
@@ -315,11 +335,13 @@ class ExcelWritebackService:
         self.datasets.scoped_write_scope = limited
         self.datasets.scoped_review_scope = scoped_review
         self.datasets.full_row_ocr_mode = full_row
+        self.datasets.template_all_mode = template_all
         start_revision = dataset.revision
+        frozen_sources = [self.tasks._source(reference) for reference in payload.manifest.sources]
+        if any(source is None for source in frozen_sources):
+            fail("WRITEBACK_SOURCE_NOT_READY", "来源文件尚未归档完成，请稍后重试。")
         for source_index, source_ref in enumerate(payload.manifest.sources):
-            source = self.tasks._source(source_ref)
-            if source is None:
-                fail("WRITEBACK_SOURCE_NOT_READY", "来源文件尚未归档完成，请稍后重试。")
+            source = frozen_sources[source_index]
             scoped_pdf = source["source_kind"] == "WORKBUDDY_SCOPED"
             scoped_word = (source["source_kind"] == "WORKBUDDY_DOCUMENT"
                            and Path(source["filename"]).suffix.lower() in {".doc", ".docx"})
@@ -341,6 +363,38 @@ class ExcelWritebackService:
                 fail("FULL_ROW_SOURCE_NOT_READY", "完整填表必须绑定已完成一次读取的 PDF 来源。", 422)
             records = []
             for candidate in (record for record in payload.records if record.source_index == source_index):
+                group = ([frozen_sources[index] for index in candidate.source_indices]
+                         if template_all else [source])
+                if template_all and left == 1 and len(candidate.fields) >= 15:
+                    def _numbers(column_number):
+                        specification = candidate.fields[column_number - 1].teacher_render
+                        return [item.ordinal for item in specification.items] if specification else []
+
+                    paper_numbers = _numbers(10)
+                    if paper_numbers and paper_numbers != list(range(1, len(paper_numbers) + 1)):
+                        fail("TEACHER_RENDER_NUMBERING_INVALID", "论文题目须从 1 连续编号。", 422)
+                    if any(not set(_numbers(column)) <= set(paper_numbers) for column in (11, 12)):
+                        fail("TEACHER_RENDER_NUMBERING_INVALID", "刊物与收录项必须沿用论文题目的序号。", 422)
+                    project_numbers = sorted(set().union(*[set(_numbers(column)) for column in (13, 14, 15)]))
+                    if project_numbers and project_numbers != list(range(1, len(project_numbers) + 1)):
+                        fail("TEACHER_RENDER_NUMBERING_INVALID", "项目序号须从 1 连续编号，M/N/O 同号对齐。", 422)
+                if template_all and any(item["source_kind"] != "WORKBUDDY_DOCUMENT" for item in group):
+                    fail("TEMPLATE_SOURCE_INVALID", "模板全列来源必须是已完成的正式 PDF/Office 正文。", 422)
+                group_units = [unit for item in group for unit in item["source_units"]]
+                if template_all:
+                    person = str(candidate.fields[name_offset].raw_text).strip()
+                    person_id = (str(candidate.fields[id_offset].raw_text).strip()
+                                 if id_offset is not None and candidate.fields[id_offset].raw_text else None)
+                    primary_units = source["source_units"]
+                    if any(not any(reference.source_unit_id in {
+                            str(unit["source_unit_id"]), str(unit.get("external_unit_id") or "")}
+                            for unit in primary_units)
+                           for reference in candidate.fields[name_offset].evidence_refs):
+                        fail("TEMPLATE_PERSON_SOURCE_MISMATCH", "姓名引文须来自该行主来源。", 422)
+                    for item in group:
+                        content = "".join("".join(str(unit["text"]).split()) for unit in item["source_units"])
+                        if "".join(person.split()) not in content and (not person_id or person_id not in content):
+                            fail("TEMPLATE_PERSON_SOURCE_MISMATCH", "同一行的每份材料须含姓名或已核实身份证号。", 422)
                 values = {}
                 for offset, (spec, field) in enumerate(zip(dataset.schema_json, candidate.fields)):
                     if limited:
@@ -421,7 +475,7 @@ class ExcelWritebackService:
                                      column=get_column_letter(column))
                     value = field.model_dump(mode="json")
                     try:
-                        value["evidence_refs"] = [validate_quote(ref, source["source_units"])
+                        value["evidence_refs"] = [validate_quote(ref, group_units)
                                                   for ref in field.evidence_refs]
                     except ValueError as exc:
                         code, _, message = str(exc).partition(":")
@@ -432,6 +486,12 @@ class ExcelWritebackService:
                 continue
             request_data = {key: source[key] for key in (
                 "document_id", "document_version_id", "extraction_run_id", "source_sha256")}
+            if template_all:
+                candidate = next(record for record in payload.records if record.source_index == source_index)
+                request_data["supplemental_sources"] = [
+                    {key: frozen_sources[index][key] for key in (
+                        "document_id", "document_version_id", "extraction_run_id", "source_sha256")}
+                    for index in candidate.source_indices[1:]]
             request_data.update(records=records, content_origin="WORKBUDDY_SCOPED" if limited and scoped_pdf else "WORKBUDDY",
                                 idempotency_key=f"writeback-{task.id}-{source_index}",
                                 target_working_copy_id=working.id, target_document_id=working.document_id,
@@ -444,15 +504,18 @@ class ExcelWritebackService:
         expected = [[record["fields"][field["key"]].get(
             "display_value", record["fields"][field["key"]]["value"])
             for field in dataset.schema_json] for record in added]
-        if limited or full_row:
+        if limited or full_row or template_all:
             for row in expected:
-                row[0] = None
+                if limited or full_row or (template_all and left == 1 and
+                        dataset.schema_json[0]["label"].strip() in {"序号", "编号"}):
+                    row[0] = None
                 if limited:
                     for offset in range(9, len(row)):
                         if not (scoped_review and offset == 11):
                             row[offset] = None
         inserted = self._verify_workbook(base_path=base_path, candidate_path=file_path,
-                                         dataset=dataset, expected_rows=expected, scoped_a_i=limited or full_row)
+                                         dataset=dataset, expected_rows=expected,
+                                         scoped_a_i=limited or full_row or template_all)
         if inserted:
             updated_layout = dict(dataset.target_layout_json)
             left_col, top_row, right_col, bottom_row = range_boundaries(updated_layout["data_range"])
@@ -483,6 +546,7 @@ class ExcelWritebackService:
             self.db, dataset=dataset, working_copy=working, version=version,
             base_version_id=current.id, task=task, result=pending_result, agent_run=self.datasets.agent_run)
         task.status = "PUBLISHING"
+        task.payload_json = body if template_all else task.payload_json
         task.result_json = {}
         task.updated_at = utcnow()
         return {**self.receipt(task), "_publication_id": publication.id}
@@ -551,6 +615,7 @@ class ExcelWritebackService:
             if len(expected_rows) > len(available):
                 fail("TARGET_EXCEL_DATA_RANGE_FULL", "模板数据区没有足够的可填写行。", 422)
             allowed = set()
+            height_rows = set()
             for row_number, values in zip(available, expected_rows):
                 if len(values) != len(labels):
                     fail("WRITEBACK_ROWS_MISMATCH", "回传记录与目标列数量不一致。", 422)
@@ -559,8 +624,9 @@ class ExcelWritebackService:
                                      for prior in range(row_number - 1, top - 1, -1)
                                      if candidate_sheet.cell(prior, 1).value is not None), None)
                     try:
-                        sequence_value = int(previous)
-                        if sequence_value < 1 or str(sequence_value) != str(previous):
+                        sequence_value = int(previous) if previous is not None else 0
+                        if (sequence_value < (0 if previous is None else 1)
+                                or previous is not None and str(sequence_value) != str(previous)):
                             raise ValueError
                     except (TypeError, ValueError):
                         fail("TARGET_EXCEL_SEQUENCE_MISSING", "A 列无法从上一序号生成。", 422,
@@ -576,12 +642,20 @@ class ExcelWritebackService:
                         if (not sequence_preserved and str(previous_value) != str(expected)) or actual.value != previous_value:
                             fail("WRITEBACK_EXISTING_CELL_CHANGED", "回传文件覆盖了模板既有单元格。", 422,
                                  cell=f"{get_column_letter(col)}{row_number}")
-                    elif expected is not None and str(actual.value) != str(expected):
+                    elif expected is not None and (actual.value is None or
+                            str(excel_content_key(actual.value)) != str(excel_content_key(expected))):
                         fail("WRITEBACK_ROWS_MISMATCH", "回传 Excel 单元格与已核验字段不一致。", 422,
                              cell=f"{get_column_letter(col)}{row_number}")
                     elif expected is None and actual.value is not None:
                         fail("WRITEBACK_ROWS_MISMATCH", "留空字段被回传文件填入了内容。", 422,
                              cell=f"{get_column_letter(col)}{row_number}")
+                    if previous_value is None and isinstance(actual.value, str) and (
+                            excel_display_text(actual.value) != actual.value):
+                        fail("WRITEBACK_BREAK_TAG_REMAINING", "新增单元格仍含 HTML 换行标签。", 422,
+                             cell=f"{get_column_letter(col)}{row_number}")
+                    if any(isinstance(value, str) and "\n" in excel_display_text(value)
+                           for value in (expected, actual.value)):
+                        height_rows.add(row_number)
                     if expected is not None and actual.data_type == "f":
                         fail("WRITEBACK_FORMULA_NOT_ALLOWED", "新数据格不能写入公式。", 422)
                     allowed.add(f"{get_column_letter(col)}{row_number}")
@@ -658,7 +732,13 @@ class ExcelWritebackService:
             if (len(result_cells) != sum(local(child.tag) == "c" for child in result_row)
                     or (base_row is not None and len(base_cells) != sum(local(child.tag) == "c" for child in base_row))):
                 fail("WRITEBACK_XLSX_INVALID", "工作表存在重复或缺少坐标的单元格。", 422)
-            if base_row is not None and (base_row.attrib != result_row.attrib
+            prior_attributes = dict(base_row.attrib) if base_row is not None else {}
+            current_attributes = dict(result_row.attrib)
+            if number in height_rows:
+                for attribute in ("ht", "customHeight"):
+                    prior_attributes.pop(attribute, None)
+                    current_attributes.pop(attribute, None)
+            if base_row is not None and (prior_attributes != current_attributes
                     or not base_cells.keys() <= result_cells.keys()):
                 fail("WRITEBACK_TEMPLATE_CHANGED", "回传文件改变了原有行结构。", 422)
             if base_row is None and not any(coordinate in allowed for coordinate in result_cells):

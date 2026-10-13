@@ -9,6 +9,19 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+_EXCEL_BREAK_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+
+
+def excel_display_text(value):
+    """只在展示层把 HTML 换行标记转成单元格换行，原文与引文不变。"""
+    return _EXCEL_BREAK_RE.sub("\n", value) if isinstance(value, str) else value
+
+
+def excel_content_key(value):
+    """比较展示正文时忽略换行位置和多余空白，不忽略文字或顺序。"""
+    return " ".join(excel_display_text(value).split()) if isinstance(value, str) else value
+
+
 class SourceQuote(BaseModel):
     """允许草稿 unit_id；提交时必须唯一绑定到本次正式 source unit。"""
 
@@ -201,8 +214,10 @@ def assess_field(*, label: str, assessment: FieldAssessment, approval: ApprovalS
 
 def display_value(value, assessment: dict):
     """只有通过校验的文本格增加一个末尾展示标记；不改写规范化事实和证据。"""
+    if "teacher_rendered_value" in assessment:
+        return excel_display_text(assessment["teacher_rendered_value"])
     if assessment.get("ocr_status") == "UNCERTAIN":
-        return f"〔OCR 待核对：{assessment['ocr_candidate']}〕"
+        return excel_display_text(f"〔OCR 待核对：{assessment['ocr_candidate']}〕")
     if assessment.get("ocr_status") == "UNREADABLE":
         return "〔OCR 未识别，待核对〕"
     indexes = assessment.get("source_only_fragment_indexes") or []
@@ -216,5 +231,5 @@ def display_value(value, assessment: dict):
                 parts[index] += suffix
         value = "\n".join(parts)
     if isinstance(value, str) and value.strip() and assessment.get("checkmark"):
-        return value.rstrip() if value.rstrip().endswith("√") else value.rstrip() + " √"
-    return value
+        value = value.rstrip() if value.rstrip().endswith("√") else value.rstrip() + " √"
+    return excel_display_text(value)

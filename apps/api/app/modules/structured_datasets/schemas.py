@@ -50,6 +50,26 @@ class DatasetCreateFromExcel(StrictInput):
     idempotency_key: str = Field(min_length=1, max_length=120)
 
 
+class TeacherRenderPart(StrictInput):
+    fragment_index: int = Field(ge=0, le=99)
+    role: Literal["GRADUATION", "SCHOOL", "MAJOR", "TEXT", "ISSN", "JOURNAL_NAME", "ZONE"]
+    text: str = Field(min_length=1, max_length=1000)
+
+
+class TeacherRenderItem(StrictInput):
+    ordinal: int | None = Field(default=None, ge=1, le=100)
+    stage: Literal["博士", "硕士", "本科"] | None = None
+    parts: list[TeacherRenderPart] = Field(min_length=1, max_length=20)
+
+
+class TeacherRender(StrictInput):
+    """受控单元格展示说明；各 part 必须由已经核验的原文片段支持。"""
+
+    kind: Literal["EDUCATION", "PAPER", "PROJECT", "ACHIEVEMENT"]
+    items: list[TeacherRenderItem] = Field(min_length=1, max_length=100)
+    catalog_version_id: UUID | None = None
+
+
 class FieldCandidate(StrictInput):
     """字段原文必须带回宿主正文中的稳定区段与可定位引文。"""
 
@@ -65,6 +85,7 @@ class FieldCandidate(StrictInput):
     ocr_unit_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
     approval: ApprovalScope | None = None
     assessment: FieldAssessment | None = None
+    teacher_render: TeacherRender | None = None
 
     @model_validator(mode="after")
     def validate_presentation(self):
@@ -127,6 +148,15 @@ class RecordCandidate(StrictInput):
     fields: dict[str, FieldCandidate] = Field(max_length=40)
 
 
+class DatasetSupplementalSource(StrictInput):
+    """仅在已冻结的模板写回任务中使用的额外证据来源。"""
+
+    document_id: UUID
+    document_version_id: UUID
+    extraction_run_id: UUID
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class DatasetAppend(StrictInput):
     """固定共享工作副本、内容版本、正文运行与提交键。"""
 
@@ -134,6 +164,7 @@ class DatasetAppend(StrictInput):
     document_version_id: UUID
     extraction_run_id: UUID
     source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    supplemental_sources: list[DatasetSupplementalSource] = Field(default_factory=list, max_length=19)
     content_origin: Literal["WORKBUDDY", "WORKBUDDY_SCOPED"] | None = None
     target_working_copy_id: UUID | None = None
     target_document_id: UUID | None = None

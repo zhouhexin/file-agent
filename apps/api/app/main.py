@@ -41,6 +41,8 @@ from app.modules.external_extraction.document_router import router as document_e
 from app.modules.external_extraction.scoped_router import router as scoped_pdf_router
 from app.modules.structured_datasets.router import router as structured_datasets_router
 from app.modules.structured_datasets.writeback_router import router as excel_writeback_router
+from app.modules.funding_usage.router import router as funding_usage_router
+from app.modules.reference_catalogs.router import router as reference_catalogs_router
 from app.modules.structured_datasets.publication import recover_pending_publications
 from app.modules.managed_files.router import router as managed_files_router
 from app.modules.operations.router import router as operations_router
@@ -87,6 +89,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="File Agent API", lifespan=lifespan)
 app.include_router(structured_datasets_router)
 app.include_router(excel_writeback_router)
+app.include_router(funding_usage_router)
+app.include_router(reference_catalogs_router)
 register_api_error_handlers(app)
 
 
