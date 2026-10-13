@@ -304,6 +304,32 @@ class DocumentArtifact(Base):
     )
 
 
+class ReferenceCatalogVersion(Base):
+    """系统共享参考目录的不可变版本；正文原件和转换件仍走 DocumentVersion/Artifact。"""
+
+    __tablename__ = "reference_catalog_versions"
+    __table_args__ = (
+        UniqueConstraint("catalog_key", "version_number", name="uq_reference_catalog_version"),
+        UniqueConstraint("catalog_key", "source_sha256", name="uq_reference_catalog_source_sha"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    catalog_key: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    document_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    derivative_artifact_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("document_artifacts.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    index_storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    index_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    entry_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class DocumentInsight(Base):
     """文件固定 ingest 产生的可复用基础洞察。"""
 
@@ -524,6 +550,7 @@ class StructuredDatasetMember(Base):
     dataset_id: Mapped[str] = mapped_column(String(36), ForeignKey("structured_datasets.id", ondelete="RESTRICT"), nullable=False, index=True)
     structured_extraction_run_id: Mapped[str] = mapped_column(String(36), ForeignKey("structured_extraction_runs.id", ondelete="RESTRICT"), nullable=False)
     document_version_id: Mapped[str] = mapped_column(String(36), ForeignKey("document_versions.id", ondelete="RESTRICT"), nullable=False)
+    source_versions_json: Mapped[list] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=False, default=list)
     append_key: Mapped[str] = mapped_column(String(120), nullable=False)
     payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     appended_revision: Mapped[int] = mapped_column(Integer, nullable=False)
