@@ -219,6 +219,40 @@ export const PROMPT_GUIDE_SECTIONS: PromptGuideSection[] = [
     ],
   },
   {
+    id: 'teacher-recruitment-excel',
+    title: '教师引进汇总表',
+    description: '上传汇总表时以本轮上传的表为准；未上传汇总表时按完整文件名追加。补充已有内容前先获取当前版本。',
+    items: [
+      {
+        id: 'teacher-recruitment-new-target',
+        title: '上传汇总表填表',
+        prompt: '请把本轮上传的教师引进材料填入同时上传的汇总表，缺失信息留空，保存并给我下载链接。',
+        channel: 'WorkBuddy 附件套件',
+      },
+      {
+        id: 'teacher-recruitment-append',
+        title: '按文件名追加',
+        prompt: '请把本轮上传的教师引进材料追加到已发布的《汇总表完整文件名》，保存并给我新增行号和下载链接。',
+        channel: 'WorkBuddy 附件套件',
+        note: '使用前把书名号内的文字替换为含扩展名的完整文件名。',
+      },
+      {
+        id: 'teacher-recruitment-checkout',
+        title: '下载后补充',
+        prompt: '请给我《汇总表完整文件名》的当前版本，我要补充已有单元格；请记录回传所需的版本信息。',
+        channel: 'WorkBuddy 附件套件',
+        note: '先下载并记录编辑前版本，再修改和保存。',
+      },
+      {
+        id: 'teacher-recruitment-return',
+        title: '补充后回传',
+        prompt: '请用编辑前记录的版本信息，把本轮上传的补充版《汇总表完整文件名》发布为同一张表的新版本，并给我下载链接。',
+        channel: 'WorkBuddy 附件套件',
+        note: '上传文件须与目标表完全同名；只补充已有人员行，不新增或删除人员。',
+      },
+    ],
+  },
+  {
     id: 'duplicates',
     title: '处理重复文件',
     description: '先查看对比页面，再明确选择继续上传、使用已有文件或取消。',
