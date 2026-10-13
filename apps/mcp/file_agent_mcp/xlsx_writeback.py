@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import os
+import math
 import posixpath
 import re
 import tempfile
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
+
+
+_EXCEL_BREAK_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+
+
+def _excel_display_text(value):
+    return _EXCEL_BREAK_RE.sub("\n", value) if isinstance(value, str) else value
 
 
 def _local(tag: str) -> str:
@@ -158,12 +166,37 @@ def _shift_scoped_footer(root: ET.Element, data: ET.Element, first_row: int, cou
             dimension.set("ref", f"{match.group(1) or ''}{match.group(2)}{int(match.group(3)) + count}")
 
 
+def _data_row_style_cells(row_nodes: dict[int, ET.Element], strings: list[str], *,
+                          left: int, right: int, top: int, bottom: int,
+                          sequence: set[int]) -> dict[int, ET.Element]:
+    """新增行继承数据区里样式覆盖最完整的一行。
+
+    空模板的每一行原本都没有值（只有带样式的空格子），若只按“有值的列数”挑行，
+    会被只含零星占位值（如 O6 的 "."）的行抢到，导致新增行缺少自动换行等模板样式。
+    因此先比样式覆盖（单元格数量），再比实际填值数量，最后沿用较新的行。
+    """
+    fallback = _cells(row_nodes.get(bottom))
+    candidates = []
+    for number in range(top, bottom + 1):
+        cells = _cells(row_nodes.get(number))
+        if not cells:
+            continue
+        covered = sum(1 for column in range(left, right + 1) if column in cells)
+        populated = sum(_cell_value(cells.get(column), strings) is not None
+                        for column in range(left, right + 1) if column - left not in sequence)
+        candidates.append((covered, populated, number, cells))
+    if not candidates:
+        return fallback
+    return {**fallback, **max(candidates, key=lambda item: item[:3])[3]}
+
+
 def patch_workbook(*, baseline: Path, output: Path, sheet_name: str,
                    labels: list[str], rows: list[list], layout: dict | None,
                    scoped_a_i: bool = False) -> None:
     """从冻结基线重建候选；重复调用不会在已编辑结果上重复追加。"""
     if not rows or any(len(row) != len(labels) for row in rows):
         raise ValueError("WRITEBACK_ROWS_MISMATCH: 每行必须覆盖全部目标列")
+    rows = [[_excel_display_text(value) for value in row] for row in rows]
     if baseline.stat().st_size > 32 * 1024 * 1024:
         raise ValueError("WRITEBACK_TARGET_TOO_LARGE: 工作簿超过 32 MiB 回传上限")
     with zipfile.ZipFile(baseline) as archive:
@@ -225,7 +258,8 @@ def patch_workbook(*, baseline: Path, output: Path, sheet_name: str,
         if len(available) < len(rows):
             raise ValueError("TARGET_EXCEL_DATA_RANGE_FULL: 模板预留行不足")
         destinations = available[:len(rows)]
-        style_cells = _cells(row_nodes.get(bottom)) if extra else {}
+        style_cells = _data_row_style_cells(row_nodes, strings, left=left, right=right,
+                                            top=top, bottom=bottom, sequence=sequence)
     else:
         header = next((number for number in sorted(row_nodes)
                        if any(_cell_value(cell, strings) is not None for cell in _cells(row_nodes[number]).values())), None)
@@ -260,8 +294,9 @@ def patch_workbook(*, baseline: Path, output: Path, sheet_name: str,
                              for prior in range(number - 1, top - 1, -1)
                              if _cell_value(_cells(row_nodes.get(prior)).get(left), strings) is not None), None)
             try:
-                sequence_value = int(previous)
-                if sequence_value < 1 or str(sequence_value) != str(previous):
+                sequence_value = int(previous) if previous is not None else 0
+                if (sequence_value < (0 if previous is None else 1)
+                        or previous is not None and str(sequence_value) != str(previous)):
                     raise ValueError
             except (TypeError, ValueError):
                 raise ValueError(f"TARGET_EXCEL_SEQUENCE_MISSING: A{number} 无法从上一序号生成") from None
@@ -286,6 +321,15 @@ def patch_workbook(*, baseline: Path, output: Path, sheet_name: str,
                     before.set("s", style_cells[column].attrib["s"])
                 _insert_cell(target_row, before, column)
             _set_value(before, value, qname)
+        multiline = [value for value in values if isinstance(value, str) and "\n" in value]
+        if multiline:
+            visual_lines = max(sum(max(1, math.ceil(len(part) / 30)) for part in value.split("\n"))
+                               for value in multiline)
+            requested_height = min(409.5, max(30.0, visual_lines * 18.0))
+            previous_height = float(target_row.attrib.get("ht", "0"))
+            if requested_height > previous_height:
+                target_row.set("ht", str(requested_height))
+                target_row.set("customHeight", "1")
     final = max(destinations)
     dimension = next((node for node in root if _local(node.tag) == "dimension"), None)
     if dimension is not None and dimension.attrib.get("ref"):

@@ -102,6 +102,20 @@ def _full_professor_rows(rows: list[list | dict], label_count: int) -> list[list
     return normalized
 
 
+def _template_rows(rows: list[dict], label_count: int) -> list[list]:
+    """模板任务只接受有值物理列键；缺失列由工具填真正的空值。"""
+    allowed = {get_column_letter(column) for column in range(2, label_count + 1)}
+    normalized = []
+    for row in rows:
+        if (not isinstance(row, dict) or not row or set(row) - allowed
+                or any(value is None or isinstance(value, bool)
+                       or isinstance(value, str) and not value.strip() for value in row.values())):
+            raise ValueError("TEMPLATE_ROWS_INVALID: 只提交 B 列起有证据的非空单元格")
+        normalized.append([None, *[row.get(get_column_letter(column))
+                                   for column in range(2, label_count + 1)]])
+    return normalized
+
+
 def register_excel_writeback_tools(mcp, client_factory, download_dir):
     """新工具以完整文件回传发布；旧 structured_dataset_* 清单原样保留。"""
 
@@ -203,9 +217,11 @@ def register_excel_writeback_tools(mcp, client_factory, download_dir):
                 rows = _scoped_identity_review_rows(rows, len(task["labels"]))
             elif payload.manifest.write_scope == "A:AA":
                 rows = _full_professor_rows(rows, len(task["labels"]))
+            elif payload.manifest.write_scope == "TEMPLATE_ALL":
+                rows = _template_rows(rows, len(task["labels"]))
             patch_workbook(baseline=baseline, output=output, sheet_name=task["sheet_name"] or "Sheet1",
                            labels=task["labels"], rows=rows, layout=task["layout"],
-                           scoped_a_i=payload.manifest.write_scope in {"A:I", "A:I,L", "A:AA"})
+                           scoped_a_i=payload.manifest.write_scope in {"A:I", "A:I,L", "A:AA", "TEMPLATE_ALL"})
             body = payload.model_dump(mode="json")
             sha = file_sha256(output)
             digest = writeback_digest(body, sha)

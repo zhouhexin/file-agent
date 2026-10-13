@@ -76,6 +76,9 @@ if (
     from .excel_writeback_tools import register_excel_writeback_tools
 
     register_excel_writeback_tools(mcp, _client, _local_download_dir)
+    from .funding_usage_tools import register_funding_usage_tools
+
+    register_funding_usage_tools(mcp, _client, _local_download_dir)
 
 if (
     os.getenv("WORKBUDDY_EXCEL_WRITEBACK_ENABLED", "false").lower() == "true"
@@ -128,7 +131,7 @@ async def job_get(job_id: str) -> dict[str, Any]:
 
 @mcp.tool(
     name="file_batch_ingest",
-    description="枚举明确授权目录，固定批次清单并传输全部文件。",
+    description="枚举明确授权目录并固定批次清单；教师汇总表可显式传 WORKBUDDY_DOCUMENT 让目录来源进入宿主正式提取，默认普通导入保持不变。",
     structured_output=True,
 )
 async def file_batch_ingest(
@@ -138,6 +141,8 @@ async def file_batch_ingest(
     user_request: str | None = None,
     placement_mode: Literal["BY_CATEGORY", "NEUTRAL"] = "BY_CATEGORY",
     rule_profile: Literal["content_based", "legacy_school_materials"] = "content_based",
+    extraction_profile: Literal["DEFAULT", "WORKBUDDY_DOCUMENT"] = "DEFAULT",
+    extraction_save_policy: Literal["DIRECT_ARCHIVE", "CONFIRM_BEFORE_SAVE"] = "DIRECT_ARCHIVE",
 ) -> dict[str, Any]:
     """启动本地目录批次导入；目录与非默认规则都必须由用户明确指定。"""
 
@@ -153,6 +158,8 @@ async def file_batch_ingest(
             user_request=user_request,
             placement_mode=placement_mode,
             rule_profile=rule_profile,
+            extraction_profile=extraction_profile,
+            extraction_save_policy=extraction_save_policy,
         )
     finally:
         await client.close()
@@ -234,6 +241,37 @@ async def file_search(conversation_ref: str, query: str) -> Any:
             ],
             structuredContent=structured,
         )
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="reference_catalog_get",
+    description="只读取得系统共享的西安理工大学 2019 版期刊目录当前版本和哈希，供多个 Skill 共用。",
+    structured_output=True,
+)
+async def reference_catalog_get() -> dict[str, Any]:
+    client = _client()
+    try:
+        return await client.reference_catalog_get()
+    finally:
+        await client.close()
+
+
+@mcp.tool(
+    name="reference_catalog_query",
+    description="按 ISSN 或完整刊名查询系统共享 2019 版正式期刊目录；可附带相关分级条款。只读，不触发导入或更新。",
+    structured_output=True,
+)
+async def reference_catalog_query(
+    issn: str | None = None,
+    journal_name: str | None = None,
+    include_rules: bool = False,
+) -> dict[str, Any]:
+    client = _client()
+    try:
+        return await client.reference_catalog_query(
+            issn=issn, journal_name=journal_name, include_rules=include_rules)
     finally:
         await client.close()
 

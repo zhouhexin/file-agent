@@ -163,6 +163,23 @@ def test_directory_ingest_saves_logical_state_and_uploads_all_files(tmp_path) ->
     } == source_snapshots
 
 
+def test_directory_document_mode_freezes_extraction_policy(tmp_path) -> None:
+    """授权目录的教师材料必须进入正式宿主正文，不回退普通自动解析。"""
+
+    root = tmp_path / "root"
+    directory = root / "待导入"
+    directory.mkdir(parents=True)
+    (directory / "material.pdf").write_bytes(b"frozen-source")
+    client = FakeIntegrationClient(root)
+    result = asyncio.run(BatchTransferService(client, TransferStateStore(tmp_path / "state")).ingest_directory(
+        source_root_ref="materials", relative_directory="待导入",
+        user_request="读取考察材料填写教师引进汇总表", placement_mode="NEUTRAL",
+        extraction_profile="WORKBUDDY_DOCUMENT", extraction_save_policy="DIRECT_ARCHIVE"))
+    assert result["uploaded_count"] == 1
+    assert client.batch_payload["extraction_profile"] == "WORKBUDDY_DOCUMENT"
+    assert client.batch_payload["placement_mode"] == "NEUTRAL"
+
+
 def test_directory_ingest_forwards_only_supported_frozen_organization_policy(tmp_path) -> None:
     """显式材料包规则必须进入后端冻结策略，未知策略不能由模型自由透传。"""
 

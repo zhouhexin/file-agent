@@ -98,6 +98,8 @@ class BatchTransferService:
         user_request: str | None = None,
         placement_mode: str = "BY_CATEGORY",
         rule_profile: str = "content_based",
+        extraction_profile: str = "DEFAULT",
+        extraction_save_policy: str = "DIRECT_ARCHIVE",
     ) -> dict[str, Any]:
         """枚举明确目录、创建并 seal 清单，然后上传全部可运行条目。"""
 
@@ -105,6 +107,12 @@ class BatchTransferService:
             raise ValueError("placement_mode 只能是 BY_CATEGORY 或 NEUTRAL")
         if rule_profile not in {"content_based", "legacy_school_materials"}:
             raise ValueError("rule_profile 不是 File Agent 允许的固定规则集")
+        if extraction_profile not in {"DEFAULT", "WORKBUDDY_DOCUMENT"}:
+            raise ValueError("本地目录只允许普通导入或正式 WorkBuddy 文档提取")
+        if extraction_save_policy not in {"DIRECT_ARCHIVE", "CONFIRM_BEFORE_SAVE"}:
+            raise ValueError("文档提取保存策略无效")
+        if extraction_save_policy == "CONFIRM_BEFORE_SAVE" and (extraction_profile != "WORKBUDDY_DOCUMENT" or not user_request):
+            raise ValueError("复核模式需要明确的文档提取任务文字")
 
         manifest = self._build_manifest(
             source_root_ref=source_root_ref,
@@ -120,6 +128,8 @@ class BatchTransferService:
             user_request=user_request,
             placement_mode=placement_mode,
             rule_profile=rule_profile,
+            extraction_profile=extraction_profile,
+            extraction_save_policy=extraction_save_policy,
         )
         batch = await self.client.create_batch(
             {
@@ -134,6 +144,9 @@ class BatchTransferService:
                 "rule_profile": rule_profile,
                 "user_request": user_request,
                 "conversation_id": None,
+                **({"extraction_profile": extraction_profile} if extraction_profile != "DEFAULT" else {}),
+                **({"extraction_save_policy": extraction_save_policy}
+                   if extraction_save_policy != "DIRECT_ARCHIVE" else {}),
             }
         )
         batch_id = str(batch["id"])
@@ -310,6 +323,8 @@ class BatchTransferService:
         user_request: str | None,
         placement_mode: str,
         rule_profile: str,
+        extraction_profile: str = "DEFAULT",
+        extraction_save_policy: str = "DIRECT_ARCHIVE",
     ) -> str:
         """计算覆盖清单、目录范围和附带请求的稳定批次幂等摘要。"""
 
@@ -321,6 +336,10 @@ class BatchTransferService:
             "rule_profile": rule_profile,
             "items": [item.api_payload() for item in manifest],
         }
+        if extraction_profile != "DEFAULT":
+            payload["extraction_profile"] = extraction_profile
+        if extraction_save_policy != "DIRECT_ARCHIVE":
+            payload["extraction_save_policy"] = extraction_save_policy
         canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

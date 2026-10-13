@@ -11,11 +11,20 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 from openpyxl import Workbook, load_workbook
 from openpyxl.chart import BarChart, Reference
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
 
 from file_agent_mcp.excel_writeback_tools import (
-    _scoped_a_i_rows, _scoped_identity_review_rows, register_excel_writeback_tools,
+    _scoped_a_i_rows, _scoped_identity_review_rows, _template_rows, register_excel_writeback_tools,
 )
+
+
+def test_template_rows_leave_unfound_cells_empty_without_client_nulls():
+    row = _template_rows([{"E": "张三", "T": "123"}], 20)[0]
+    assert len(row) == 20
+    assert row[0] is None and row[4] == "张三" and row[19] == "123"
+    assert all(value is None for offset, value in enumerate(row) if offset not in {4, 19})
+    with pytest.raises(ValueError, match="TEMPLATE_ROWS_INVALID"):
+        _template_rows([{"E": "张三", "F": None}], 20)
 
 
 def test_scoped_identity_review_rows_only_populates_b_i_and_l():
@@ -321,6 +330,60 @@ def test_scoped_append_generates_sequence_and_moves_footer(tmp_path):
         if number >= 3:
             layout = {**layout, "data_range": f"A5:AA{row}"}
         current = output
+
+
+def test_append_multiline_uses_populated_data_row_style(tmp_path):
+    """末行只有模板占位符时，新增行仍沿用真实人员行的换行样式。"""
+    baseline = tmp_path / "baseline.xlsx"
+    output = tmp_path / "result.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "应届"
+    sheet.append(["序号", "姓名", "学习经历"])
+    sheet["A5"] = 1
+    sheet["B5"] = "张三"
+    sheet["C5"] = "博士\n硕士"
+    sheet["C5"].alignment = Alignment(wrap_text=True)
+    sheet["C6"] = "."
+    book.save(baseline)
+    book.close()
+    value = "博士：2026.09\n西安理工大学\n\n硕士：硕博连读"
+    patch_workbook(baseline=baseline, output=output, sheet_name="应届",
+                   labels=["序号", "姓名", "学习经历"],
+                   rows=[[None, "李四", value]],
+                   layout={"header_range": "A1:C1", "data_range": "A5:C6"}, scoped_a_i=True)
+    result = load_workbook(output)
+    assert result["应届"]["C6"].value == "."
+    assert result["应届"]["A7"].value == 2
+    assert result["应届"]["C7"].value == value
+    assert result["应届"]["C7"].alignment.wrap_text is True
+    assert result["应届"].row_dimensions[7].height >= 72
+    result.close()
+    with zipfile.ZipFile(baseline) as before, zipfile.ZipFile(output) as after:
+        for part in before.namelist():
+            if part != "xl/worksheets/sheet1.xml":
+                assert before.read(part) == after.read(part)
+
+
+def test_append_replaces_case_insensitive_br_tags_before_writing(tmp_path):
+    baseline = tmp_path / "baseline.xlsx"
+    output = tmp_path / "result.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "应届"
+    sheet.append(["序号", "姓名", "学习经历"])
+    book.save(baseline)
+    book.close()
+
+    patch_workbook(baseline=baseline, output=output, sheet_name="应届",
+                   labels=["序号", "姓名", "学习经历"],
+                   rows=[[None, "李四", "博士<BR>硕士<br/>本科<br />论文"]],
+                   layout={"header_range": "A1:C1", "data_range": "A2:C2"}, scoped_a_i=True)
+
+    result = load_workbook(output)
+    assert result["应届"]["C2"].value == "博士\n硕士\n本科\n论文"
+    assert result["应届"]["C2"].alignment.wrap_text is not True
+    result.close()
 
 
 def test_empty_template_data_row_does_not_copy_header_style(tmp_path):

@@ -623,12 +623,38 @@ class FileAgentIntegrationClient:
         response = await self._request(self.http.request(method, f"/api/structured-datasets{path}", json=payload), operation="累计表格")
         return self._business_json(response)
 
+    async def reference_catalog_get(self) -> dict[str, Any]:
+        """只读取得当前系统共享期刊目录版本。"""
+        response = await self._request(
+            self.http.get("/api/reference-catalogs/xaut-journals-2019"), operation="共享期刊目录")
+        return self._business_json(response)
+
+    async def reference_catalog_query(self, *, issn: str | None = None,
+                                      journal_name: str | None = None,
+                                      include_rules: bool = False) -> dict[str, Any]:
+        """只按受控参数匹配正式可见目录，不开放任意文件搜索。"""
+        response = await self._request(self.http.get(
+            "/api/reference-catalogs/xaut-journals-2019/query",
+            params={"issn": issn, "journal_name": journal_name,
+                    "include_rules": include_rules}), operation="共享期刊目录")
+        return self._business_json(response)
+
     async def excel_writeback_request(self, method: str, path: str, payload: dict | None = None) -> dict[str, Any]:
         """新 Excel 回传入口使用固定路径，不复用旧表格写入工具名。"""
         response = await self._request(
             self.http.request(method, f"/api/excel-writeback{path}", json=payload),
             operation="Excel 文件回传",
         )
+        return self._business_json(response)
+
+    async def funding_usage_request(self, method: str, path: str, payload: dict) -> dict[str, Any]:
+        """固定成果资助预览/发布接口；不向宿主开放任意 API 路径。"""
+        if method != "POST" or path not in {
+                "/preview", "/publish", "/continue/preview", "/continue/publish"}:
+            raise ValueError("FUNDING_USAGE_ROUTE_INVALID")
+        response = await self._request(
+            self.http.post(f"/api/funding-usage{path}", json=payload),
+            operation="成果资助使用登记 Excel")
         return self._business_json(response)
 
     async def upload_excel_writeback(self, *, task_id: str, result_digest: str,
