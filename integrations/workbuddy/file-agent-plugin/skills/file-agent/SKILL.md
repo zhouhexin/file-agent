@@ -5,6 +5,10 @@ description: 当本轮上下文含 FILE_AGENT_HOST_SUBMISSION，且用户要求�
 
 # 文件助手附件桥接
 
+用户提供成果资助使用登记图片与旧汇总表，要求首次生成余额 Excel；或只上传新的登记图片，要求按完整文件名继续追加并扣减已有余额时，都交给 `file-agent-research-funding-usage-balance`。下载这类表后修改、删除或人工新增首个汇总页的独立支出并回传，也遵循该 Skill 的首表同步规则，回传工具用 `file-agent-manual-excel-revision`。图片印刷金额不参与扣减，也不按年度拆分。
+
+用户要求把教师引进考察材料填入《西安理工大学教师引进考察汇总表.xlsx》或同类教师引进汇总模板时，交给 `file-agent-teacher-recruitment-excel`。每轮有上传目标 Excel，就以这份新上传表的真实列填入本轮材料；只有没有上传目标时才按完整文件名追加已有表。多份材料可归到同一位教师的一行；不得误用教授业绩汇总 B–I/L 的定向技能。下载后仅手工补充并同名回传的请求仍交给 `file-agent-manual-excel-revision`。
+
 用户把 PDF/Word 信息追加到已发布的教授业绩汇总 `.xlsx`，或者首次上传该模板填表，而没有明确写出列范围时，默认使用 `file-agent-a-i-scoped-excel`，同轮只填 B–I 身份列和 L 考核优秀年度。提示词中的“追加到已有 Excel”“直接保存”“给新增行号、新版本和下载链接”只说明目标与保存方式，不能视为 A–AA 全列授权。用户若明确要求 A–AA 全列同时填写并核对印章，报告当前插件不提供完整教授表填报 Skill 并停止，不得擅自改成 B–I 与 L 定向任务。
 
 仅在当前轮出现 `FILE_AGENT_HOST_SUBMISSION ref=...`，且用户明确要求将本轮附件导入、归档、整理、解析、OCR、提取内容或分类时调用。“文件助手”是面向用户的中文称呼，用户无需输入英文产品名；例如“请用文件助手归档并分类本轮附件”或“从刚上传的文件提取姓名和金额”。不提称呼但任务明确时同样可以调用；只说“文件助手”而未给出文件任务，不得导入。可信文档引用当前支持 `.doc/.docx/.pdf/.xls/.xlsx/.txt`；图片必须由宿主提供 `image_blob_ref`。`count=pending` 是 WorkBuddy 5.5.3/插件 0.1.15 的正常延迟解析状态，不是失败。
@@ -61,6 +65,8 @@ description: 当本轮上下文含 FILE_AGENT_HOST_SUBMISSION，且用户要求�
 ## 文档内容提取与确认流程
 
 **Excel 任务分流**：教授汇总表 B–I/L 填表与按文件名追加交给 `file-agent-a-i-scoped-excel`，
+成果资助图片手写登记首次生成、同名余额表继续追加和扣减，交给 `file-agent-research-funding-usage-balance`；
+教师引进考察汇总表的本轮上传目标填表（首次或后续）与未上传目标时按完整文件名追加交给 `file-agent-teacher-recruitment-excel`；
 手工补全后的同名 Excel 回传交给 `file-agent-manual-excel-revision`；其他明确要求完整 Excel 写回的任务
 交给现有 `file-agent-excel-writeback`。各 Skill 按自己的接收、复核和发布工具执行；以下单文档确认流程
 不作为 Excel 的最终保存链。只有对应发布工具返回 `excel_published=true` 才报告 Excel 保存成功。

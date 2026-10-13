@@ -1,9 +1,11 @@
 ---
 name: file-agent-excel-writeback
-description: 用户明确要求由 WorkBuddy 写入完整 Excel 并回传 File Agent 保存时使用；新上传模板或按文件名追加均可。教授汇总表 B–I/L 定向填表与手工补全同名文件回传分别使用其专用 Skill。
+description: 用户明确要求由 WorkBuddy 写入一般完整 Excel 并回传 File Agent 保存时使用；新上传模板或按文件名追加均可。教授汇总表 B–I/L、教师引进考察汇总表及手工补全同名文件回传分别使用其专用 Skill。
 ---
 
 # WorkBuddy 写完整 Excel，服务器验证发布
+
+教师引进考察汇总表按真实模板列填写、同人多份材料合并和按同名文件追加时，转用 `file-agent-teacher-recruitment-excel`；不得用本 Skill 的单来源记录步骤拆成多行。
 
 此 Skill 使用独立 `excel_writeback_*` MCP 工具。不要把它和旧
 `structured_dataset_preview/confirm/commit` 混用；同一任务只能选一个写入者。
@@ -54,7 +56,8 @@ File Agent 只核对正式来源、审批证据、当前目标版本与文件差
 
 1. WorkBuddy 根据已核实的每列结果形成 `rows`，顺序和 `payload.records`、`labels` 完全相同。
    `rows` 是 Excel 中实际展示值，符合整列条件才在整个数据格文字末尾加一次 ` √`；
-   不在标题或每个小项后加勾。预置序号格可传 `null` 保留模板序号。
+   不在标题或每个小项后加勾。预置序号格可传 `null` 保留模板序号。写入器会把新增展示值中的
+   `<br>`、`<br/>`、`<br />`（不区分大小写）转换为换行；正式引文与 `raw_text` 仍保留原样。
 2. 调用 `excel_writeback_apply(task_id,payload,rows)`。它从冻结基线重新写候选文件，
    只修改目标工作表新数据格，原工作簿其他 ZIP 部件原字节保留，同时登记完整文件和候选共同摘要。
    不要使用普通编辑器另存、`openpyxl.save` 或自行复制整张表代替；这些方式可能重写公式、样式、
@@ -69,8 +72,9 @@ File Agent 只核对正式来源、审批证据、当前目标版本与文件差
 ## 发布与回执
 
 调用 `excel_writeback_publish(task_id,result_digest,payload)`。工具只回传固定任务目录内的完整
-`.xlsx`，服务端再次逐字校验证据、条件和 `√`、旧版本 CAS、表头、原有行、样式、公式、
-非目标工作表和 OOXML 部件。若模板部件被重写或目标版本已变化，停止并重新 checkout，
+`.xlsx`，服务端再次校验证据、条件和 `√`、旧版本 CAS、表头、原有行与样式、公式、
+非目标工作表和 OOXML 部件；新增格的换行位置、多余空白、行高与自动换行样式不单独阻止发布。
+若模板部件被重写或目标版本已变化，停止并重新 checkout，
 不能覆盖当前文件。失败时不得宣称“已保存”。
 
 仅当返回 `status=COMPLETED`、`excel_published=true`、`task_record_count>0`，
