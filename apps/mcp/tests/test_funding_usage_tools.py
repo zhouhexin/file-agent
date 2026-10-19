@@ -20,7 +20,8 @@ def test_funding_usage_tools_route_and_download(tmp_path):
     class FakeClient:
         async def funding_usage_request(self, method, path, payload):
             calls.append((method, path, payload))
-            if path in {"/preview", "/continue/preview"}:
+            if path in {"/preview", "/continue/preview", "/refresh/preview",
+                        "/source-summary/preview"}:
                 return {"preview_digest": "a" * 64, "person_count": 1}
             return {"status": "COMPLETED", "excel_published": True,
                     "dataset_id": "dataset", "export_id": "export",
@@ -46,7 +47,9 @@ def test_funding_usage_tools_route_and_download(tmp_path):
     async def run():
         names = {item.name for item in await mcp.list_tools()}
         assert {"funding_usage_preview", "funding_usage_publish",
-                "funding_usage_continue_preview", "funding_usage_continue_publish"} <= names
+                "funding_usage_continue_preview", "funding_usage_continue_publish",
+                "funding_usage_refresh_preview", "funding_usage_refresh_publish",
+                "funding_source_summary_preview", "funding_source_summary_publish"} <= names
         await mcp.call_tool("funding_usage_preview", {"payload": payload})
         result = await mcp.call_tool("funding_usage_publish", {"payload": {
             **payload, "preview_digest": "a" * 64}})
@@ -59,6 +62,18 @@ def test_funding_usage_tools_route_and_download(tmp_path):
         added = await mcp.call_tool("funding_usage_continue_publish", {"payload": {
             **continuing, "preview_digest": "a" * 64}})
         assert any(isinstance(item, ResourceLink) for item in added.content)
+        refresh = {"workbook": source, "filename": "余额.xlsx", "request_key": "refresh",
+                   "base_document_version_id": source["document_version_id"],
+                   "base_sha256": source["source_sha256"], "base_revision": 0}
+        await mcp.call_tool("funding_usage_refresh_preview", {"payload": refresh})
+        refreshed = await mcp.call_tool("funding_usage_refresh_publish", {"payload": {
+            **refresh, "preview_digest": "a" * 64}})
+        assert any(isinstance(item, ResourceLink) for item in refreshed.content)
+        source_sync = {"workbook": source, "request_key": "source-sync"}
+        await mcp.call_tool("funding_source_summary_preview", {"payload": source_sync})
+        synced = await mcp.call_tool("funding_source_summary_publish", {"payload": {
+            **source_sync, "preview_digest": "a" * 64}})
+        assert any(isinstance(item, ResourceLink) for item in synced.content)
 
     asyncio.run(run())
     assert calls[0][0:2] == ("POST", "/preview")
@@ -67,6 +82,10 @@ def test_funding_usage_tools_route_and_download(tmp_path):
     assert calls[2][0] == "download"
     assert calls[3][1] == "/continue/preview"
     assert calls[4][1] == "/continue/publish"
+    assert calls[6][1] == "/refresh/preview"
+    assert calls[7][1] == "/refresh/publish"
+    assert calls[9][1] == "/source-summary/preview"
+    assert calls[10][1] == "/source-summary/publish"
 
 
 def test_funding_usage_client_allows_only_fixed_continue_routes():
@@ -83,6 +102,10 @@ def test_funding_usage_client_allows_only_fixed_continue_routes():
         try:
             assert (await client.funding_usage_request("POST", "/continue/preview", {})) == {"status": "ok"}
             assert (await client.funding_usage_request("POST", "/continue/publish", {})) == {"status": "ok"}
+            assert (await client.funding_usage_request("POST", "/refresh/preview", {})) == {"status": "ok"}
+            assert (await client.funding_usage_request("POST", "/refresh/publish", {})) == {"status": "ok"}
+            assert (await client.funding_usage_request("POST", "/source-summary/preview", {})) == {"status": "ok"}
+            assert (await client.funding_usage_request("POST", "/source-summary/publish", {})) == {"status": "ok"}
             with pytest.raises(ValueError, match="FUNDING_USAGE_ROUTE_INVALID"):
                 await client.funding_usage_request("POST", "/other", {})
         finally:
@@ -90,4 +113,8 @@ def test_funding_usage_client_allows_only_fixed_continue_routes():
 
     asyncio.run(run())
     assert paths == ["/api/funding-usage/continue/preview",
-                     "/api/funding-usage/continue/publish"]
+                     "/api/funding-usage/continue/publish",
+                     "/api/funding-usage/refresh/preview",
+                     "/api/funding-usage/refresh/publish",
+                     "/api/funding-usage/source-summary/preview",
+                     "/api/funding-usage/source-summary/publish"]

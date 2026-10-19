@@ -22,8 +22,7 @@ from app.tests.test_structured_datasets import demo, seed_excel_target, seed_wor
 
 
 def _request(text: str, *, amount: str, decision: str = "CONFIRMED_SPEND",
-             registration: str = "报销差旅300元"):
-    name = "张三"
+             registration: str = "报销差旅300元", name: str = "张三"):
     name_start = text.index(name)
     registration_start = text.index(registration)
     amount_start = text.index(amount, registration_start)
@@ -337,6 +336,7 @@ def test_append_formats_multiline_row_and_upgrades_legacy_personal_sheet():
 def test_delete_registration_recalculates_balance_and_releases_source(demo, monkeypatch):
     from io import BytesIO
 
+    monkeypatch.setattr(FundingUsageService, "_legacy_initial_layout", True)
     client, sessions, users = demo
     monkeypatch.setenv("WORKBUDDY_EXCEL_WRITEBACK_ENABLED", "true")
     get_settings.cache_clear()
@@ -472,6 +472,7 @@ def test_delete_registration_recalculates_balance_and_releases_source(demo, monk
 def test_manual_return_adds_rows_in_middle_and_end_then_continues(demo, monkeypatch):
     from io import BytesIO
 
+    monkeypatch.setattr(FundingUsageService, "_legacy_initial_layout", True)
     client, sessions, users = demo
     monkeypatch.setenv("WORKBUDDY_EXCEL_WRITEBACK_ENABLED", "true")
     get_settings.cache_clear()
@@ -703,6 +704,7 @@ def test_append_repairs_previously_unstyled_summary_rows():
 
 
 def test_workbuddy_preview_publish_and_download(demo, monkeypatch):
+    monkeypatch.setattr(FundingUsageService, "_legacy_initial_layout", True)
     client, sessions, users = demo
     monkeypatch.setenv("WORKBUDDY_EXCEL_WRITEBACK_ENABLED", "true")
     get_settings.cache_clear()
@@ -804,6 +806,7 @@ def test_workbuddy_preview_publish_and_download(demo, monkeypatch):
 def test_continue_deducts_latest_published_balance_and_manual_summary_sync(demo, monkeypatch):
     from io import BytesIO
 
+    monkeypatch.setattr(FundingUsageService, "_legacy_initial_layout", True)
     client, sessions, users = demo
     monkeypatch.setenv("WORKBUDDY_EXCEL_WRITEBACK_ENABLED", "true")
     get_settings.cache_clear()

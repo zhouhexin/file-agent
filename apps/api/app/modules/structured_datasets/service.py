@@ -865,6 +865,8 @@ class StructuredDatasetService:
             .all()
         )
         for dataset, working_copy in rows:
+            if (dataset.target_layout_json or {}).get("funding_source_summary_sync"):
+                continue
             if working_copy.filename.casefold() == normalized.casefold():
                 matches.append((dataset, working_copy))
         if not matches:

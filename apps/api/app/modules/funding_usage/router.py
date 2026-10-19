@@ -8,7 +8,9 @@ from app.modules.auth.dependencies import get_current_user
 from app.modules.structured_datasets.runtime import execute_dataset_write
 
 from .schemas import (FundingUsageRequest, FundingUsagePublish,
-                      FundingUsageContinue, FundingUsageContinuePublish)
+                      FundingUsageContinue, FundingUsageContinuePublish,
+                      FundingUsageRefresh, FundingUsageRefreshPublish,
+                      FundingSourceSummarySync, FundingSourceSummarySyncPublish)
 from .service import FundingUsageService
 
 
@@ -41,3 +43,23 @@ def continue_preview(request: FundingUsageContinue, db=Depends(get_db), user=Dep
 @router.post("/continue/publish")
 def continue_publish(request: FundingUsageContinuePublish, db=Depends(get_db), user=Depends(get_current_user)):
     return execute_dataset_write(db=db, user=user, operation="funding_usage_continue_publish", payload=request)
+
+
+@router.post("/refresh/preview")
+def refresh_preview(request: FundingUsageRefresh, db=Depends(get_db), user=Depends(get_current_user)):
+    return FundingUsageService(db, user).refresh_preview(request)
+
+
+@router.post("/refresh/publish")
+def refresh_publish(request: FundingUsageRefreshPublish, db=Depends(get_db), user=Depends(get_current_user)):
+    return execute_dataset_write(db=db, user=user, operation="funding_usage_refresh_publish", payload=request)
+
+
+@router.post("/source-summary/preview")
+def source_summary_preview(request: FundingSourceSummarySync, db=Depends(get_db), user=Depends(get_current_user)):
+    return FundingUsageService(db, user).source_summary_preview(request)
+
+
+@router.post("/source-summary/publish")
+def source_summary_publish(request: FundingSourceSummarySyncPublish, db=Depends(get_db), user=Depends(get_current_user)):
+    return execute_dataset_write(db=db, user=user, operation="funding_source_summary_publish", payload=request)

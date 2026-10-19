@@ -79,3 +79,25 @@ class FundingUsageContinue(StrictInput):
 
 class FundingUsageContinuePublish(FundingUsageContinue):
     preview_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class FundingUsageRefresh(StrictInput):
+    workbook: SourceSnapshot
+    filename: str = Field(min_length=6, max_length=240)
+    base_document_version_id: UUID
+    base_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    base_revision: int = Field(ge=0)
+    request_key: str = Field(min_length=1, max_length=120)
+
+
+class FundingUsageRefreshPublish(FundingUsageRefresh):
+    preview_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class FundingSourceSummarySync(StrictInput):
+    workbook: SourceSnapshot
+    request_key: str = Field(min_length=1, max_length=120)
+
+
+class FundingSourceSummarySyncPublish(FundingSourceSummarySync):
+    preview_digest: str = Field(pattern=r"^[0-9a-f]{64}$")

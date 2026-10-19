@@ -1,6 +1,6 @@
 {
   "name": "file-agent-workbuddy-bridge",
-  "version": "0.1.79",
+  "version": "0.1.84",
   "description": "为文件助手生成本轮可信附件提交单（底层服务为 File Agent）。",
   "author": {"name": "File Agent Team"},
   "hooks": "./hooks/hooks.json",

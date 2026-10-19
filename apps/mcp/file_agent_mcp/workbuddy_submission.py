@@ -30,7 +30,8 @@ _DEFAULT_TTL_SECONDS = 600
 _PENDING_CLOCK_SKEW_SECONDS = 5
 # 消息时间在宿主准备附件时记录；实测 Hook 启动晚约 6 秒，与提交单未来时钟容差分开。
 _PENDING_HOST_PREPARATION_SECONDS = 30
-_VERIFIED_ATTACHMENT_TYPES = frozenset({"image_blob_ref"})
+_BLOB_REF_PART_TYPE = "image_blob_ref"
+_WRAPPED_IMAGE_PART_TYPE = "input_image"
 _DOCUMENT_EXTENSIONS = frozenset({".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt"})
 _DOCUMENT_LIMIT_BYTES = 200 * 1024 * 1024
 
@@ -332,7 +333,7 @@ class WorkBuddySubmissionService:
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("待解析附件提交单缺少任务文字")
         transcript = self._resolve_transcript_path(raw.get("transcript_path"))
-        candidates: list[dict[str, Any]] = []
+        candidates: list[tuple[dict[str, Any], list[dict[str, str]], list[str]]] = []
         try:
             with transcript.open("r", encoding="utf-8") as source:
                 for raw_line in source:
@@ -353,45 +354,23 @@ class WorkBuddySubmissionService:
                         continue
                     if not _message_matches_prompt(message, prompt):
                         continue
-                    if not any(
-                        isinstance(part, dict)
-                        and part.get("type") in _VERIFIED_ATTACHMENT_TYPES
-                        for part in message.get("content") or []
-                    ) and not _host_document_paths(message, prompt=prompt):
+                    image_attachments = _blob_ref_attachments(message)
+                    document_paths = _host_document_paths(message, prompt=prompt)
+                    if not image_attachments and not document_paths:
                         continue
-                    candidates.append(message)
+                    candidates.append((message, image_attachments, document_paths))
         except OSError as exc:
             raise ValueError("WorkBuddy 会话记录暂不可读，请重新发送附件和任务") from exc
         if not candidates:
             raise ValueError("未能在固定会话记录中找到本轮已验证附件，请重新发送附件和任务")
         if len(candidates) != 1:
             raise ValueError("本轮附件消息匹配不唯一，请更换任务文字后重新发送")
-        message = candidates[0]
+        message, attachments, document_paths = candidates[0]
         submission_id = message.get("uuid") or message.get("id")
         if not isinstance(submission_id, str) or not submission_id:
             raise ValueError("本轮附件消息缺少稳定消息标识")
-        attachments: list[dict[str, str]] = []
-        for part in message.get("content") or []:
-            if not isinstance(part, dict) or part.get("type") not in _VERIFIED_ATTACHMENT_TYPES:
-                continue
-            attachment_id = part.get("blob_id")
-            filename = part.get("original_filename")
-            local_path = part.get("blob_path")
-            if (
-                not isinstance(attachment_id, str)
-                or not isinstance(filename, str)
-                or not isinstance(local_path, str)
-            ):
-                raise ValueError("本轮附件消息包含不完整的附件引用")
-            attachments.append(
-                {
-                    "attachment_id": attachment_id,
-                    "filename": filename,
-                    "local_path": local_path,
-                }
-            )
         # 文档路径只来自宿主在 user_query 之前渲染的附件区；聊天正文中的路径绝不作为授权。
-        for index, source_path in enumerate(_host_document_paths(message, prompt=prompt)):
+        for index, source_path in enumerate(document_paths):
             filename = Path(source_path).name
             if (
                 not filename
@@ -502,6 +481,56 @@ class WorkBuddySubmissionService:
             except OSError:
                 # 临时文件清理失败不覆盖上方的业务错误；下次启动仅按私有缓存策略清理。
                 pass
+
+
+def _blob_ref_attachments(message: dict[str, Any]) -> list[dict[str, str]]:
+    """只读取宿主 transcript 中两代可验证的图片 blob 引用。"""
+
+    attachments: list[dict[str, str]] = []
+    seen: dict[str, tuple[str, str]] = {}
+    for part in message.get("content") or []:
+        if not isinstance(part, dict):
+            continue
+        part_type = part.get("type")
+        if part_type == _BLOB_REF_PART_TYPE:
+            source = part
+        elif part_type == _WRAPPED_IMAGE_PART_TYPE:
+            source = part.get("image")
+            if not isinstance(source, dict) or source.get("type") != _BLOB_REF_PART_TYPE:
+                raise ValueError("本轮图片附件缺少可验证的 blob 引用")
+        else:
+            continue
+
+        attachment_id = source.get("blob_id")
+        local_path = source.get("blob_path")
+        nested_filename = source.get("original_filename")
+        outer_filename = part.get("original_filename")
+        if (
+            part_type == _WRAPPED_IMAGE_PART_TYPE
+            and isinstance(nested_filename, str)
+            and isinstance(outer_filename, str)
+            and nested_filename != outer_filename
+        ):
+            raise ValueError("本轮图片附件的文件名引用不一致")
+        filename = nested_filename or outer_filename
+        if (
+            not isinstance(attachment_id, str) or not attachment_id
+            or not isinstance(local_path, str) or not local_path
+            or not isinstance(filename, str) or not filename
+        ):
+            raise ValueError("本轮附件消息包含不完整的附件引用")
+        prior = seen.get(attachment_id)
+        if prior is not None:
+            if prior != (filename, local_path):
+                raise ValueError("本轮图片附件的 blob 标识存在冲突")
+            continue
+        seen[attachment_id] = (filename, local_path)
+        attachments.append({
+            "attachment_id": attachment_id,
+            "filename": filename,
+            "local_path": local_path,
+        })
+    return attachments
 
 
 def _host_document_paths(message: dict[str, Any], *, prompt: str | None = None) -> list[str]:

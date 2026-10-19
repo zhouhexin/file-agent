@@ -18,6 +18,7 @@ from sqlalchemy import func
 from fastapi import HTTPException
 
 from app.db.models import DocumentVersion, StructuredDatasetExport, StructuredDatasetTask, utcnow
+from app.modules.structured_extraction.export import _safe_spreadsheet_text
 from app.modules.structured_extraction.workbook_layout import WorkbookLayout
 
 from .publication import stage_publication
@@ -31,8 +32,13 @@ def _json_value(value):
     return value
 
 
+def _funding_published_value(value):
+    """返回资助明细原文在已发布 Excel 中的实际单元格值。"""
+    return _safe_spreadsheet_text(value) if isinstance(value, str) else value
+
+
 def _funding_text_value(value, *, field_key: str, cell: str):
-    """保留 Excel 标量原意，将汇总页文本列的非文本值转为可保存的文本。"""
+    """保留 Excel 标量原意，将资助登记文本列的非文本值转为可保存的文本。"""
     if value is None or isinstance(value, str):
         return value
     if isinstance(value, bool):
@@ -97,12 +103,23 @@ class ManualRevisionService:
             fail("MANUAL_EXCEL_BASE_MISSING", "目标基线缺失或损坏。", 409)
         origin = self.db.query(DocumentVersion).filter_by(
             document_id=working.document_id, version_number=1).one_or_none()
+        funding_v3 = bool(origin and (origin.extraction_policy_json or {}).get(
+            "structured_dataset_export_mode") == "funding-usage-v3")
         funding = bool(origin and (origin.extraction_policy_json or {}).get(
             "structured_dataset_export_mode") == "funding-usage-v1" and any(
             field.get("key") == "date" for field in dataset.schema_json or []))
-        if not funding and current.sha256 == request.file_sha256:
+        if not funding and not funding_v3 and current.sha256 == request.file_sha256:
             fail("MANUAL_EXCEL_UNCHANGED", "上传文件与当前版本相同。", 422)
-        if funding:
+        if funding_v3:
+            changes, normalized_bytes, normalized_rows, source_policy, deleted_sequences = (
+                self._prepare_funding_revision_v3(dataset, base_path, path, current, request.request_key))
+            balance_overrides = None
+            output_sha = sha256(normalized_bytes).hexdigest()
+            output_size = len(normalized_bytes)
+            dataset.base_rows_json = normalized_rows
+            dataset.target_layout_json = {"header_range": "A1:F1",
+                "data_range": f"A2:F{max(2, len(normalized_rows) + 1)}"}
+        elif funding:
             changes, normalized_bytes, normalized_rows, balance_overrides, source_policy, deleted_sequences = (
                 self._prepare_funding_revision(dataset, base_path, path, current, origin, request.request_key))
             output_sha = sha256(normalized_bytes).hexdigest()
@@ -118,8 +135,10 @@ class ManualRevisionService:
             deleted_sequences = []
             output_sha = request.file_sha256
             output_size = path.stat().st_size
-        if funding and not changes:
-            fail("MANUAL_EXCEL_UNCHANGED", "汇总页没有需要发布的业务修改。", 422)
+        if (funding or funding_v3) and not changes:
+            message = ("个人明细页没有需要发布的业务修改。" if funding_v3
+                       else "汇总页没有需要发布的业务修改。")
+            fail("MANUAL_EXCEL_UNCHANGED", message, 422)
         task = StructuredDatasetTask(
             user_id=self.user.id, request_key=f"manual-revision:{request.request_key}",
             result_digest=request.file_sha256, review_mode="DIRECT_SAVE", status="PUBLISHING",
@@ -157,9 +176,11 @@ class ManualRevisionService:
             storage_path=relative_path, version_number=version_number,
             sha256=output_sha, size_bytes=output_size)
         version.extraction_policy_json = {**dict(current.extraction_policy_json or {}),
-            "structured_dataset_export_mode": "funding-usage-v2" if funding else "package-append-v3",
+            "structured_dataset_export_mode": "funding-usage-v3" if funding_v3 else
+                "funding-usage-v2" if funding else "package-append-v3",
             "manual_revision": True,
-            **({"funding_usage_balance_overrides": balance_overrides, **source_policy} if funding else {})}
+            **({"funding_usage_balance_overrides": balance_overrides, **source_policy} if funding
+               else source_policy if funding_v3 else {})}
         export = StructuredDatasetExport(
             id=export_id, dataset_id=dataset.id, dataset_revision=dataset.revision,
             storage_path=relative_path, sha256=output_sha,
@@ -173,6 +194,8 @@ class ManualRevisionService:
                   "added_record_count": len(source_policy.get("funding_usage_added_rows", [])),
                   "added_row_sequences": [item["sequence"] for item in
                                           source_policy.get("funding_usage_added_rows", [])],
+                  "added_personal_rows": source_policy.get("funding_usage_added_rows", [])
+                    if funding_v3 else [],
                   "renumbered_sequences": source_policy.get("funding_usage_sequence_changes", []),
                   "task_record_count": max(1, len(changes))}
         stage = stage_publication(self.db, dataset=dataset, working_copy=working,
@@ -186,6 +209,172 @@ class ManualRevisionService:
                 "filename": (task.manifest_json or {}).get("filename"),
                 "excel_published": task.status == "COMPLETED",
                 "error": task.error_json or None, **(task.result_json or {})}
+
+    def _prepare_funding_revision_v3(self, dataset, base_path, path, current, request_key):
+        """只采纳个人明细及其资助金额，重算首页和个人页的合计。"""
+        from app.modules.funding_usage.summary_workbook import (
+            person_order, read_detail_book, render_book, summaries, to_bytes)
+        from .service import digest
+
+        try:
+            inspect_xlsx(base_path)
+            inspect_xlsx(path)
+            with zipfile.ZipFile(path) as archive:
+                if any(name.lower().startswith("xl/externallinks/") for name in archive.namelist()):
+                    fail("MANUAL_EXCEL_EXTERNAL_LINK", "补全文件不能包含外部工作簿链接。", 422)
+            baseline = load_workbook(base_path, data_only=False)
+            candidate = load_workbook(path, data_only=False)
+        except XlsxSafetyError as exc:
+            fail(exc.code, str(exc), 422)
+        except HTTPException:
+            raise
+        except Exception:
+            fail("MANUAL_EXCEL_INVALID", "Excel 无法安全读取。", 422)
+        try:
+            if baseline.sheetnames != candidate.sheetnames:
+                fail("MANUAL_EXCEL_STRUCTURE_CHANGED", "不能增删或重命名工作表。", 422)
+            for old_sheet, new_sheet in zip(baseline.worksheets, candidate.worksheets):
+                if {str(x) for x in old_sheet.merged_cells.ranges} != {
+                        str(x) for x in new_sheet.merged_cells.ranges}:
+                    fail("MANUAL_EXCEL_STRUCTURE_CHANGED", "不能改变工作表合并区域。", 422)
+                if any(cell.data_type in {"f", "e"} for cell in new_sheet._cells.values()):
+                    fail("MANUAL_EXCEL_FORMULA_CHANGED", "补全文件不能包含公式或错误单元格。", 422)
+            old_summary, new_summary = baseline.worksheets[0], candidate.worksheets[0]
+            for coordinate in set(old_summary._cells) | set(new_summary._cells):
+                if old_summary.cell(*coordinate).value != new_summary.cell(*coordinate).value:
+                    fail("FUNDING_SUMMARY_REVISION_UNSUPPORTED",
+                         "新版余额表请修改个人明细页，首页汇总由服务端自动更新。", 422,
+                         cell=new_summary.cell(*coordinate).coordinate)
+            policy = current.extraction_policy_json or {}
+            old_rows = list(policy.get("funding_usage_rows_v3") or [])
+            old_funding = dict(policy.get("funding_usage_funding_v3") or {})
+            names = person_order(dataset, old_funding, policy)
+            detail_names = {row["name"] for row in old_rows}
+            old_read, old_read_funding = read_detail_book(
+                baseline, names, required_names=detail_names)
+            frozen_by_identity = {(row["name"], row["sequence"]): row
+                                  for row in old_rows}
+            if (len(old_rows) != len(old_read) or old_read_funding != old_funding
+                    or len(frozen_by_identity) != len(old_rows)
+                    or any((row["name"], row["sequence"]) not in frozen_by_identity
+                           or any(row.get(key) != _funding_published_value(
+                               frozen_by_identity[(row["name"], row["sequence"])].get(key))
+                                  for key in ("registration", "date", "usage_amount", "status"))
+                           for row in old_read)):
+                fail("FUNDING_TARGET_CHANGED", "服务器已发布 Excel 的明细与冻结记录不一致，请核对当前版本。", 409)
+            new_rows, funding = read_detail_book(
+                candidate, names, required_names=detail_names)
+            old_by_name = {name: {row["sequence"]: row for row in old_rows if row["name"] == name}
+                           for name in names}
+            entries = {item["source_row_id"]: dict(item)
+                       for item in policy.get("funding_usage_entries") or []
+                       if item.get("source_row_id")}
+            active_entries = []
+            deleted_entries = list(policy.get("funding_usage_deleted_entries") or [])
+            changes = []
+            normalized = []
+            deleted_sequences = []
+            sequence_changes = []
+            upload_sha = self.datasets.storage.sha256_file(path)
+            for name in names:
+                old_person = old_by_name[name]
+                new_person = [row for row in new_rows if row["name"] == name]
+                retained = [row["sequence"] for row in new_person if row["sequence"] is not None]
+                if (retained != [row["sequence"] for row in old_rows
+                                if row["name"] == name and row["sequence"] in retained]
+                        or any(seq not in old_person for seq in retained)):
+                    fail("FUNDING_ROW_ID_INVALID", "已有明细序号及顺序不能改变；新增行的序号请留空。", 422)
+                for sequence, old in old_person.items():
+                    if sequence not in retained:
+                        deleted_sequences.append({"name": name, "sequence": sequence})
+                        changes.append({"record_id": old["_funding_row_id"],
+                                        "field_key": "__row__", "change_type": "ROW_DELETED",
+                                        "before": old, "after": None})
+                        entry = entries.get(old["_funding_row_id"])
+                        if entry:
+                            deleted_entries.append({**entry, "deleted_at": utcnow().isoformat(),
+                                "deletion_request_key": request_key})
+                for sequence, row in enumerate(new_person, 1):
+                    original_sequence = row["sequence"]
+                    old = old_person.get(original_sequence) if original_sequence is not None else None
+                    for field in ("registration", "date", "status"):
+                        col = {"registration": "B", "date": "C", "status": "E"}[field]
+                        row[field] = _funding_text_value(row[field], field_key=field,
+                            cell=f"{row['_sheet_title']}!{col}{row['_sheet_row_number']}")
+                        # 已发布 Excel 的防公式前缀只是显示保护，不能变成人工修改或来源原文。
+                        if old is not None and row[field] == _funding_published_value(old.get(field)):
+                            row[field] = old.get(field)
+                    status = str(row["status"] or "")
+                    if row["usage_amount"] is None and "手写金额待核对" not in status:
+                        status = (status + "；手写金额待核对").strip("；")
+                    elif row["usage_amount"] is not None:
+                        status = status.replace("手写金额待核对", "").strip("； ")
+                    row["status"] = status or "已核对"
+                    row_id = old["_funding_row_id"] if old else str(uuid4())
+                    item = {"sequence": sequence, "name": name, "registration": row["registration"],
+                            "date": row["date"], "usage_amount": row["usage_amount"],
+                            "status": row["status"], "_funding_row_id": row_id}
+                    normalized.append(item)
+                    if old:
+                        if original_sequence != sequence:
+                            sequence_changes.append({"name": name, "before": original_sequence,
+                                                     "after": sequence, "source_row_id": row_id})
+                        for field in ("registration", "date", "usage_amount", "status"):
+                            if old.get(field) != item[field]:
+                                changes.append({"record_id": row_id, "field_key": field,
+                                                "before": _json_value(old.get(field)),
+                                                "after": _json_value(item[field])})
+                        entry = entries.get(row_id)
+                        if entry is None:
+                            fail("FUNDING_SOURCE_HISTORY_MISSING", "已有登记缺少来源记录。", 409)
+                    else:
+                        changes.append({"record_id": row_id, "field_key": "__row__",
+                            "change_type": "ROW_ADDED", "before": None, "after": item})
+                        entry = {"source_row_id": row_id, "source_kind": "MANUAL_EXCEL_REVISION",
+                            "registration_key": digest(["manual-excel-revision", upload_sha,
+                                name, row["_sheet_row_number"], request_key]),
+                            "manual_revision_request_key": request_key,
+                            "manual_upload_sha256": upload_sha,
+                            "manual_upload_sheet": row["_sheet_title"],
+                            "manual_upload_row": row["_sheet_row_number"]}
+                    active_entries.append({**entry, "name": name, "sequence": sequence,
+                                           "current_row": item})
+                for field in ("research_total", "other_total"):
+                    before = old_funding[name].get(field)
+                    after = funding[name].get(field)
+                    if before != after:
+                        changes.append({"record_id": f"funding:{name}", "field_key": field,
+                                        "before": before, "after": after})
+            if len(changes) > 1000:
+                fail("MANUAL_EXCEL_TOO_MANY_CHANGES", "一次最多修改或删除 1000 条内容。", 422)
+            new_summary = summaries(normalized, funding, names)
+            old_summary_ids = {row["name"]: row.get("_funding_row_id")
+                               for row in dataset.base_rows_json or []}
+            stored_summary = [{**row, "_funding_row_id": old_summary_ids.get(row["name"]) or str(uuid4())}
+                              for row in new_summary]
+            result_book = render_book(normalized, funding, order=names)
+            try:
+                output = to_bytes(result_book)
+            finally:
+                result_book.close()
+            active_keys = [item["registration_key"] for item in active_entries]
+            source_policy = {"funding_usage_rows_v3": normalized,
+                "funding_usage_funding_v3": funding,
+                "funding_usage_person_order_v3": names,
+                "funding_usage_entries": active_entries,
+                "funding_usage_deleted_entries": deleted_entries,
+                "funding_usage_history": active_keys,
+                "funding_usage_added_rows": [
+                    {"name": item["name"], "sequence": item["sequence"],
+                     "source_row_id": item["source_row_id"]}
+                    for item in active_entries
+                    if item.get("manual_revision_request_key") == request_key],
+                "funding_usage_sequence_changes": sequence_changes,
+                "funding_usage_next_sequence": max((row["sequence"] for row in normalized), default=0) + 1}
+            return changes, output, stored_summary, source_policy, deleted_sequences
+        finally:
+            baseline.close()
+            candidate.close()
 
     def _prepare_funding_revision(self, dataset, base_path: Path, path: Path, current, origin, request_key):
         """首表是唯一可编辑的业务来源，个人页由服务端重新生成。"""

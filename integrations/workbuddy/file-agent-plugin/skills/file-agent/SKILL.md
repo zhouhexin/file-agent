@@ -5,7 +5,7 @@ description: 当本轮上下文含 FILE_AGENT_HOST_SUBMISSION，且用户要求�
 
 # 文件助手附件桥接
 
-用户提供成果资助使用登记图片与旧汇总表，要求首次生成余额 Excel；或只上传新的登记图片，要求按完整文件名继续追加并扣减已有余额时，都交给 `file-agent-research-funding-usage-balance`。下载这类表后修改、删除或人工新增首个汇总页的独立支出并回传，也遵循该 Skill 的首表同步规则，回传工具用 `file-agent-manual-excel-revision`。图片印刷金额不参与扣减，也不按年度拆分。
+用户提供成果资助使用登记图片与旧汇总表，要求首次生成余额 Excel；只上传新的登记图片，要求按完整文件名继续追加；或者上传新版教师成果明细汇总表，要求刷新已发布余额表的科研成果资助总额时，都交给 `file-agent-research-funding-usage-balance`。下载新版余额表后，在个人明细页修改、删除或人工新增独立支出并回传；服务器按个人页重算首页，回传工具用 `file-agent-manual-excel-revision`。已发布旧版余额表仍按旧版首表规则回传，其他 Excel 回传规则不变。图片印刷金额不参与扣减，也不按年度拆分。
 
 用户要求把教师引进考察材料填入《西安理工大学教师引进考察汇总表.xlsx》或同类教师引进汇总模板时，交给 `file-agent-teacher-recruitment-excel`。每轮有上传目标 Excel，就以这份新上传表的真实列填入本轮材料；只有没有上传目标时才按完整文件名追加已有表。多份材料可归到同一位教师的一行；不得误用教授业绩汇总 B–I/L 的定向技能。下载后仅手工补充并同名回传的请求仍交给 `file-agent-manual-excel-revision`。
 

@@ -21,6 +21,7 @@ from file_agent_mcp.client import WorkBuddyAttachmentRegistry
 from file_agent_mcp.workbuddy_submission import (
     TrustedSubmission,
     WorkBuddySubmissionService,
+    _blob_ref_attachments,
     _host_document_paths,
     _message_matches_prompt,
 )
@@ -127,6 +128,152 @@ def _document_message(*, path: Path, prompt: str, created_at: float) -> dict:
             ),
         }],
     }
+
+
+def _pending_image_service(tmp_path, *, image_parts: list[dict], document: Path | None = None):
+    """构造本轮宿主 transcript 和待解析提交单，实际走 MCP 导入链路。"""
+
+    home = tmp_path / ".workbuddy"
+    projects = home / "projects"
+    projects.mkdir(parents=True, exist_ok=True)
+    transcript = projects / "session.jsonl"
+    state = home / "bridge-state"
+    (state / "submissions").mkdir(parents=True)
+    stage = state / "document-cache"
+    stage.mkdir()
+    blobs = home / "blobs"
+    blobs.mkdir(exist_ok=True)
+    prompt = "请归档本轮附件"
+    now = time.time()
+    message = (
+        _document_message(path=document, prompt=prompt, created_at=now)
+        if document is not None else {
+            "id": "image-message-1", "role": "user", "sessionId": "session-1",
+            "timestamp": int(now * 1000),
+            "content": [{"type": "input_text", "text": prompt}],
+        }
+    )
+    message["content"].extend(image_parts)
+    transcript.write_text(json.dumps(message, ensure_ascii=False) + "\n", encoding="utf-8")
+    ref = "wbsub_v1_55555555555555555555555555555555"
+    (state / "submissions" / f"{ref}.json").write_text(json.dumps({
+        "status": "PENDING_TRANSCRIPT", "session_id": "session-1",
+        "created_at": now, "prompt": prompt,
+        "transcript_path": str(transcript), "attachments": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    client = FakeAttachmentClient()
+    registry = WorkBuddyAttachmentRegistry([blobs, stage])
+    service = WorkBuddySubmissionService(
+        transfer=AttachmentTransferService(client, registry), registry=registry,
+        state_dir=state, transcript_roots=[projects],
+    )
+    return service, client, ref, blobs
+
+
+def _wrapped_image_part(blob: Path, *, blob_id: str = "blob-1", filename: str = "材料.jpg") -> dict:
+    return {
+        "type": "input_image",
+        "image": {
+            "type": "image_blob_ref", "blob_id": blob_id,
+            "blob_path": str(blob), "original_filename": filename,
+        },
+        "original_filename": filename,
+    }
+
+
+def test_pending_wrapped_image_is_imported(tmp_path) -> None:
+    """当前宿主的 input_image 包装引用必须进入提交批次。"""
+
+    blob = tmp_path / ".workbuddy" / "blobs" / "aa" / "hash.jpg"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"image")
+    service, client, ref, _ = _pending_image_service(
+        tmp_path, image_parts=[_wrapped_image_part(blob)],
+    )
+
+    result = asyncio.run(service.ingest(
+        submission_ref=ref, user_request=None,
+        placement_mode="BY_CATEGORY", rule_profile="content_based",
+    ))
+
+    assert result["uploaded_count"] == 1
+    assert len(client.items) == 1
+    assert client.uploaded[0][1:] == (blob, "材料.jpg")
+
+
+def test_pending_wrapped_image_and_document_are_both_imported(tmp_path) -> None:
+    """图片与宿主文档同轮提交时不得静默丢掉图片。"""
+
+    blob = tmp_path / ".workbuddy" / "blobs" / "aa" / "hash.jpg"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"image")
+    document = tmp_path / "汇总表.xlsx"
+    document.write_bytes(b"xlsx")
+    service, client, ref, _ = _pending_image_service(
+        tmp_path, image_parts=[_wrapped_image_part(blob)], document=document,
+    )
+
+    result = asyncio.run(service.ingest(
+        submission_ref=ref, user_request=None,
+        placement_mode="BY_CATEGORY", rule_profile="content_based",
+    ))
+
+    assert result["uploaded_count"] == 2
+    assert [item["source_relative_path"].split("/")[-1] for item in client.items] == [
+        "材料.jpg", "汇总表.xlsx",
+    ]
+    assert {item[2] for item in client.uploaded} == {"材料.jpg", "汇总表.xlsx"}
+
+
+def test_pending_wrapped_duplicate_image_is_imported_once(tmp_path) -> None:
+    blob = tmp_path / ".workbuddy" / "blobs" / "aa" / "hash.jpg"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"image")
+    image = _wrapped_image_part(blob)
+    service, client, ref, _ = _pending_image_service(tmp_path, image_parts=[image, image])
+
+    result = asyncio.run(service.ingest(
+        submission_ref=ref, user_request=None,
+        placement_mode="BY_CATEGORY", rule_profile="content_based",
+    ))
+
+    assert result["uploaded_count"] == 1
+    assert len(client.items) == 1
+
+
+def test_pending_wrapped_image_requires_verified_blob_and_authorized_root(tmp_path) -> None:
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(b"image")
+    image = _wrapped_image_part(outside)
+    service, client, ref, _ = _pending_image_service(tmp_path, image_parts=[image])
+
+    with pytest.raises(ValueError, match="不在已授权缓存根内"):
+        asyncio.run(service.ingest(
+            submission_ref=ref, user_request=None,
+            placement_mode="BY_CATEGORY", rule_profile="content_based",
+        ))
+    assert not client.items
+
+    image["image"] = {"type": "base64", "data": "not-a-blob"}
+    bad_service, _, bad_ref, _ = _pending_image_service(
+        tmp_path / "base64", image_parts=[image],
+    )
+    with pytest.raises(ValueError, match="缺少可验证的 blob 引用"):
+        bad_service.load(submission_ref=bad_ref)
+
+
+def test_wrapped_image_rejects_conflicting_or_incomplete_references(tmp_path) -> None:
+    blob = tmp_path / "hash.jpg"
+    image = _wrapped_image_part(blob)
+    image["image"].pop("blob_path")
+    image["blob_path"] = str(blob)
+    with pytest.raises(ValueError, match="不完整的附件引用"):
+        _blob_ref_attachments({"content": [image]})
+
+    first = _wrapped_image_part(blob)
+    second = _wrapped_image_part(blob, filename="另一张.jpg")
+    with pytest.raises(ValueError, match="blob 标识存在冲突"):
+        _blob_ref_attachments({"content": [first, second]})
 
 
 def test_manual_excel_revision_requires_one_trusted_same_named_attachment(tmp_path) -> None:

@@ -650,7 +650,9 @@ class FileAgentIntegrationClient:
     async def funding_usage_request(self, method: str, path: str, payload: dict) -> dict[str, Any]:
         """固定成果资助预览/发布接口；不向宿主开放任意 API 路径。"""
         if method != "POST" or path not in {
-                "/preview", "/publish", "/continue/preview", "/continue/publish"}:
+                "/preview", "/publish", "/continue/preview", "/continue/publish",
+                "/refresh/preview", "/refresh/publish",
+                "/source-summary/preview", "/source-summary/publish"}:
             raise ValueError("FUNDING_USAGE_ROUTE_INVALID")
         response = await self._request(
             self.http.post(f"/api/funding-usage{path}", json=payload),
