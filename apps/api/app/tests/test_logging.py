@@ -6,6 +6,7 @@ import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from app.core import config
 from app.core.logging import cleanup_old_logs, format_exception_traceback
@@ -80,6 +81,31 @@ def test_cleanup_old_logs_removes_files_older_than_retention(monkeypatch, tmp_pa
 
     assert not old_log.exists()
     assert fresh_log.exists()
+    config.get_settings.cache_clear()
+
+
+def test_cleanup_old_logs_tolerates_concurrent_worker_deletion(monkeypatch, tmp_path):
+    """目录枚举后文件被另一个 worker 删除时，仍继续清理其他过期日志。"""
+
+    monkeypatch.setenv("LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOG_RETENTION_DAYS", "7")
+    config.get_settings.cache_clear()
+    removed_by_other_worker = tmp_path / "file-agent-removed.log"
+    remaining_old_log = tmp_path / "file-agent-old.log"
+    remaining_old_log.write_text("{}\n", encoding="utf-8")
+    old_timestamp = (datetime.now(timezone.utc) - timedelta(days=8)).timestamp()
+    os.utime(remaining_old_log, (old_timestamp, old_timestamp))
+    real_glob = Path.glob
+
+    def glob_with_stale_entry(directory, pattern):
+        if directory == tmp_path and pattern == "file-agent-*.log":
+            return iter((removed_by_other_worker, remaining_old_log))
+        return real_glob(directory, pattern)
+
+    monkeypatch.setattr(Path, "glob", glob_with_stale_entry)
+    cleanup_old_logs()
+
+    assert not remaining_old_log.exists()
     config.get_settings.cache_clear()
 
 

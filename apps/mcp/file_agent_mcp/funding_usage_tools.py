@@ -96,7 +96,52 @@ class FundingSourceSummarySyncPublishPayload(FundingSourceSummarySyncPayload):
     preview_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class FundingSourceEntriesImportPayload(StrictInput):
+    workbook: SourceSnapshot
+    filename: str = Field(min_length=6, max_length=240)
+    request_key: str = Field(min_length=1, max_length=120)
+    confirm_inferred_owner: bool = False
+
+
+class FundingSourceEntriesImportPublishPayload(FundingSourceEntriesImportPayload):
+    preview_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 def register_funding_usage_tools(mcp, client_factory, download_dir):
+    @mcp.tool(name="funding_source_entries_preview", description=(
+        "预览本轮上传单人资助 Excel 第 1 张论文页、第 3 张会议页向同名教师成果明细汇总表的追加；"
+        "逐行报告重复、缺字段和申请人推断，不修改文件。"), structured_output=True)
+    async def source_entries_preview(payload: FundingSourceEntriesImportPayload) -> dict[str, Any]:
+        client: FileAgentIntegrationClient = client_factory()
+        try:
+            return await client.funding_usage_request(
+                "POST", "/source-entries/preview", payload.model_dump(mode="json"))
+        finally:
+            await client.close()
+
+    @mcp.tool(name="funding_source_entries_publish", description=(
+        "只发布与预览一致的单人资助新增成果；同步个人页与汇总页并返回同名新版本。"
+        "缺申请人关联必须显式确认。"), structured_output=False)
+    async def source_entries_publish(payload: FundingSourceEntriesImportPublishPayload):
+        client: FileAgentIntegrationClient = client_factory()
+        try:
+            result = await client.funding_usage_request(
+                "POST", "/source-entries/publish", payload.model_dump(mode="json"))
+            if not result.get("excel_published") or result.get("status") != "COMPLETED":
+                return result
+            resource = await client.download_dataset_export(
+                dataset_id=result["dataset_id"], export_id=result["export_id"],
+                output_dir=Path(download_dir()))
+            receipt = {**result, "download_resource_uri": resource["resource_uri"]}
+            return CallToolResult(content=[
+                TextContent(type="text", text=json.dumps(receipt, ensure_ascii=False)),
+                ResourceLink(type="resource_link", name=result["filename"],
+                             uri=resource["resource_uri"],
+                             mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             size=resource["size_bytes"])], structuredContent=receipt)
+        finally:
+            await client.close()
+
     @mcp.tool(name="funding_source_summary_preview", description=(
         "核对已归档教师成果明细表个人页合计与汇总页资助总额的差异；仅预览，不修改文件。"),
         structured_output=True)

@@ -160,6 +160,9 @@ class DocumentSearchProfileService:
         if existing:
             user_id = doc.user_id if doc else existing.user_id
             existing.user_id = user_id
+            existing.workspace_id = wc.workspace_id
+            existing.document_id = wc.document_id
+            existing.document_version_id = wc.current_version_id or ""
             existing.status = wc.status or "ACTIVE"
             existing.normalized_filename = normalized_filename or None
             existing.filename_search_text = filename_terms or None

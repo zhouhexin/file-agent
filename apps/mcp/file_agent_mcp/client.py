@@ -652,7 +652,8 @@ class FileAgentIntegrationClient:
         if method != "POST" or path not in {
                 "/preview", "/publish", "/continue/preview", "/continue/publish",
                 "/refresh/preview", "/refresh/publish",
-                "/source-summary/preview", "/source-summary/publish"}:
+                "/source-summary/preview", "/source-summary/publish",
+                "/source-entries/preview", "/source-entries/publish"}:
             raise ValueError("FUNDING_USAGE_ROUTE_INVALID")
         response = await self._request(
             self.http.post(f"/api/funding-usage{path}", json=payload),

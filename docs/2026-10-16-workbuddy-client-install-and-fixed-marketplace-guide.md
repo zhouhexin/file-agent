@@ -1,6 +1,6 @@
 # WorkBuddy 文件助手客户端安装与固定市场地址操作手册
 
-适用日期：2026-10-19。当前附件桥接套件版本：`0.1.84`。
+适用日期：2026-10-20。当前附件桥接套件版本：`0.1.85`；新功能需要客户端 MCP `0.1.1`。
 
 本文用于管理员把 File Agent 接入客户的 Windows WorkBuddy，并统一使用以下固定市场地址安装、更新套件：
 
@@ -27,16 +27,16 @@ http://10.102.4.241/downloads/file-agent-marketplace.zip
 当前服务器上的来源 ZIP 预期为：
 
 ```text
-E:\file-agent\integrations\workbuddy\file-agent-marketplace-0.1.84.zip
+E:\file-agent\integrations\workbuddy\file-agent-marketplace-0.1.85.zip
 ```
 
-本项目构建机上的 `0.1.84` 包大小为 `82027` 字节，SHA-256 为 `e290fa1ddb5560c290fd2a91e715d46bc56a89afb0e24e075e3b884fad89ee9b`。如果服务器文件不同，先核对传输来源和版本，不要把网页文件改名为 ZIP。项目内可用 `python integrations/workbuddy/build_marketplace.py` 重建市场包；脚本会同时生成带版本号和不带版本号的 ZIP。
+本项目构建机上的 `0.1.85` 包大小为 `83197` 字节，SHA-256 为 `1df8411c3fbe9cc07200c60e38cbda1db8a7b50456c97a5d6b3652996d036265`。如果服务器文件不同，先核对传输来源和版本，不要把网页文件改名为 ZIP。项目内可用 `python integrations/workbuddy/build_marketplace.py` 重建市场包；脚本会同时生成带版本号和不带版本号的 ZIP。
 
 在服务器 PowerShell 执行：
 
 ```powershell
 Set-Location E:\file-agent
-$Version = '0.1.84'
+$Version = '0.1.85'
 $SourceZip = "E:\file-agent\integrations\workbuddy\file-agent-marketplace-$Version.zip"
 $EnvFile = '.\deploy\.env'
 $ComposeFile = '.\deploy\docker-compose.production.yml'
@@ -90,7 +90,7 @@ if ($LASTEXITCODE -ne 0) { throw '下载到的文件不是完整 ZIP' }
 Get-Item -LiteralPath $DownloadedZip | Select-Object FullName,Length
 ```
 
-在客户电脑上也应从同一 URL 下载验证一次，排除客户网络或代理返回不同内容。当前 `0.1.84` 应为 `82027` 字节。
+在客户电脑上也应从同一 URL 下载验证一次，排除客户网络或代理返回不同内容。当前 `0.1.85` 应为 `83197` 字节。
 
 上述 `docker cp` 是当前环境的快速发布方式。重建 `gateway` 容器后，容器内文件会消失，应重新执行本节发布与验收。长期使用可按旧部署手册为 `gateway` 配置 `../data/downloads:/srv/downloads:ro` 只读绑定卷，再由宿主机持久化管理市场 ZIP；修改 Compose 并重建容器前应先安排维护窗口。
 
@@ -231,7 +231,7 @@ if ($LASTEXITCODE -ne 0) { throw '下载内容不是完整 ZIP' }
 Get-Item -LiteralPath $MarketCheck | Select-Object FullName,Length
 ```
 
-当前 `0.1.84` 下载文件应为 `82027` 字节。若只有约 `410` 字节，或浏览器显示登录页，说明地址返回的是网页，应回到第 2 节修复发布，不能继续点击 WorkBuddy“更新”。
+当前 `0.1.85` 下载文件应为 `83197` 字节。若只有约 `410` 字节，或浏览器显示登录页，说明地址返回的是网页，应回到第 2 节修复发布，不能继续点击 WorkBuddy“更新”。
 
 在 WorkBuddy 中进入“技能 → 套件 → 市场”：
 
@@ -296,7 +296,7 @@ $Settings.enabledPlugins.$PluginKey
 $Settings.pluginConfigs.$PluginKey.options | Format-List
 ```
 
-`url` 应为固定地址，`installComplete` 与启用状态应为 `True`，WorkBuddy 界面应显示套件 `0.1.84`。历史缓存目录里存在 `0.1.84`，只能说明曾下载过，不能单独证明本次更新成功或 Hook 已运行。
+`url` 应为固定地址，`installComplete` 与启用状态应为 `True`，WorkBuddy 界面应显示套件 `0.1.85`。历史缓存目录里存在 `0.1.85`，只能说明曾下载过，不能单独证明本次更新成功或 Hook 已运行。
 
 ### 7.2 实际功能测试
 
@@ -329,7 +329,7 @@ $Settings.pluginConfigs.$PluginKey.options | Format-List
 | --- | --- |
 | WorkBuddy 报 `End of central directory record signature not found` | 它实际下载到的不是完整 ZIP。先读 `.zip-metadata.json` 的 `url`，再从**客户电脑**下载该 URL，核对字节数、哈希与 ZIP 完整性。 |
 | 下载只有约 `410` 字节，浏览器显示登录页 | Caddy 找不到指定文件，回退返回前端页面。重新执行第 2 节发布；只看到 `HTTP 200` 不能算成功。 |
-| 已发布 `0.1.84`，WorkBuddy 仍请求 `0.1.10.zip` | 旧市场地址仍留在客户电脑。通过 WorkBuddy 市场管理把它更换成固定 URL；发布新文件不会自动改旧地址。 |
+| 已发布 `0.1.85`，WorkBuddy 仍请求 `0.1.10.zip` | 旧市场地址仍留在客户电脑。通过 WorkBuddy 市场管理把它更换成固定 URL；发布新文件不会自动改旧地址。 |
 | `:8765` 无法连接 | 8765 是临时 Python 文件服务端口，不随服务器代码部署自动启动。本文固定地址使用现有 80 端口，不依赖 8765。 |
 | 更新成功后附件仍无调用 | 核对套件已启用、三个本机选项、MCP 已连接、`bridge_state_dir` 一致，并完全退出重启 WorkBuddy；必须上传新附件发新消息测试。 |
 | 重建 gateway 后下载又变成登录页 | 当前使用容器内复制方式，容器重建会丢失 ZIP。重新执行第 2 节，或配置持久只读下载目录挂载。 |
@@ -337,10 +337,10 @@ $Settings.pluginConfigs.$PluginKey.options | Format-List
 ## 10. 客户交付核对
 
 - [ ] 客户电脑可访问 `http://10.102.4.241/api/health`。
-- [ ] 固定市场 URL 下载到有效 ZIP；当前 `0.1.84` 为 `82027` 字节。
+- [ ] 固定市场 URL 下载到有效 ZIP；当前 `0.1.85` 为 `83197` 字节。
 - [ ] 客户自己的 File Agent 账号登录成功，未共享 Token、密码或整个 `mcp.json`。
 - [ ] 客户电脑 `file-agent-mcp` 可导入，WorkBuddy 显示 `file-agent` MCP 已连接。
-- [ ] WorkBuddy 市场元数据指向固定 URL，套件显示 `0.1.84` 并启用。
+- [ ] WorkBuddy 市场元数据指向固定 URL，套件显示 `0.1.85` 并启用。
 - [ ] 三个套件选项使用本机真实路径，`bridge_state_dir` 与 MCP 配置一致。
 - [ ] 新测试附件触发提交引用、MCP 工具调用和逐文件回执。
 - [ ] 未同时启用 `file-agent-connector` 标准连接器。

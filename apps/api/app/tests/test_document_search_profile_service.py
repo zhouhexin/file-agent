@@ -202,6 +202,50 @@ def test_upsert_is_idempotent():
         db.close()
 
 
+def test_upsert_tracks_new_current_version():
+    """同名文件发布新版本后，检索投影必须跟随当前版本。"""
+
+    db = _db_session()
+    try:
+        _add_working_copy_with_summary(
+            db,
+            suffix="updated",
+            user_id="user-updated",
+            filename="累计余额表.xlsx",
+            summary_text="旧版摘要",
+        )
+        service = DocumentSearchProfileService(db=db)
+        working = db.get(WorkingCopy, "working-copy-updated")
+        service.upsert_current_profile(working.id)
+        profile_id = db.query(DocumentSearchProfile).filter_by(
+            working_copy_id=working.id).one().id
+        next_version = DocumentVersion(
+            id="version-updated-next",
+            document_id=working.document_id,
+            version_number=2,
+            storage_tier="WORKING_COPY",
+            storage_path="work/累计余额表-v2.xlsx",
+            filename=working.filename,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=100,
+            sha256="b" * 64,
+            source_type="STRUCTURED_DATASET_EXPORT",
+        )
+        db.add(next_version)
+        working.current_version_id = next_version.id
+        db.flush()
+
+        service.upsert_current_profile(working.id)
+
+        profile = db.query(DocumentSearchProfile).filter_by(
+            working_copy_id=working.id).one()
+        assert profile.id == profile_id
+        assert profile.document_version_id == next_version.id
+        assert db.query(DocumentSearchProfile).count() == 1
+    finally:
+        db.close()
+
+
 def test_upsert_indexes_relative_directory_for_metadata_only_files():
     """无正文工作副本仍应通过相对目录进入弱检索，不把目录当成正式分类。"""
 

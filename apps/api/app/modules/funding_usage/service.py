@@ -16,7 +16,7 @@ from sqlalchemy import func
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from app.db.models import Document, DocumentPage, DocumentVersion, DocumentExtractionRun, StructuredDataset, StructuredDatasetExport
+from app.db.models import Document, DocumentPage, DocumentVersion, DocumentExtractionRun, StructuredDataset, StructuredDatasetExport, WorkingCopy
 from app.modules.file_lifecycle.shared_access import CanonicalWorkingFileResolver, CanonicalWorkingFileError
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.modules.structured_datasets.publication import assert_publication_ready, stage_publication
@@ -27,7 +27,9 @@ from app.modules.structured_extraction.export import _safe_spreadsheet_text
 from .schemas import (FundingUsageRequest, FundingUsagePublish,
                       FundingUsageContinue, FundingUsageContinuePublish,
                       FundingUsageRefresh, FundingUsageRefreshPublish,
-                      FundingSourceSummarySync, FundingSourceSummarySyncPublish, TextSpan)
+                      FundingSourceSummarySync, FundingSourceSummarySyncPublish,
+                      FundingSourceEntriesImport, FundingSourceEntriesImportPublish, TextSpan)
+from .source_entries import SourceEntriesError, evaluate as evaluate_source_entries, apply as apply_source_entries
 from .workbook import append_summary_rows, money, read_summary_rows, rebuild_personal_sheets
 from .summary_workbook import (SUMMARY_HEADERS, SUMMARY_KEYS, person_order, read_detail_book,
                                render_book, summaries)
@@ -752,6 +754,197 @@ class FundingUsageService:
                 working_copy=working, version=version, base_version_id=current.id,
                 result=result, agent_run=self.datasets.agent_run)
         return {**result, "people": decisions, "_publication_id": publication.id}
+
+    @staticmethod
+    def _source_entries_digest(request: FundingSourceEntriesImport, version: DocumentVersion) -> str:
+        data = {"request": request.model_dump(mode="json", exclude={"preview_digest"}),
+                "target_version_id": version.id, "target_sha256": version.sha256}
+        return sha256(json.dumps(data, ensure_ascii=False, sort_keys=True,
+                                 separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _source_entries_request_digest(request: FundingSourceEntriesImport) -> str:
+        return sha256(json.dumps(request.model_dump(mode="json", exclude={"preview_digest"}),
+                                 ensure_ascii=False, sort_keys=True,
+                                 separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    def _source_entries_target(self, filename: str, *, lock=False):
+        if (Path(filename).name != filename or Path(filename).suffix.lower() != ".xlsx"
+                or "\\" in filename or "/" in filename):
+            fail("FUNDING_ENTRY_TARGET_INVALID", "请提供目标成果明细汇总表的完整 .xlsx 文件名。", 422)
+        rows = self.db.query(WorkingCopy).filter_by(
+            workspace_id=get_shared_workspace_id(self.db), status="ACTIVE").all()
+        matches = [row for row in rows if row.filename.casefold() == filename.casefold()]
+        if not matches:
+            fail("FUNDING_ENTRY_TARGET_NOT_FOUND", "没有找到同名教师成果明细汇总表。", 404)
+        if len(matches) != 1:
+            fail("FUNDING_ENTRY_TARGET_AMBIGUOUS", "找到多个同名成果明细表，请先确定唯一目标。", 409)
+        working = matches[0]
+        if lock:
+            working = self.db.query(WorkingCopy).filter_by(id=working.id).with_for_update().one()
+        assert_publication_ready(self.db, working_copy_id=working.id)
+        version = self.db.get(DocumentVersion, working.current_version_id)
+        if version is None or version.filename != working.filename:
+            fail("FUNDING_ENTRY_TARGET_INVALID", "目标 Excel 当前版本不完整。", 409)
+        visible = self.datasets.storage.working_copy_path(self.datasets._working_copy_storage_path(working))
+        if not visible.is_file() or self.datasets.storage.sha256_file(visible) != version.sha256:
+            fail("FUNDING_ENTRY_TARGET_CHANGED", "目标 Excel 当前文件与版本记录不一致。", 409)
+        inspect_xlsx(visible)
+        return working, version, visible
+
+    def _source_entries_evaluate(self, request: FundingSourceEntriesImport, *, lock=False):
+        source_path = self._refresh_source(request)
+        source_version = self.db.get(DocumentVersion, str(request.workbook.document_version_id))
+        source_document = self.db.get(Document, source_version.document_id)
+        inspect_xlsx(source_path)
+        working, version, visible = self._source_entries_target(request.filename, lock=lock)
+        if working.document_id == str(request.workbook.document_id):
+            fail("FUNDING_ENTRY_SOURCE_INVALID", "上传的单人表不能是目标汇总表本身。", 422)
+        try:
+            decisions, owner = evaluate_source_entries(
+                source_path, visible, source_document.original_filename,
+                confirm_inferred_owner=request.confirm_inferred_owner)
+            totals = None
+            if not any(item["status"] == "TARGET_PERSON_MISSING" for item in decisions):
+                book = load_workbook(visible, read_only=False, data_only=False)
+                try:
+                    totals = apply_source_entries(book, decisions, owner)
+                finally:
+                    book.close()
+        except SourceEntriesError as exc:
+            fail(exc.code, str(exc), 422)
+        except (OSError, ValueError, KeyError, XlsxSafetyError):
+            fail("FUNDING_ENTRY_WORKBOOK_INVALID", "单人资助表或目标成果表无法安全读取。", 422)
+        return working, version, visible, decisions, owner, totals
+
+    def source_entries_preview(self, request: FundingSourceEntriesImport):
+        _, version, _, decisions, owner, totals = self._source_entries_evaluate(request)
+        return {"preview_digest": self._source_entries_digest(request, version),
+                "filename": request.filename, "name": owner,
+                "added_count": sum(item["status"] in {"ADDED", "ADDED_REVIEW"} for item in decisions),
+                "duplicate_count": sum(item["status"] == "DUPLICATE" for item in decisions),
+                "review_count": sum(item["status"] not in {"ADDED", "DUPLICATE"} for item in decisions),
+                "proposed_totals": totals,
+                "rows": [{key: value for key, value in item.items() if key != "cells"} for item in decisions]}
+
+    def source_entries_publish(self, request: FundingSourceEntriesImportPublish):
+        request_digest = self._source_entries_request_digest(request)
+        for previous in self.db.query(DocumentVersion).filter_by(source_type="FUNDING_SOURCE_ENTRIES_IMPORT").all():
+            policy = previous.extraction_policy_json or {}
+            if policy.get("funding_source_entries_request_key") != request.request_key:
+                continue
+            if policy.get("funding_source_entries_request_digest") != request_digest:
+                fail("FUNDING_REQUEST_CONFLICT", "请求键已用于其他单人资助表导入。", 409)
+            export = self.db.query(StructuredDatasetExport).filter_by(
+                document_version_id=previous.id).one_or_none()
+            if export is None:
+                fail("FUNDING_PUBLICATION_PENDING", "上次单人资助表发布尚未完成。", 423)
+            assert_publication_ready(self.db, dataset_id=export.dataset_id)
+            return {**self.datasets._export_result(export, reused=True), "status": "COMPLETED",
+                    "added_count": policy.get("funding_source_entries_added_count", 0),
+                    "duplicate_count": policy.get("funding_source_entries_duplicate_count", 0),
+                    "review_count": policy.get("funding_source_entries_review_count", 0),
+                    "name": policy.get("funding_source_entries_name"),
+                    "totals": policy.get("funding_source_entries_totals")}
+        working, current, visible, decisions, owner, totals = self._source_entries_evaluate(request, lock=True)
+        if request.preview_digest != self._source_entries_digest(request, current):
+            fail("FUNDING_PREVIEW_CHANGED", "单人资助表预览对应的目标版本已改变，请重新预览。", 409)
+        added = [item for item in decisions if item["status"] in {"ADDED", "ADDED_REVIEW"}]
+        if not added:
+            fail("FUNDING_ENTRY_UNCHANGED", "上传表没有可安全追加的新成果。", 422)
+        dataset = self.db.query(StructuredDataset).filter_by(working_copy_id=working.id).with_for_update().one_or_none()
+        creation_key = digest(["funding-source-summary", working.id])
+        if dataset is not None and dataset.creation_key != creation_key:
+            fail("FUNDING_SOURCE_DATASET_CONFLICT", "成果明细汇总表已由其他数据集管理。", 409)
+        if dataset is None:
+            dataset = StructuredDataset(workspace_id=get_shared_workspace_id(self.db),
+                created_by=self.user.id, name=Path(working.filename).stem[:100],
+                target_filename=working.filename, target_sheet_name="汇总",
+                target_layout_json={"funding_source_summary_sync": True,
+                                    "funding_source_entries_import": True},
+                schema_json=[{"key": "name", "label": "姓名", "field_type": "string",
+                              "required": False, "multiple": False},
+                             {"key": "research_total", "label": "资助总额（元）",
+                              "field_type": "decimal", "required": False, "multiple": False}],
+                base_rows_json=[], target_source_version_id=current.id,
+                creation_key=creation_key, creation_digest=digest([working.id]),
+                working_copy_id=working.id)
+            self.db.add(dataset)
+            self.db.flush()
+        self.datasets._assert_task_write_access(dataset)
+        with tempfile.TemporaryDirectory(prefix="file-agent-funding-entries-") as directory:
+            output = Path(directory) / working.filename
+            book = load_workbook(visible, read_only=False, data_only=False)
+            try:
+                applied = apply_source_entries(book, decisions, owner)
+                book.save(output)
+            finally:
+                book.close()
+            if applied != totals:
+                fail("FUNDING_PREVIEW_CHANGED", "单人资助表写入结果与预览不一致。", 409)
+            inspect_xlsx(output)
+            file_sha = self.datasets.storage.sha256_file(output)
+            export_id = str(uuid4())
+            version_number = int(self.db.query(func.max(DocumentVersion.version_number)).filter(
+                DocumentVersion.document_id == working.document_id).scalar() or 0) + 1
+            visible_relative = self.datasets._working_copy_storage_path(working)
+            if current.storage_path == visible_relative:
+                history_path = self.datasets.storage.dataset_source_version_relative_path(
+                    dataset_id=dataset.id, document_version_id=current.id,
+                    version_number=current.version_number, suffix=".xlsx")
+                self.datasets.storage.import_working_copy(
+                    source=visible, relative_path=history_path, expected_sha256=current.sha256)
+                current.storage_path = history_path
+            storage_path = self.datasets.storage.dataset_working_version_relative_path(
+                dataset_id=dataset.id, export_id=export_id, version_number=version_number)
+            self.datasets.storage.import_working_copy(
+                source=output, relative_path=storage_path, expected_sha256=file_sha)
+            dataset.revision += 1
+            _, version = self.datasets._publish_working_version(
+                dataset=dataset, working_copy=working, parent_version=current,
+                storage_path=storage_path, version_number=version_number,
+                sha256=file_sha, size_bytes=output.stat().st_size)
+            version.source_type = "FUNDING_SOURCE_ENTRIES_IMPORT"
+            duplicate_count = sum(item["status"] == "DUPLICATE" for item in decisions)
+            review_count = sum(item["status"] not in {"ADDED", "DUPLICATE"} for item in decisions)
+            version.extraction_policy_json = {**dict(current.extraction_policy_json or {}),
+                "funding_source_entries_request_key": request.request_key,
+                "funding_source_entries_request_digest": request_digest,
+                "funding_source_entries_added_count": len(added),
+                "funding_source_entries_duplicate_count": duplicate_count,
+                "funding_source_entries_review_count": review_count,
+                "funding_source_entries_name": owner,
+                "funding_source_entries_totals": totals,
+                "funding_source_entries_source_document_id": str(request.workbook.document_id),
+                "funding_source_entries_source_version_id": str(request.workbook.document_version_id),
+                "funding_source_entries_source_sha256": request.workbook.source_sha256}
+            summary = load_workbook(output, read_only=True, data_only=True)
+            try:
+                sheet = summary["汇总"]
+                dataset.base_rows_json = [{"name": sheet.cell(row, 2).value,
+                    "research_total": sheet.cell(row, 14).value}
+                    for row in range(2, sheet.max_row + 1)
+                    if sheet.cell(row, 2).value and isinstance(sheet.cell(row, 1).value, int)]
+            finally:
+                summary.close()
+            export = StructuredDatasetExport(id=export_id, dataset_id=dataset.id,
+                dataset_revision=dataset.revision, storage_path=storage_path,
+                sha256=file_sha, size_bytes=output.stat().st_size,
+                document_version_id=version.id)
+            self.db.add(export)
+            self.db.flush()
+            result = {**self.datasets._export_result(export, reused=False),
+                "status": "PUBLISHING", "excel_published": False,
+                "added_count": len(added),
+                "duplicate_count": duplicate_count,
+                "review_count": review_count,
+                "name": owner, "totals": totals}
+            publication = stage_publication(self.db, dataset=dataset,
+                working_copy=working, version=version, base_version_id=current.id,
+                result=result, agent_run=self.datasets.agent_run)
+        return {**result,
+                "rows": [{key: value for key, value in item.items() if key != "cells"} for item in decisions],
+                "_publication_id": publication.id}
 
     def _refresh_evaluate(self, request: FundingUsageRefresh, *, lock=False):
         dataset, working, current, origin, target_path = self._continue_target(request, lock=lock)

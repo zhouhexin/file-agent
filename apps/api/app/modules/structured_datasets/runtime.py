@@ -25,7 +25,8 @@ from .manual_revision import ManualRevisionService
 from .correction_schemas import CorrectionCheckout, CorrectionPublish
 from .publication import finalize_publication
 from app.modules.funding_usage.schemas import (FundingUsagePublish, FundingUsageContinuePublish,
-                                               FundingUsageRefreshPublish, FundingSourceSummarySyncPublish)
+                                               FundingUsageRefreshPublish, FundingSourceSummarySyncPublish,
+                                               FundingSourceEntriesImportPublish)
 from app.modules.funding_usage.service import FundingUsageService
 
 
@@ -60,6 +61,7 @@ def execute_dataset_write(*, db, user, operation, payload=None, dataset_id=None,
         "funding_usage_continue_publish": FundingUsageContinuePublish,
         "funding_usage_refresh_publish": FundingUsageRefreshPublish,
         "funding_source_summary_publish": FundingSourceSummarySyncPublish,
+        "funding_source_entries_publish": FundingSourceEntriesImportPublish,
     }
     if operation not in schemas:
         raise ValueError("未知数据集写操作")
@@ -144,6 +146,7 @@ def execute_dataset_write(*, db, user, operation, payload=None, dataset_id=None,
             "funding_usage_continue_publish": lambda: funding_usage.continue_publish(payload),
             "funding_usage_refresh_publish": lambda: funding_usage.refresh_publish(payload),
             "funding_source_summary_publish": lambda: funding_usage.source_summary_publish(payload),
+            "funding_source_entries_publish": lambda: funding_usage.source_entries_publish(payload),
         }
         result = handlers[operation]()
         return {"status": "COMPLETED"}
@@ -171,6 +174,7 @@ def execute_dataset_write(*, db, user, operation, payload=None, dataset_id=None,
                 "person_count",
                 "added_record_count",
                 "changed_count", "review_count",
+                "added_count", "duplicate_count",
             )
             safe_result = {key: result[key] for key in safe_keys if key in result}
             is_job = result.get("kind") == "filesystem_job"
@@ -213,7 +217,7 @@ def execute_dataset_write(*, db, user, operation, payload=None, dataset_id=None,
                     source="workbuddy-excel-writeback" if operation.startswith(("writeback_", "correction_", "manual_revision_")) else "workbuddy-dataset-demo",
                     execution_status="PENDING" if is_async else "COMPLETED",
                 ))
-                if operation in {"export", "writeback_publish", "correction_publish", "manual_revision_publish", "funding_usage_publish", "funding_usage_continue_publish", "funding_usage_refresh_publish", "funding_source_summary_publish"} and result.get("working_copy_id"):
+                if operation in {"export", "writeback_publish", "correction_publish", "manual_revision_publish", "funding_usage_publish", "funding_usage_continue_publish", "funding_usage_refresh_publish", "funding_source_summary_publish", "funding_source_entries_publish"} and result.get("working_copy_id"):
                     db.add(ChangeItem(
                         changeset_id=changeset.id,
                         target_type="working_copy",
@@ -351,7 +355,7 @@ def execute_dataset_write(*, db, user, operation, payload=None, dataset_id=None,
                 result = ManualRevisionService(db, user).receipt(task)
             elif operation == "task_commit":
                 result = DatasetTaskService(db, user).receipt(DatasetTaskService(db, user).owned(task_id))
-            elif operation in {"funding_usage_publish", "funding_usage_continue_publish", "funding_usage_refresh_publish", "funding_source_summary_publish"}:
+            elif operation in {"funding_usage_publish", "funding_usage_continue_publish", "funding_usage_refresh_publish", "funding_source_summary_publish", "funding_source_entries_publish"}:
                 result = {**result, "status": "COMPLETED", "excel_published": True,
                           "saved_to_server": True}
             else:

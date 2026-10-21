@@ -14,13 +14,14 @@ from openpyxl.utils.cell import range_boundaries
 
 from app.core.config import get_settings
 from app.core.request_limits import ExcelWritebackBodyLimitMiddleware
-from app.db.models import DocumentVersion, StructuredDatasetMember, StructuredDatasetPublication, StructuredDatasetTask, WorkingCopy, WorkingCopyRoot
+from app.db.models import DocumentSearchProfile, DocumentVersion, StructuredDatasetMember, StructuredDatasetPublication, StructuredDatasetTask, WorkingCopy, WorkingCopyRoot
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.modules.structured_datasets.task_schemas import TaskPayload
 from app.modules.structured_datasets.writeback import writeback_digest
 from app.modules.structured_datasets.publication import (
     finalize_publication, recover_pending_publications, repair_needs_repair_publication,
 )
+from app.scripts.rebuild_dataset_search_profile import rebuild_profile
 from app.tests.test_dataset_tasks import make_payload
 from app.tests.test_structured_datasets import BASE, demo, seed_workbuddy_document, seed_excel_target
 
@@ -81,6 +82,12 @@ def test_writeback_publishes_workbuddy_bytes_and_preserves_old_path(demo, monkey
     saved = result.json()
     assert saved["excel_published"] and saved["task_record_count"] == 1
     assert saved["filename"] == "教学汇总.xlsx"
+    searched = client.post("/api/search", headers=users[0], json={
+        "query": "教学汇总.xlsx", "top_k": 10,
+    })
+    assert searched.status_code == 200, searched.text
+    assert any(item["working_copy_id"] == saved["working_copy_id"]
+               for item in searched.json()["files"])
     downloaded = client.get(saved["download_url"], headers=users[0])
     assert downloaded.status_code == 200
     assert downloaded.content == output.read_bytes()
@@ -96,6 +103,17 @@ def test_writeback_publishes_workbuddy_bytes_and_preserves_old_path(demo, monkey
         version = db.get(DocumentVersion, saved["document_version_id"])
         assert version.version_number == saved["version_number"]
         working = db.get(WorkingCopy, saved["working_copy_id"])
+        profile = db.query(DocumentSearchProfile).filter_by(working_copy_id=working.id).one()
+        assert profile.status == "ACTIVE"
+        assert profile.document_version_id == saved["document_version_id"]
+        db.delete(profile)
+        db.flush()
+        repaired = rebuild_profile(
+            db, working_copy_id=working.id,
+            expected_version_id=saved["document_version_id"],
+        )
+        assert repaired["profile_id"]
+        assert db.query(DocumentSearchProfile).filter_by(working_copy_id=working.id).one().document_version_id == saved["document_version_id"]
         root = db.get(WorkingCopyRoot, working.working_copy_root_id)
         assert working.filename == "教学汇总.xlsx"
         assert Path(working.relative_path).name == "教学汇总.xlsx"
@@ -317,6 +335,16 @@ def test_manual_excel_revision_updates_same_target_and_query_without_appending(d
     assert current["working_copy_id"] == previous["working_copy_id"]
     assert current["document_version_id"] != previous["document_version_id"]
     assert current["manual_changed_cell_count"] == 1
+    with sessions() as db:
+        profile = db.query(DocumentSearchProfile).filter_by(
+            working_copy_id=current["working_copy_id"]).one()
+        assert profile.document_version_id == current["document_version_id"]
+    searched = client.post("/api/search", headers=users[0], json={
+        "query": task["filename"], "top_k": 10,
+    })
+    assert searched.status_code == 200, searched.text
+    assert any(item["document_version_id"] == current["document_version_id"]
+               for item in searched.json()["files"])
     assert client.get(current["download_url"], headers=users[0]).content == edited.read_bytes()
     assert client.get(previous["download_url"], headers=users[0]).content == output.read_bytes()
     target = client.get(f"{BASE}/targets/by-filename", headers=users[0],

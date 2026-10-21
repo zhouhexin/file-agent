@@ -607,6 +607,8 @@ PostgreSQL migration 会用 trigger 在插入或更新分词字段时同步写�
 检索主路径仍是应用层 Jieba 词项 + `simple` GIN。投影在工作副本创建、重命名/移动、恢复、摘要完成和
 分类建议写入时同事务刷新；回收站操作标记为 `INACTIVE`。投影可以 backfill/reconcile 重建，不能反向
 修改文件或分类事实。
+累计 Excel 在可见工作副本发布完成的同一数据库事务中创建或更新投影；发布新版本时同步更新
+`document_version_id`，替换旧目标时停用旧目标投影。历史缺失投影可按当前版本受控补建。
 
 ### 4.13 evidence_spans
 

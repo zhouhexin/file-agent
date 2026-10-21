@@ -15,7 +15,7 @@ from PIL import Image
 
 from app.core.config import get_settings
 from app.db.models import (
-    ChangeItem, Document, DocumentVersion, DocumentPage, DocumentElement, DocumentExtractionRun,
+    ChangeItem, Document, DocumentSearchProfile, DocumentVersion, DocumentPage, DocumentElement, DocumentExtractionRun,
     FileObject, ManagedRoot, ManagedFile, WorkingCopyRoot, WorkingCopy, WorkingCopyPathRecord, User,
     StructuredDataset, StructuredDatasetExport, StructuredDatasetMember, StructuredExtractionRun,
     ToolInvocation,
@@ -1500,8 +1500,14 @@ def test_uploaded_xlsx_replaces_same_named_target_only_after_successful_publicat
     with sessions() as db:
         old_copy = db.get(WorkingCopy, old_target["working_copy_id"])
         assert old_copy.status == "ARCHIVED"
+        assert db.query(DocumentSearchProfile).filter_by(
+            working_copy_id=old_copy.id).one().status == "INACTIVE"
         assert db.get(ManagedFile, old_copy.managed_file_id).status == "ARCHIVED"
         assert db.get(WorkingCopy, pending.json()["working_copy_id"]).status == "ACTIVE"
+        current_profile = db.query(DocumentSearchProfile).filter_by(
+            working_copy_id=pending.json()["working_copy_id"]).one()
+        assert current_profile.status == "ACTIVE"
+        assert current_profile.document_version_id == pending.json()["document_version_id"]
         assert db.get(ManagedFile, pending_copy.managed_file_id).status == "ACTIVE"
         archived = db.query(ChangeItem).filter_by(
             change_type="STRUCTURED_DATASET_TARGET_ARCHIVED",

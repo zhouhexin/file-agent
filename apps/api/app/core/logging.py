@@ -206,7 +206,12 @@ def cleanup_old_logs() -> None:
         return
     expire_before = time.time() - settings.log_retention_days * 24 * 60 * 60
     for path in log_dir.glob("file-agent-*.log"):
-        if path.stat().st_mtime < expire_before:
+        try:
+            modified_at = path.stat().st_mtime
+        except FileNotFoundError:
+            # 多个 API worker 同时启动时，另一个 worker 可能已删除该日志。
+            continue
+        if modified_at < expire_before:
             path.unlink(missing_ok=True)
 
 

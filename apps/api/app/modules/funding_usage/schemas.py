@@ -101,3 +101,14 @@ class FundingSourceSummarySync(StrictInput):
 
 class FundingSourceSummarySyncPublish(FundingSourceSummarySync):
     preview_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class FundingSourceEntriesImport(StrictInput):
+    workbook: SourceSnapshot
+    filename: str = Field(min_length=6, max_length=240)
+    request_key: str = Field(min_length=1, max_length=120)
+    confirm_inferred_owner: bool = False
+
+
+class FundingSourceEntriesImportPublish(FundingSourceEntriesImport):
+    preview_digest: str = Field(pattern=r"^[0-9a-f]{64}$")

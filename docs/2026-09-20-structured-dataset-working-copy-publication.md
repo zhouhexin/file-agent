@@ -37,6 +37,13 @@
    `document_version_id` 和版本号。
 6. MCP 可以继续下载当前导出作为宿主交付副本；该下载不构成第二个服务端业务文件。
 
+发布协调器完成同名可见文件和版本核验后，必须在标记发布完成的同一数据库事务中，为当前
+`WorkingCopy` 创建或更新 `document_search_profiles`。投影的 `document_version_id` 必须等于
+`WorkingCopy.current_version_id`，否则精确文件名检索的当前版本校验会丢弃结果。用新目标替换
+旧目标时，同一事务将旧工作副本的投影标记为 `INACTIVE`。已发布但缺少投影的历史目标，可用
+`app.scripts.rebuild_dataset_search_profile` 按工作副本 ID 和冻结版本 ID 幂等补建；补建只改检索
+派生数据，不创建 Excel 新版本。
+
 ## 失败与兼容
 
 - 文件写入采用原子 XLSX writer；数据库事务失败时不把未关联文件暴露为工作副本。

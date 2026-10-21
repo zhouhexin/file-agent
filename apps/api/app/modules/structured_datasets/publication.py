@@ -259,6 +259,15 @@ def finalize_publication(db, publication_id: str) -> bool:
                 item.after_value_json = {**dict(item.after_value_json or {}),
                                          "excel_published": True,
                                          "document_version_id": row.candidate_document_version_id}
+    # 可见版本与搜索投影同事务提交；否则已发布的累计表无法按文件名检索，
+    # 而后续版本仍会因投影指向旧版本被检索结果的最终事实校验过滤。
+    from app.modules.retrieval.search_profile import DocumentSearchProfileService
+
+    profiles = DocumentSearchProfileService(db=db)
+    if archive_target:
+        profiles.deactivate_profile(old_working.id)
+    if not profiles.upsert_current_profile(working.id).get("ok"):
+        raise RuntimeError("累计 Excel 搜索投影更新失败")
     db.commit()
     return True
 

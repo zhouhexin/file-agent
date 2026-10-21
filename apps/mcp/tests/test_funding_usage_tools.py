@@ -21,7 +21,7 @@ def test_funding_usage_tools_route_and_download(tmp_path):
         async def funding_usage_request(self, method, path, payload):
             calls.append((method, path, payload))
             if path in {"/preview", "/continue/preview", "/refresh/preview",
-                        "/source-summary/preview"}:
+                        "/source-summary/preview", "/source-entries/preview"}:
                 return {"preview_digest": "a" * 64, "person_count": 1}
             return {"status": "COMPLETED", "excel_published": True,
                     "dataset_id": "dataset", "export_id": "export",
@@ -49,7 +49,8 @@ def test_funding_usage_tools_route_and_download(tmp_path):
         assert {"funding_usage_preview", "funding_usage_publish",
                 "funding_usage_continue_preview", "funding_usage_continue_publish",
                 "funding_usage_refresh_preview", "funding_usage_refresh_publish",
-                "funding_source_summary_preview", "funding_source_summary_publish"} <= names
+                "funding_source_summary_preview", "funding_source_summary_publish",
+                "funding_source_entries_preview", "funding_source_entries_publish"} <= names
         await mcp.call_tool("funding_usage_preview", {"payload": payload})
         result = await mcp.call_tool("funding_usage_publish", {"payload": {
             **payload, "preview_digest": "a" * 64}})
@@ -74,6 +75,12 @@ def test_funding_usage_tools_route_and_download(tmp_path):
         synced = await mcp.call_tool("funding_source_summary_publish", {"payload": {
             **source_sync, "preview_digest": "a" * 64}})
         assert any(isinstance(item, ResourceLink) for item in synced.content)
+        entry_import = {"workbook": source, "filename": "教师成果明细汇总表.xlsx",
+                        "request_key": "entries", "confirm_inferred_owner": True}
+        await mcp.call_tool("funding_source_entries_preview", {"payload": entry_import})
+        imported = await mcp.call_tool("funding_source_entries_publish", {"payload": {
+            **entry_import, "preview_digest": "a" * 64}})
+        assert any(isinstance(item, ResourceLink) for item in imported.content)
 
     asyncio.run(run())
     assert calls[0][0:2] == ("POST", "/preview")
@@ -86,6 +93,8 @@ def test_funding_usage_tools_route_and_download(tmp_path):
     assert calls[7][1] == "/refresh/publish"
     assert calls[9][1] == "/source-summary/preview"
     assert calls[10][1] == "/source-summary/publish"
+    assert calls[12][1] == "/source-entries/preview"
+    assert calls[13][1] == "/source-entries/publish"
 
 
 def test_funding_usage_client_allows_only_fixed_continue_routes():
@@ -106,6 +115,8 @@ def test_funding_usage_client_allows_only_fixed_continue_routes():
             assert (await client.funding_usage_request("POST", "/refresh/publish", {})) == {"status": "ok"}
             assert (await client.funding_usage_request("POST", "/source-summary/preview", {})) == {"status": "ok"}
             assert (await client.funding_usage_request("POST", "/source-summary/publish", {})) == {"status": "ok"}
+            assert (await client.funding_usage_request("POST", "/source-entries/preview", {})) == {"status": "ok"}
+            assert (await client.funding_usage_request("POST", "/source-entries/publish", {})) == {"status": "ok"}
             with pytest.raises(ValueError, match="FUNDING_USAGE_ROUTE_INVALID"):
                 await client.funding_usage_request("POST", "/other", {})
         finally:
@@ -117,4 +128,6 @@ def test_funding_usage_client_allows_only_fixed_continue_routes():
                      "/api/funding-usage/refresh/preview",
                      "/api/funding-usage/refresh/publish",
                      "/api/funding-usage/source-summary/preview",
-                     "/api/funding-usage/source-summary/publish"]
+                     "/api/funding-usage/source-summary/publish",
+                     "/api/funding-usage/source-entries/preview",
+                     "/api/funding-usage/source-entries/publish"]
