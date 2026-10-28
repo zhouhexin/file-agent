@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.modules.agent.tool_schemas import StructuredFieldSpec
 from app.modules.structured_extraction.workbook_layout import WorkbookLayout
-from .assessment import ApprovalScope, FieldAssessment, SourceQuote
+from .assessment import ApprovalScope, FieldAssessment, PaperEligibility, SourceQuote
 
 
 class StrictInput(BaseModel):
@@ -79,6 +79,7 @@ class FieldCandidate(StrictInput):
     confidence: float | None = Field(default=None, ge=0, le=1)
     fragments: list[SourceQuote] = Field(default_factory=list, max_length=100)
     numbered_items: bool = False
+    paper_checks: list[PaperEligibility] = Field(default_factory=list, max_length=100)
     source_only_fragments: list[SourceQuote] = Field(default_factory=list, max_length=100)
     blank_reason: str | None = Field(default=None, min_length=1, max_length=1000)
     # 完整教授表允许一次 OCR 后保留不确定候选；状态与来源区段由服务端核验。
@@ -102,6 +103,8 @@ class FieldCandidate(StrictInput):
                                     or self.teacher_render or self.assessment or self.approval
                                     or self.source_only_fragments or self.ocr_status):
             raise ValueError("逐条编号只适用于至少两条非空原文片段的普通文本字段")
+        if self.paper_checks and not self.fragments:
+            raise ValueError("论文筛选必须逐篇提供原文片段")
         if self.blank_reason and self.raw_text:
             raise ValueError("有内容字段不能同时声明留空")
         if self.ocr_status:

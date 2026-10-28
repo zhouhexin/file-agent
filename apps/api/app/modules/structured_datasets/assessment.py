@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from decimal import Decimal, InvalidOperation
 from typing import Literal
 
@@ -39,6 +40,108 @@ class SourceQuote(BaseModel):
         ):
             raise ValueError("证据范围必须成对且正向")
         return self
+
+
+class PaperEligibility(BaseModel):
+    """通用填表中一篇论文的作者证据和可选状态引文。"""
+
+    model_config = ConfigDict(extra="forbid")
+    fragment_index: int = Field(ge=0, le=99)
+    applicant_name: str = Field(min_length=1, max_length=80)
+    applicant_evidence: SourceQuote
+    first_author_kind: Literal["APPLICANT", "PHD_ADVISOR"]
+    first_author_name: str = Field(min_length=1, max_length=80)
+    author_evidence: SourceQuote
+    publication_evidence: SourceQuote | None = None
+    phd_advisor_evidence: SourceQuote | None = None
+
+    @model_validator(mode="after")
+    def check_author_kind(self):
+        if (self.first_author_kind == "PHD_ADVISOR") != (self.phd_advisor_evidence is not None):
+            raise ValueError("导师一作必须引用导师身份；本人或学生一作不得冒用导师证据")
+        if self.first_author_kind == "APPLICANT" and self.first_author_name != self.applicant_name:
+            raise ValueError("本人一作姓名必须与申请人姓名一致")
+        return self
+
+
+_PAPER_EXCLUDED_STATUS_RE = re.compile(
+    r"小修|投稿中|在投|已投稿|投递中|已投递|审稿中|在审|"
+    r"minor\s+revision|under\s+review|submitted",
+    re.IGNORECASE,
+)
+
+
+def _first_author_is_explicit(name: str, quote: str) -> bool:
+    escaped = re.escape(unicodedata.normalize("NFKC", name))
+    quote = unicodedata.normalize("NFKC", quote)
+    return bool(re.search(
+        rf"(?:学生\s*)?(?:第一作者|一作|first[ -]author)\s*[:：为是]?\s*{escaped}(?!\w)|"
+        rf"{escaped}\s*[（(]?\s*(?:学生\s*)?(?:第一作者|一作|first[ -]author)|"
+        rf"^\s*(?:(?:作者|authors?)\s*[:：]\s*)?{escaped}\s*[,，、;；]",
+        quote, re.IGNORECASE,
+    ))
+
+
+def _advisor_first_is_explicit(quote: str) -> bool:
+    return bool(re.search(r"导师\s*(?:为|是)?\s*(?:第一作者|一作)|(?:第一作者|一作)\s*(?:为|是)?\s*导师",
+                          unicodedata.normalize("NFKC", quote)))
+
+
+def _advisor_relation_is_explicit(name: str, quote: str) -> bool:
+    escaped = re.escape(unicodedata.normalize("NFKC", name))
+    quote = unicodedata.normalize("NFKC", quote)
+    marker = re.compile(r"硕士(?:生|研究生)?导师|硕导|博士(?:生|研究生)?导师|博导|导师")
+    master = re.compile(r"硕士(?:生|研究生)?导师|硕导")
+    found_advisor = False
+    for person in re.finditer(escaped, quote):
+        tail = quote[person.end():]
+        after = re.match(r"\s*[（(]?\s*", tail)
+        trailing = marker.match(tail[after.end():]) if after else None
+        if trailing:
+            if master.fullmatch(trailing.group()):
+                return False
+            found_advisor = True
+        prior_markers = list(marker.finditer(quote[:person.start()]))
+        if not prior_markers:
+            continue
+        previous = prior_markers[-1]
+        between = quote[previous.end():person.start()]
+        if len(between) > 30 or re.search(r"[。；;\n]", between):
+            continue
+        if master.fullmatch(previous.group()):
+            return False
+        found_advisor = True
+    return found_advisor
+
+
+def validate_paper_eligibility(check: PaperEligibility, fragment: SourceQuote, units: list[dict]) -> dict:
+    """机械校验作者身份及小修、投递中状态；其余状态按用户口径收录。"""
+
+    validated = {"paper": validate_quote(fragment, units)}
+    for name in ("applicant_evidence", "author_evidence", "publication_evidence", "phd_advisor_evidence"):
+        reference = getattr(check, name)
+        if reference is not None:
+            validated[name] = validate_quote(reference, units)
+    if unicodedata.normalize("NFKC", check.applicant_name) not in unicodedata.normalize(
+            "NFKC", check.applicant_evidence.quote):
+        raise ValueError("PAPER_APPLICANT_EVIDENCE_INVALID: 申请人姓名不在身份引文中")
+    if not _first_author_is_explicit(check.first_author_name, check.author_evidence.quote):
+        raise ValueError("PAPER_AUTHOR_EVIDENCE_INVALID: 作者引文未明确该姓名是本人、学生或导师一作")
+    if check.phd_advisor_evidence is not None:
+        advisor_text = check.phd_advisor_evidence.quote
+        if not _advisor_first_is_explicit(check.author_evidence.quote):
+            raise ValueError("PAPER_ADVISOR_EVIDENCE_INVALID: 仅明确标注导师一作时才核对导师")
+        if not _advisor_relation_is_explicit(check.first_author_name, advisor_text):
+            raise ValueError("PAPER_ADVISOR_EVIDENCE_INVALID: 引文未证明该姓名是导师，或已标为硕士导师")
+    if _PAPER_EXCLUDED_STATUS_RE.search(unicodedata.normalize("NFKC", fragment.quote)) or (
+            check.publication_evidence is not None
+            and _PAPER_EXCLUDED_STATUS_RE.search(unicodedata.normalize("NFKC", check.publication_evidence.quote))):
+        raise ValueError("PAPER_NOT_PUBLISHED: 论文引文明确标注小修或投递中")
+    return {"fragment_index": check.fragment_index,
+            "applicant_name": check.applicant_name,
+            "first_author_kind": check.first_author_kind,
+            "first_author_name": check.first_author_name,
+            "evidence": validated}
 
 
 class ApprovalScope(BaseModel):

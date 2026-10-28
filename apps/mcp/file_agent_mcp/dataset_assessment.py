@@ -1,7 +1,7 @@
 """MCP 字段判定的有界传输契约；正式证据与判断由服务端校验。"""
 
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SourceQuote(BaseModel):
@@ -11,6 +11,28 @@ class SourceQuote(BaseModel):
     quote: str = Field(min_length=1, max_length=8000)
     start: int | None = Field(default=None, ge=0)
     end: int | None = Field(default=None, gt=0)
+
+
+class PaperEligibility(BaseModel):
+    """通用填表逐篇论文的受限来源证据；服务端再逐字核验。"""
+
+    model_config = ConfigDict(extra="forbid")
+    fragment_index: int = Field(ge=0, le=99)
+    applicant_name: str = Field(min_length=1, max_length=80)
+    applicant_evidence: SourceQuote
+    first_author_kind: Literal["APPLICANT", "PHD_ADVISOR"]
+    first_author_name: str = Field(min_length=1, max_length=80)
+    author_evidence: SourceQuote
+    publication_evidence: SourceQuote | None = None
+    phd_advisor_evidence: SourceQuote | None = None
+
+    @model_validator(mode="after")
+    def check_author_kind(self):
+        if (self.first_author_kind == "PHD_ADVISOR") != (self.phd_advisor_evidence is not None):
+            raise ValueError("导师一作必须引用导师身份；本人或学生一作不得冒用导师证据")
+        if self.first_author_kind == "APPLICANT" and self.first_author_name != self.applicant_name:
+            raise ValueError("本人一作姓名必须与申请人姓名一致")
+        return self
 
 
 class ApprovalScope(BaseModel):

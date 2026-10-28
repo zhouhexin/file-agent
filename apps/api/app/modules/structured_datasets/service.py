@@ -48,7 +48,7 @@ from app.modules.structured_extraction.schemas import (
 )
 from app.modules.structured_extraction.service import StructuredExtractionService
 from .schemas import DatasetCreate, DatasetCreateFromExcel, DatasetAppend, DatasetQuery
-from .assessment import assess_field, display_value, validate_quote, validate_approval, validate_scope
+from .assessment import assess_field, display_value, validate_quote, validate_approval, validate_scope, validate_paper_eligibility
 from .xlsx_safety import XlsxSafetyError, inspect_xlsx
 from .publication import assert_publication_ready, pending_publication, pending_replacement, stage_publication
 from app.modules.structured_extraction.evidence import EvidenceElement
@@ -1470,7 +1470,7 @@ class StructuredDatasetService:
         for record in payload_for_digest.get("records", []):
             for value in record.get("fields", {}).values():
                 # 新可选字段不改变旧请求指纹，保证升级后原幂等键仍可恢复。
-                for optional in ("fragments", "numbered_items", "blank_reason", "approval", "assessment", "ocr_status", "ocr_unit_id", "teacher_render"):
+                for optional in ("fragments", "numbered_items", "paper_checks", "blank_reason", "approval", "assessment", "ocr_status", "ocr_unit_id", "teacher_render"):
                     if not value.get(optional):
                         value.pop(optional, None)
                 if not value.get("evidence_refs"):
@@ -1628,6 +1628,10 @@ class StructuredDatasetService:
                         presentation.update(assess_field(label=spec.label, assessment=value.assessment,
                             approval=value.approval, units=source["source_units"]))
                     fragment_refs = [validate_quote(ref, source["source_units"]) for ref in value.fragments]
+                    if value.paper_checks:
+                        presentation["paper_checks"] = [validate_paper_eligibility(
+                            check, value.fragments[check.fragment_index], source["source_units"])
+                            for check in value.paper_checks]
                     if value.numbered_items:
                         presentation["numbered_item_texts"] = [ref.quote for ref in value.fragments]
                     if value.source_only_fragments:

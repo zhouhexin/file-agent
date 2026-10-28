@@ -89,7 +89,7 @@ def test_generic_writeback_numbers_multiple_evidenced_items(demo, monkeypatch, t
     output = tmp_path / "numbered-items.xlsx"
     shown = "1. 教学工作量：120学时\n本栏情况属实\n2. 年度考核未提供"
     patch_workbook(baseline=baseline, output=output, sheet_name=task["sheet_name"],
-                   labels=task["labels"], rows=[[shown, None]], layout=task["layout"])
+                   labels=task["labels"], rows=[[shown, ""]], layout=task["layout"])
     sha = hashlib.sha256(output.read_bytes()).hexdigest()
     digest = writeback_digest(payload, sha)
     preview = client.post(f"/api/excel-writeback/tasks/{task['task_id']}/preview", headers=users[0],
@@ -99,6 +99,7 @@ def test_generic_writeback_numbers_multiple_evidenced_items(demo, monkeypatch, t
     assert published.status_code == 200, published.text
     book = load_workbook(io.BytesIO(client.get(published.json()["download_url"], headers=users[0]).content))
     assert book["登记"]["A2"].value == shown
+    assert book["登记"]["B2"].value is None
     book.close()
 
 
@@ -119,7 +120,26 @@ def test_generic_paper_titles_must_be_numbered_before_submit(demo, monkeypatch, 
         with pytest.raises(ValueError, match="论文题目有多条原文片段时必须逐篇编号"):
             contract.model_validate(payload)
         payload["records"][0]["fields"][0]["numbered_items"] = True
+        legacy = contract.model_validate(payload)  # 未提一作条件时保留原来的宽松填表。
+        assert "paper_filter" not in legacy.model_dump(mode="json")["manifest"]
+        payload["manifest"]["paper_filter"] = "FIRST_AUTHOR_PUBLISHED"
+        with pytest.raises(ValueError, match="逐篇提交本人、学生或导师一作证据"):
+            contract.model_validate(payload)
+        payload["records"][0]["fields"][0]["paper_checks"] = [
+            {"fragment_index": index, "applicant_name": "张三",
+             "applicant_evidence": {"source_unit_id": "unit-0", "quote": "姓名：张三"},
+             "first_author_kind": "APPLICANT", "first_author_name": "张三",
+             "author_evidence": {"source_unit_id": "unit-0", "quote": "张三，李四"},
+             "publication_evidence": {"source_unit_id": "unit-0", "quote": "已正式发表"}}
+            for index in range(2)]
         contract.model_validate(payload)
+        for check in payload["records"][0]["fields"][0]["paper_checks"]:
+            check.pop("publication_evidence", None)
+        contract.model_validate(payload)  # 新口径不强求正面发表引文。
+        del payload["manifest"]["paper_filter"]
+        with pytest.raises(ValueError, match="未启用严格论文筛选"):
+            contract.model_validate(payload)
+        del payload["records"][0]["fields"][0]["paper_checks"]
         del payload["records"][0]["fields"][0]["numbered_items"]
 
 

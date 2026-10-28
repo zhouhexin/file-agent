@@ -130,12 +130,15 @@ class TaskManifest(StrictInput):
     identity_column_range: Literal["B:I"] | None = Field(default=None, exclude_if=lambda value: value is None)
     source_fact_column_range: Literal["J:P"] | None = Field(default=None, exclude_if=lambda value: value is None)
     write_scope: Literal["A:I", "A:I,L", "A:AA", "TEMPLATE_ALL"] | None = Field(default=None, exclude_if=lambda value: value is None)
+    paper_filter: Literal["FIRST_AUTHOR_PUBLISHED"] | None = Field(default=None, exclude_if=lambda value: value is None)
     required_pdf_columns: Literal["B:I", "B:I,L"] | None = Field(default=None, exclude_if=lambda value: value is None)
     extraction_confirmations: list[ExtractionConfirmationRef] = Field(default_factory=list, max_length=21)
 
     @model_validator(mode="after")
     def check_identity_columns(self):
         """宿主先验证免审批范围绑定实际物理列，不让模型按字段名称猜列。"""
+        if self.paper_filter is not None and self.write_scope is not None:
+            raise ValueError("严格论文筛选只适用于通用 Excel 填表任务")
         if self.write_scope == "A:AA":
             if (self.required_pdf_columns is not None or not self.sealed_only
                     or self.identity_column_range != "B:I" or self.source_fact_column_range != "J:P"
@@ -263,10 +266,22 @@ class TaskPayload(StrictInput):
                         raise ValueError("目标空白列必须原样保留，不得填写或附加证据")
                     continue
                 leaf_label = re.sub(r"\s*\[[A-Z]+\]$", "", self.manifest.target.labels[index].split(" / ")[-1]).strip()
+                paper_title = (leaf_label in {"论文", "发表论文", "代表性论文"}
+                               or any(title in leaf_label for title in ("论文题目", "论文标题", "论文名称")))
                 if (self.manifest.write_scope in {None, "TEMPLATE_ALL"}
                         and len(field.fragments) > 1 and not field.teacher_render and not field.numbered_items
                         and any(title in leaf_label for title in ("论文题目", "论文标题", "论文名称"))):
                     raise ValueError("论文题目有多条原文片段时必须逐篇编号")
+                if self.manifest.paper_filter == "FIRST_AUTHOR_PUBLISHED":
+                    if paper_title and field.raw_text:
+                        if (not field.fragments or len(field.paper_checks) != len(field.fragments)
+                                or [check.fragment_index for check in field.paper_checks]
+                                != list(range(len(field.fragments)))):
+                            raise ValueError("通用论文列须逐篇提交本人、学生或导师一作证据")
+                    elif field.paper_checks:
+                        raise ValueError("论文筛选证据只能附在有内容的论文题目列")
+                elif field.paper_checks:
+                    raise ValueError("未启用严格论文筛选时不得提交论文资格证据")
                 if not field.raw_text and not field.blank_reason:
                     raise ValueError("每个空列必须提供留空原因")
                 if self.manifest.write_scope == "TEMPLATE_ALL":

@@ -197,6 +197,11 @@ def patch_workbook(*, baseline: Path, output: Path, sheet_name: str,
     """从冻结基线重建候选；重复调用不会在已编辑结果上重复追加。"""
     if not rows or any(len(row) != len(labels) for row in rows):
         raise ValueError("WRITEBACK_ROWS_MISMATCH: 每行必须覆盖全部目标列")
+    # 宿主可能把 JSON null 编码为空串；所有列的精确空串都视为未填写。
+    # 无标题保留列额外允许仅含空白字符，业务列的其它文本原样保留。
+    rows = [[None if value == "" or (_BLANK_COLUMN_LABEL_RE.fullmatch(label)
+             and isinstance(value, str) and not value.strip()) else value
+             for label, value in zip(labels, row)] for row in rows]
     if any(value is not None for row in rows for label, value in zip(labels, row)
            if _BLANK_COLUMN_LABEL_RE.fullmatch(label)):
         raise ValueError("TARGET_BLANK_COLUMN_CHANGED: 目标空白列必须保留空值")

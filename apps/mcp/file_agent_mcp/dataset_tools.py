@@ -7,7 +7,7 @@ from urllib.parse import quote
 from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from mcp.types import CallToolResult, ResourceLink, TextContent
-from .dataset_assessment import SourceQuote, ApprovalScope, FieldAssessment
+from .dataset_assessment import SourceQuote, ApprovalScope, FieldAssessment, PaperEligibility
 
 
 class DatasetField(BaseModel):
@@ -28,6 +28,7 @@ class DatasetValue(BaseModel):
     confidence: float | None = Field(default=None, ge=0, le=1)
     fragments: list[SourceQuote] = Field(default_factory=list, max_length=100)
     numbered_items: bool = False
+    paper_checks: list[PaperEligibility] = Field(default_factory=list, max_length=100)
     source_only_fragments: list[SourceQuote] = Field(default_factory=list, max_length=100)
     blank_reason: str | None = Field(default=None, min_length=1, max_length=1000)
     ocr_status: Literal["UNCERTAIN", "UNREADABLE"] | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -48,6 +49,8 @@ class DatasetValue(BaseModel):
         if self.numbered_items and (len(self.fragments) < 2 or any(not ref.quote.strip() for ref in self.fragments)
                                     or self.assessment or self.approval or self.source_only_fragments or self.ocr_status):
             raise ValueError("逐条编号只适用于至少两条非空原文片段的普通文本字段")
+        if self.paper_checks and not self.fragments:
+            raise ValueError("论文筛选必须逐篇提供原文片段")
         if self.blank_reason and self.raw_text:
             raise ValueError("有内容字段不能同时声明留空")
         if self.ocr_status:

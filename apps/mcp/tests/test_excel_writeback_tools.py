@@ -67,6 +67,83 @@ def test_general_writeback_does_not_fill_untitled_blank_column(tmp_path):
                        labels=labels, rows=[["张三", "误填", "计算机学院"]], layout=None)
 
 
+def test_general_writeback_accepts_host_empty_string_for_middle_blank_column(tmp_path):
+    """宿主空串不能把中间无标题列或业务留空列写成有值单元格。"""
+    baseline = tmp_path / "23-column-template.xlsx"
+    output = tmp_path / "result.xlsx"
+    labels = ["序号", "〔空白列:B〕", "姓名", "性别",
+              *[f"字段{column}" for column in range(5, 24)]]
+    book = Workbook()
+    book.active.title = "登记"
+    book.active.append(["序号", None, *labels[2:]])
+    book.save(baseline)
+    book.close()
+
+    patch_workbook(baseline=baseline, output=output, sheet_name="登记",
+                   labels=labels, rows=[[None, "", "张三", "男", "", *([None] * 18)]], layout=None)
+    result = load_workbook(output)
+    assert result.active.max_column == 23
+    assert result.active["A2"].value == 1
+    assert result.active["B2"].value is None
+    assert result.active["C2"].value == "张三"
+    assert result.active["D2"].value == "男"
+    assert result.active["E2"].value is None
+    result.close()
+
+
+def test_apply_23_column_template_with_host_empty_string_in_blank_b(tmp_path):
+    """真实 MCP apply 入口应接受 23 列模板，并保留所有空列。"""
+    baseline = tmp_path / "source.xlsx"
+    labels = ["序号", "〔空白列:B〕", "姓名", "性别",
+              *[f"字段{column}" for column in range(5, 24)]]
+    book = Workbook()
+    book.active.title = "登记"
+    book.active.append(["序号", None, *labels[2:]])
+    book.save(baseline)
+    book.close()
+    target_id, version_id, task_id = (str(uuid4()) for _ in range(3))
+    source_id, source_version, run_id = (str(uuid4()) for _ in range(3))
+    sha = hashlib.sha256(baseline.read_bytes()).hexdigest()
+    task = {"task_id": task_id, "dataset_id": target_id, "document_version_id": version_id,
+            "working_copy_id": str(uuid4()), "filename": "23列登记.xlsx", "sheet_name": "登记",
+            "labels": labels, "layout": None, "base_sha256": sha, "review_mode": "DIRECT_SAVE"}
+
+    class FakeClient:
+        async def excel_writeback_request(self, method, path, payload=None):
+            return task
+
+        async def download_working_copy(self, *, working_copy_id, output_dir):
+            return {"sha256": sha, "resource_uri": baseline.as_uri()}
+
+        async def close(self):
+            pass
+
+    payload = {"manifest": {"sources": [{"document_id": source_id,
+        "document_version_id": source_version, "extraction_run_id": run_id,
+        "source_sha256": "a" * 64}], "target": {"dataset_id": target_id,
+        "document_version_id": version_id, "filename": task["filename"],
+        "sheet_name": task["sheet_name"], "labels": labels}},
+        "records": [{"source_index": 0, "fields": [
+            {"blank_reason": "TARGET_DERIVED"}, {"blank_reason": "TARGET_BLANK_COLUMN"},
+            {"raw_text": "张三"}, {"raw_text": "男"},
+            *[{"blank_reason": "SOURCE_FIELD_NOT_FOUND"} for _ in range(19)]]}]}
+
+    async def scenario():
+        mcp = FastMCP("blank-b-apply-test")
+        register_excel_writeback_tools(mcp, FakeClient, lambda: tmp_path / "cache")
+        await mcp.call_tool("excel_writeback_checkout", {"filename": task["filename"], "request_key": "blank-b"})
+        await mcp.call_tool("excel_writeback_apply", {"task_id": task_id,
+            "payload": payload, "rows": [[None, "", "张三", "男", *([""] * 19)]]})
+        editable = tmp_path / "cache" / "excel-writeback" / task_id / task["filename"]
+        current = load_workbook(editable)
+        assert [current.active.cell(2, column).value for column in (1, 2, 3, 4)] == [
+            1, None, "张三", "男"]
+        assert all(current.active.cell(2, column).value is None for column in range(5, 24))
+        current.close()
+
+    asyncio.run(scenario())
+
+
 def test_scoped_identity_review_rows_only_populates_b_i_and_l():
     """桥接层内部补空位，避免宿主把 JSON null 改写为非空值。"""
     values = {column: column for column in "BCDEFGHI"}
