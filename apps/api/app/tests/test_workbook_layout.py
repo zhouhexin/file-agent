@@ -15,6 +15,25 @@ from app.modules.structured_extraction.workbook_layout import WorkbookLayout, re
 LAYOUT = {"header_range": "A2:AA4", "data_range": "A5:AA6"}
 
 
+def test_layout_keeps_untitled_column_at_physical_position():
+    book = Workbook()
+    sheet = book.active
+    sheet.append(["姓名", None, "单位"])
+    sheet.append(["已有人员", None, "原单位"])
+    labels, rows = read_layout(sheet, WorkbookLayout(
+        header_range="A1:C1", data_range="A2:C2"))
+    assert labels == ["姓名", "〔空白列:B〕", "单位"]
+    assert rows == [["已有人员", None, "原单位"]]
+
+
+def test_layout_rejects_real_header_using_blank_column_marker():
+    book = Workbook()
+    sheet = book.active
+    sheet.append(["姓名", "〔空白列:B〕"])
+    with pytest.raises(ValueError, match="系统保留的空白列标记"):
+        read_layout(sheet, WorkbookLayout(header_range="A1:B1", data_range="A2:B2"))
+
+
 def make_template(path):
     """构造与实际模板同类的 27 列三层表头，不使用用户个人信息。"""
     book = Workbook()

@@ -10,8 +10,10 @@ from app.modules.structured_datasets.runtime import execute_dataset_write
 from .schemas import (FundingUsageRequest, FundingUsagePublish,
                       FundingUsageContinue, FundingUsageContinuePublish,
                       FundingUsageRefresh, FundingUsageRefreshPublish,
+                      FundingPromptTarget, FundingUsagePromptEdit, FundingUsagePromptPublish,
                       FundingSourceSummarySync, FundingSourceSummarySyncPublish,
                       FundingSourceEntriesImport, FundingSourceEntriesImportPublish)
+from .prompt_edit import FundingPromptEditService
 from .service import FundingUsageService
 
 
@@ -54,6 +56,21 @@ def refresh_preview(request: FundingUsageRefresh, db=Depends(get_db), user=Depen
 @router.post("/refresh/publish")
 def refresh_publish(request: FundingUsageRefreshPublish, db=Depends(get_db), user=Depends(get_current_user)):
     return execute_dataset_write(db=db, user=user, operation="funding_usage_refresh_publish", payload=request)
+
+
+@router.post("/prompt/target")
+def prompt_target(request: FundingPromptTarget, db=Depends(get_db), user=Depends(get_current_user)):
+    return FundingPromptEditService(db, user).checkout(request.filename)
+
+
+@router.post("/prompt/preview")
+def prompt_preview(request: FundingUsagePromptEdit, db=Depends(get_db), user=Depends(get_current_user)):
+    return FundingPromptEditService(db, user).preview(request)
+
+
+@router.post("/prompt/publish")
+def prompt_publish(request: FundingUsagePromptPublish, db=Depends(get_db), user=Depends(get_current_user)):
+    return execute_dataset_write(db=db, user=user, operation="funding_usage_prompt_publish", payload=request)
 
 
 @router.post("/source-summary/preview")

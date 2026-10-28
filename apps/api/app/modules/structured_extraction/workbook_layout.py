@@ -1,5 +1,6 @@
 """复杂 Excel 模板的显式布局契约与只读字段映射，不猜测数据写入区域。"""
 
+import re
 from openpyxl.utils.cell import range_boundaries, get_column_letter
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -23,6 +24,15 @@ class WorkbookLayout(BaseModel):
         return self
 
 
+def blank_column_label(column: int) -> str:
+    """以物理列号标识无标题的保留列；不写入原工作簿表头。"""
+    return f"〔空白列:{get_column_letter(column)}〕"
+
+
+def is_blank_column_label(label: str) -> bool:
+    return re.fullmatch(r"〔空白列:[A-Z]{1,3}〕", label) is not None
+
+
 def layout_headers(sheet, layout: WorkbookLayout) -> list[str]:
     """合并表头按锚点展开，重复叶标题用实际列号消歧，不修改模板。"""
     left, top, right, bottom = range_boundaries(layout.header_range)
@@ -43,9 +53,12 @@ def layout_headers(sheet, layout: WorkbookLayout) -> list[str]:
             value = " ".join(str(cell.value or "").split())
             if value and (not parts or value != parts[-1]):
                 parts.append(value)
-        if not parts:
-            raise ValueError("表头范围存在无法绑定的空列")
-        labels.append(" / ".join(parts))
+        label = " / ".join(parts) if parts else blank_column_label(col)
+        if parts and is_blank_column_label(label):
+            raise ValueError("表头不能使用系统保留的空白列标记")
+        labels.append(label)
+    if all(is_blank_column_label(label) for label in labels):
+        raise ValueError("表头范围没有可填写的字段")
     # 重复标题仍保留原文，以列坐标建立唯一字段；同名字段不再被错误合并。
     return [f"{label} [{get_column_letter(left + i)}]" if labels.count(label) > 1 else label
             for i, label in enumerate(labels)]

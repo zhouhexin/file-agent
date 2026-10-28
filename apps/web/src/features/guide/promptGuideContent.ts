@@ -281,7 +281,7 @@ export const PROMPT_GUIDE_SECTIONS: PromptGuideSection[] = [
   {
     id: 'research-funding-balance',
     title: '教师成果资助余额表',
-    description: '可首次生成余额表、同步成果明细表、只更新余额表、追加新登记，或在下载修改后回传。',
+    description: '可首次生成、从图片追加、通过文字新增修改删除登记、更新资助金额，或在下载修改后回传。',
     items: [
       {
         id: 'funding-balance-create',
@@ -289,6 +289,13 @@ export const PROMPT_GUIDE_SECTIONS: PromptGuideSection[] = [
         prompt: '请根据本轮上传的成果资助使用登记图片和教师成果明细汇总表，读取各教师的资助总额，只从手写使用登记中提取支出金额，生成新的教师成果资助使用登记余额表。首页保留来源表中的全部教师，无法核对的金额标明原因，给我新版本和下载链接。',
         channel: 'WorkBuddy 附件套件',
         note: '首次使用时同时上传登记图片和包含全部教师的成果明细汇总表。',
+      },
+      {
+        id: 'funding-single-teacher-and-balance',
+        title: '单人资助表更新两张表',
+        prompt: '请读取我上传的单人科研成果资助表第 1 张论文页和第 3 张会议页，将新成果追加到《教师成果明细汇总表.xlsx》对应教师的个人页并更新“汇总”页。该表正式发布后，用新版本更新《教师成果资助使用登记余额表.xlsx》的科研成果资助金额，按已有登记重算支出和余额。请分别给出两张表的新版本、下载链接和待核对事项。',
+        channel: 'WorkBuddy 附件套件',
+        note: '请上传单人资助表，并把两张目标表的文件名替换为服务器上实际的完整文件名；缺申请人的记录须先确认归属。',
       },
       {
         id: 'funding-balance-and-source-summary',
@@ -310,6 +317,34 @@ export const PROMPT_GUIDE_SECTIONS: PromptGuideSection[] = [
         prompt: '请读取我本轮上传的成果资助使用登记图片，把新的手写使用登记追加到已发布的《教师成果资助使用登记余额表.xlsx》。按手写登记中的金额计算支出，更新对应教师的个人明细页和首页余额，并发布同名新版本。请告诉我新增记录、待核对事项、新版本和下载链接。',
         channel: 'WorkBuddy 附件套件',
         note: '请上传新的登记图片，并将余额表文件名替换为实际完整文件名。',
+      },
+      {
+        id: 'funding-balance-prompt-add',
+        title: '用文字新增一笔登记',
+        prompt: '请在已发布的《教师成果资助使用登记余额表.xlsx》中，给张三新增一笔使用登记：2026年10月26日会议支出100元。请先核对当前明细，再新增这一笔，重算个人页与首页金额，发布同名新版本并给我下载链接。',
+        channel: 'WorkBuddy MCP',
+        note: '替换为真实文件名、姓名、登记内容、日期和金额；不需要上传图片。',
+      },
+      {
+        id: 'funding-balance-prompt-update',
+        title: '用文字修改登记或资助金额',
+        prompt: '请把已发布的《教师成果资助使用登记余额表.xlsx》中张三的“2026年10月26日会议支出100元”改为120元，并把他的其他资助金额改为500元。请核对具体登记后更新个人页与首页，重新计算余额，发布同名新版本并给我下载链接。',
+        channel: 'WorkBuddy MCP',
+        note: '登记不唯一时需要先指定具体一笔；修改个人页其他资助金额后，首页会同步更新。',
+      },
+      {
+        id: 'funding-balance-prompt-delete',
+        title: '用文字删除一笔登记',
+        prompt: '请从已发布的《教师成果资助使用登记余额表.xlsx》中删除张三的“2026年10月26日会议支出100元”这一笔登记。请先核对具体记录，再重新计算个人页与首页的支出和余额，发布同名新版本并给我下载链接。',
+        channel: 'WorkBuddy MCP',
+        note: '只删除明确指定的登记，保留其他记录和历史版本。',
+      },
+      {
+        id: 'funding-balance-prompt-rename',
+        title: '更正教师姓名',
+        prompt: '请用文件助手把已发布的《教师成果资助使用登记余额表.xlsx》中教师“张叁”的姓名更正为“张三”。请先核对当前教师名单，保持金额不变，同步更新首页、个人明细页和该教师的登记归属，发布同名新版本并给我下载链接。',
+        channel: 'WorkBuddy MCP',
+        note: '请替换为真实的旧姓名和正确姓名；新姓名不能与表中其他教师重名。',
       },
       {
         id: 'funding-balance-return',
@@ -364,7 +399,7 @@ export const PROMPT_GUIDE_SECTIONS: PromptGuideSection[] = [
   {
     id: 'general-excel-writeback',
     title: '按表头填写和修正表格',
-    description: '以本轮上传的表为新目标，或按已发布表的完整文件名追加、修正和回传。',
+    description: '按真实表头填表、按完整文件名追加，或下载修改后回传同一张表。',
     items: [
       {
         id: 'general-excel-new-target',
@@ -373,9 +408,16 @@ export const PROMPT_GUIDE_SECTIONS: PromptGuideSection[] = [
         channel: 'WorkBuddy 附件套件',
       },
       {
+        id: 'general-excel-doctoral-target',
+        title: '填写博士应聘统计表',
+        prompt: '请把本轮上传的博士应聘材料填入同时上传的统计表，按实际表头和列位置填写，保留空白列；多篇论文在同一单元格逐篇编号并换行。无法确认的信息留空，保存并给我新增行号、新版本和下载链接。',
+        channel: 'WorkBuddy 附件套件',
+        note: '请同时上传材料和目标表；以本轮上传的表为准。',
+      },
+      {
         id: 'general-excel-append',
         title: '按文件名追加',
-        prompt: '请把本轮上传的材料追加到已发布的《目标表完整文件名》，按当前表头填写可核实的信息，保存并给我新增行号、新版本和下载链接。',
+        prompt: '请把本轮上传的材料追加到已发布的《目标表完整文件名》，按当前表头填写可核实的信息；同一列有多条信息时逐条编号并换行，空白列保持空白。保存并给我新增行号、新版本和下载链接。',
         channel: 'WorkBuddy 附件套件',
         note: '把书名号内文字替换为含扩展名的完整文件名。',
       },
@@ -395,9 +437,9 @@ export const PROMPT_GUIDE_SECTIONS: PromptGuideSection[] = [
       {
         id: 'general-excel-return',
         title: '补充后回传',
-        prompt: '请使用编辑前记录的版本信息，把本轮上传的同名补充版《目标表完整文件名》回传并发布为新版本，给我下载链接。',
+        prompt: '我已修改下载的《目标表完整文件名》。请使用编辑前记录的版本信息，将本轮上传的同名表回传并发布为新版本，给我新版本和下载链接。',
         channel: 'WorkBuddy 附件套件',
-        note: '先下载当前版本，修改后保存并关闭，再上传与目标完全同名的表格。',
+        note: '先下载当前版本并记录版本信息；修改已有数据格后保存、关闭，再上传完全同名的表格。新增人员请使用材料追加流程。',
       },
     ],
   },

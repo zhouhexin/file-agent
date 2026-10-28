@@ -652,6 +652,7 @@ class FileAgentIntegrationClient:
         if method != "POST" or path not in {
                 "/preview", "/publish", "/continue/preview", "/continue/publish",
                 "/refresh/preview", "/refresh/publish",
+                "/prompt/target", "/prompt/preview", "/prompt/publish",
                 "/source-summary/preview", "/source-summary/publish",
                 "/source-entries/preview", "/source-entries/publish"}:
             raise ValueError("FUNDING_USAGE_ROUTE_INVALID")

@@ -27,6 +27,46 @@ def test_template_rows_leave_unfound_cells_empty_without_client_nulls():
         _template_rows([{"E": "张三", "F": None}], 20)
 
 
+@pytest.mark.parametrize("layout", [None, {"header_range": "A1:B1", "data_range": "A2:B4"}])
+def test_general_writeback_numbers_new_rows_when_target_has_sequence_column(tmp_path, layout):
+    baseline = tmp_path / "numbered.xlsx"
+    output = tmp_path / "result.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "登记"
+    sheet.append(["序号", "事项"])
+    sheet.append([1, "原记录"])
+    book.save(baseline)
+    book.close()
+
+    patch_workbook(baseline=baseline, output=output, sheet_name="登记",
+                   labels=["序号", "事项"], rows=[[None, "第一条"], [None, "第二条"]],
+                   layout=layout)
+    result = load_workbook(output)
+    assert [(result.active.cell(row, 1).value, result.active.cell(row, 2).value)
+            for row in (2, 3, 4)] == [(1, "原记录"), (2, "第一条"), (3, "第二条")]
+    result.close()
+
+
+def test_general_writeback_does_not_fill_untitled_blank_column(tmp_path):
+    baseline = tmp_path / "blank-column.xlsx"
+    output = tmp_path / "result.xlsx"
+    book = Workbook()
+    book.active.title = "登记"
+    book.active.append(["姓名", None, "单位"])
+    book.save(baseline)
+    book.close()
+    labels = ["姓名", "〔空白列:B〕", "单位"]
+    patch_workbook(baseline=baseline, output=output, sheet_name="登记",
+                   labels=labels, rows=[["张三", None, "计算机学院"]], layout=None)
+    result = load_workbook(output)
+    assert [result.active.cell(2, col).value for col in (1, 2, 3)] == ["张三", None, "计算机学院"]
+    result.close()
+    with pytest.raises(ValueError, match="TARGET_BLANK_COLUMN_CHANGED"):
+        patch_workbook(baseline=baseline, output=output, sheet_name="登记",
+                       labels=labels, rows=[["张三", "误填", "计算机学院"]], layout=None)
+
+
 def test_scoped_identity_review_rows_only_populates_b_i_and_l():
     """桥接层内部补空位，避免宿主把 JSON null 改写为非空值。"""
     values = {column: column for column in "BCDEFGHI"}

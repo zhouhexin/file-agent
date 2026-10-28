@@ -78,6 +78,7 @@ class FieldCandidate(StrictInput):
     evidence_refs: list["DatasetEvidenceRef"] = Field(default_factory=list, max_length=20)
     confidence: float | None = Field(default=None, ge=0, le=1)
     fragments: list[SourceQuote] = Field(default_factory=list, max_length=100)
+    numbered_items: bool = False
     source_only_fragments: list[SourceQuote] = Field(default_factory=list, max_length=100)
     blank_reason: str | None = Field(default=None, min_length=1, max_length=1000)
     # 完整教授表允许一次 OCR 后保留不确定候选；状态与来源区段由服务端核验。
@@ -97,6 +98,10 @@ class FieldCandidate(StrictInput):
             if len(joined) > 4000:
                 raise ValueError("字段拼接内容超过 4000 字符")
             self.raw_text = joined
+        if self.numbered_items and (len(self.fragments) < 2 or any(not ref.quote.strip() for ref in self.fragments)
+                                    or self.teacher_render or self.assessment or self.approval
+                                    or self.source_only_fragments or self.ocr_status):
+            raise ValueError("逐条编号只适用于至少两条非空原文片段的普通文本字段")
         if self.blank_reason and self.raw_text:
             raise ValueError("有内容字段不能同时声明留空")
         if self.ocr_status:

@@ -70,6 +70,128 @@ def _publish(client, headers, task, payload, output, sha, digest):
                          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
 
 
+def test_generic_writeback_numbers_multiple_evidenced_items(demo, monkeypatch, tmp_path):
+    client, sessions, users = demo
+    task, payload, baseline = _ready(client, sessions, users[0], monkeypatch, tmp_path)
+    payload["manifest"]["sealed_only"] = False
+    payload["records"][0]["fields"][0] = {
+        "fragments": [
+            {"source_unit_id": "unit-0", "quote": "教学工作量：120学时\n本栏情况属实"},
+            {"source_unit_id": "unit-0", "quote": "年度考核未提供"},
+        ],
+        "numbered_items": True,
+        "confidence": 1,
+    }
+    payload = TaskPayload.model_validate(payload).model_dump(mode="json")
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "mcp"))
+    from file_agent_mcp.xlsx_writeback import patch_workbook
+
+    output = tmp_path / "numbered-items.xlsx"
+    shown = "1. 教学工作量：120学时\n本栏情况属实\n2. 年度考核未提供"
+    patch_workbook(baseline=baseline, output=output, sheet_name=task["sheet_name"],
+                   labels=task["labels"], rows=[[shown, None]], layout=task["layout"])
+    sha = hashlib.sha256(output.read_bytes()).hexdigest()
+    digest = writeback_digest(payload, sha)
+    preview = client.post(f"/api/excel-writeback/tasks/{task['task_id']}/preview", headers=users[0],
+                          json={"result_digest": digest, "file_sha256": sha})
+    assert preview.status_code == 200, preview.text
+    published = _publish(client, users[0], task, payload, output, sha, digest)
+    assert published.status_code == 200, published.text
+    book = load_workbook(io.BytesIO(client.get(published.json()["download_url"], headers=users[0]).content))
+    assert book["登记"]["A2"].value == shown
+    book.close()
+
+
+def test_generic_paper_titles_must_be_numbered_before_submit(demo, monkeypatch, tmp_path):
+    client, sessions, users = demo
+    _, payload, _ = _ready(client, sessions, users[0], monkeypatch, tmp_path)
+    payload["manifest"]["target"]["labels"][0] = "论文题目"
+    payload["manifest"]["sealed_only"] = False
+    payload["records"][0]["fields"][0] = {
+        "fragments": [
+            {"source_unit_id": "unit-0", "quote": "第一篇\n续行"},
+            {"source_unit_id": "unit-0", "quote": "第二篇"},
+        ],
+    }
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "mcp"))
+    from file_agent_mcp.dataset_task_contracts import TaskPayload as McpTaskPayload
+    for contract in (TaskPayload, McpTaskPayload):
+        with pytest.raises(ValueError, match="论文题目有多条原文片段时必须逐篇编号"):
+            contract.model_validate(payload)
+        payload["records"][0]["fields"][0]["numbered_items"] = True
+        contract.model_validate(payload)
+        del payload["records"][0]["fields"][0]["numbered_items"]
+
+
+def test_generic_writeback_keeps_blank_column_and_publishes_row_sequence(demo, monkeypatch, tmp_path):
+    client, sessions, users = demo
+    source_id = seed_workbuddy_document(sessions, filename="人员.pdf", content_type="application/pdf", units=[
+        {"kind": "PDF_PAGE", "page_number": 1, "text": "张三\n计算机学院"},
+    ])
+    source = client.get(f"{BASE}/sources/{source_id}", headers=users[0]).json()
+    target_id = seed_excel_target(sessions, filename="序号登记.xlsx", sheets={
+        "登记": [["序号", "姓名", None, "单位"], [1, "已有人员", None, "原单位"]],
+    })
+    created = client.post(f"{BASE}/from-excel", headers=users[0], json={
+        "document_id": target_id, "sheet_name": "登记", "idempotency_key": "numbered-target",
+    })
+    assert created.status_code == 200, created.text
+    task_response = client.post("/api/excel-writeback/checkout", headers=users[0], json={
+        "filename": "序号登记.xlsx", "request_key": "numbered-row", "review_mode": "DIRECT_SAVE",
+    })
+    assert task_response.status_code == 200, task_response.text
+    task = task_response.json()
+    assert task["labels"] == ["序号", "姓名", "〔空白列:C〕", "单位"]
+    payload = TaskPayload.model_validate({
+        "manifest": {
+            "sources": [{key: source[key] for key in (
+                "document_id", "document_version_id", "extraction_run_id", "source_sha256")},
+            ],
+            "target": {"dataset_id": created.json()["dataset_id"],
+                       "document_version_id": task["document_version_id"],
+                       "filename": task["filename"], "sheet_name": task["sheet_name"],
+                       "labels": task["labels"], "layout": task["layout"]},
+        },
+        "records": [{"source_index": 0, "fields": [
+            {"blank_reason": "TARGET_DERIVED"},
+            {"raw_text": "张三", "evidence_refs": [{"source_unit_id": "unit-0", "quote": "张三"}]},
+            {"blank_reason": "TARGET_BLANK_COLUMN"},
+            {"raw_text": "计算机学院", "evidence_refs": [{"source_unit_id": "unit-0", "quote": "计算机学院"}]},
+        ]}],
+    }).model_dump(mode="json")
+    filled_blank = json.loads(json.dumps(payload, ensure_ascii=False))
+    filled_blank["records"][0]["fields"][2] = {
+        "raw_text": "误填", "evidence_refs": [{"source_unit_id": "unit-0", "quote": "张三"}],
+    }
+    with pytest.raises(ValueError, match="目标空白列必须原样保留"):
+        TaskPayload.model_validate(filled_blank)
+    baseline = tmp_path / "numbered-baseline.xlsx"
+    baseline.write_bytes(client.get(task["download_url"], headers=users[0]).content)
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "mcp"))
+    from file_agent_mcp.dataset_task_contracts import TaskPayload as McpTaskPayload
+    from file_agent_mcp.xlsx_writeback import patch_workbook
+    McpTaskPayload.model_validate(payload)
+    with pytest.raises(ValueError, match="目标空白列必须原样保留"):
+        McpTaskPayload.model_validate(filled_blank)
+
+    output = tmp_path / "numbered-result.xlsx"
+    patch_workbook(baseline=baseline, output=output, sheet_name=task["sheet_name"],
+                   labels=task["labels"], rows=[[None, "张三", None, "计算机学院"]], layout=task["layout"])
+    sha = hashlib.sha256(output.read_bytes()).hexdigest()
+    digest = writeback_digest(payload, sha)
+    preview = client.post(f"/api/excel-writeback/tasks/{task['task_id']}/preview", headers=users[0],
+                          json={"result_digest": digest, "file_sha256": sha})
+    assert preview.status_code == 200, preview.text
+    published = _publish(client, users[0], task, payload, output, sha, digest)
+    assert published.status_code == 200, published.text
+    book = load_workbook(io.BytesIO(client.get(published.json()["download_url"], headers=users[0]).content))
+    assert [book["登记"][f"A{row}"].value for row in (2, 3)] == [1, 2]
+    assert book["登记"]["B3"].value == "张三"
+    assert book["登记"]["C1"].value is None and book["登记"]["C3"].value is None
+    assert book["登记"]["D3"].value == "计算机学院"
+    book.close()
+
+
 def test_writeback_publishes_workbuddy_bytes_and_preserves_old_path(demo, monkeypatch, tmp_path):
     client, sessions, users = demo
     task, payload, baseline = _ready(client, sessions, users[0], monkeypatch, tmp_path)

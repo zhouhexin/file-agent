@@ -169,6 +169,19 @@ class TaskPayload(StrictInput):
                 from openpyxl.utils.cell import range_boundaries
                 left = range_boundaries(self.manifest.target.layout["header_range"])[0]
             for index, field in enumerate(row.fields):
+                from app.modules.structured_extraction.workbook_layout import is_blank_column_label
+                if is_blank_column_label(self.manifest.target.labels[index]):
+                    if (field.raw_text is not None or field.blank_reason != "TARGET_BLANK_COLUMN"
+                            or field.evidence_refs or field.fragments or field.source_only_fragments
+                            or field.approval or field.assessment or field.teacher_render
+                            or field.numbered_items or field.ocr_status or field.ocr_unit_id):
+                        raise ValueError("目标空白列必须原样保留，不得填写或附加证据")
+                    continue
+                leaf_label = re.sub(r"\s*\[[A-Z]+\]$", "", self.manifest.target.labels[index].split(" / ")[-1]).strip()
+                if (self.manifest.write_scope in {None, "TEMPLATE_ALL"}
+                        and len(field.fragments) > 1 and not field.teacher_render and not field.numbered_items
+                        and any(title in leaf_label for title in ("论文题目", "论文标题", "论文名称"))):
+                    raise ValueError("论文题目有多条原文片段时必须逐篇编号")
                 if not field.raw_text and not field.blank_reason:
                     raise ValueError("每个空列必须提供留空原因")
                 if self.manifest.write_scope == "TEMPLATE_ALL":

@@ -27,7 +27,8 @@ def _sync_directory(path):
 
 
 def stage_publication(db, *, dataset, working_copy, version, base_version_id=None,
-                      task=None, result=None, cleanup=None, archive_target=None, agent_run=None):
+                      task=None, result=None, cleanup=None, archive_target=None,
+                      archive_targets=None, agent_run=None):
     """只登记已落盘的不可变版本；调用方在提交事务前不得改动可见文件。"""
     storage = FileLifecycleStorageService()
     candidate = storage.working_copy_path(version.storage_path)
@@ -50,6 +51,8 @@ def stage_publication(db, *, dataset, working_copy, version, base_version_id=Non
     ).with_for_update().first()
     if existing is not None:
         raise HTTPException(423, detail={"code": "DATASET_PUBLICATION_PENDING", "message": "该 Excel 有未完成发布，请先恢复。"})
+    if archive_target and archive_targets:
+        raise ValueError("同一次发布不能同时使用两种归档清单")
     row = StructuredDatasetPublication(
         dataset_id=dataset.id, working_copy_id=working_copy.id,
         task_id=task.id if task else None, base_document_version_id=base_version_id,
@@ -57,7 +60,10 @@ def stage_publication(db, *, dataset, working_copy, version, base_version_id=Non
         candidate_storage_path=version.storage_path, visible_relative_path=visible,
         status="DB_COMMITTED", result_json=result or {},
         cleanup_json=({"legacy_cleanup": cleanup or {}, "archive_target": archive_target}
-                      if archive_target else cleanup or {}),
+                      if archive_target else
+                      {"legacy_cleanup": cleanup or {}, "archive_targets": archive_targets,
+                       "replacement_kind": "funding_source_summary_return"}
+                      if archive_targets else cleanup or {}),
         agent_run_id=agent_run.id if agent_run else None,
     )
     db.add(row)
@@ -79,13 +85,22 @@ def pending_publication(db, *, dataset_id=None, working_copy_id=None):
     return query.order_by(StructuredDatasetPublication.created_at.desc()).first()
 
 
-def pending_replacement(db, *, dataset_id: str):
+def pending_replacement(db, *, dataset_id: str | None = None,
+                        working_copy_id: str | None = None):
     """查找正在取代旧目标的发布；旧目标在此期间不得继续写入。"""
 
     rows = db.query(StructuredDatasetPublication).filter(
         StructuredDatasetPublication.status.in_(("DB_COMMITTED", "NEEDS_REPAIR"))).all()
-    return next((row for row in rows
-                 if ((row.cleanup_json or {}).get("archive_target") or {}).get("dataset_id") == dataset_id), None)
+    for row in rows:
+        cleanup = row.cleanup_json or {}
+        targets = list(cleanup.get("archive_targets") or [])
+        if cleanup.get("archive_target"):
+            targets.append(cleanup["archive_target"])
+        if any((dataset_id and target.get("dataset_id") == dataset_id)
+               or (working_copy_id and target.get("working_copy_id") == working_copy_id)
+               for target in targets):
+            return row
+    return None
 
 
 def assert_publication_ready(db, *, dataset_id=None, working_copy_id=None):
@@ -95,6 +110,13 @@ def assert_publication_ready(db, *, dataset_id=None, working_copy_id=None):
         raise HTTPException(423, detail={
             "code": "DATASET_PUBLICATION_PENDING" if row.status == "DB_COMMITTED" else "DATASET_PUBLICATION_NEEDS_REPAIR",
             "message": "Excel 正在同步同名工作副本；请稍后重试或联系管理员恢复。",
+        })
+    replacement = pending_replacement(db, dataset_id=dataset_id,
+                                      working_copy_id=working_copy_id)
+    if replacement is not None:
+        raise HTTPException(423, detail={
+            "code": "DATASET_TARGET_REPLACEMENT_PENDING",
+            "message": "同名新版本正在发布，请等待发布完成。",
         })
 
 
@@ -135,16 +157,39 @@ def finalize_publication(db, publication_id: str) -> bool:
         document_id=working.document_id, storage_backend="working_copy_local").one_or_none() if working else None
     exported = db.query(StructuredDatasetExport).filter_by(
         dataset_id=row.dataset_id, document_version_id=row.candidate_document_version_id).one_or_none()
-    archive_target = (row.cleanup_json or {}).get("archive_target")
-    old_dataset = old_working = old_managed = None
-    if archive_target:
-        old_dataset = (db.query(StructuredDataset).filter_by(id=archive_target["dataset_id"])
+    cleanup = row.cleanup_json or {}
+    archive_target = cleanup.get("archive_target")
+    return_targets = list(cleanup.get("archive_targets") or [])
+    archive_targets = [archive_target] if archive_target else return_targets
+    source_return = cleanup.get("replacement_kind") == "funding_source_summary_return"
+    archived = []
+    for target in archive_targets:
+        old_dataset = (db.query(StructuredDataset).filter_by(id=target["dataset_id"])
+                       .with_for_update().one_or_none()) if target.get("dataset_id") else None
+        old_working = (db.query(WorkingCopy).filter_by(id=target["working_copy_id"])
                        .with_for_update().one_or_none())
-        old_working = (db.query(WorkingCopy).filter_by(id=archive_target["working_copy_id"])
-                       .with_for_update().one_or_none())
-        if old_working is not None:
-            old_managed = (db.query(ManagedFile).filter_by(id=old_working.managed_file_id)
-                           .with_for_update().one_or_none())
+        old_managed = (db.query(ManagedFile).filter_by(id=old_working.managed_file_id)
+                       .with_for_update().one_or_none()) if old_working else None
+        archived.append((target, old_dataset, old_working, old_managed))
+    archives_valid = (working is not None
+                      and len({target["working_copy_id"] for target in archive_targets}) == len(archive_targets)
+                      and all(
+                          old_working is not None and old_managed is not None
+                          and old_working.id != working.id
+                          and old_working.status == "ACTIVE"
+                          and old_managed.status == "ACTIVE"
+                          and old_working.current_version_id == target["document_version_id"]
+                          and old_working.content_sha256 == target["sha256"]
+                          and old_working.revision == target["revision"]
+                          and old_working.filename.casefold() == working.filename.casefold()
+                          and (old_dataset is not None and old_dataset.working_copy_id == old_working.id
+                               if target.get("dataset_id") else source_return)
+                          and (not source_return or (
+                              old_managed.id == target.get("managed_file_id")
+                              and old_managed.source_type == "UPLOAD_ARCHIVE"
+                              and (old_dataset is None or
+                                   (old_dataset.target_layout_json or {}).get("funding_source_summary_sync"))))
+                          for target, old_dataset, old_working, old_managed in archived))
     if (dataset is None or working is None or version is None
             or working.current_version_id != row.candidate_document_version_id
             or working.content_sha256 != row.candidate_sha256
@@ -155,16 +200,12 @@ def finalize_publication(db, publication_id: str) -> bool:
             or file_object.storage_path != row.visible_relative_path
             or exported is None or exported.sha256 != row.candidate_sha256
             or exported.size_bytes != version.size_bytes
-            or (archive_target and (
-                old_dataset is None or old_working is None or old_managed is None
-                or managed is None or managed.status != "PUBLISHING"
-                or old_dataset.working_copy_id != old_working.id
-                or old_working.status != "ACTIVE"
-                or old_managed.status != "ACTIVE"
-                or old_working.current_version_id != archive_target["document_version_id"]
-                or old_working.content_sha256 != archive_target["sha256"]
-                or old_working.revision != archive_target["revision"]
-                or old_working.filename.casefold() != working.filename.casefold()))):
+            or (archive_targets and (
+                not archives_valid or managed is None
+                or (source_return and (
+                    managed.status != "ACTIVE" or managed.source_type != "UPLOAD_ARCHIVE"
+                    or working.status != "ACTIVE"))
+                or (not source_return and managed.status != "PUBLISHING")))):
         _mark_needs_repair(db, row, "DATASET_PUBLICATION_STATE_CONFLICT")
         db.commit()
         return False
@@ -178,8 +219,8 @@ def finalize_publication(db, publication_id: str) -> bool:
         if storage.sha256_file(visible) != row.candidate_sha256:
             raise ValueError("published hash mismatch")
         _sync_directory(visible.parent)
-        legacy_cleanup = ((row.cleanup_json or {}).get("legacy_cleanup", {})
-                          if archive_target else row.cleanup_json or {})
+        legacy_cleanup = (cleanup.get("legacy_cleanup", {})
+                          if archive_targets else cleanup)
         if legacy_cleanup:
             storage.retire_dataset_legacy_current_file(**legacy_cleanup)
     except Exception as exc:
@@ -192,29 +233,34 @@ def finalize_publication(db, publication_id: str) -> bool:
         log_event("structured_dataset.publication.failed", level="ERROR", status=row.status,
                   error_code=row.error_code, document_id=working.document_id)
         return False
-    if archive_target:
-        old_working.status = "ARCHIVED"
-        old_working.revision += 1
-        old_managed.status = "ARCHIVED"
+    if archive_targets:
+        for target, old_dataset, old_working, old_managed in archived:
+            old_working.status = "ARCHIVED"
+            old_working.revision += 1
+            old_managed.status = "ARCHIVED"
+            if row.agent_run_id:
+                changeset = db.query(ChangeSet).filter_by(agent_run_id=row.agent_run_id).first()
+                if changeset is not None:
+                    db.add(ChangeItem(
+                        changeset_id=changeset.id,
+                        target_type="DATASET" if old_dataset else "WORKING_COPY",
+                        target_id=old_dataset.id if old_dataset else old_working.id,
+                        target_document_id=old_working.document_id,
+                        change_type="STRUCTURED_DATASET_TARGET_ARCHIVED",
+                        before_value_json={"status": "ACTIVE", "working_copy_id": old_working.id},
+                        after_value_json={"status": "ARCHIVED", "replaced_by_dataset_id": dataset.id},
+                        source="workbuddy-dataset-demo", confidence=1.0,
+                        evidence_json={"replaced_version_id": target["document_version_id"]},
+                        execution_status="COMPLETED",
+                    ))
         working.status = "ACTIVE"
         managed.status = "ACTIVE"
-        if row.agent_run_id:
-            changeset = db.query(ChangeSet).filter_by(agent_run_id=row.agent_run_id).first()
-            if changeset is not None:
-                db.add(ChangeItem(
-                    changeset_id=changeset.id,
-                    target_type="DATASET",
-                    target_id=old_dataset.id,
-                    target_document_id=old_working.document_id,
-                    change_type="STRUCTURED_DATASET_TARGET_ARCHIVED",
-                    before_value_json={"status": "ACTIVE", "working_copy_id": old_working.id},
-                    after_value_json={"status": "ARCHIVED", "replaced_by_dataset_id": dataset.id},
-                    source="workbuddy-dataset-demo", confidence=1.0,
-                    evidence_json={"replaced_version_id": archive_target["document_version_id"]},
-                    execution_status="COMPLETED",
-                ))
+        archived_ids = [item.id for _, _, item, _ in archived]
         row.result_json = {**dict(row.result_json or {}),
-                           "archived_dataset_id": old_dataset.id}
+                           "archived_working_copy_ids": archived_ids}
+        if archive_target:
+            row.result_json = {**row.result_json,
+                               "archived_dataset_id": archived[0][1].id}
     if row.task_id:
         task = db.get(StructuredDatasetTask, row.task_id)
         if task is None or task.status != "PUBLISHING":
@@ -264,7 +310,7 @@ def finalize_publication(db, publication_id: str) -> bool:
     from app.modules.retrieval.search_profile import DocumentSearchProfileService
 
     profiles = DocumentSearchProfileService(db=db)
-    if archive_target:
+    for _, _, old_working, _ in archived:
         profiles.deactivate_profile(old_working.id)
     if not profiles.upsert_current_profile(working.id).get("ok"):
         raise RuntimeError("累计 Excel 搜索投影更新失败")

@@ -216,6 +216,10 @@ def display_value(value, assessment: dict):
     """只有通过校验的文本格增加一个末尾展示标记；不改写规范化事实和证据。"""
     if "teacher_rendered_value" in assessment:
         return excel_display_text(assessment["teacher_rendered_value"])
+    if assessment.get("numbered_item_texts"):
+        return excel_display_text("\n".join(
+            f"{index}. {item}" for index, item in enumerate(assessment["numbered_item_texts"], 1)
+        ))
     if assessment.get("ocr_status") == "UNCERTAIN":
         return excel_display_text(f"〔OCR 待核对：{assessment['ocr_candidate']}〕")
     if assessment.get("ocr_status") == "UNREADABLE":

@@ -18,6 +18,13 @@ def context():
     return ref, units, approval
 
 
+def test_numbered_items_render_without_changing_source_text():
+    original = "第一项\n第二项"
+    presentation = {"numbered_item_texts": ["第一项", "第二项"]}
+    assert display_value(original, presentation) == "1. 第一项\n2. 第二项"
+    assert display_value(display_value(original, presentation), presentation) == "1. 第一项\n2. 第二项"
+
+
 def test_optional_branches_and_mandatory_branch():
     """3选1与至少2项/必选组合不被误判成所有分支必须通过。"""
     ref, units, approval = context()

@@ -25,9 +25,11 @@ from .manual_revision import ManualRevisionService
 from .correction_schemas import CorrectionCheckout, CorrectionPublish
 from .publication import finalize_publication
 from app.modules.funding_usage.schemas import (FundingUsagePublish, FundingUsageContinuePublish,
-                                               FundingUsageRefreshPublish, FundingSourceSummarySyncPublish,
+                                               FundingUsageRefreshPublish, FundingUsagePromptPublish,
+                                               FundingSourceSummarySyncPublish,
                                                FundingSourceEntriesImportPublish)
 from app.modules.funding_usage.service import FundingUsageService
+from app.modules.funding_usage.prompt_edit import FundingPromptEditService
 
 
 class DispatchState(TypedDict):
@@ -60,6 +62,7 @@ def execute_dataset_write(*, db, user, operation, payload=None, dataset_id=None,
         "funding_usage_publish": FundingUsagePublish,
         "funding_usage_continue_publish": FundingUsageContinuePublish,
         "funding_usage_refresh_publish": FundingUsageRefreshPublish,
+        "funding_usage_prompt_publish": FundingUsagePromptPublish,
         "funding_source_summary_publish": FundingSourceSummarySyncPublish,
         "funding_source_entries_publish": FundingSourceEntriesImportPublish,
     }
@@ -114,6 +117,7 @@ def execute_dataset_write(*, db, user, operation, payload=None, dataset_id=None,
     correction = ExcelCorrectionService(db, user, run)
     manual_revision = ManualRevisionService(db, user, run)
     funding_usage = FundingUsageService(db, user, run)
+    funding_prompt = FundingPromptEditService(db, user, run)
     result = {}
     visible_cleanup = {}
     publication_id = None
@@ -145,6 +149,7 @@ def execute_dataset_write(*, db, user, operation, payload=None, dataset_id=None,
             "funding_usage_publish": lambda: funding_usage.publish(payload),
             "funding_usage_continue_publish": lambda: funding_usage.continue_publish(payload),
             "funding_usage_refresh_publish": lambda: funding_usage.refresh_publish(payload),
+            "funding_usage_prompt_publish": lambda: funding_prompt.publish(payload),
             "funding_source_summary_publish": lambda: funding_usage.source_summary_publish(payload),
             "funding_source_entries_publish": lambda: funding_usage.source_entries_publish(payload),
         }
@@ -173,6 +178,7 @@ def execute_dataset_write(*, db, user, operation, payload=None, dataset_id=None,
                 "manual_changed_cell_count",
                 "person_count",
                 "added_record_count",
+                "updated_record_count", "deleted_record_count", "total_change_count",
                 "changed_count", "review_count",
                 "added_count", "duplicate_count",
             )
@@ -217,7 +223,7 @@ def execute_dataset_write(*, db, user, operation, payload=None, dataset_id=None,
                     source="workbuddy-excel-writeback" if operation.startswith(("writeback_", "correction_", "manual_revision_")) else "workbuddy-dataset-demo",
                     execution_status="PENDING" if is_async else "COMPLETED",
                 ))
-                if operation in {"export", "writeback_publish", "correction_publish", "manual_revision_publish", "funding_usage_publish", "funding_usage_continue_publish", "funding_usage_refresh_publish", "funding_source_summary_publish", "funding_source_entries_publish"} and result.get("working_copy_id"):
+                if operation in {"export", "writeback_publish", "correction_publish", "manual_revision_publish", "funding_usage_publish", "funding_usage_continue_publish", "funding_usage_refresh_publish", "funding_usage_prompt_publish", "funding_source_summary_publish", "funding_source_entries_publish"} and result.get("working_copy_id"):
                     db.add(ChangeItem(
                         changeset_id=changeset.id,
                         target_type="working_copy",
@@ -355,7 +361,7 @@ def execute_dataset_write(*, db, user, operation, payload=None, dataset_id=None,
                 result = ManualRevisionService(db, user).receipt(task)
             elif operation == "task_commit":
                 result = DatasetTaskService(db, user).receipt(DatasetTaskService(db, user).owned(task_id))
-            elif operation in {"funding_usage_publish", "funding_usage_continue_publish", "funding_usage_refresh_publish", "funding_source_summary_publish", "funding_source_entries_publish"}:
+            elif operation in {"funding_usage_publish", "funding_usage_continue_publish", "funding_usage_refresh_publish", "funding_usage_prompt_publish", "funding_source_summary_publish", "funding_source_entries_publish"}:
                 result = {**result, "status": "COMPLETED", "excel_published": True,
                           "saved_to_server": True}
             else:

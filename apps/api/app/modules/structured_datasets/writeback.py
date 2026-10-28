@@ -610,16 +610,19 @@ class ExcelWritebackService:
                                    for col in range(left, right + 1))), default=top - 1)
                 available = list(range(last + 1, last + 1 + len(expected_rows)))
                 inserted = 0
+                sequences = {0} if labels[0].strip() in {"序号", "编号"} else set()
             if base_labels != labels or candidate_labels != labels:
                 fail("WRITEBACK_TEMPLATE_CHANGED", "回传文件的完整表头与基线不一致。", 422)
             if len(expected_rows) > len(available):
                 fail("TARGET_EXCEL_DATA_RANGE_FULL", "模板数据区没有足够的可填写行。", 422)
             allowed = set()
             height_rows = set()
+            auto_sequence = left == 1 and labels[0].strip() in {"序号", "编号"}
             for row_number, values in zip(available, expected_rows):
                 if len(values) != len(labels):
                     fail("WRITEBACK_ROWS_MISMATCH", "回传记录与目标列数量不一致。", 422)
-                if scoped_a_i and (row_number > bottom or base_sheet.cell(row_number, 1).value is None):
+                if (scoped_a_i or auto_sequence) and (not layout or row_number > bottom
+                                                      or base_sheet.cell(row_number, 1).value is None):
                     previous = next((candidate_sheet.cell(prior, 1).value
                                      for prior in range(row_number - 1, top - 1, -1)
                                      if candidate_sheet.cell(prior, 1).value is not None), None)
@@ -638,7 +641,7 @@ class ExcelWritebackService:
                     actual = candidate_sheet.cell(row_number, col)
                     previous_value = None if inserted and row_number > bottom else previous.value
                     if previous_value is not None:
-                        sequence_preserved = layout and offset in sequences and expected is None
+                        sequence_preserved = offset in sequences and expected is None
                         if (not sequence_preserved and str(previous_value) != str(expected)) or actual.value != previous_value:
                             fail("WRITEBACK_EXISTING_CELL_CHANGED", "回传文件覆盖了模板既有单元格。", 422,
                                  cell=f"{get_column_letter(col)}{row_number}")

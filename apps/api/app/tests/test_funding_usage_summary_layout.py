@@ -8,7 +8,7 @@ import pytest
 from openpyxl import load_workbook
 
 from app.core.config import get_settings
-from app.db.models import DocumentExtractionRun, DocumentVersion, WorkingCopy
+from app.db.models import DocumentExtractionRun, DocumentSearchProfile, DocumentVersion, ManagedFile, WorkingCopy
 from app.modules.file_lifecycle.storage import FileLifecycleStorageService
 from app.tests.test_funding_usage import _request
 from app.tests.test_structured_datasets import demo, seed_excel_target, seed_workbuddy_document
@@ -294,6 +294,110 @@ def test_source_summary_sync_publishes_new_version_and_preserves_detail(demo, mo
     assert balance_book["使用登记汇总"]["E2"].value == 30
     assert balance_book["使用登记汇总"]["F2"].value == 90
     balance_book.close()
+
+
+def test_same_name_source_return_archives_older_uploads_after_publish(demo, monkeypatch):
+    client, sessions, users = demo
+    monkeypatch.setenv("WORKBUDDY_EXCEL_WRITEBACK_ENABLED", "true")
+    get_settings.cache_clear()
+    filename = "同名成果明细回传.xlsx"
+    header = [None] * 14
+    header[1], header[13] = "姓名", "资助总额（元）"
+    detail_header = [None] * 10
+    detail_header[9] = "资助金额（元）"
+
+    def seed(amount, summary_amount):
+        summary = [None] * 14
+        summary[1], summary[13] = "张三", summary_amount
+        item = [None] * 10
+        item[9] = amount
+        footer = [None] * 10
+        footer[0], footer[9] = "合计", amount
+        document_id = seed_excel_target(sessions, filename=filename, sheets={
+            "汇总": [header, summary], "张三": [["张三"], detail_header, item, footer]})
+        with sessions() as db:
+            working = db.query(WorkingCopy).filter_by(document_id=document_id).one()
+            db.get(ManagedFile, working.managed_file_id).source_type = "UPLOAD_ARCHIVE"
+            version = db.get(DocumentVersion, working.current_version_id)
+            result = {"document_id": document_id, "document_version_id": version.id,
+                      "source_sha256": version.sha256}
+            db.commit()
+        return result
+
+    def publish(source):
+        payload = {"workbook": source, "request_key": str(uuid4())}
+        preview = client.post("/api/funding-usage/source-summary/preview",
+                              headers=users[0], json=payload)
+        assert preview.status_code == 200, preview.text
+        response = client.post("/api/funding-usage/source-summary/publish",
+                               headers=users[0],
+                               json={**payload, "preview_digest": preview.json()["preview_digest"]})
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "COMPLETED"
+        return preview.json(), response.json()
+
+    first = seed(120, 100)
+    _, first_result = publish(first)  # 旧表已有自己的来源同步数据集和历史版本。
+    second = seed(120, 120)  # 另一份旧上传件没有数据集。
+    latest = seed(130, 130)  # 新上传件金额已同步，无需再改汇总页。
+    payload = {"workbook": latest, "request_key": str(uuid4())}
+    preview = client.post("/api/funding-usage/source-summary/preview",
+                          headers=users[0], json=payload)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["changed_count"] == 0
+    assert preview.json()["replacement_count"] == 2
+    response = client.post("/api/funding-usage/source-summary/publish", headers=users[0],
+                           json={**payload, "preview_digest": preview.json()["preview_digest"]})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["status"] == "COMPLETED" and result["excel_published"]
+    assert result["replacement_count"] == 2
+    assert result["sha256"] == latest["source_sha256"]  # 无金额差异时保留回传 Excel 的原始字节。
+    with sessions() as db:
+        rows = db.query(WorkingCopy).filter_by(filename=filename).all()
+        assert [(row.document_id, row.status) for row in rows] == [
+            (first["document_id"], "ARCHIVED"),
+            (second["document_id"], "ARCHIVED"),
+            (latest["document_id"], "ACTIVE")]
+        old_profile = db.query(DocumentSearchProfile).filter_by(working_copy_id=rows[0].id).one()
+        new_profile = db.query(DocumentSearchProfile).filter_by(working_copy_id=rows[2].id).one()
+        assert old_profile.status == "INACTIVE" and new_profile.status == "ACTIVE"
+        assert db.get(DocumentVersion, first_result["document_version_id"]).sha256 == first_result["sha256"]
+    repeated = client.post("/api/funding-usage/source-summary/publish", headers=users[0],
+                           json={**payload, "preview_digest": preview.json()["preview_digest"]})
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["document_version_id"] == result["document_version_id"]
+
+
+def test_same_name_source_return_rejects_unrelated_managed_file(demo, monkeypatch):
+    client, sessions, users = demo
+    monkeypatch.setenv("WORKBUDDY_EXCEL_WRITEBACK_ENABLED", "true")
+    get_settings.cache_clear()
+    header = [None] * 14
+    header[1], header[13] = "姓名", "资助总额（元）"
+    row = [None] * 14
+    row[1], row[13] = "张三", 100
+    old_id = seed_excel_target(sessions, filename="不可归档同名成果表.xlsx",
+                               sheets={"汇总": [header, row]})
+    new_id = seed_excel_target(sessions, filename="不可归档同名成果表.xlsx",
+                               sheets={"汇总": [header, row]})
+    with sessions() as db:
+        new_copy = db.query(WorkingCopy).filter_by(document_id=new_id).one()
+        db.get(ManagedFile, new_copy.managed_file_id).source_type = "UPLOAD_ARCHIVE"
+        version = db.get(DocumentVersion, new_copy.current_version_id)
+        version_id, version_sha = version.id, version.sha256
+        db.commit()
+    payload = {"workbook": {"document_id": new_id,
+                             "document_version_id": version_id,
+                             "source_sha256": version_sha},
+               "request_key": str(uuid4())}
+    preview = client.post("/api/funding-usage/source-summary/preview",
+                          headers=users[0], json=payload)
+    assert preview.status_code == 409
+    assert preview.json()["error"]["code"] == "FUNDING_SOURCE_TARGET_CONFLICT"
+    with sessions() as db:
+        assert all(row.status == "ACTIVE" for row in db.query(WorkingCopy).filter(
+            WorkingCopy.document_id.in_((old_id, new_id))).all())
 
 
 @pytest.mark.parametrize("registration_prefix", ["", "-"])

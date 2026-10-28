@@ -16,10 +16,10 @@ from sqlalchemy import func
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from app.db.models import Document, DocumentPage, DocumentVersion, DocumentExtractionRun, StructuredDataset, StructuredDatasetExport, WorkingCopy
+from app.db.models import Document, DocumentPage, DocumentVersion, DocumentExtractionRun, ManagedFile, StructuredDataset, StructuredDatasetExport, WorkingCopy
 from app.modules.file_lifecycle.shared_access import CanonicalWorkingFileResolver, CanonicalWorkingFileError
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
-from app.modules.structured_datasets.publication import assert_publication_ready, stage_publication
+from app.modules.structured_datasets.publication import assert_publication_ready, pending_replacement, stage_publication
 from app.modules.structured_datasets.service import StructuredDatasetService, digest, fail
 from app.modules.structured_datasets.xlsx_safety import XlsxSafetyError, inspect_xlsx
 from app.modules.structured_extraction.export import _safe_spreadsheet_text
@@ -639,10 +639,64 @@ class FundingUsageService:
 
     def source_summary_preview(self, request: FundingSourceSummarySync):
         _, decisions, _ = self._source_summary_evaluate(request)
+        source = CanonicalWorkingFileResolver(self.db).resolve_document(
+            document_id=str(request.workbook.document_id),
+            document_version_id=str(request.workbook.document_version_id))
+        replacements = self._source_summary_replacements(source.working_copy)
         return {"preview_digest": self._source_summary_digest(request),
                 "changed_count": sum(item["status"] == "UPDATED" for item in decisions),
+                "replacement_count": len(replacements),
                 "review_count": sum(item["status"].startswith(("SOURCE_", "DETAIL_")) for item in decisions),
                 "people": decisions}
+
+    def _source_summary_replacements(self, working: WorkingCopy, *, lock: bool = False) -> list[dict]:
+        """仅将较早上传的同名成果总表作为本次回传的归档对象。"""
+
+        query = self.db.query(WorkingCopy).filter(
+            WorkingCopy.workspace_id == working.workspace_id,
+            WorkingCopy.status == "ACTIVE",
+            func.lower(WorkingCopy.filename) == working.filename.lower(),
+            WorkingCopy.id != working.id,
+        ).order_by(WorkingCopy.id)
+        if lock:
+            query = query.with_for_update()
+        older = query.all()
+        if not older:
+            return []
+        def managed_for(item: WorkingCopy):
+            managed_query = self.db.query(ManagedFile).filter_by(id=item.managed_file_id)
+            return (managed_query.with_for_update() if lock else managed_query).one_or_none()
+
+        current_managed = managed_for(working)
+        current_version = self.db.get(DocumentVersion, working.current_version_id)
+        if (current_managed is None or current_managed.source_type != "UPLOAD_ARCHIVE"
+                or current_version is None):
+            fail("FUNDING_SOURCE_TARGET_CONFLICT", "同名文件并非本轮上传成果总表，不能自动归档。", 409)
+        targets = []
+        for old in older:
+            managed = managed_for(old)
+            old_version = self.db.get(DocumentVersion, old.current_version_id)
+            if (managed is None or managed.status != "ACTIVE"
+                    or managed.source_type != "UPLOAD_ARCHIVE"
+                    or old_version is None or old.created_at >= working.created_at
+                    or old_version.created_at >= current_version.created_at):
+                fail("FUNDING_SOURCE_TARGET_CONFLICT", "同名旧表来源或先后顺序不明确，不能自动归档。", 409)
+            dataset_query = self.db.query(StructuredDataset).filter_by(working_copy_id=old.id)
+            if lock:
+                dataset_query = dataset_query.with_for_update()
+            dataset = dataset_query.one_or_none()
+            if dataset is not None and not (dataset.target_layout_json or {}).get("funding_source_summary_sync"):
+                fail("FUNDING_SOURCE_TARGET_CONFLICT", "同名旧表由其他数据集管理，不能自动归档。", 409)
+            if dataset is not None and dataset.active_task_id:
+                fail("DATASET_TASK_IN_PROGRESS", "同名旧表仍有未完成任务。", 423)
+            assert_publication_ready(self.db, working_copy_id=old.id)
+            if dataset is not None and pending_replacement(self.db, dataset_id=dataset.id):
+                fail("DATASET_TARGET_REPLACEMENT_PENDING", "同名旧表正在被替换。", 423)
+            targets.append({"dataset_id": dataset.id if dataset else None,
+                            "working_copy_id": old.id, "managed_file_id": managed.id,
+                            "document_version_id": old.current_version_id,
+                            "sha256": old.content_sha256, "revision": old.revision})
+        return targets
 
     def source_summary_publish(self, request: FundingSourceSummarySyncPublish):
         request_digest = self._source_summary_digest(request)
@@ -663,16 +717,18 @@ class FundingUsageService:
                 fail("FUNDING_PUBLICATION_PENDING", "成果明细表上次发布尚未完成。", 423)
             assert_publication_ready(self.db, dataset_id=export.dataset_id)
             return {**self.datasets._export_result(export, reused=True),
-                    "status": "COMPLETED", "changed_count": policy.get("funding_source_summary_changed_count", 0)}
+                    "status": "COMPLETED", "changed_count": policy.get("funding_source_summary_changed_count", 0),
+                    "replacement_count": policy.get("funding_source_summary_replacement_count", 0)}
         path, decisions, total_col = self._source_summary_evaluate(request)
         changed = [item for item in decisions if item["status"] == "UPDATED"]
-        if not changed:
-            fail("FUNDING_SOURCE_UNCHANGED", "个人明细页没有需要同步到汇总页的有效金额差异。", 422)
         source = CanonicalWorkingFileResolver(self.db).resolve_document(
             document_id=str(request.workbook.document_id),
             document_version_id=str(request.workbook.document_version_id))
         working = source.working_copy
         current = source.document_version
+        replacements = self._source_summary_replacements(working, lock=True)
+        if not changed and not replacements:
+            fail("FUNDING_SOURCE_UNCHANGED", "个人明细页没有需要同步到汇总页的有效金额差异。", 422)
         assert_publication_ready(self.db, working_copy_id=working.id)
         visible_relative = self.datasets._working_copy_storage_path(working)
         visible = self.datasets.storage.working_copy_path(visible_relative)
@@ -697,19 +753,20 @@ class FundingUsageService:
             self.db.flush()
         self.datasets._assert_task_write_access(dataset)
         with tempfile.TemporaryDirectory(prefix="file-agent-funding-source-") as directory:
-            output = Path(directory) / working.filename
-            book = load_workbook(path, read_only=False, data_only=False)
-            try:
-                if any(cell.data_type == "f" for worksheet in book.worksheets
-                       for row in worksheet for cell in row):
-                    fail("FUNDING_SOURCE_FORMULA_UNSUPPORTED",
-                         "成果明细表含公式，当前同步方式会清除公式缓存；请先保存为数值版再上传。", 422)
-                sheet = book["汇总"]
-                for item in changed:
-                    sheet.cell(item["row_number"], total_col).value = item["new_research_total"]
-                book.save(output)
-            finally:
-                book.close()
+            output = Path(directory) / working.filename if changed else path
+            if changed:
+                book = load_workbook(path, read_only=False, data_only=False)
+                try:
+                    if any(cell.data_type == "f" for worksheet in book.worksheets
+                           for row in worksheet for cell in row):
+                        fail("FUNDING_SOURCE_FORMULA_UNSUPPORTED",
+                             "成果明细表含公式，当前同步方式会清除公式缓存；请先保存为数值版再上传。", 422)
+                    sheet = book["汇总"]
+                    for item in changed:
+                        sheet.cell(item["row_number"], total_col).value = item["new_research_total"]
+                    book.save(output)
+                finally:
+                    book.close()
             inspect_xlsx(output)
             file_sha = self.datasets.storage.sha256_file(output)
             export_id = str(uuid4())
@@ -736,7 +793,8 @@ class FundingUsageService:
                 "funding_source_summary_request_key": request.request_key,
                 "funding_source_summary_source_document_id": str(request.workbook.document_id),
                 "funding_source_summary_digest": request_digest,
-                "funding_source_summary_changed_count": len(changed)}
+                "funding_source_summary_changed_count": len(changed),
+                "funding_source_summary_replacement_count": len(replacements)}
             dataset.base_rows_json = [{"name": item["name"],
                 "research_total": item["new_research_total"] if item["status"] == "UPDATED"
                     else item["old_research_total"]} for item in decisions]
@@ -748,11 +806,11 @@ class FundingUsageService:
             self.db.flush()
             result = {**self.datasets._export_result(export, reused=False),
                 "status": "PUBLISHING", "excel_published": False,
-                "changed_count": len(changed), "review_count": sum(
+                "changed_count": len(changed), "replacement_count": len(replacements), "review_count": sum(
                     item["status"].startswith(("SOURCE_", "DETAIL_")) for item in decisions)}
             publication = stage_publication(self.db, dataset=dataset,
                 working_copy=working, version=version, base_version_id=current.id,
-                result=result, agent_run=self.datasets.agent_run)
+                result=result, archive_targets=replacements, agent_run=self.datasets.agent_run)
         return {**result, "people": decisions, "_publication_id": publication.id}
 
     @staticmethod

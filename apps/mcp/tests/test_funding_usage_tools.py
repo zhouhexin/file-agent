@@ -21,6 +21,7 @@ def test_funding_usage_tools_route_and_download(tmp_path):
         async def funding_usage_request(self, method, path, payload):
             calls.append((method, path, payload))
             if path in {"/preview", "/continue/preview", "/refresh/preview",
+                        "/prompt/target", "/prompt/preview",
                         "/source-summary/preview", "/source-entries/preview"}:
                 return {"preview_digest": "a" * 64, "person_count": 1}
             return {"status": "COMPLETED", "excel_published": True,
@@ -49,6 +50,8 @@ def test_funding_usage_tools_route_and_download(tmp_path):
         assert {"funding_usage_preview", "funding_usage_publish",
                 "funding_usage_continue_preview", "funding_usage_continue_publish",
                 "funding_usage_refresh_preview", "funding_usage_refresh_publish",
+                "funding_usage_prompt_target", "funding_usage_prompt_preview",
+                "funding_usage_prompt_publish",
                 "funding_source_summary_preview", "funding_source_summary_publish",
                 "funding_source_entries_preview", "funding_source_entries_publish"} <= names
         await mcp.call_tool("funding_usage_preview", {"payload": payload})
@@ -81,6 +84,24 @@ def test_funding_usage_tools_route_and_download(tmp_path):
         imported = await mcp.call_tool("funding_source_entries_publish", {"payload": {
             **entry_import, "preview_digest": "a" * 64}})
         assert any(isinstance(item, ResourceLink) for item in imported.content)
+        await mcp.call_tool("funding_usage_prompt_target", {"payload": {"filename": "余额.xlsx"}})
+        prompt = {"filename": "余额.xlsx", "request_key": "prompt-one",
+                  "base_document_version_id": source["document_version_id"],
+                  "base_sha256": source["source_sha256"], "base_revision": 0,
+                  "user_request": "给张三新增一笔支出10元",
+                  "row_edits": [{"action": "ADD", "name": "张三",
+                                 "registration": "新增支出10元", "usage_amount": 10}]}
+        await mcp.call_tool("funding_usage_prompt_preview", {"payload": prompt})
+        prompted = await mcp.call_tool("funding_usage_prompt_publish", {"payload": {
+            **prompt, "preview_digest": "a" * 64}})
+        assert any(isinstance(item, ResourceLink) for item in prompted.content)
+        rename = {**prompt, "request_key": "rename-one",
+                  "user_request": "将张三更正为张山", "row_edits": [],
+                  "name_edits": [{"old_name": "张三", "new_name": "张山"}]}
+        await mcp.call_tool("funding_usage_prompt_preview", {"payload": rename})
+        renamed = await mcp.call_tool("funding_usage_prompt_publish", {"payload": {
+            **rename, "preview_digest": "a" * 64}})
+        assert any(isinstance(item, ResourceLink) for item in renamed.content)
 
     asyncio.run(run())
     assert calls[0][0:2] == ("POST", "/preview")
@@ -95,6 +116,12 @@ def test_funding_usage_tools_route_and_download(tmp_path):
     assert calls[10][1] == "/source-summary/publish"
     assert calls[12][1] == "/source-entries/preview"
     assert calls[13][1] == "/source-entries/publish"
+    assert calls[15][1] == "/prompt/target"
+    assert calls[16][1] == "/prompt/preview"
+    assert calls[17][1] == "/prompt/publish"
+    assert calls[19][1] == "/prompt/preview"
+    assert calls[19][2]["name_edits"] == [{"old_name": "张三", "new_name": "张山"}]
+    assert calls[20][1] == "/prompt/publish"
 
 
 def test_funding_usage_client_allows_only_fixed_continue_routes():
@@ -113,6 +140,9 @@ def test_funding_usage_client_allows_only_fixed_continue_routes():
             assert (await client.funding_usage_request("POST", "/continue/publish", {})) == {"status": "ok"}
             assert (await client.funding_usage_request("POST", "/refresh/preview", {})) == {"status": "ok"}
             assert (await client.funding_usage_request("POST", "/refresh/publish", {})) == {"status": "ok"}
+            assert (await client.funding_usage_request("POST", "/prompt/target", {})) == {"status": "ok"}
+            assert (await client.funding_usage_request("POST", "/prompt/preview", {})) == {"status": "ok"}
+            assert (await client.funding_usage_request("POST", "/prompt/publish", {})) == {"status": "ok"}
             assert (await client.funding_usage_request("POST", "/source-summary/preview", {})) == {"status": "ok"}
             assert (await client.funding_usage_request("POST", "/source-summary/publish", {})) == {"status": "ok"}
             assert (await client.funding_usage_request("POST", "/source-entries/preview", {})) == {"status": "ok"}
@@ -127,6 +157,9 @@ def test_funding_usage_client_allows_only_fixed_continue_routes():
                      "/api/funding-usage/continue/publish",
                      "/api/funding-usage/refresh/preview",
                      "/api/funding-usage/refresh/publish",
+                     "/api/funding-usage/prompt/target",
+                     "/api/funding-usage/prompt/preview",
+                     "/api/funding-usage/prompt/publish",
                      "/api/funding-usage/source-summary/preview",
                      "/api/funding-usage/source-summary/publish",
                      "/api/funding-usage/source-entries/preview",

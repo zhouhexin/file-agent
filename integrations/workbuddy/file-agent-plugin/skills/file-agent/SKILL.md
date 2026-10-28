@@ -5,11 +5,13 @@ description: 当本轮上下文含 FILE_AGENT_HOST_SUBMISSION，且用户要求�
 
 # 文件助手附件桥接
 
-用户上传《科研成果资助汇总表-某教师.xlsx》一类单人 Excel，要求将第 1 张论文页和第 3 张会议页追加到已有《教师成果明细汇总表》时，交给 `file-agent-research-funding-usage-balance` 的“上传单人资助表追加教师成果明细”流程；不要误走“上传完整成果明细表刷新余额表”流程。
+用户上传《科研成果资助汇总表-某教师.xlsx》一类单人 Excel，要求将第 1 张论文页和第 3 张会议页追加到已有《教师成果明细汇总表》时，交给 `file-agent-research-funding-usage-balance` 的“上传单人资助表追加教师成果明细”流程；除非用户明确只更新成果明细汇总表，否则该流程在成果明细正式发布后继续用其新版本刷新使用登记余额表。不要把上传的单人表误交给“上传完整成果明细表刷新余额表”流程。
 
 用户提供成果资助使用登记图片与旧汇总表，要求首次生成余额 Excel；只上传新的登记图片，要求按完整文件名继续追加；或者上传新版教师成果明细汇总表，要求刷新已发布余额表的科研成果资助总额时，都交给 `file-agent-research-funding-usage-balance`。下载新版余额表后，在个人明细页修改、删除或人工新增独立支出并回传；服务器按个人页重算首页，回传工具用 `file-agent-manual-excel-revision`。已发布旧版余额表仍按旧版首表规则回传，其他 Excel 回传规则不变。图片印刷金额不参与扣减，也不按年度拆分。
 
-用户要求把教师引进考察材料填入《西安理工大学教师引进考察汇总表.xlsx》或同类教师引进汇总模板时，交给 `file-agent-teacher-recruitment-excel`。每轮有上传目标 Excel，就以这份新上传表的真实列填入本轮材料；只有没有上传目标时才按完整文件名追加已有表。多份材料可归到同一位教师的一行；不得误用教授业绩汇总 B–I/L 的定向技能。下载后仅手工补充并同名回传的请求仍交给 `file-agent-manual-excel-revision`。
+用户只用提示词明确要求对**已发布新版余额表**的个人使用登记新增、修改、删除，调整某位教师的科研成果资助金额、其他资助金额，或更正 OCR 识别错误的教师姓名时，交给 `file-agent-research-funding-usage-balance` 的“通过提示词维护已发布余额表”段。先读取当前教师名单、稳定行 ID 和版本，按用户明确指定的记录预览后发布；不走图片 OCR 或 Excel 手工回传，也不直接填写总支出与剩余金额。
+
+用户要求填写《西安理工大学教师引进考察汇总表.xlsx》时，先核对目标实际工作表与表头：仅 A–T 二十列且 A 为序号、E 为姓名、I 为教育经历、J–L 为论文、M–O 为项目、P 为成果的专用布局，交给 `file-agent-teacher-recruitment-excel`。其他教师招聘、博士应聘或同类业务名称的 Excel 均按实际表头交给 `file-agent-excel-writeback`；不能仅凭文件名或业务主题选择专用流程。上传目标仍以上传表为准，未上传目标才按完整文件名追加。下载后仅手工补充并同名回传的请求仍交给 `file-agent-manual-excel-revision`。
 
 用户把 PDF/Word 信息追加到已发布的教授业绩汇总 `.xlsx`，或者首次上传该模板填表，而没有明确写出列范围时，默认使用 `file-agent-a-i-scoped-excel`，同轮只填 B–I 身份列和 L 考核优秀年度。提示词中的“追加到已有 Excel”“直接保存”“给新增行号、新版本和下载链接”只说明目标与保存方式，不能视为 A–AA 全列授权。用户若明确要求 A–AA 全列同时填写并核对印章，报告当前插件不提供完整教授表填报 Skill 并停止，不得擅自改成 B–I 与 L 定向任务。
 
@@ -67,8 +69,8 @@ description: 当本轮上下文含 FILE_AGENT_HOST_SUBMISSION，且用户要求�
 ## 文档内容提取与确认流程
 
 **Excel 任务分流**：教授汇总表 B–I/L 填表与按文件名追加交给 `file-agent-a-i-scoped-excel`，
-成果资助图片手写登记首次生成、同名余额表继续追加和扣减，以及单人资助 Excel 追加到教师成果明细汇总表，交给 `file-agent-research-funding-usage-balance`；
-教师引进考察汇总表的本轮上传目标填表（首次或后续）与未上传目标时按完整文件名追加交给 `file-agent-teacher-recruitment-excel`；
+成果资助图片手写登记首次生成、同名余额表继续追加和扣减、对已发布新版余额表按提示词增改删个人登记、调整资助金额或更正教师姓名，以及单人资助 Excel 追加到教师成果明细汇总表，交给 `file-agent-research-funding-usage-balance`；
+经真实表头确认符合 A–T 专用布局的教师引进考察汇总表，首次上传填表与后续按完整文件名追加交给 `file-agent-teacher-recruitment-excel`；其他教师招聘或博士应聘表交给通用写回，不按标题词语猜布局；
 手工补全后的同名 Excel 回传交给 `file-agent-manual-excel-revision`；其他明确要求完整 Excel 写回的任务
 交给现有 `file-agent-excel-writeback`。各 Skill 按自己的接收、复核和发布工具执行；以下单文档确认流程
 不作为 Excel 的最终保存链。只有对应发布工具返回 `excel_published=true` 才报告 Excel 保存成功。

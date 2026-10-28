@@ -714,12 +714,17 @@ class StructuredDatasetService:
             if element.label == "table_cell" and metadata.get("row_index") == 0:
                 located.append((int(metadata.get("column_index") or 0), element.text_content.strip()))
         if located:
+            from app.modules.structured_extraction.workbook_layout import is_blank_column_label
             for column_index, label in sorted(located):
+                if not label and column_index < len(actual_labels) and is_blank_column_label(actual_labels[column_index]):
+                    continue
                 if column_index >= len(actual_labels) or actual_labels[column_index] != label:
                     fail("TARGET_EXCEL_CONVERSION_SCHEMA_MISMATCH", "转换后的标题与 WorkBuddy 单元格证据不一致。")
             return
         first_line = next((line.strip() for line in page.text_content.splitlines() if line.strip()), "")
-        labels = [value.strip() for value in first_line.split("\t") if value.strip()]
+        from app.modules.structured_extraction.workbook_layout import blank_column_label
+        labels = [value.strip() or blank_column_label(index)
+                  for index, value in enumerate(first_line.split("\t"), 1)]
         if not labels:
             fail("TARGET_EXCEL_HEADER_CELLS_MISSING", "WorkBuddy 没有提交可核对的标题，请重新读取目标 Excel。", 422)
         if labels != actual_labels:
@@ -1112,11 +1117,18 @@ class StructuredDatasetService:
             elif any(any(v is not None and str(v).strip() for v in row[len(raw_headers):])
                      for row in rows[header_index + 1:]):
                 fail("TARGET_EXCEL_LAYOUT_REQUIRED", "首行不是完整字段表头，请提供真实 header_range 和 data_range，不能把大标题或尾注当数据。", 422)
-            if not raw_headers or len(raw_headers) > 40 or any(
-                value is None or not str(value).strip() for value in raw_headers
-            ):
-                fail("TARGET_EXCEL_SCHEMA_INVALID", "标题必须连续、非空且不超过 40 列；复杂表头请指定 layout。", 422)
-            labels = [" ".join(str(value).split()) for value in raw_headers]
+            if not raw_headers or len(raw_headers) > 40:
+                fail("TARGET_EXCEL_SCHEMA_INVALID", "标题须包含实际字段且不超过 40 列。", 422)
+            from app.modules.structured_extraction.workbook_layout import blank_column_label, is_blank_column_label
+            labels = [(" ".join(str(value).split()) if value is not None and str(value).strip()
+                       else blank_column_label(offset))
+                      for offset, value in enumerate(raw_headers, 1)] if layout is None else [
+                          " ".join(str(value).split()) for value in raw_headers]
+            if layout is None and any(value is not None and str(value).strip() and is_blank_column_label(label)
+                                      for value, label in zip(raw_headers, labels)):
+                fail("TARGET_EXCEL_SCHEMA_INVALID", "表头不能使用系统保留的空白列标记。", 422)
+            if all(is_blank_column_label(label) for label in labels):
+                fail("TARGET_EXCEL_SCHEMA_INVALID", "标题须包含至少一个真实字段。", 422)
             if len({label.casefold() for label in labels}) != len(labels):
                 fail("TARGET_EXCEL_SCHEMA_INVALID", "Excel 标题不能重复。", 422)
             data_rows = []
@@ -1125,6 +1137,9 @@ class StructuredDatasetService:
                 # write_only 生成的 XLSX 可以省略尾部空单元格；读取时按真实表头补齐，
                 # 避免可选空列导致发布回读或后续按文件名追加出现 IndexError。
                 selected.extend([None] * (len(labels) - len(selected)))
+                if any(selected[index] is not None and str(selected[index]).strip()
+                       for index, label in enumerate(labels) if is_blank_column_label(label)):
+                    fail("TARGET_EXCEL_SCHEMA_INVALID", "无标题的保留列已有数据，请明确该列标题或调整目标范围。", 422)
                 if not any(value is not None and str(value).strip() for value in selected):
                     continue
                 if len(data_rows) >= 1000:
@@ -1455,7 +1470,7 @@ class StructuredDatasetService:
         for record in payload_for_digest.get("records", []):
             for value in record.get("fields", {}).values():
                 # 新可选字段不改变旧请求指纹，保证升级后原幂等键仍可恢复。
-                for optional in ("fragments", "blank_reason", "approval", "assessment", "ocr_status", "ocr_unit_id", "teacher_render"):
+                for optional in ("fragments", "numbered_items", "blank_reason", "approval", "assessment", "ocr_status", "ocr_unit_id", "teacher_render"):
                     if not value.get(optional):
                         value.pop(optional, None)
                 if not value.get("evidence_refs"):
@@ -1613,6 +1628,8 @@ class StructuredDatasetService:
                         presentation.update(assess_field(label=spec.label, assessment=value.assessment,
                             approval=value.approval, units=source["source_units"]))
                     fragment_refs = [validate_quote(ref, source["source_units"]) for ref in value.fragments]
+                    if value.numbered_items:
+                        presentation["numbered_item_texts"] = [ref.quote for ref in value.fragments]
                     if value.source_only_fragments:
                         indexes = [value.fragments.index(ref) for ref in value.source_only_fragments]
                         presentation["source_only_fragment_indexes"] = indexes

@@ -1,6 +1,6 @@
 ---
 name: file-agent-research-funding-usage-balance
-description: 成果资助手写登记首次生成余额表、图片追加扣减、上传单人资助表更新教师成果明细汇总表、上传新版成果明细表刷新余额表资助总额，以及个人明细页回传时使用。图片提取只认手写登记金额。
+description: 成果资助手写登记首次生成余额表、图片追加扣减、通过提示词新增修改删除已发布余额表登记或调整资助金额和更正教师姓名、上传成果明细表刷新资助总额，以及个人明细页回传时使用。图片提取只认手写登记金额。
 ---
 
 # 成果资助使用登记与余额
@@ -51,23 +51,45 @@ description: 成果资助手写登记首次生成余额表、图片追加扣减�
 
 新版表回传时，用户在对应个人明细页修改 B–E 的登记、日期、确认金额和核对说明，也可以删除整条登记，或在明细区中间及金额汇总区**上方**插入独立支出。已有行的 A 列序号保持原值且相对顺序不变；新增行的 A 列留空。金额待核对时 D 列可留空、E 列写原因。个人页左下方可核对或补充“总科研成果资助金额”和“其他资助金额”；“总支出”和“剩余总资助金额”由服务端重算，不需手填。不要修改首页人员顺序、工作表名称、表头或汇总标签。服务端按每个人的明细顺序重新编号，从个人页汇总已确认支出，更新个人页左下角及首页对应教师的金额。删除的登记从活跃来源去重记录撤销，但保留删除审计；人工新行保存上传文件哈希和独立行 ID，不伪称图片 OCR 来源。删除某人全部登记并发布后，首页仍保留该人，空白个人页不再生成；后续图片首次新增登记时再创建个人页并继续扣减。
 
+个人明细页左下方“其他资助金额”是有个人页教师的回传输入；用户修改后，服务端同时更新首页 D 列，并按“科研成果资助＋其他资助－确认支出”重算首页 F 列和个人页剩余金额。首页不用另改，也不能让两处金额各自独立生效；没有个人页的教师可使用下述提示词金额修改入口。
+
+## 通过提示词维护已发布余额表
+
+用户未上传新图片或 Excel，只在本轮提示词中明确要求对已发布余额表**新增、修改、删除**某位教师的使用登记、修改其“总科研成果资助金额 / 其他资助金额”，或纠正手写 OCR 识别错误的教师姓名时走本段。提供完整 `.xlsx` 文件名；无唯一目标时先只读查找并请用户选定。此入口只适用新版个人明细余额表，不把用户文字伪装成图片 OCR 引文，也不重读旧图片。原图片追加、来源表刷新和下载回传继续走各自原流程。
+
+先调用 `funding_usage_prompt_target(filename)` 读取当前版本、首页教师名单和每条个人登记的稳定 `source_row_id`。**修改或删除必须用该工具返回的行 ID 与完全一致的教师姓名定位**；用户只说“某笔”但现有登记中存在歧义时先展示候选请其指明，不能按模糊题名猜。更名必须由用户明确给出旧姓名和正确新姓名，旧姓名须与当前首页完全一致；新名与另一位教师相同或仅空格不同、同名无变化、非法 Excel 工作表名或无法确定是哪位教师时停止，不能自行合并两名教师。新增登记必须指明已有教师、登记内容；金额不明确可留空并标待核对。要插在某条登记之后时使用其 `after_row_id`；不指定位置则加在该教师明细末尾。不能通过本工具新增教师或直接指定“总支出 / 剩余金额”。
+
+将本轮用户原话放入 `user_request`，用刚读出的 `base_document_version_id/base_sha256/base_revision`、稳定 `request_key` 和 `row_edits` / `total_edits` / `name_edits` 调用 `funding_usage_prompt_preview`。`row_edits` 的 `action=ADD` 给 `name/registration`，可给 `date/usage_amount/status/after_row_id`；`action=UPDATE` 给 `name/source_row_id` 和至少一个要改的字段；`action=DELETE` 只给 `name/source_row_id`。用户更正登记原文中的金额时，同时更新 `registration` 和 `usage_amount`；仅调整核定金额而保留原文时，在 `status` 写明差异。`total_edits` 只允许 `field=research_total|other_total` 与明确金额；金额用非负、最多两位小数的数字。`name_edits` 每项给 `old_name/new_name`；仅更名时 `row_edits` 和 `total_edits` 留空，同次还改登记或金额时这些项仍用**更名前**的姓名。逐项核对预览里的修改前后、增改删和更名数量、每人总支出、其他资助金额和剩余金额。用户要求先预览时停在此处；用户本轮已明确要求直接保存时，把**原样 payload** 加 `preview_digest` 调用 `funding_usage_prompt_publish`。
+
+服务端只以冻结的个人登记和资助金额计算新工作簿：每人明细序号重新从 1 排列，个人页金额区与首页同步；更名同时更新首页姓名、个人工作表名、当前资助记录和登记归属，原始图片 OCR 引文与旧版本保持原样；无登记教师只改首页，不补建空白个人页。删除登记撤销该笔活跃来源并保留删除审计，新增登记记为用户提示词来源，不冒充 OCR。只有 `status=COMPLETED`、`excel_published=true` 并取得新版本与下载链接才报告成功。版本冲突重新读取当前登记并重新预览；行 ID 不存在、归属不符、姓名冲突、金额不明确或内容无变化时报告原错误并停止，不换请求键反复试探。后续图片 OCR 若又识别为已纠正的旧名，不能自动创建第二位教师，须报告姓名归属待核对。发布后仍可用既有图片追加和下载回传流程继续维护。
+
 ## 上传单人资助表追加教师成果明细
 
-用户只上传类似《科研成果资助汇总表-温营坤.xlsx》的单人 Excel，并要求更新已发布《教师成果明细汇总表》时，走本段；**不要**把这份单人表当作完整成果明细表直接交给余额表刷新工具。先用本轮 `FILE_AGENT_HOST_SUBMISSION ref=...` 调用 `workbuddy_submission_ingest(submission_ref, extraction_profile="WORKBUDDY_DOCUMENT", extraction_save_policy="DIRECT_ARCHIVE", placement_mode="NEUTRAL")` 归档上传 Excel，取得真实 `document_id/document_version_id/source_sha256`。目标使用用户给出的完整 `.xlsx` 文件名；若只说“教师成果明细汇总表”，先用授权只读检索确定唯一目标，不能猜测同名文件或使用本地路径。
+用户只上传类似《科研成果资助汇总表-温营坤.xlsx》的单人 Excel，并要求更新已发布《教师成果明细汇总表》时，走本段；除非用户明确说**只更新成果明细汇总表**，否则本段还要接着更新已发布余额表。**不要**把单人表直接交给余额表刷新工具。先用本轮 `FILE_AGENT_HOST_SUBMISSION ref=...` 调用 `workbuddy_submission_ingest(submission_ref, extraction_profile="WORKBUDDY_DOCUMENT", extraction_save_policy="DIRECT_ARCHIVE", placement_mode="NEUTRAL")` 归档上传 Excel，取得真实 `document_id/document_version_id/source_sha256`。成果明细目标使用用户给出的完整 `.xlsx` 文件名；若只说“教师成果明细汇总表”，先用授权只读检索确定唯一目标，不能猜测同名文件或使用本地路径。
 
 以来源快照 `workbook`、目标 `filename` 和稳定 `request_key` 调用 `funding_source_entries_preview`。服务端只读取上传表**第 1 张论文页和第 3 张会议页**（工作表实际名称可以不是 Sheet1/Sheet3），校验表头、姓名、年份和金额，按目标个人页成果名称、日期及金额去重。逐条核对 `rows` 的 `ADDED`、`ADDED_REVIEW`、`DUPLICATE`、`POSSIBLE_DUPLICATE`、`CONFLICT`、`OWNER_CONFIRMATION_REQUIRED` 等状态，以及 `added_count/duplicate_count/review_count/proposed_totals`。已有论文不得重复添加；不完整行只写真实可取的字段，缺失会议名称、地点等在个人页备注中标待核对。
 
 会议行没有申请人时，只有同一工作簿其他数据行的申请人唯一且文件名末尾姓名与其一致，服务端才提出关联。预览的 `OWNER_CONFIRMATION_REQUIRED` **不构成用户确认**。只有用户明确确认该空姓名会议行属于所示教师（包括用户已在当前任务中明确说明）时，才能用 `confirm_inferred_owner=true` 重新预览，并把相同 payload 加 `preview_digest` 调用 `funding_source_entries_publish`。否则只报告待确认，不能发布该行。发布仅追加可安全接收的新行，重算该教师个人页合计、该教师“汇总”行的论文数、会议数、年度数量、资助总额，以及页末全体“总计”行；其他教师、已登记行和历史版本保留。无可新增行时不制造空版本。只有返回 `COMPLETED` 且 `excel_published=true` 才报告已保存，并给出新增/重复/待核对数量、新版本及下载链接。目标版本变化时重新预览；重复请求键不重复发布。
 
-本流程只更新教师成果明细汇总表；用户之后明确要求把新总额同步到使用登记余额表时，再用**已发布的新版成果明细表**按下节原有刷新流程处理。图片追加和余额表手工回传仍按各自原规则执行。
+### 连续刷新使用登记余额表
+
+本轮要求更新余额表时，先完成上面的成果明细发布，再连续执行本段；用户已经授权连续发布两张表，不需另行询问。余额表使用用户给出的**完整 `.xlsx` 文件名**；若没有给出，先通过授权只读检索确定唯一已发布的使用登记余额表。找不到或有多个候选时，保留已完成的成果明细回执，报告余额表未更新及缺少的完整文件名，不猜测目标。
+
+只有 `funding_source_entries_publish` 返回 `status=COMPLETED` 且 `excel_published=true` 后，才以**该回执**的 `document_id/document_version_id/sha256` 构造余额表刷新请求的 `workbook:{document_id,document_version_id,source_sha256}`；不得沿用最初上传的单人表快照，也不得使用尚在 `PUBLISHING` 的来源版本。若没有可新增成果，本轮不制造成果明细新版本；报告余额表未在本段刷新，若需要从已有成果明细版本单独刷新，走下节原有流程。
+
+用另一稳定 `request_key` 调用 `excel_manual_revision_checkout(完整余额表文件名)`，取其 `document_version_id/base_sha256/base_revision` 作为余额表的 `base_document_version_id/base_sha256/base_revision`。以当前来源快照、余额表完整 `filename`、这些冻结值和**独立于成果明细发布**的 `request_key` 调用 `funding_usage_refresh_preview`。逐人核对 `people` 和 `source_only_names`：本次新增成果所属教师应在余额表中，`UPDATED` 的新资助额应等于已发布成果明细的个人页合计；`SOURCE_*`、`DETAIL_*` 或与本轮无关的其他教师变化，先报告异常并停止余额表发布，不能扩大修改范围。`changed_count=0` 时报告余额表金额无需变更，不调用发布工具，也不声称产生新版本。
+
+核对通过后，把**原样刷新 payload** 加 `preview_digest` 调用 `funding_usage_refresh_publish`；只有返回 `status=COMPLETED` 且 `excel_published=true` 才报告余额表已更新。总支出仍由余额表已有使用登记重算，其他资助金额保持原值，余额表首页与已有个人页同步更新。最终回执分别给出成果明细表与余额表的文件名、版本号和下载链接；任一步失败都逐表说明实际发布状态。成果明细已发布而余额表失败时，保留其成功结果，使用同一已发布来源版本重新 checkout、预览、发布余额表，**不得重新追加单人成果或换键重复写入**。图片追加与余额表手工回传仍按各自原规则执行。
 
 ## 上传新版成果明细表刷新资助总额
 
-用户先保存并关闭更新后的《教师成果明细汇总表》，再把这个文件作为本轮附件上传，同时给出已发布余额表的**完整 `.xlsx` 文件名**。使用本轮 `FILE_AGENT_HOST_SUBMISSION ref=...` 调用 `workbuddy_submission_ingest(submission_ref, extraction_profile="WORKBUDDY_DOCUMENT", extraction_save_policy="DIRECT_ARCHIVE", placement_mode="NEUTRAL")` 归档这一份新版成果明细表。只取返回的真实 `document_id/document_version_id/source_sha256`；本任务不需要图片 OCR，也不从本地路径读取附件。未保存的 Excel 编辑不会进入上传字节，不能从文件名或聊天描述补出金额。
+用户先保存并关闭更新后的《教师成果明细汇总表》，再把这个文件作为本轮附件上传；只有要求更新余额表时，才需要给出已发布余额表的**完整 `.xlsx` 文件名**。使用本轮 `FILE_AGENT_HOST_SUBMISSION ref=...` 调用 `workbuddy_submission_ingest(submission_ref, extraction_profile="WORKBUDDY_DOCUMENT", extraction_save_policy="DIRECT_ARCHIVE", placement_mode="NEUTRAL")` 归档这一份新版成果明细表。只取返回的真实 `document_id/document_version_id/source_sha256`；本任务不需要图片 OCR，也不从本地路径读取附件。未保存的 Excel 编辑不会进入上传字节，不能从文件名或聊天描述补出金额。
 
-按用户明确的目标选择一种路径，不能把“只更新余额表”自动扩大成“同时改来源表”。用户要求同步来源表“汇总”页及余额表时，先用本轮来源表 `workbook` 和稳定 `request_key` 调用 `funding_source_summary_preview`，核对个人成果页 J 列逐项与“合计”及来源表“汇总”页资助总额的差异。`DETAIL_*` 或 `SOURCE_DUPLICATE` 人员不猜金额、不改对应行。若有 `UPDATED`，将相同 payload 加 `preview_digest` 调用 `funding_source_summary_publish`；只有返回 `status=COMPLETED` 且 `excel_published=true` 后，才把返回的新 `document_id/document_version_id/sha256` 作为接下来 `workbook` 的身份。若没有有效差异，沿用本轮来源表身份并跳过来源表发布。来源表新版本回执须给出文件名、版本号和下载链接。来源表含公式并报 `FUNDING_SOURCE_FORMULA_UNSUPPORTED` 时停止，要求用户提供已保存的数值版；来源表发布失败或仍为 `PUBLISHING` 时也停止余额表刷新，不把两表说成已同步。用户明确要求**只更新余额表**时，完全跳过 `funding_source_summary_preview/publish`，直接使用本轮已归档来源表的版本作为 `workbook`；不得改动或发布来源表。
+按用户明确的目标选择一种路径，不能把“只更新余额表”自动扩大成“同时改来源表”。用户要求同步来源表“汇总”页及余额表时，先用本轮来源表 `workbook` 和稳定 `request_key` 调用 `funding_source_summary_preview`，核对个人成果页 J 列逐项与“合计”及来源表“汇总”页资助总额的差异。`DETAIL_*` 或 `SOURCE_DUPLICATE` 人员不猜金额、不改对应行。若有 `UPDATED`，或预览返回 `replacement_count>0` 表示本轮上传表将替换更早的同名上传表，将相同 payload 加 `preview_digest` 调用 `funding_source_summary_publish`；只有返回 `status=COMPLETED` 且 `excel_published=true` 后，才把返回的新 `document_id/document_version_id/sha256` 作为接下来 `workbook` 的身份。发布成功后同名旧工作副本归档，旧文件与版本仍保留供审计；不能在发布前手工删除旧表。若 `changed_count=0` 且 `replacement_count=0`，沿用本轮来源表身份并跳过来源表发布。来源表新版本回执须给出文件名、版本号和下载链接。来源表含公式并报 `FUNDING_SOURCE_FORMULA_UNSUPPORTED` 时停止，要求用户提供已保存的数值版；来源表发布失败或仍为 `PUBLISHING` 时也停止余额表刷新，不把两表说成已同步。用户明确要求**只更新余额表**时，完全跳过 `funding_source_summary_preview/publish`，直接使用本轮已归档来源表的版本作为 `workbook`；不得改动或发布来源表。
 
-之后用 `excel_manual_revision_checkout(完整余额表文件名)` 取得 `base_document_version_id/base_sha256/base_revision`，连同当前来源版本的 `workbook`、目标 `filename` 和稳定 `request_key` 调用 `funding_usage_refresh_preview`；若已同步来源表，余额表须使用另一请求键和来源表的新版本。逐人检查 `UPDATED/UNCHANGED/SOURCE_MISSING/SOURCE_DUPLICATE/SOURCE_TOTAL_INVALID` 及 `DETAIL_*`；异常不猜金额，该人的原资助额保持不变。`source_only_names` 是新表里有、余额表里没有的人，只报告，不自动新增。只有预览有可更新人员且用户任务要求直接保存时，将**相同 payload** 加 `preview_digest` 调用 `funding_usage_refresh_publish`。只有 `status=COMPLETED`、`excel_published=true` 才报告成功，并给出余额表新版本和下载链接；若本次也发布了来源表，再分别给出来源表的版本与下载链接。若来源表已经发布而余额表失败，保留来源表成功回执，用该已发布来源版本重新 checkout、预览余额表；不得重复修改来源表。
+用户明确要求**只回传/发布最新同名成果明细表**时，也执行上段来源表预览；`changed_count>0` 或 `replacement_count>0` 时发布，确认 `status=COMPLETED` 且 `excel_published=true` 后，报告来源表新版本、下载链接和归档的旧同名表数量。两项均为 0 时报告无需新版本。此路径不需要余额表文件名，不调用余额表刷新工具；仅上传归档成功不代表旧同名表已归档。
+
+只有任务要求更新余额表时，才用 `excel_manual_revision_checkout(完整余额表文件名)` 取得 `base_document_version_id/base_sha256/base_revision`，连同当前来源版本的 `workbook`、目标 `filename` 和稳定 `request_key` 调用 `funding_usage_refresh_preview`；若已同步来源表，余额表须使用另一请求键和来源表的新版本。逐人检查 `UPDATED/UNCHANGED/SOURCE_MISSING/SOURCE_DUPLICATE/SOURCE_TOTAL_INVALID` 及 `DETAIL_*`；异常不猜金额，该人的原资助额保持不变。`source_only_names` 是新表里有、余额表里没有的人，只报告，不自动新增。只有预览有可更新人员且用户任务要求直接保存时，将**相同 payload** 加 `preview_digest` 调用 `funding_usage_refresh_publish`。只有 `status=COMPLETED`、`excel_published=true` 才报告成功，并给出余额表新版本和下载链接；若本次也发布了来源表，再分别给出来源表的版本与下载链接。若来源表已经发布而余额表失败，保留来源表成功回执，用该已发布来源版本重新 checkout、预览余额表；不得重复修改来源表。
 
 上传的成果明细表若有同名教师个人成果页，优先取该页 J 列“合计”，并要求上方逐项 J 列金额之和与它一致；上传表“汇总”页 N 列尚未同步时，两种路径都不能用旧 N 值覆盖个人页修订。只有用户要求同步来源表时，才先按有效个人页金额修正其“汇总”页并发布新版本。没有该人的个人成果页时才取“汇总”页“资助总额（元）”；个人页合计与逐项不符时报告 `DETAIL_TOTAL_MISMATCH`，不回退到旧 N 值。刷新只把确认的资助总额写到余额表的“总科研成果资助金额”；“总支出”仍由余额表个人登记的确认使用金额重新相加，其他资助金额保留，余额随之重算。余额表首页和已有个人页左下角同步更新；没有登记的人仍只在首页。不新增教师、不重读图片、不覆盖来源或历史版本。目标版本变化时重新 checkout 和预览；相同请求键重复发布不产生第二个版本。新版余额表的业务准据始终是个人登记，不切换到旧版首页逐笔登记规则。
 

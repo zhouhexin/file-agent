@@ -13,6 +13,7 @@ from xml.etree import ElementTree as ET
 
 
 _EXCEL_BREAK_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+_BLANK_COLUMN_LABEL_RE = re.compile(r"〔空白列:[A-Z]{1,3}〕")
 
 
 def _excel_display_text(value):
@@ -196,6 +197,9 @@ def patch_workbook(*, baseline: Path, output: Path, sheet_name: str,
     """从冻结基线重建候选；重复调用不会在已编辑结果上重复追加。"""
     if not rows or any(len(row) != len(labels) for row in rows):
         raise ValueError("WRITEBACK_ROWS_MISMATCH: 每行必须覆盖全部目标列")
+    if any(value is not None for row in rows for label, value in zip(labels, row)
+           if _BLANK_COLUMN_LABEL_RE.fullmatch(label)):
+        raise ValueError("TARGET_BLANK_COLUMN_CHANGED: 目标空白列必须保留空值")
     rows = [[_excel_display_text(value) for value in row] for row in rows]
     if baseline.stat().st_size > 32 * 1024 * 1024:
         raise ValueError("WRITEBACK_TARGET_TOO_LARGE: 工作簿超过 32 MiB 回传上限")
@@ -266,16 +270,22 @@ def patch_workbook(*, baseline: Path, output: Path, sheet_name: str,
         if header is None:
             raise ValueError("WRITEBACK_TEMPLATE_CHANGED: 目标缺少标题行")
         actual = [_cell_value(_cells(row_nodes[header]).get(column), strings) for column in range(1, len(labels) + 1)]
-        if [str(item or "").strip() for item in actual] != [str(item).strip() for item in labels]:
-            raise ValueError("WRITEBACK_TEMPLATE_CHANGED: 目标标题与 checkout 不一致")
+        for item, label in zip(actual, labels):
+            if _BLANK_COLUMN_LABEL_RE.fullmatch(label):
+                if item is not None and str(item).strip():
+                    raise ValueError("WRITEBACK_TEMPLATE_CHANGED: 目标空白列表头已变化")
+            elif str(item or "").strip() != label.strip():
+                raise ValueError("WRITEBACK_TEMPLATE_CHANGED: 目标标题与 checkout 不一致")
         left = 1
         last = max((number for number in row_nodes if number > header and any(
             _cell_value(_cells(row_nodes[number]).get(column), strings) is not None
             for column in range(1, len(labels) + 1))), default=header)
         destinations = list(range(last + 1, last + 1 + len(rows)))
-        sequence = set()
+        top = header + 1
+        sequence = {0} if labels[0].strip() in {"序号", "编号"} else set()
         # 空模板没有数据样式行；不能把标题行样式伪装成新增数据行。
         style_cells = _cells(row_nodes[last]) if last > header else {}
+    auto_sequence = left == 1 and labels[0].strip() in {"序号", "编号"}
     for number, values in zip(destinations, rows):
         target_row = row_nodes.get(number)
         if target_row is None:
@@ -289,7 +299,7 @@ def patch_workbook(*, baseline: Path, output: Path, sheet_name: str,
             _insert_row(data, target_row, number)
             row_nodes[number] = target_row
         target_cells = _cells(target_row)
-        if scoped_a_i and _cell_value(target_cells.get(left), strings) is None:
+        if (scoped_a_i or auto_sequence) and _cell_value(target_cells.get(left), strings) is None:
             previous = next((_cell_value(_cells(row_nodes.get(prior)).get(left), strings)
                              for prior in range(number - 1, top - 1, -1)
                              if _cell_value(_cells(row_nodes.get(prior)).get(left), strings) is not None), None)
