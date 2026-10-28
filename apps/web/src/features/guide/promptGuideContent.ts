@@ -406,13 +406,14 @@ export const PROMPT_GUIDE_SECTIONS: PromptGuideSection[] = [
         title: '上传目标表填表',
         prompt: '请根据本轮上传的材料，按同时上传的目标表的真实表头填写可核实的信息，缺失内容留空，保存并给我新增行号、新版本和下载链接。',
         channel: 'WorkBuddy 附件套件',
+        note: '需要只收录一作论文时，请在提示词中明确写出；未要求时按原有方式读取。',
       },
       {
         id: 'general-excel-doctoral-target',
         title: '填写博士应聘统计表',
         prompt: '请把本轮上传的博士应聘材料填入同时上传的统计表，按实际表头和列位置填写，保留空白列；多篇论文在同一单元格逐篇编号并换行。无法确认的信息留空，保存并给我新增行号、新版本和下载链接。',
         channel: 'WorkBuddy 附件套件',
-        note: '请同时上传材料和目标表；以本轮上传的表为准。',
+        note: '请同时上传材料和目标表；需要一作及正式发表筛选时，请在提示词中明确写出。',
       },
       {
         id: 'general-excel-append',
