@@ -1,11 +1,59 @@
 # File Agent
 
+Harness自动循环入口：`campaign-loop`在一份总预算内串起探索、固定复测和反馈再探索；默认只检查，显式live执行。候选仍由模型提出，阶段分别冻结封存，正式入选标准及保留集边界不变。运行及记录说明见[自动循环步骤](docs/evidence-evaluation-test/harness-auto-loop-usage.md)。
+
+Harness测试代理修复：独立测试env可用`EVIDENCE_HARNESS_PROXY_URL`固定网络通路，仅harness启动器映射到子进程代理，正式服务不变；37项测试及一次真实固定假问题探测通过。继续测试使用[新v4步骤](docs/evidence-evaluation-test/harness-proxy-fix.md)。
+
 面向学校/学工业务场景的对话式文件工作智能体。
 
 File Agent 不是传统网盘，也不是只会问答的知识库系统。用户通过聊天框上传、读取、OCR、分类、检索、整理和处理文件；系统使用 LangGraph 驱动 Agent Runtime，通过白名单 Tool 执行文件处理，并用 ChangeSet、OperationPlan 和证据链保证每次操作可追溯、可确认、可审计。
 
 ## 文档
 
+- [证据评估器 MVP](docs/2026-10-28-evidence-evaluator-mvp.md)：证据包建立后旁观检查缺信息、同口径矛盾与旧内容版本；默认关闭，附文件清单、开启与评测方法。
+- [评估失败诊断](docs/2026-10-29-evidence-evaluation-error-diagnostics.md)：区分网络、额度、超时和格式问题，记录安全的调用阶段、异常类型、HTTP状态与中文说明。
+- [模型返回形态记录](docs/2026-10-30-model-response-shape-diagnostics.md)：定位空content、返回类型、JSON顶层和长度结束原因，仅记录结构与计数。
+- [大白话日志阅读说明](docs/evidence-evaluation-test/log-reading-guide.md)：用真实一次请求解释COMPLETED、MISSING、PARTIAL与NEEDS_REVIEW为何可以同时出现。
+- [60条人工测试集方案](docs/evidence-evaluation-test/manual-60-plan.md)及[Excel空白模板](docs/evidence-evaluation-test/manual-60-template.xlsx)：四组各15条选材任务、易误判反例、三轮记录、P/R/F1与Token/延迟统计；真实金标尚待填写。
+- [固定真实输入与独立评测](docs/evidence-evaluation-test/frozen-real-input-usage.md)：按指定题目/文档采集实际证据包，绑定人工标签，绕过规划与检索重复评估；默认关闭采集，不改变原答案。
+- [输出额度单变量对照步骤](docs/evidence-evaluation-test/output-budget-comparison-steps.md)：独立6000 Token配置；先检查，再显式运行三题三轮live，保留原3000 Token基线。
+- [反馈驱动Harness最小闭环方案](docs/evidence-evaluation-test/feedback-driven-harness-mvp-plan.md)：[反馈整理](docs/evidence-evaluation-test/harness-step1-acceptance.md)、[LLM建议](docs/evidence-evaluation-test/harness-step2-acceptance.md)、[受控复测/独立比较](docs/evidence-evaluation-test/harness-step3-acceptance.md)及[完整离线流程/历史反馈](docs/evidence-evaluation-test/harness-step4-acceptance.md)已实现。`harness cycle`默认只检查，显式`--live`才运行一个候选，含建议最多19次/1800秒；`--previous-cycle`开始新一轮并继承历史，`inspect-cycle`只读查看。307项相关测试通过，不自动采纳或改变Shadow。
+- [首轮路由Harness最小方案与操作](docs/evidence-evaluation-test/routing-harness-minimal-plan.md)已实现。`routing-prepare`只读导出真实任务、`routing-freeze`绑定人工路由标签、`routing-cycle`调用同版LangGraph规划节点进行候选对照，默认只检查，显式`--live`调用模型。`routing-compare`独立检查首轮路由及计划范围，检索和答案质量标记为未执行。
+
+  路由建议器可通过`--advisor-max-output-tokens 8000`单独设置输出额度，允许3000/6000/8000、默认3000。默认检查展示实际额度，规划请求上限为3000。复测及旧记录兼容说明见[独立额度操作](docs/evidence-evaluation-test/routing-harness-minimal-plan.md#11-独立建议器额度与本次复测)。
+- [Harness自主补丁四阶段操作](docs/evidence-evaluation-test/harness-self-improvement-usage.md)：机器反馈、LLM生成受限判断条件、macOS隔离试跑、独立验收及有限多轮迭代。`self-cycle`默认只检查，显式`--live`才调用模型；仅改变实验副本，不自动上线。首版限legacy首轮路由，开发验收使用Fake。
+
+  [Adaptive评测A阶段操作](docs/evidence-evaluation-test/harness-adaptive-stage-a-usage.md)已接通：`planning-evaluate --planner-mode enabled`默认零模型调用检查，追加`--live`建立独立原版基线；`planning-compare`只读重放并区分Adaptive、legacy回退和规则。A入口只评测规划原版，不改线上模式；策略修改另见B阶段，实际检索/回答评测尚未接入。
+
+  [Adaptive策略B阶段操作](docs/evidence-evaluation-test/harness-adaptive-stage-b-usage.md)新增`adaptive-cycle`：依据核验后的A失败，让建议模型自主生成一段通用规划补充说明，只追加到隔离副本，再对照原版；`adaptive-compare`独立重放验收。默认检查零调用，显式live才运行，一个候选、两题最多13次请求，保留NO_CHANGE，不自动上线。
+
+  首次真实B结果为NO_GAIN（两组各1/2）。机器反馈现已分开最终目标、当前工具动作和应用意图契约，明确schema通过不等于intent可识别；新候选使用`adaptive-policy-v2`目录，见[补全反馈后的复测](docs/evidence-evaluation-test/harness-adaptive-stage-b-usage.md#8-补齐机器反馈后生成一个新候选)。旧v1仍按旧反馈只读重算，不改Gold或路由评分。
+
+  [C阶段固定候选扩大验证](docs/evidence-evaluation-test/harness-adaptive-stage-c-usage.md)已实现：`adaptive-validation-prepare/freeze`准备并人工分开开发/保留题，`adaptive-validate`默认检查、显式live重复2—3轮，`adaptive-validation-compare`独立重放。锁定B-v2候选，不调用建议器；预算按两组×题数×轮数×3重新明确。14题已确认冻结，首次C因旧模型额度耗尽得到INCONCLUSIVE；更换模型后可显式增加`--allow-model-profile-change`，两组共用新配置并记录逐调用身份，见[新模型复测步骤](docs/evidence-evaluation-test/harness-adaptive-stage-c-usage.md#11-旧模型额度耗尽使用新模型重新对照)。默认仍保留同模型检查，旧实验不改。
+
+  C另可使用`--provider codex-login --codex-model gpt-6.1-sol --allow-model-profile-change`复用本机Codex的ChatGPT登录，见[完整检查与复测命令](docs/evidence-evaluation-test/harness-adaptive-stage-c-usage.md#12-改用本机已经登录的codex)。只换本次C模型代理，正式服务保持原配置；Profile明确CLI调用计数、Token硬限制不受支持，仍需账号自身额度。默认检查不调用模型，live另建`adaptive-validation-codex-v1`，不自动上线。
+
+  现在也可在测试env设置`EVIDENCE_HARNESS_PROVIDER=codex-login`、`EVIDENCE_HARNESS_CODEX_MODEL=gpt-6.1-sol`、`EVIDENCE_HARNESS_ALLOW_MODEL_PROFILE_CHANGE=true`，之后启动命令无需重复这些参数；见[env配置及切回API步骤](docs/evidence-evaluation-test/harness-adaptive-stage-c-usage.md#13-在env中切换codex和原api)。切回只改Provider为`openai-compatible`，继续读取原`LLM_*`配置；CLI优先于env，未配置时仍为原API。只影响C测试，不改变正式服务。
+
+  Codex整批失败时先执行`python scripts/run_evidence_test.py harness codex-probe`零调用检查，再显式`codex-probe --live`以固定假问题调用一次。已修复非致命`item.error`启动提示被误判为工具事件，实际工具及失败终态仍拒绝；新调用记录脱敏事件摘要。见[单次探针步骤](docs/evidence-evaluation-test/harness-adaptive-stage-c-usage.md#14-codex启动事件修复后先单次探针)，旧v1保留，单次成功后才用新v2目录三轮复测。
+
+  WebSocket连接被重置时，可在测试env设`EVIDENCE_HARNESS_CODEX_TRANSPORT=https`，沿用ChatGPT登录并明确使用HTTPS流；本机已配置。适配器收到error通知后等待真实终态，保留60秒时限和失败/JSON/工具检查。原API不受影响，旧auto模式仍可选择，见[HTTPS操作步骤](docs/evidence-evaluation-test/harness-adaptive-stage-c-usage.md#15-websocket被重置时改用https)。
+
+  隔离worker已改为只使用宿主明确传入的测试配置，不再向上寻找`.env`。首次真实实验受阻后的新目录复测命令见[修复后复测](docs/evidence-evaluation-test/harness-self-improvement-usage.md#9-env隔离问题修复后的复测)，无需修改env或重启服务。
+
+  建议器现使用独立任务对错摘要和v2建议协议，区分“无收益”和“没有错误”，保留有依据的NO_CHANGE；旧根因反馈不改写，新复测使用`self-live-v3`，见[建议器改进后复测](docs/evidence-evaluation-test/harness-self-improvement-usage.md#10-建议器现在怎样区分没收益和没错误)。
+  新增开发集有限自主迭代入口：从已核验C来源自动重验Tool参数，把具体约束错误和逐轮独立结果交给建议器；最多三轮，共用预算，只改隔离副本中的规划补充说明。`adaptive-iterate`默认零模型调用，显式live才执行；保留题不进入建议器，不自动上线。见[自主迭代测试步骤](docs/evidence-evaluation-test/harness-adaptive-iteration-usage.md)及[开发方案](docs/evidence-evaluation-test/harness-adaptive-iteration-plan.md)。
+  新迭代使用v2短引用：模型选择`R1F001`等本轮编号，反馈和源码的完整哈希由程序绑定及精确映射；格式错误报告字段位置，不猜测补字。旧v1保留原结论，新复测使用`adaptive-iteration-v2`，见[短引用复测步骤](docs/evidence-evaluation-test/harness-adaptive-iteration-usage.md#7-长编号漏字修复后怎么复测)。
+  带历史的冻结实验管理入口：`campaign-run`默认零调用，显式live才承接开发历史、逐候选冻结重复测试，并在批次结束后统一比较；`campaign-compare`独立重算，`campaign-lock`只锁合格推荐，`campaign-confirm`单独做固定版本开发确认或保留验收。具体业务修改由建议器自主提出，原门槛、权限及正式服务保持原边界，见[完整启动步骤](docs/evidence-evaluation-test/harness-frozen-candidate-campaign-usage.md)。
+
+  [多候选探索与开发复测](docs/evidence-evaluation-test/harness-exploration-retest-usage.md)：搜索默认6份候选（最多10份），每题每组初测1次；新增`campaign-retest`筛选前2份（最多3份），冻结原样各复测5次（最多10次），整批共享显式额度。`campaign-retest-compare`零调用重算，研究资格与严格推荐资格分开；研究锁不能进入保留集。新入口默认检查，不自动启动live、改env或更新正式服务。
+
+  探索因历史过长停止后，按[继续测试步骤](docs/evidence-evaluation-test/harness-exploration-retest-usage.md#8-遇到retest_source_not_completed后怎样继续)承接旧记录到新目录。新探索v3使用可重建的有界历史摘要，保留全部错误计数及当前轮完整反馈；零调用检查显示建议输入字符数，每轮新增`advisor-memory.json`。旧实验不改状态，复测仍只接受COMPLETED来源，不改env或自动调用模型。
+- [显式来源检索修复](docs/2026-10-30-source-scope-grounding-fix.md)：拒绝模型拼造精确短语和混淆历史/当前时间过滤，最多一次参数纠错后继续原任务。
+- [证据评估验证报告](docs/2026-10-28-evidence-evaluator-validation.md)：64条合成案例、回归结果与真实模型尚未验收的边界。
+- [真实文件证据评估测试](docs/evidence-evaluation-test/real-files.md)：使用自己上传的真实文件，按上传、解析、全文索引、检索、评估执行；附独立覆盖配置与运行步骤。
+- [独立测试库与精简env](docs/evidence-evaluation-test/standalone.md)：24项专用配置、独立文件目录、管理员建库SQL和隔离启动入口，评估等待上限60秒。
+- [评估超时与回答校验修复](docs/2026-10-30-evaluation-timeout-and-answer-support-fix.md)：局部原文否定校验、拒绝原因日志及既有预算内的一次回答纠错。
 - `docs/2026-09-23-workbuddy-generic-extraction-excel-template-safety-plan.md`：WorkBuddy 提取、旧 XLS 网格预检、完整提取状态恢复和 Excel 版本化发布边界。
 - `docs/2026-09-22-workbuddy-confirm-save-recovery-plan.md`：WorkBuddy 确认保存、复杂模板修复及实际验收进度。
   本轮新增迁移 `20260922_0001`，部署必须先迁移再重启 API/worker/MCP，并更新 WorkBuddy 插件至 0.1.29。

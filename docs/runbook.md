@@ -1,6 +1,12 @@
 # File Agent Runbook
 
+Harness自动循环：`campaign-loop --source ... --output ... --max-requests ...`只做零调用检查，显式live才按总预算自动探索、固定复测、读取新反馈再探索；默认最多2循环、4小时执行时限，所有阶段领取剩余额度，不自动续费、上线或进入保留集。`campaign-loop-compare`只读重算，进行中仅显示UNFINALIZED及暂存进度。完整参数与文件位置见[自动循环操作文档](evidence-evaluation-test/harness-auto-loop-usage.md)。
+
+Harness代理配置与v4测试步骤见[代理修复文档](evidence-evaluation-test/harness-proxy-fix.md)：`EVIDENCE_HARNESS_PROXY_URL`仅供独立harness子进程使用；不自动抓取系统代理，不修改API/worker网络行为。修复后单次真实探测通过，整批测试仍须显式live及使用新目录。
+
 本文记录当前项目的本地启动、验证方式和可用接口。后续如果端口、命令、环境依赖、启动顺序或接口能力发生变化，必须同步更新本文和 `README.md`。
+
+Harness实验补充：新探索v3会给建议器生成有长度上限的历史视图，完整原始记录仍保留，所有错误参与计数，当前反馈及Tool契约不裁剪；每轮`advisor-memory.json`可独立重建。零调用检查显示输入字符数，摘要不改变评分、预算、R035限制或复测完成条件。`frozen-exploration-v1`因历史过长为STOPPED，应按[操作步骤第8节](evidence-evaluation-test/harness-exploration-retest-usage.md#8-遇到retest_source_not_completed后怎样继续)承接到新`frozen-exploration-v2`，完成后才进入复测；不改env、不重启服务、不自动调用模型。方案见[历史长度修复](evidence-evaluation-test/harness-advisor-history-budget-plan.md)。
 
 整项目发布前的真实文件系统烟测、测试数据矩阵和逐项通过标准见
 `docs/file-agent-manual-smoke-test.md`。本文只维护启动与运行方式，不能替代烟测手册。
@@ -403,6 +409,80 @@ LLM_CLASSIFICATION_ALLOW_FREE_PATHS=true
 自由生成的分类路径不会自动进入正式 taxonomy，也不会写入正式 `document_categories`。系统会把它保存为 `source=llm_free_path`、`status=NEEDS_REVIEW` 的建议，等待人工确认、纠正或后续维护 taxonomy v2。
 
 2026-06-25 已完成真实模型 smoke test：临时启用 `LLM_ENABLED=true` 后，`MiniMax-M3` 可完成“总结我刚才上传的文件”请求，AgentRun 返回 `COMPLETED`，ToolInvocation 为 `read-document-insights`，且 `graph_state_json.user_intent_plan` 已写入。
+
+## 4.2 证据状态旁观评估（2026-10-28）
+
+2026-10-29独立测试请优先使用[专用env与新库流程](evidence-evaluation-test/standalone.md)：`runtime/evidence-test/.env`含24项配置，由`scripts/run_evidence_test.py`隔离加载；新库须先由管理员创建，再执行启动器的`migrate`建表。以下source覆盖方式保留为旧用法，不与独立启动器混用。
+2026-10-30测试env单独设置 `EVIDENCE_EVALUATION_TIMEOUT_SECONDS=60`，应用默认仍为20秒。
+回答按局部原文校验否定关系，拒绝原因写入 `evidence_answer.claims_validated`；全部被拒时与格式修复共用
+既有的一次修复预算，仍受总调用/输入限制。修改后重启API和analysis；详见[修复与文件清单](2026-10-30-evaluation-timeout-and-answer-support-fix.md)。
+
+真实验收按[自己上传文件的完整测试步骤](evidence-evaluation-test/real-files.md)执行：提供不含密钥的覆盖配置、Jieba准备要求、API/worker启动和日志核对方法，不替换根`.env`，不使用合成文件作为验收输入。
+
+完整实现与新增文件见[证据评估器 MVP](2026-10-28-evidence-evaluator-mvp.md)，
+结果及限制见[验证报告](2026-10-28-evidence-evaluator-validation.md)。本功能无数据库迁移。
+
+默认 `EVIDENCE_EVALUATION_MODE=off`。在部署 `.env` 设置 `shadow` 并重启 API；
+如果证据回答由 AGENT worker 执行，也重启该 worker。shadow 在证据包建立后、生成答案前，
+只读检查 MISSING、CONFLICT、OUTDATED 并记录诊断，失败不阻断原回答。
+语义检查还需原有 `LLM_ENABLED=true` 与模型连接配置；LLM 关闭时仅核对技术版本，语义为 NOT_EVALUATED。
+不会自动补搜、拒答、修改文件或在普通用户界面展示内部评估结果。
+
+```dotenv
+EVIDENCE_EVALUATION_MODE=shadow
+EVIDENCE_EVALUATION_TIMEOUT_SECONDS=20
+EVIDENCE_EVALUATION_MAX_INPUT_CHARS=48000
+EVIDENCE_EVALUATION_MAX_CALLS=3
+EVIDENCE_EVALUATION_MAX_OUTPUT_TOKENS=3000
+```
+
+启用会增加同步延迟和模型调用费用。默认每次评估最多三次模型调用、每次20秒超时、无额外重试。
+输入超限时分批；跨批冲突未比较、截断、时间意图不明或版本不可核验时明确记录 PARTIAL，
+不能解释为证据齐全。FIELD_TABLE最多八个字段，更多字段语义 NOT_EVALUATED。
+回退只需改为 `off` 并重启对应进程，不改变文件、索引或历史答案。
+
+日志仍在 `LOG_DIR/file-agent-YYYY-MM-DD.log`，筛选 `evidence_evaluation.shadow`。
+查看 `issue_types`、`issues`中的引用ID及固定原因码、`version_status`、`semantic_status`、
+`error_codes`、`limitation_codes`、`duration_ms`、`llm_calls`和token统计。
+评估失败还会记录 `error_details`：`category`、`stage`、`exception_type`、`http_status` 和固定中文 `message`。
+网络、超时、额度、认证、限流、格式与schema错误分开；HTTP状态不可取得时为null，不猜测为200。
+字段、类别表和文件清单见[评估失败诊断](2026-10-29-evidence-evaluation-error-diagnostics.md)。
+重启API及执行问答的analysis worker后，新请求才会生成这些字段；历史日志不补写。
+
+评估JSON客户端还记录 `evidence_evaluation.llm_response_shape`，包括外层/choices/message/content类型、
+空值状态、字符数、思考内容长度、finish_reason、是否长度结束及JSON顶层类型。
+格式失败时同样附到 `error_details[].response_shape`，中文summary指出具体形态；不记录正文或思考文字。
+重启后可用 `rg --no-ignore -n 'evidence_evaluation\.(llm_response_shape|shadow)' runtime/evidence-test/logs/` 查看。
+字段、示例和文件清单见[返回形态诊断](2026-10-30-model-response-shape-diagnostics.md)。
+
+显式来源问答还会在检索前核对来源时间与必需精确短语。参数越界时记录
+`agent.planning.source_scope_rejected`，Legacy 最多增加一次来源参数纠错；仍失败才用既有只读来源兜底。
+这不是语义评估重试，也不授予跨文件检索或文件写权限。重启API和analysis后生效。
+原因码、成本边界、验证及文件清单见[显式来源检索修复](2026-10-30-source-scope-grounding-fix.md)。
+`token_usage_complete=false`表示成本统计不完整；日志不含问题、引用正文或模型自由回复。
+
+仓库根目录执行离线回放，无需模型或数据库：
+
+```bash
+PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
+  -m app.scripts.evaluate_evidence --mode replay --output /tmp/evidence-replay.json
+PYTHONPATH=apps/api /opt/homebrew/anaconda3/envs/py311/bin/python \
+  -m app.scripts.evaluate_evidence --mode rules --output /tmp/evidence-rules.json
+```
+
+`--mode live` 会额外调用配置模型并计费；先确认LLM外发配置，合成样本标签应由业务人员独立复核。
+真实模型只接收问题、字段和证据，不接收预期标签。回放指标不代表真实模型准确率。
+
+本功能回归测试（全部用 Fake，数据库仅配置占位值；测试使用隔离数据库）：
+
+```bash
+cd apps/api
+DATABASE_URL=postgresql://test:test@localhost/test \
+  /opt/homebrew/anaconda3/envs/py311/bin/python -m pytest \
+  app/tests/test_evidence_evaluation.py app/tests/test_evidence_evaluation_integration.py \
+  app/tests/test_evidence_answer.py app/tests/test_llm_client.py app/tests/test_config.py \
+  app/tests/test_retrieval_readiness.py app/tests/test_retrieval_statement_timeout.py -q
+```
 
 ## 5. 启动前端服务
 
@@ -1656,3 +1736,47 @@ python -m app.scripts.repair_structured_dataset_publication --publication-id <pu
 2026-10-08 补充：0.1.59 增加已签发但未完成的 v2 固定末页任务升级。先用 `scoped_pdf_source_get` 看 `provider_contract_version`；若为 v2，调用 `scoped_pdf_review_discovery_upgrade(task_id)`，用返回的新 `task_id` 重新 claim，再走倒序找页。对应 API 为 `POST /api/integrations/v1/scoped-pdf-sources/{task_id}/review-discovery-upgrade`。旧租约、旧 L 图像和旧 `scope_digest` 立即作废；不要向旧任务重试提交。升级过程复用原归档 PDF，不重新上传，也不需要数据库迁移。安装插件 0.1.59 前仍须同步部署 API/MCP 并重启；仅替换本地 Skill 不会让服务端接受升级调用。
 
 如果新版任务已显示 `FOUND`，但下载的 `annual_review` PNG 没有真实考核正文，调用 `scoped_pdf_review_region_reject` 提交该图 SHA、当前 Worker/token 与 `HEADING_ABSENT` 或 `SECTION_OUTSIDE_CROP`。服务端退回到前一页继续查找，不能把签字/审批文字提交为 L。对应 API 为 `POST /api/integrations/v1/scoped-pdf-sources/{task_id}/review-region/reject`；退回后须使用新的 `scope_digest`。真实栏目只有非优秀年度或字迹不清时按原栏目留空，不用退回接口跳页。
+
+## 固定证据输入的输出额度对照（2026-11-09）
+
+Harness安全反馈整理已实现，具体命令和验收见[第一步交付记录](evidence-evaluation-test/harness-step1-acceptance.md)。项目根执行`python scripts/run_evidence_test.py harness prepare --dataset ... --baseline ... --history ... --output ...`，路径相对于独立测试目录，仅整理既有报告，不连接数据库或模型。输出必须在`runtime/evidence-test/experiments/harness-v1/`子目录，拒绝覆盖。
+
+第二步[LLM建议与校验](evidence-evaluation-test/harness-step2-acceptance.md)已实现：`python scripts/run_evidence_test.py harness propose --feedback experiments/harness-v1/step1-real-v1 --output experiments/harness-v1/step2-live-v1`默认仅检查，显式追加`--live`才请求一次真实建议模型。建议请求固定输出上限3000、HTTP超时60秒、重试0次；返回VALIDATED、NO_CHANGE、REJECTED或OPTIMIZER_FAILED。VALIDATED仅表示候选通过规则，不代表效果已验证；当前没有run能力，不执行建议、不改env或Shadow。真实模型调用未在本轮开发中执行。
+
+第三步[受控复测与独立比较](evidence-evaluation-test/harness-step3-acceptance.md)已交付，上段“没有run能力”为第二步历史状态。现在`harness run --feedback ... --proposal ... --output ...`默认只检查，显式`--live`执行控制与候选各三题三轮；建议已消费1次，总上限19次/活跃1800秒。只接受真实VALIDATED建议，120秒仅对离线Profile生效，不改普通env上限。同一建议有一次性租约，不能换目录续领；中断不自动恢复。`harness compare --experiment ...`只读重算Gold及全部轮次，未完成为INCONCLUSIVE，篡改为INVALID_EXPERIMENT。源码、数据或其他配置不同先停止，旧文件不覆盖，不自动应用或上线。
+
+第四步[完整离线流程与历史反馈](evidence-evaluation-test/harness-step4-acceptance.md)已交付，相关307项测试通过。根目录运行`python scripts/run_evidence_test.py harness cycle --dataset datasets/frozen-real-v1/cases-v1.json --baseline datasets/frozen-real-v1/runs/live-output6000-v1-01.json --history datasets/frozen-real-v1/runs/live-v1-01.json --experiments experiments/harness-v1/step3-live-v1 --output experiments/harness-v1/cycle-live-v1`默认检查，追加`--live`才启动一个候选的完整流程，最多19请求/1800秒。NO_CHANGE、拒绝或建议失败立即结束；本轮实验独立重算后生成v2反馈，旧产物保持不变。同条件重复的完整NO_GAIN/REGRESSION候选会被拒绝。`harness inspect-cycle --cycle experiments/harness-v1/cycle-live-v1`只读检查；下一轮用新输出目录并加`--previous-cycle experiments/harness-v1/cycle-live-v1`继承历史，再明确`--live`才调用，不恢复旧请求。最多9条既有历史、嵌套8层、输入64000字符，超过拒绝。复用现有Python及测试env，不需数据库或检索服务；本次开发未追加真实模型调用。
+
+首轮路由实验见[最小开发方案及验收](evidence-evaluation-test/routing-harness-minimal-plan.md)。`harness routing-prepare --user-id ... --run-ids ... --case-ids ... --output datasets/routing-real-v1`只读导出本人已结束任务及当前Catalog。人工填写gold-draft后，`routing-freeze --inputs ... --gold ... --output ...`绑定输入与Gold。`routing-cycle --dataset ... --output experiments/harness-v1/routing-live-v1`默认只检查，`--live`执行一次建议及同版首轮规划对照；`--previous`继承先前实验历史，`routing-compare --experiment ...`只读重算。路由实验默认每组一轮、总19请求/1800秒，可显式授权至1000请求/7200秒；每题规划上限3请求，所有回退、Shadow请求和建议计入。真实运行须同时有正文问答和正常文件列表标签。当前仅评分INITIAL_ROUTING及声明文件范围，原问题的实际检索与最终答案尚不参与该评分。普通日志在离线规划上下文仅输出事件/状态/错误码/耗时，完整任务产物在私有实验目录。
+
+建议阶段输出截断时，可为新实验显式传`--advisor-max-output-tokens 8000`，支持3000/6000/8000，默认3000。该授权只作用于ADVISOR，PLANNER仍为3000；检查输出的request_limits及实际calls记录会展示各自额度。旧授权未含该字段时按3000读取。使用新输出目录，现有路由两题可直接复用，示例见[独立额度复测命令](evidence-evaluation-test/routing-harness-minimal-plan.md#11-独立建议器额度与本次复测)。
+
+具体步骤见[输出额度单变量对照](evidence-evaluation-test/output-budget-comparison-steps.md)。先在项目根执行 `/opt/homebrew/anaconda3/envs/py311/bin/python scripts/run_evidence_output_budget.py`，仅检查原三题数据及配置一致性；检查通过后显式追加 `--run` 才执行三题三轮live，会调用已配置模型。独立配置为 `runtime/evidence-test/experiments/output-budget-6000.json`，仅将输出上限从3000改为6000，超时仍60秒；不修改原env，不重启API/worker，不重复检索。旧报告保留，新结果另存 `runtime/evidence-test/datasets/frozen-real-v1/runs/live-output6000-v1-01.json`，禁止覆盖。输入、人工标签、其他评估配置或代码与基线不同则停止。不要通过在旧启动器前设置环境变量来覆盖额度，该启动器会清除终端应用变量。
+
+Harness自主补丁四阶段已实现，见[大白话测试步骤](evidence-evaluation-test/harness-self-improvement-usage.md)。项目根运行`python scripts/run_evidence_test.py harness self-feedback --experiment experiments/harness-v1/routing-live-v3 --output experiments/harness-v1/新的反馈目录`只读整理根因；本机已有`root-cause-routing-v3-v1`可直接使用。`self-cycle --feedback experiments/harness-v1/root-cause-routing-v3-v1 --dataset datasets/routing-real-v1/cases-v1.json --output experiments/harness-v1/self-live-v1 --max-rounds 2 --max-requests 26 --advisor-max-output-tokens 8000 --planner-max-output-tokens 3000`默认检查，追加`--live`才生成候选并复测；多轮共用请求和时间预算。`self-compare --experiment ...`独立重算，`self-propose`可只生成补丁，`self-sandbox-check --output ...`只验证本机隔离。首版仅支持macOS和legacy首轮规划，只能修改指定搜索前置判断，隔离不可用则停止；不连接业务库、不执行文件Tool、不自动写回活动源码。无需安装依赖或重启API/worker。工程验收零真实模型调用，真实效果待显式live。
+
+Adaptive独立评测A阶段另增`planning-evaluate`、`planning-compare`，完整命令见[基线测试步骤](evidence-evaluation-test/harness-adaptive-stage-a-usage.md)。在项目根执行`python scripts/run_evidence_test.py harness planning-evaluate --dataset datasets/routing-real-v1/cases-v1.json --planner-mode enabled --output experiments/harness-v1/adaptive-baseline-v1 --max-requests 6`只检查；追加`--live`才调用真实模型，在隔离原版副本中测两题首轮规划，不调用建议器或业务Tool。模式只作用于新实验，不修改env、源数据或线上模式。`planning-compare --experiment experiments/harness-v1/adaptive-baseline-v1`不调用模型、不写入产物，并重放实际模式与回退；回退不能计作Adaptive独立成功。已有`self-cycle`仍限legacy代码候选，Adaptive策略修改使用下述B阶段独立入口。
+
+Adaptive策略B阶段已实现，完整命令见[模型自主改进规划提示](evidence-evaluation-test/harness-adaptive-stage-b-usage.md)。项目根执行`python scripts/run_evidence_test.py harness adaptive-cycle --baseline experiments/harness-v1/adaptive-baseline-v1 --output experiments/harness-v1/adaptive-policy-v1 --max-requests 13 --advisor-max-output-tokens 8000 --planner-max-output-tokens 3000`默认只检查；追加`--live`才请求一个模型生成的通用提示补充说明，并在隔离副本中对照原版、候选两组规划。原提示逐字保留，只追加说明，不修改活动源码、env或数据库；建议器和规划独立输出额度、共享13次/1800秒授权，不自动续跑或重试。`adaptive-compare --experiment experiments/harness-v1/adaptive-policy-v1`只读核验实际补丁和两组模型结构，不再调用模型。允许有依据的NO_CHANGE；回退不能冒充Adaptive成功。A-v1仅在已知执行器身份、原快照与当前源码完全一致且原决策可重放时兼容，原实验不改写；更换模型/接口需新A基线。C的扩大验证和D的实际检索、回答仍未接入。
+
+B反馈补全：首轮`adaptive-policy-v1`真实结果为NO_GAIN，两组各1/2。新实验改用全新输出`experiments/harness-v1/adaptive-policy-v2`，其余输入和13次/1800秒预算不变，完整检查/live/比较命令见[新版反馈复测](evidence-evaluation-test/harness-adaptive-stage-b-usage.md#8-补齐机器反馈后生成一个新候选)。默认检查显示`feedback.schema_version=adaptive-policy-feedback-v2`、原始目标/动作诊断条数与契约问题计数；两题均有自由intent，但仅一题路由错误，不能把契约计数当作错题数。建议器现在明确区分原始目标、发现步骤和应用映射，不依据尚未执行的检索断言失败；具体候选仍由模型生成，允许NO_CHANGE。旧v1使用登记版本按原反馈与原Prompt只读重算，不改写旧NO_GAIN；无需改env或重启服务。
+
+C扩大重复验证已开发，见[C操作步骤](evidence-evaluation-test/harness-adaptive-stage-c-usage.md)。固定B-v2已验证候选，不重新运行adaptive-cycle。先用`adaptive-validation-prepare --candidate ... --inputs ... --output datasets/...`合并真实任务，在独立`annotations-draft.json`确认路由、可选决策类型、文件族和开发/保留分组；`adaptive-validation-freeze --draft ... --annotations ... --output ...`另存冻结集，拒绝未确认或跨组泄漏。`adaptive-validate --dataset ... --output ... --repetitions 3 --max-requests <明确额度>`默认零调用检查，追加live才执行两组重复；`adaptive-validation-compare --experiment ...`只读重放。上界为2×题数×轮数×3，无建议器调用，总时限默认3600秒、最多7200秒，时限不足保留未运行分母，不自动续跑。14题已人工确认并冻结（开发10/保留4），首次C因旧模型额度耗尽INCONCLUSIVE。当前模型已经更换，按[第11节](evidence-evaluation-test/harness-adaptive-stage-c-usage.md#11-旧模型额度耗尽使用新模型重新对照)使用新输出`adaptive-validation-v2`并显式增加`--allow-model-profile-change`。默认仍拒绝模型或接口改变；显式允许后两组共用当前固定配置，记录来源/实际配置与逐调用身份，比较器独立核对，不能把新旧模型分数相减当优化收益。旧C按已知旧执行器只读核验，不补写新字段。R035预检仍不属于有效Adaptive比较，不因此改评分；明确附件/澄清覆盖仍未采集。不改env、服务或活动提示。
+
+C的Codex登录模式：`adaptive-validate`显式增加`--provider codex-login --codex-model gpt-6.1-sol --allow-model-profile-change`，新输出为`experiments/harness-v1/adaptive-validation-codex-v1`；完整命令见[C操作第12节](evidence-evaluation-test/harness-adaptive-stage-c-usage.md#12-改用本机已经登录的codex)。只复用已安装CLI的ChatGPT登录，不读取/复制auth token，不改现有API参数或正常服务。默认执行本机版本及登录检查、零模型调用；显式live才请求模型。CLI在临时空目录忽略用户配置，禁用工具，macOS另限制项目读写与其他程序执行，候选仍使用原隔离。Profile记录Provider、CLI/包装身份、`CODEX_INVOCATIONS`计数和`output_token_limit_enforced=false`：不能把CLI内部HTTP次数或3000请求值当作精确HTTP预算/Token硬上限。实际返回用量记账，缺失记未知；Codex账号仍有额度，失败不自动转回原API。新v3独立比较继续兼容已知旧C-v1/v2，旧目录不改写。
+
+C模型选择支持env：在`runtime/evidence-test/.env`配置`EVIDENCE_HARNESS_PROVIDER=codex-login`、`EVIDENCE_HARNESS_CODEX_MODEL=gpt-6.1-sol`和`EVIDENCE_HARNESS_ALLOW_MODEL_PROFILE_CHANGE=true`，命令不需重复三个选择参数。完整步骤见[C操作第13节](evidence-evaluation-test/harness-adaptive-stage-c-usage.md#13-在env中切换codex和原api)，方案见[env配置方案](evidence-evaluation-test/harness-provider-env-plan.md)。切回原API只改Provider为`openai-compatible`，原`LLM_API_KEY/LLM_BASE_URL/LLM_CHAT_MODEL`继续有效，env中保存的Codex模型在API模式忽略。CLI优先于env；`--no-allow-model-profile-change`可明确关闭许可。未配置新键时仍是原API及严格同模型检查；非法枚举/布尔拒绝，不静默转接口。配置只在CLI启动时于宿主解析，候选快照与实际规划Settings不变，v3协议及历史重放不变。检查显示`configuration_sources`，不请求模型或创建实验目录；本机env已按用户要求设为Codex。
+
+Codex启动事件修复：`item.type=error`是官方协议中的非致命提示，不能与Shell/MCP/文件变更等操作事件混为一谈；原适配器曾因此把整批156次调用误拦截。现在单独记录`codex_event_diagnostic`的有限类型/原因线索，仍要求单轮、明确完成、合法JSON及无工具事件，error通知继续等待真实终态，turn.failed等仍失败，不记录错误原文或认证。先运行`python scripts/run_evidence_test.py harness codex-probe`零调用检查，显式`codex-probe --live`才以固定假问题调用一次，不用真实题目/Gold、不创建实验、不自动重试。成功前不再跑整批；成功后换新输出`adaptive-validation-codex-v2`。见[C操作第14节](evidence-evaluation-test/harness-adaptive-stage-c-usage.md#14-codex启动事件修复后先单次探针)及[修复方案](evidence-evaluation-test/harness-codex-startup-event-fix.md)。已知旧C-v3执行器仍只读重放，失败v1保留，模型env不自动替换。
+
+Codex HTTPS模式：本机HTTP可达、WebSocket被对端重置时，在测试env设`EVIDENCE_HARNESS_CODEX_TRANSPORT=https`；命令可通过`--codex-transport auto/https`覆盖。独立Provider ID保持ChatGPT认证、原生端点选择和模型，明确禁用WebSocket，不改全局Codex配置或原API。HTTPS Profile含`transport=HTTPS_SSE`和独立adapter_ref，配置请求/流重试0，但内部HTTP次数仍不等于CLI预算。顶层error通知后CLI仍可能继续运行，适配器现在等真实终态；失败终态、退出码、JSON、工具与60秒时限仍校验。先用codex-probe --live单次验证，不能将HTTP可达检查当成推理已成功。见[C操作第15节](evidence-evaluation-test/harness-adaptive-stage-c-usage.md#15-websocket被重置时改用https)及[方案](evidence-evaluation-test/harness-codex-https-fix.md)。
+
+开发集自主迭代：新增`adaptive-iterate --source ... --output ... --max-requests ...`，默认只读核验C来源、提取开发诊断、检查当前Provider，零模型调用且不创建输出。显式`--live`才进行最多1—3轮“LLM建议→真实提示差异→OS隔离原版/候选→独立重放→自动反馈下一轮”。全局Journal覆盖建议、失败和回退，不按轮重置；各轮均与同一原版比较，不复制保留题或向模型发送Gold。`adaptive-iteration-compare --experiment ...`只读重算全部连接与成绩。当前只优化规划追加说明，固定预检仍报告不可覆盖，严格验收不放宽，保留集和实际检索/回答另行验收，不自动改正式服务。完整参数、预算、停止原因和私有文件见[自主迭代操作文档](evidence-evaluation-test/harness-adaptive-iteration-usage.md)，设计见[最小方案](evidence-evaluation-test/harness-adaptive-iteration-plan.md)。原API/Codex env沿用，无需服务重启。
+
+迭代v2引用协议：建议器只选择带轮次的短反馈编号，原反馈哈希和源码哈希由宿主冻结绑定；输出schema枚举本轮允许编号，未知、截断、重复或旧轮引用均明确拒绝。`reference-map.json`和`resolved-proposal.json`分别保存映射及程序恢复结果，原始`proposal.json`不覆盖，独立比较器重建映射校验。`rounds[].proposal_diagnostic`只记录阶段、字段位置、错误类型和固定业务约束，不含错误输入值。已知旧v1仍按原长哈希协议只读重放，不补字、不升级旧结论、不自动重试；新复测目录为`adaptive-iteration-v2`，命令见[短引用复测](evidence-evaluation-test/harness-adaptive-iteration-usage.md#7-长编号漏字修复后怎么复测)。原路径、命令、样本、权限和预算限制不放宽。
+
+冻结候选实验管理：`campaign-run --source ... --output ... --max-requests ...`承接同一C下的已核验开发历史，默认只检查。2026-11-17起默认探索6份候选（最多10份），每题每组初测1次；新增`campaign-retest`按改善迹象筛前2份（最多3份），固定原候选各复测5次（最多10次），整批共享剩余额度与时限，不调用建议器。研究资格不等于推荐，研究锁禁止保留题。`campaign-retest-compare`独立重算，满足原严格门槛后才可正式`campaign-lock`并`campaign-confirm`；保留验收仍不反馈优化。已封存的开发复测批次可承接下一次探索，确认子目录禁止直接导入。默认总时限仍7200秒，显式可到28800秒，请求额度必须明确提供；不加live不调用模型。旧三候选协议及历史只读核验保持原规则。每轮冻结、封存、完整Gold、失败、回退、R035固定预检限制和安全门槛均保留，不因选优删题。启动与预算见[新操作步骤](evidence-evaluation-test/harness-exploration-retest-usage.md)，设计见[新方案](evidence-evaluation-test/harness-exploration-retest-plan.md)。无需重启API/worker，不修改env或正式Planner。
+
+隔离配置修复：试验worker不再调用普通`.env`加载器；宿主经IPC交付固定假数据库地址、legacy设置及本次scratch内日志路径，业务组件导入前统一绑定。未知配置、真实密钥、越界日志路径等直接拒绝，不放开文件读取权限。保留首次受阻的`self-live-v1`，新实验使用`self-live-v2`；完整检查及live命令见[修复后复测](evidence-evaluation-test/harness-self-improvement-usage.md#9-env隔离问题修复后的复测)。普通API/worker配置、现有env及服务进程均不变。
+
+建议器反馈解释改进：新实验采用`self-improvement-v2`及`patch-proposal-v2`，原`self-cycle/self-propose`命令不变。旧root-cause-feedback-v1先独立校验，再从原来源重建带安全任务评分的v2模型输入，不写回旧目录。任务对错与模型/隔离状态分别记录，历史明确区分提示策略与代码候选，合法NO_CHANGE仍可停止；矛盾依据明确拒绝且不重试。新实验输出改为`experiments/harness-v1/self-live-v3`，其余数据和预算沿用，具体命令见[建议器改进后复测](evidence-evaluation-test/harness-self-improvement-usage.md#10-建议器现在怎样区分没收益和没错误)。只读比较会重新核验新反馈、建议和历史；旧代码实验保留为旧版事实，不能按新版协议冒充验收。
