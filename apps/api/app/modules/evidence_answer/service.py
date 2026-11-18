@@ -17,7 +17,7 @@ from pathlib import PurePosixPath
 from typing import Any, Iterable
 
 from pydantic import ValidationError
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
@@ -46,6 +46,7 @@ from app.modules.classification.evidence_reader import (
 from app.modules.file_lifecycle.shared_workspace import get_shared_workspace_id
 from app.modules.file_lifecycle.trash_lookup import ExactTrashFilenameLookupService
 from app.modules.llm.client import LLMResponseError, OpenAICompatibleLLMClient
+from app.modules.llm.diagnostics import SafeErrorDiagnostic, make_diagnostic
 from app.modules.retrieval.chunk_lexical_search import DocumentChunkLexicalSearchService
 from app.modules.retrieval.query_parser import FileSearchQueryParser
 from app.modules.retrieval.readiness import WorkingCopySearchReadinessService
@@ -61,10 +62,11 @@ from app.modules.retrieval.two_stage_search import TwoStageFileSearchService
 from app.modules.retrieval.phrase_strategy import FileSearchPhraseStrategyService
 from app.modules.evidence_answer.policy import EvidenceQuestionPolicy
 from app.modules.evidence_answer.schemas import EvidenceItem, EvidencePackage, StructuredAnswer
+from app.modules.evidence_answer.claim_support import polarity_rejection_reason
+from app.modules.retrieval.explicit_sources import ExplicitSource, extract_explicit_sources
 
 
 _NUMERIC_PATTERN = re.compile(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?%?")
-_NEGATION_MARKERS = ("不需要", "无需", "不得", "禁止", "尚未", "未", "没有", "不")
 _CLAIM_STOP_TERMS = {
     "根据",
     "文件",
@@ -111,6 +113,7 @@ class EvidenceAnswerService:
         agent_run_id: str | None = None,
         settings: Settings | None = None,
         client: Any | None = None,
+        evaluation_client: Any | None = None,
     ) -> None:
         """保存请求级依赖；数据库会话和模型客户端不得写入图状态。"""
 
@@ -122,6 +125,8 @@ class EvidenceAnswerService:
         self.workspace_id = get_shared_workspace_id(db)
         self.tokenizer = ChineseLexicalTokenizer(load_default_business_terms())
         self.client = client if client is not None else self._build_client()
+        # 评估客户端独立注入，Shadow 不消费原回答的调用预算或改变其模型上下文。
+        self.evaluation_client = evaluation_client
 
     def answer(
         self,
@@ -249,6 +254,32 @@ class EvidenceAnswerService:
             )
         exact_filename = _explicit_filename_from_question(normalized_question)
         active_rows = self._resolve_active_working_copies(explicit_ids)
+        source_identities = extract_explicit_sources(normalized_question)
+        if source_identities:
+            if not confirmed_document_scope:
+                selected, source_status = self._resolve_explicit_source_working_copies(source_identities)
+                if source_status == "AMBIGUOUS":
+                    return self._create_file_selection(
+                        rows=selected,
+                        question=normalized_question,
+                        message="指定来源存在多个匹配文件，请确认每份来源对应的具体文件。",
+                    )
+                if source_status != "MATCHED":
+                    return self._no_evidence(
+                        question=normalized_question, mode=mode,
+                        index_status="EXPLICIT_SOURCE_NOT_RESOLVED",
+                        message="未能唯一确认全部指定来源，请在文件列表中选择这些文件后继续。",
+                    )
+                active_rows = selected
+                explicit_ids = list(dict.fromkeys(copy.document_id for copy, _ in selected))
+            # 多来源身份已解析或用户已确认，不能再按第一个扩展名缩成单文件。
+            exact_filename = None
+            log_event(
+                "evidence_answer.explicit_sources.resolved", settings=self.settings,
+                agent_run_id=self.agent_run_id, user_id=self.user_id,
+                conversation_id=self.conversation_id, status="COMPLETED",
+                source_count=len(source_identities), document_count=len(active_rows),
+            )
         # 源侧逻辑 Document ID 不属于工作副本 Readiness 的 canonical 集合；若先
         # 使用 ``explicit_ids``，它会被当作未解析附件丢弃，进而错误回复“文件
         # 不存在”。这里只接受 Tool 绑定的稳定 ID，仍不会自行扩张到全局源目录。
@@ -579,6 +610,10 @@ class EvidenceAnswerService:
                 limitations=[],
                 evidence_fingerprint=evidence_fingerprint,
             )
+            self._evaluate_shadow(
+                package, question=normalized_question,
+                working_copy_ids=frozenset(copy.id for copy, _ in active_rows),
+            )
             structured, usage = self._generate(
                 package=package,
             )
@@ -605,10 +640,8 @@ class EvidenceAnswerService:
                 "input_chars": 0,
                 "fallback_error": exc.__class__.__name__,
             }
-        validated, validation_warnings = self._validate_claims(
-            structured,
-            items,
-            answer_mode=mode,
+        structured, validated, validation_warnings = self._validate_or_repair_support(
+            structured=structured, package=package, usage=usage,
         )
         field_table: dict[str, Any] | None = None
         field_used_ids: list[str] = []
@@ -753,6 +786,123 @@ class EvidenceAnswerService:
         self.db.add(record)
         self.db.flush()
         return record.id
+
+    def _evaluate_shadow(
+        self, package: EvidencePackage, *, question: str,
+        working_copy_ids: frozenset[str] = frozenset(),
+        revision_ids: frozenset[str] = frozenset(),
+    ) -> None:
+        """包建立后、答案生成前做旁观检查；不返回决策，不写答案或图状态。"""
+        if self.settings.evidence_evaluation_mode != "shadow":
+            return
+        # 开关内延迟加载，off 和缓存命中路径没有额外 SQL 或模型调用。
+        try:
+            from app.modules.evidence_evaluation.service import (
+                EvidenceEvaluationService, build_semantic_checker, log_shadow_result,
+            )
+            from app.modules.evidence_evaluation.version_checker import (
+                AuthorizedVersionReader, VersionChecker, infer_temporal_focus,
+            )
+
+            from app.modules.evidence_evaluation.frozen_inputs import (
+                FrozenCapture, RecordingSemanticClient, runtime_config, write_new_json,
+            )
+            from datetime import datetime, timezone
+            from uuid import uuid4
+
+            capture = snapshot_path = recorder = None
+            def capture_failed(exc, stage):
+                # 不打印异常文本、问题、路径或任何业务正文。
+                try:
+                    safe_code = str(exc) if isinstance(exc, ValueError) and re.fullmatch(r"[A-Z_]+", str(exc)) else "CAPTURE_FAILED"
+                    log_event("evidence_evaluation.capture", settings=self.settings,
+                              agent_run_id=self.agent_run_id, status="FAILED",
+                              error_code=safe_code, capture_stage=stage,
+                              exception_type=type(exc).__name__ if type(exc).__name__ in {
+                                  "OSError", "PermissionError", "FileNotFoundError", "FileExistsError",
+                                  "ValueError", "ValidationError", "JSONDecodeError",
+                              } else "Exception", message="测试快照采集失败，原评估与回答继续。")
+                except Exception:
+                    pass
+            try:
+                capture = FrozenCapture.select(self.settings, package, question)
+                if capture is None and self.settings.evidence_evaluation_capture_plan:
+                    log_event("evidence_evaluation.capture", settings=self.settings,
+                              agent_run_id=self.agent_run_id, status="SKIPPED",
+                              error_code="CAPTURE_CASE_SCOPE_NOT_MATCHED")
+            except Exception as exc:
+                capture_failed(exc, "CAPTURE_SETUP")
+            authorized_reader = AuthorizedVersionReader(
+                db=self.db, user_id=self.user_id, conversation_id=self.conversation_id,
+                workspace_id=self.workspace_id, working_copy_ids=working_copy_ids,
+                revision_ids=revision_ids,
+            )
+            focus = infer_temporal_focus(question)
+            def read_versions_once(pkg):
+                nonlocal snapshot_path
+                snapshots = authorized_reader(pkg)
+                if capture is not None:
+                    try:
+                        snapshot_path = capture.save_input(
+                            package=pkg, versions=snapshots, original_question=question,
+                            temporal_focus=focus, config=runtime_config(self.settings),
+                            provenance={"agent_run_id": self.agent_run_id,
+                                        "user_id": self.user_id, "conversation_id": self.conversation_id,
+                                        "workspace_id": self.workspace_id,
+                                        "authorized_working_copy_ids": sorted(working_copy_ids),
+                                        "authorized_revision_ids": sorted(revision_ids)},
+                        )
+                        log_event("evidence_evaluation.capture", settings=self.settings,
+                                  agent_run_id=self.agent_run_id, status="COMPLETED",
+                                  case_id=capture.selection.case_id, input_sha256=snapshot_path.name)
+                    except Exception as exc:
+                        capture_failed(exc, "CAPTURE_INPUT_WRITE")
+                return snapshots
+            checker = build_semantic_checker(self.settings, client=self.evaluation_client)
+            if capture is not None and checker.client is not None:
+                recorder = RecordingSemanticClient(checker.client)
+                checker.client = recorder
+            evaluator = EvidenceEvaluationService(
+                version_checker=VersionChecker(read_versions_once), semantic_checker=checker,
+            )
+            # 全文总结会规范化模型问题，版本判定必须保留用户原始的时间意图。
+            result = evaluator.evaluate(package, temporal_focus=focus)
+            if snapshot_path is not None:
+                try:
+                    write_new_json(snapshot_path / "observations" / f"{uuid4().hex}.json", {
+                        "captured_at": datetime.now(timezone.utc).isoformat(),
+                        "agent_run_id": self.agent_run_id, "input_sha256": snapshot_path.name,
+                        "runtime_config": runtime_config(self.settings),
+                        "result": result.model_dump(mode="json"),
+                        "semantic_calls": recorder.calls if recorder is not None else [],
+                    })
+                except Exception as exc:
+                    capture_failed(exc, "CAPTURE_OBSERVATION_WRITE")
+            log_shadow_result(
+                result, settings=self.settings, user_id=self.user_id,
+                conversation_id=self.conversation_id, agent_run_id=self.agent_run_id,
+            )
+        except Exception as exc:
+            # 配置、依赖、日志等失败也不能阻断原回答，不记录异常原文。
+            try:
+                from app.modules.llm.client import LLMConfigurationError
+                from app.modules.llm.diagnostics import make_diagnostic
+
+                diagnostic = make_diagnostic(
+                    category="CONFIGURATION_ERROR" if isinstance(exc, LLMConfigurationError) else "INTERNAL_ERROR",
+                    stage="SHADOW_SETUP", exc=exc,
+                )
+                log_event(
+                    "evidence_evaluation.shadow", settings=self.settings,
+                    level="WARNING", message=diagnostic.log_fields()["message"],
+                    user_id=self.user_id, conversation_id=self.conversation_id,
+                    agent_run_id=self.agent_run_id, status="EVALUATION_FAILED",
+                    error_code="SHADOW_EVALUATION_FAILED", evaluator_version="evidence-eval-v1",
+                    error_details=[diagnostic.log_fields()],
+                    evidence_fingerprint=package.evidence_fingerprint,
+                )
+            except Exception:
+                pass
 
     def _build_client(self) -> OpenAICompatibleLLMClient | None:
         """仅在阶段五和全局 LLM 都显式启用时构造模型客户端。"""
@@ -954,6 +1104,43 @@ class EvidenceAnswerService:
         rows.sort(key=lambda item: order.get(item[1].id, len(order)))
         return rows
 
+    def _resolve_explicit_source_working_copies(
+        self, sources: list[ExplicitSource]
+    ) -> tuple[list[tuple[WorkingCopy, DocumentVersion]], str]:
+        """按共享活动副本的真实标题+正式文号校验；全部唯一才读取，拒绝部分命中。"""
+        selected, ambiguous = {}, False
+        for source in sources:
+            rows = (
+                self.db.query(WorkingCopy, DocumentVersion, Document.original_filename)
+                .join(DocumentVersion, DocumentVersion.id == WorkingCopy.current_version_id)
+                .join(Document, Document.id == WorkingCopy.document_id)
+                .filter(
+                    WorkingCopy.workspace_id == self.workspace_id,
+                    WorkingCopy.status == "ACTIVE",
+                    DocumentVersion.document_id == WorkingCopy.document_id,
+                    or_(
+                        WorkingCopy.filename.contains(source.issuer),
+                        DocumentVersion.filename.contains(source.issuer),
+                        Document.original_filename.contains(source.issuer),
+                    ),
+                )
+                .limit(201)
+                .all()
+            )
+            # 不在被截断的候选集上声称唯一，也不读取仅命中其中一份的正文。
+            if len(rows) > 200:
+                return [], "TOO_MANY_CANDIDATES"
+            matched = [
+                (copy, version) for copy, version, original in rows
+                if source.matches([copy.filename, version.filename, original])
+            ]
+            if not matched:
+                return [], "MISSING"
+            ambiguous |= len(matched) > 1
+            for copy, version in matched:
+                selected[copy.id] = (copy, version)
+        return list(selected.values()), "AMBIGUOUS" if ambiguous else "MATCHED"
+
     def _resolve_exact_filename_working_copies(
         self, filename: str
     ) -> list[tuple[WorkingCopy, DocumentVersion]]:
@@ -1081,6 +1268,10 @@ class EvidenceAnswerService:
             limitations=[],
             evidence_fingerprint=evidence_fingerprint,
         )
+        self._evaluate_shadow(
+            package, question=question,
+            revision_ids=frozenset(row[0].id for row in source_rows),
+        )
         try:
             structured, usage = self._generate(package=package)
         except (LLMResponseError, ValidationError) as exc:
@@ -1088,7 +1279,7 @@ class EvidenceAnswerService:
                 items=items, mode=mode, reason="模型回答校验失败，已切换为原文抽取式摘要。"
             )
             usage = {"llm_calls": 0, "fallback_error": exc.__class__.__name__}
-        validated, warnings = self._validate_claims(structured, items, answer_mode=mode)
+        structured, validated, warnings = self._validate_or_repair_support(structured=structured, package=package, usage=usage)
         field_table: dict[str, Any] | None = None
         field_used_ids: list[str] = []
         if response_format == "FIELD_TABLE":
@@ -1810,7 +2001,11 @@ class EvidenceAnswerService:
         base = (
             "你是文件证据回答器。只能使用 evidence 中的事实，不得使用常识补全。"
             "每条 claim 必须引用一个或多个真实 evidence_id。数字、日期、姓名必须逐字存在于引用证据；"
+            "每条claim只写一个原子事实，尽量沿用原文措辞；不要在claim.text中添加题号或序号。"
             "证据不足时放入 limitations 或返回 NO_EVIDENCE。只输出符合 required_output 的 JSON 对象。"
+            "历史文件中的要求和期限只证明当时规定，不能自动证明今年或当前仍然适用。"
+            "用户同时询问历史要求和当前适用性时分别回答；若所选证据没有持续适用或现行依据，"
+            "在 limitations 明确说明仅凭这些文件无法确认当前是否仍执行，不得推断已失效或仍有效。"
         )
         if response_format == "FIELD_TABLE":
             return (
@@ -1828,6 +2023,59 @@ class EvidenceAnswerService:
             "每条要点仍必须给出支持它的 evidence_id。"
         )
 
+    def _validate_or_repair_support(
+        self, *, structured: StructuredAnswer, package: EvidencePackage, usage: dict[str, Any],
+    ) -> tuple[StructuredAnswer, list[dict[str, Any]], list[str]]:
+        """全被拒时在既有修复/调用/输入预算内修正一次；失败仍关闭式拒答，不放宽证据校验。"""
+
+        validated, warnings = self._validate_claims(structured, package.evidence_items, answer_mode=package.answer_mode)
+        if (
+            validated or package.response_format == "FIELD_TABLE" or self.client is None
+            or int(usage.get("repair_calls") or 0) >= self.settings.evidence_answer_repair_calls
+            or int(usage.get("llm_calls") or 0) >= self.settings.evidence_answer_max_calls
+            or sum(len(item.quote) for item in package.evidence_items) > self.settings.evidence_answer_max_input_chars
+        ):
+            return structured, validated, warnings
+        # 结构修复与支持性修复共用一个预算，不能为了回答成功无限追加模型调用。
+        usage["llm_calls"] = int(usage.get("llm_calls") or 0) + 1
+        usage["repair_calls"] = int(usage.get("repair_calls") or 0) + 1
+        usage["support_repair_calls"] = 1
+        started = time.perf_counter()
+        try:
+            raw = self.client.complete_json(
+                system_prompt=self._system_prompt(answer_mode=package.answer_mode, response_format=package.response_format)
+                + "上一轮所有结论都未通过原文支持性校验。只修正回答：逐条沿用原文表述，每条只写一个事实；"
+                "保留原文数字、日期与否定关系，使用本次真实evidence_id，不加序号。无法支持的要求放入limitations。",
+                user_payload={
+                    **self._model_payload(package=package, items=package.evidence_items),
+                    "support_validation": {"error_code": "ALL_CLAIMS_REJECTED", "repair_attempt": 1, "max_repairs": 1},
+                },
+            )
+            repaired = StructuredAnswer.model_validate(raw)
+            validated, warnings = self._validate_claims(repaired, package.evidence_items, answer_mode=package.answer_mode)
+            log_event(
+                "evidence_answer.support_repair", settings=self.settings, agent_run_id=self.agent_run_id,
+                user_id=self.user_id, conversation_id=self.conversation_id,
+                status="COMPLETED" if validated else "FAILED", duration_ms=int((time.perf_counter() - started) * 1000),
+                accepted_claim_count=len(validated), message="回答原文支持性修正完成。",
+            )
+            return repaired, validated, warnings
+        except (LLMResponseError, ValidationError) as exc:
+            diagnostic = getattr(exc, "diagnostic", None)
+            if not isinstance(diagnostic, SafeErrorDiagnostic):
+                diagnostic = make_diagnostic(
+                    category="SCHEMA_INVALID" if isinstance(exc, ValidationError) else "UNKNOWN_LLM_ERROR",
+                    stage="ANSWER_SUPPORT_REPAIR", exc=exc,
+                )
+            log_event(
+                "evidence_answer.support_repair", settings=self.settings, agent_run_id=self.agent_run_id,
+                user_id=self.user_id, conversation_id=self.conversation_id, level="WARNING", status="FAILED",
+                duration_ms=int((time.perf_counter() - started) * 1000), error_code=type(exc).__name__,
+                error_details=[diagnostic.log_fields()],
+                message="回答原文支持性修正失败，未返回未经验证的结论。",
+            )
+            return structured, validated, warnings
+
     def _validate_claims(
         self,
         answer: StructuredAnswer,
@@ -1840,17 +2088,25 @@ class EvidenceAnswerService:
         item_map = {item.evidence_id: item for item in items}
         valid: list[dict[str, Any]] = []
         warnings: list[str] = []
+        rejection_counts: dict[str, int] = {}
+
+        def reject(code: str) -> None:
+            """只保存固定原因码和计数，不记录被拒结论或原文；用户只看到有限状态说明。"""
+
+            rejection_counts[code] = rejection_counts.get(code, 0) + 1
+            warnings.append("当前回答仅保留了通过原文校验的结论，未通过的内容没有展示。")
+
         for claim in answer.claims:
             evidence_ids = list(dict.fromkeys(claim.evidence_ids))
             cited = [item_map[value] for value in evidence_ids if value in item_map]
             if not cited:
-                # warnings.append("已移除一条没有有效引用的模型结论。")
+                reject("CLAIM_REFERENCE_INVALID")
                 continue
             evidence_text = "\n".join(item.quote for item in cited)
             claim_numbers = {_normalize_number(value) for value in _NUMERIC_PATTERN.findall(claim.text)}
             evidence_numbers = {_normalize_number(value) for value in _NUMERIC_PATTERN.findall(evidence_text)}
             if claim_numbers - evidence_numbers:
-                # warnings.append("已移除一条数字无法由引用原文支持的模型结论。")
+                reject("CLAIM_NUMBER_UNSUPPORTED")
                 continue
             claim_terms = {
                 value
@@ -1876,18 +2132,24 @@ class EvidenceAnswerService:
             else:
                 required_overlap = 0.8 if len(claim_terms) <= 6 else 0.65
             if overlap_ratio < required_overlap:
-                # warnings.append("已移除一条与引用原文缺少事实词项重合的模型结论。")
+                reject("CLAIM_TERM_OVERLAP_INSUFFICIENT")
                 continue
-            claim_negations = {
-                marker for marker in _NEGATION_MARKERS if marker in claim.text
-            }
-            evidence_negations = {
-                marker for marker in _NEGATION_MARKERS if marker in evidence_text
-            }
-            if bool(claim_negations) != bool(evidence_negations):
-                # warnings.append("已移除一条肯定或否定关系与引用原文不一致的模型结论。")
+            rejection = polarity_rejection_reason(
+                claim=claim.text, quotes=[item.quote for item in cited], tokenizer=self.tokenizer,
+                stop_terms=_CLAIM_STOP_TERMS, required_overlap=required_overlap,
+            )
+            if rejection:
+                reject(rejection)
                 continue
             valid.append({"text": claim.text.strip(), "evidence_ids": [item.evidence_id for item in cited]})
+        log_event(
+            "evidence_answer.claims_validated", settings=self.settings, agent_run_id=self.agent_run_id,
+            user_id=self.user_id, conversation_id=self.conversation_id,
+            level="WARNING" if rejection_counts else "INFO", status="PARTIAL" if rejection_counts else "COMPLETED",
+            claim_count=len(answer.claims), accepted_claim_count=len(valid),
+            rejected_claim_count=sum(rejection_counts.values()), rejection_reason_counts=rejection_counts,
+            message="模型结论原文支持性校验完成。",
+        )
         return valid, warnings
 
     def _validate_field_values(

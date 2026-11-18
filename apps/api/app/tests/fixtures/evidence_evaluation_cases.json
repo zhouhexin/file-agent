@@ -1,0 +1,4407 @@
+{
+  "dataset_version": "evidence-eval-synthetic-v1",
+  "annotation_origin": "逐条编写的合成案例及预期标签，尚未经业务人员独立复核；非生产语料。",
+  "replay_notice": "recorded_semantic_response为确定性测试桩，不是实际模型测量；live评测绝不发送预期标签。",
+  "cases": [
+    {
+      "case_id": "normal_01",
+      "group": "NORMAL",
+      "package": {
+        "question": "2024年学校批准的科研经费是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "normal_01_doc_1",
+            "document_version_id": "normal_01_v_1",
+            "working_copy_id": "normal_01_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本1.pdf",
+            "quote": "2024年学校最终批准科研经费500万元。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "6b015d6be6364a46dcaab068a0fcda3c40f187a120167e00d8e399b266894943"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_01_v_1"
+        }
+      },
+      "expected_issues": [],
+      "expected_explanation": "所有必要要求已有支持；年份、口径、组织或单位差异不构成矛盾，历史查询可引用旧版本。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "2024年最终批准科研经费",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "normal_02",
+      "group": "NORMAL",
+      "package": {
+        "question": "奖学金申报截止到哪天？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "normal_02_doc_1",
+            "document_version_id": "normal_02_v_1",
+            "working_copy_id": "normal_02_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本2.pdf",
+            "quote": "申报截止日期为2026年10月31日。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "745ff3a2ba901ba7b63b76cb90217f5c26cfb791f56c874e31a261fe2a759a60"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_02_v_1"
+        }
+      },
+      "expected_issues": [],
+      "expected_explanation": "所有必要要求已有支持；年份、口径、组织或单位差异不构成矛盾，历史查询可引用旧版本。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "申报截止日期",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "normal_03",
+      "group": "NORMAL",
+      "package": {
+        "question": "申请人姓名是什么？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "normal_03_doc_1",
+            "document_version_id": "normal_03_v_1",
+            "working_copy_id": "normal_03_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本3.pdf",
+            "quote": "申请人：张三。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "a209915729e7910f94adbd2d0cc892e2e5025f04f5aaff03af287c2ca784dc5c"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_03_v_1"
+        }
+      },
+      "expected_issues": [],
+      "expected_explanation": "所有必要要求已有支持；年份、口径、组织或单位差异不构成矛盾，历史查询可引用旧版本。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "申请人姓名",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "normal_04",
+      "group": "NORMAL",
+      "package": {
+        "question": "2023年和2024年各批准多少预算？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "normal_04_doc_1",
+            "document_version_id": "normal_04_v_1",
+            "working_copy_id": "normal_04_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本4.pdf",
+            "quote": "2023年批准预算400万元。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "normal_04_doc_2",
+            "document_version_id": "normal_04_v_2",
+            "working_copy_id": "normal_04_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本4.pdf",
+            "quote": "2024年批准预算500万元。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "801050e516ee16084fcc10da677458d398f001b3920ef5c970eec653cebae4af"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_04_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_04_v_2"
+        }
+      },
+      "expected_issues": [],
+      "expected_explanation": "所有必要要求已有支持；年份、口径、组织或单位差异不构成矛盾，历史查询可引用旧版本。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "两个年度分别批准的预算",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "normal_05",
+      "group": "NORMAL",
+      "package": {
+        "question": "申请和批准预算分别是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "normal_05_doc_1",
+            "document_version_id": "normal_05_v_1",
+            "working_copy_id": "normal_05_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本5.pdf",
+            "quote": "项目申请预算500万元。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "normal_05_doc_2",
+            "document_version_id": "normal_05_v_2",
+            "working_copy_id": "normal_05_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本5.pdf",
+            "quote": "项目批准预算450万元。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "679b50ccd06eb8a62f63f855b9e81b2e539e87ca4aff4049e0f08305e14154bf"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_05_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_05_v_2"
+        }
+      },
+      "expected_issues": [],
+      "expected_explanation": "所有必要要求已有支持；年份、口径、组织或单位差异不构成矛盾，历史查询可引用旧版本。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "申请与批准预算分别的金额",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "normal_06",
+      "group": "NORMAL",
+      "package": {
+        "question": "最终批准预算是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "normal_06_doc_1",
+            "document_version_id": "normal_06_v_1",
+            "working_copy_id": "normal_06_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本6.pdf",
+            "quote": "最终批准预算500万元。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "normal_06_doc_2",
+            "document_version_id": "normal_06_v_2",
+            "working_copy_id": "normal_06_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本6.pdf",
+            "quote": "最终批准预算5000000元。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "c286b72f98470668a8fc1f04b8a8522f31923a5e23151b5dadbb5d631f7f3b61"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_06_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_06_v_2"
+        }
+      },
+      "expected_issues": [],
+      "expected_explanation": "所有必要要求已有支持；年份、口径、组织或单位差异不构成矛盾，历史查询可引用旧版本。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "单位换算后的批准预算",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "normal_07",
+      "group": "NORMAL",
+      "package": {
+        "question": "学校和学院各有多少教师？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "normal_07_doc_1",
+            "document_version_id": "normal_07_v_1",
+            "working_copy_id": "normal_07_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本7.pdf",
+            "quote": "学校共有教师1200人。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "normal_07_doc_2",
+            "document_version_id": "normal_07_v_2",
+            "working_copy_id": "normal_07_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本7.pdf",
+            "quote": "计算机学院共有教师80人。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "d892cddd8fa13e5fb3b634339a908dd446292b97bc9cf09bb5e2f3aa13fa1e7d"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_07_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_07_v_2"
+        }
+      },
+      "expected_issues": [],
+      "expected_explanation": "所有必要要求已有支持；年份、口径、组织或单位差异不构成矛盾，历史查询可引用旧版本。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "不同组织范围的教师人数",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "normal_08",
+      "group": "NORMAL",
+      "package": {
+        "question": "离职材料应由谁审核？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "normal_08_doc_1",
+            "document_version_id": "normal_08_v_1",
+            "working_copy_id": "normal_08_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本8.pdf",
+            "quote": "离职材料交人事处审核。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "normal_08_doc_2",
+            "document_version_id": "normal_08_v_2",
+            "working_copy_id": "normal_08_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本8.pdf",
+            "quote": "人事部门负责审核离职材料。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "6a4f4ad46eb5f8fdec407f17fdefeba5fd642ce823fb91f1d9c5fb25a90cc5c8"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_08_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_08_v_2"
+        }
+      },
+      "expected_issues": [],
+      "expected_explanation": "所有必要要求已有支持；年份、口径、组织或单位差异不构成矛盾，历史查询可引用旧版本。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "离职材料审核部门",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "normal_09",
+      "group": "NORMAL",
+      "package": {
+        "question": "按2024年当时的通知，资助标准是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "normal_09_doc_1",
+            "document_version_id": "normal_09_v_1",
+            "working_copy_id": "normal_09_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本9.pdf",
+            "quote": "2024年通知规定资助标准每人5000元。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "fe8acb7ef8d5c4c31b35ec68636c7b889a651524afd8ff9db35cb0b8274058f1"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_09_replacement"
+        }
+      },
+      "expected_issues": [],
+      "expected_explanation": "所有必要要求已有支持；年份、口径、组织或单位差异不构成矛盾，历史查询可引用旧版本。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "2024年通知规定的标准",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "normal_10",
+      "group": "NORMAL",
+      "package": {
+        "question": "请按旧版文件说明申请条件。",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "normal_10_doc_1",
+            "document_version_id": "normal_10_v_1",
+            "working_copy_id": "normal_10_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本10.pdf",
+            "quote": "旧版规定申请人应为全日制本科生。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "63ef7d74241b54bf8100a115de4a7f1bbbcb40f3dc57216280718992de68dc35"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_10_replacement"
+        }
+      },
+      "expected_issues": [],
+      "expected_explanation": "所有必要要求已有支持；年份、口径、组织或单位差异不构成矛盾，历史查询可引用旧版本。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "旧版申请条件",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "normal_11",
+      "group": "NORMAL",
+      "package": {
+        "question": "截至2023年的活动数量是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "normal_11_doc_1",
+            "document_version_id": "normal_11_v_1",
+            "working_copy_id": "normal_11_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本11.pdf",
+            "quote": "截至2023年12月，已举办活动12场。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "32a083bcb9105fea69855448ec0911b21ce927f8d5b6c416d59a62ce8f6c2690"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_11_replacement"
+        }
+      },
+      "expected_issues": [],
+      "expected_explanation": "所有必要要求已有支持；年份、口径、组织或单位差异不构成矛盾，历史查询可引用旧版本。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "历史时点活动数量",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "normal_12",
+      "group": "NORMAL",
+      "package": {
+        "question": "发票报销需要什么材料？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "normal_12_doc_1",
+            "document_version_id": "normal_12_v_1",
+            "working_copy_id": "normal_12_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本12.pdf",
+            "quote": "报销需提交发票与审批单。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "d5c4f74ae844c56a2bf90d4489f909924f965711f7161f2236c3b4f41d35221c"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_12_v_1"
+        }
+      },
+      "expected_issues": [],
+      "expected_explanation": "所有必要要求已有支持；年份、口径、组织或单位差异不构成矛盾，历史查询可引用旧版本。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "报销必需材料",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "normal_13",
+      "group": "NORMAL",
+      "package": {
+        "question": "请总结全文各章节的主要事项。",
+        "question_type": "SUMMARY",
+        "answer_mode": "FULL_SUMMARY",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "normal_13_doc_1",
+            "document_version_id": "normal_13_v_1",
+            "working_copy_id": "normal_13_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本13.pdf",
+            "quote": "第一章规定申报对象。第二章规定审核流程。第三章规定公示程序。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "57413d47bb651d29c79b89fb8a9cf168dbecd01d9200118818a4dd061a0bdfa9"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_13_v_1"
+        }
+      },
+      "expected_issues": [],
+      "expected_explanation": "所有必要要求已有支持；年份、口径、组织或单位差异不构成矛盾，历史查询可引用旧版本。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "给定三个章节的主要事项",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "normal_14",
+      "group": "NORMAL",
+      "package": {
+        "question": "提取姓名和联系电话。",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "FIELD_TABLE",
+        "fields": [
+          {
+            "key": "name",
+            "label": "姓名"
+          },
+          {
+            "key": "phone",
+            "label": "联系电话"
+          }
+        ],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "normal_14_doc_1",
+            "document_version_id": "normal_14_v_1",
+            "working_copy_id": "normal_14_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本14.pdf",
+            "quote": "姓名：李四；联系电话：02912345678。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "78668da7d577b08fad6ba24d4204f29087071fa258f6cf4d45348135984b53d4"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_14_v_1"
+        }
+      },
+      "expected_issues": [],
+      "expected_explanation": "所有必要要求已有支持；年份、口径、组织或单位差异不构成矛盾，历史查询可引用旧版本。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "姓名",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "联系电话",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "normal_15",
+      "group": "NORMAL",
+      "package": {
+        "question": "项目是否允许重复申报？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "normal_15_doc_1",
+            "document_version_id": "normal_15_v_1",
+            "working_copy_id": "normal_15_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本15.pdf",
+            "quote": "本项目不允许重复申报。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "a8f2e6834a7dc2fffdb9b1932e86577a5965f13c333c4e29e46a18f8929cd249"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_15_v_1"
+        }
+      },
+      "expected_issues": [],
+      "expected_explanation": "所有必要要求已有支持；年份、口径、组织或单位差异不构成矛盾，历史查询可引用旧版本。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "是否允许重复申报",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "normal_16",
+      "group": "NORMAL",
+      "package": {
+        "question": "当前通知要求提供哪些附件？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "normal_16_doc_1",
+            "document_version_id": "normal_16_v_1",
+            "working_copy_id": "normal_16_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本16.pdf",
+            "quote": "当前通知要求提交申请表和在读证明。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "787e89dd954cdc89774621c70f1a612163aa162cb2418686a829da3cf2f32be6"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "normal_16_v_1"
+        }
+      },
+      "expected_issues": [],
+      "expected_explanation": "所有必要要求已有支持；年份、口径、组织或单位差异不构成矛盾，历史查询可引用旧版本。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "当前通知的附件清单",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "missing_01",
+      "group": "MISSING",
+      "package": {
+        "question": "2023年和2024年的科研经费分别是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "missing_01_doc_1",
+            "document_version_id": "missing_01_v_1",
+            "working_copy_id": "missing_01_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本1.pdf",
+            "quote": "2023年学校批准科研经费400万元。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "131bb3d4663ad700208ca5864ff10853e90549a92f67cedde0bc122e3a3c884f"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "missing_01_v_1"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        }
+      ],
+      "expected_explanation": "当前证据包仅支持2023年科研经费，没有提供2024年科研经费；不能推出全库不存在。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "2023年科研经费",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "2024年科研经费",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "missing_02",
+      "group": "MISSING",
+      "package": {
+        "question": "给出姓名、学号和联系电话。",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "missing_02_doc_1",
+            "document_version_id": "missing_02_v_1",
+            "working_copy_id": "missing_02_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本2.pdf",
+            "quote": "姓名：王五；学号：2024001。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "aa7c9f8619ab96f1d5f061340f82bfa9f88c3f6722edcc48ecf874d727421a2a"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "missing_02_v_1"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        }
+      ],
+      "expected_explanation": "当前证据包仅支持姓名和学号，没有提供联系电话；不能推出全库不存在。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "姓名和学号",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "联系电话",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "missing_03",
+      "group": "MISSING",
+      "package": {
+        "question": "申请何时截止，为什么延期？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "missing_03_doc_1",
+            "document_version_id": "missing_03_v_1",
+            "working_copy_id": "missing_03_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本3.pdf",
+            "quote": "申报截止时间延至10月31日。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "c8d2adee72055bf3782b32698ac544992c2ba9e282b12d031c959b0fa6cadf40"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "missing_03_v_1"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        }
+      ],
+      "expected_explanation": "当前证据包仅支持延期后的截止时间，没有提供延期原因；不能推出全库不存在。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "延期后的截止时间",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "延期原因",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "missing_04",
+      "group": "MISSING",
+      "package": {
+        "question": "批准预算是多少，实际支付多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "missing_04_doc_1",
+            "document_version_id": "missing_04_v_1",
+            "working_copy_id": "missing_04_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本4.pdf",
+            "quote": "最终批准预算450万元。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "bf3072f351adae656b0819a74c28681d80fb50cbe928b7a4ad4f488923f23502"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "missing_04_v_1"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        }
+      ],
+      "expected_explanation": "当前证据包仅支持最终批准预算，没有提供实际支付金额；不能推出全库不存在。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "最终批准预算",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "实际支付金额",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "missing_05",
+      "group": "MISSING",
+      "package": {
+        "question": "这项奖学金的条件和名额分别是什么？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "missing_05_doc_1",
+            "document_version_id": "missing_05_v_1",
+            "working_copy_id": "missing_05_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本5.pdf",
+            "quote": "申请人须为全日制本科生。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "67ab95c25a013a8fea24280b9b4516df56eab1b1d741b0f438ed8cfded6e44ee"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "missing_05_v_1"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        }
+      ],
+      "expected_explanation": "当前证据包仅支持申请条件，没有提供奖学金名额；不能推出全库不存在。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "申请条件",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "奖学金名额",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "missing_06",
+      "group": "MISSING",
+      "package": {
+        "question": "活动在哪里举行，谁主办？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "missing_06_doc_1",
+            "document_version_id": "missing_06_v_1",
+            "working_copy_id": "missing_06_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本6.pdf",
+            "quote": "活动在大学生活动中心举行。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "cac8d291aca01e2b6f00b24ab1c864b5914e3141a4c81741f5e9c1a502243489"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "missing_06_v_1"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        }
+      ],
+      "expected_explanation": "当前证据包仅支持活动地点，没有提供主办单位；不能推出全库不存在。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "活动地点",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "主办单位",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "missing_07",
+      "group": "MISSING",
+      "package": {
+        "question": "提供教师姓名和入职日期。",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "missing_07_doc_1",
+            "document_version_id": "missing_07_v_1",
+            "working_copy_id": "missing_07_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本7.pdf",
+            "quote": "教师姓名：赵六。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "9cd9f766dc01190f789e35c91b332714742cbba7b6667be973f443cd1efe447f"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "missing_07_v_1"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        }
+      ],
+      "expected_explanation": "当前证据包仅支持教师姓名，没有提供入职日期；不能推出全库不存在。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "教师姓名",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "入职日期",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "missing_08",
+      "group": "MISSING",
+      "package": {
+        "question": "2024年支出和同比增长率是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "missing_08_doc_1",
+            "document_version_id": "missing_08_v_1",
+            "working_copy_id": "missing_08_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本8.pdf",
+            "quote": "2024年支出100万元。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "bc15e18d57c108ac0bed86c2c56850a0d98a41bf799bf8252c87ca0f98b4808a"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "missing_08_v_1"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        }
+      ],
+      "expected_explanation": "当前证据包仅支持2024年支出金额，没有提供同比增长率或上年可计算基数；不能推出全库不存在。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "2024年支出金额",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "同比增长率或上年可计算基数",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "missing_09",
+      "group": "MISSING",
+      "package": {
+        "question": "项目负责人及经费来源是什么？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "missing_09_doc_1",
+            "document_version_id": "missing_09_v_1",
+            "working_copy_id": "missing_09_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本9.pdf",
+            "quote": "项目负责人为陈老师。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "6fa7a99c73e3431770a1e9f9796bcaf32082e5c560a571a46b707ef236c3e849"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "missing_09_v_1"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        }
+      ],
+      "expected_explanation": "当前证据包仅支持项目负责人，没有提供经费来源；不能推出全库不存在。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "项目负责人",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "经费来源",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "missing_10",
+      "group": "MISSING",
+      "package": {
+        "question": "招生人数及其统计范围是什么？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "missing_10_doc_1",
+            "document_version_id": "missing_10_v_1",
+            "working_copy_id": "missing_10_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本10.pdf",
+            "quote": "招生人数为120人。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "65d2917ed7ad47041ec9d24da03f1abee9b86b40b4ec4dadf1fc17d51fa52f39"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "missing_10_v_1"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        }
+      ],
+      "expected_explanation": "当前证据包仅支持招生人数，没有提供招生人数的统计范围；不能推出全库不存在。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "招生人数",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "招生人数的统计范围",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "missing_11",
+      "group": "MISSING",
+      "package": {
+        "question": "公示开始和结束日期是什么？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "missing_11_doc_1",
+            "document_version_id": "missing_11_v_1",
+            "working_copy_id": "missing_11_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本11.pdf",
+            "quote": "公示开始日期为10月20日。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "e45fc5892d0893c5158e735817fd7078fd81fd947f0d9d97d5d5d0769dacf966"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "missing_11_v_1"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        }
+      ],
+      "expected_explanation": "当前证据包仅支持公示开始日期，没有提供公示结束日期；不能推出全库不存在。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "公示开始日期",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "公示结束日期",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "missing_12",
+      "group": "MISSING",
+      "package": {
+        "question": "请列出每张工作表的总额。",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "missing_12_doc_1",
+            "document_version_id": "missing_12_v_1",
+            "working_copy_id": "missing_12_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本12.pdf",
+            "quote": "Sheet1合计金额10000元。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [
+          "检索结果只覆盖部分工作表。"
+        ],
+        "evidence_fingerprint": "acbafb8df7b529697f2c4d09b021622690786a62085692ab5cd795dd5690a57e"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "missing_12_v_1"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        }
+      ],
+      "expected_explanation": "当前证据包仅支持Sheet1总额，没有提供其他工作表总额及工作表清单；不能推出全库不存在。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "Sheet1总额",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "其他工作表总额及工作表清单",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "missing_13",
+      "group": "MISSING",
+      "package": {
+        "question": "这份制度何时生效，是否废止旧制度？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "missing_13_doc_1",
+            "document_version_id": "missing_13_v_1",
+            "working_copy_id": "missing_13_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本13.pdf",
+            "quote": "制度自2026年1月1日起施行。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "ecac41781f311710e2c83af76e987bb9602916af11b82ae0df7fd483b679ead4"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "missing_13_v_1"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        }
+      ],
+      "expected_explanation": "当前证据包仅支持制度生效日期，没有提供是否废止旧制度；不能推出全库不存在。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "制度生效日期",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "是否废止旧制度",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "missing_14",
+      "group": "MISSING",
+      "package": {
+        "question": "附件名称及其下载方式是什么？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "missing_14_doc_1",
+            "document_version_id": "missing_14_v_1",
+            "working_copy_id": "missing_14_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本14.pdf",
+            "quote": "附件名称：奖学金申请表。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "85ef7d4ba50c28b35afb874615f7c8ce2b5c7f20fc327e246b4143bdda467832"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "missing_14_v_1"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        }
+      ],
+      "expected_explanation": "当前证据包仅支持附件名称，没有提供附件下载方式；不能推出全库不存在。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "附件名称",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "附件下载方式",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "missing_15",
+      "group": "MISSING",
+      "package": {
+        "question": "请提取姓名、学院和联系电话。",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "FIELD_TABLE",
+        "fields": [
+          {
+            "key": "name",
+            "label": "姓名"
+          },
+          {
+            "key": "college",
+            "label": "学院"
+          },
+          {
+            "key": "phone",
+            "label": "联系电话"
+          }
+        ],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "missing_15_doc_1",
+            "document_version_id": "missing_15_v_1",
+            "working_copy_id": "missing_15_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本15.pdf",
+            "quote": "姓名：孙七；学院：计算机学院。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "ddf0203b4fcafae8bde99d2f456e33a76292d0c9048d3acd8086701eb5791d40"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "missing_15_v_1"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        }
+      ],
+      "expected_explanation": "当前证据包仅支持姓名与学院，没有提供联系电话；不能推出全库不存在。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "姓名",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "学院",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r3",
+            "text": "联系电话",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "missing_16",
+      "group": "MISSING",
+      "package": {
+        "question": "当前项目已完成哪些步骤，还需补哪些审批？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "missing_16_doc_1",
+            "document_version_id": "missing_16_v_1",
+            "working_copy_id": "missing_16_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本16.pdf",
+            "quote": "项目已完成学院审核。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "79d00c36982954f74236a612243dc642ea5bd2a0fb5ab7c534413cf7e2dd59bf"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "missing_16_v_1"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        }
+      ],
+      "expected_explanation": "当前证据包仅支持已完成步骤，没有提供仍需完成的审批步骤；不能推出全库不存在。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "已完成步骤",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "仍需完成的审批步骤",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "conflict_01",
+      "group": "CONFLICT",
+      "package": {
+        "question": "2024年学校最终批准预算是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "conflict_01_doc_1",
+            "document_version_id": "conflict_01_v_1",
+            "working_copy_id": "conflict_01_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本1.pdf",
+            "quote": "2024年学校的最终批准预算（万元，批准）为500万元。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "conflict_01_doc_2",
+            "document_version_id": "conflict_01_v_2",
+            "working_copy_id": "conflict_01_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本1.pdf",
+            "quote": "2024年学校的最终批准预算（万元，批准）为450万元。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "48bd4d962ecabf55469d06c183447f3df52282b081f40adcffad68e1f4aa1f5b"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_01_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_01_v_2"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "CONFLICT",
+          "evidence_ids": [
+            "ev_1",
+            "ev_2"
+          ]
+        }
+      ],
+      "expected_explanation": "两个真实引用在同一实体、属性、时间、单位范围和事实状态下给出不兼容值。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "最终批准预算",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": [
+          {
+            "left": {
+              "entity": "学校",
+              "attribute": "最终批准预算",
+              "time": "2024年",
+              "basis": "万元",
+              "fact_status": "批准",
+              "evidence_id": "ev_1",
+              "value": "500万元",
+              "value_quote": "500万元"
+            },
+            "right": {
+              "entity": "学校",
+              "attribute": "最终批准预算",
+              "time": "2024年",
+              "basis": "万元",
+              "fact_status": "批准",
+              "evidence_id": "ev_2",
+              "value": "450万元",
+              "value_quote": "450万元"
+            },
+            "incompatible": true,
+            "reason": "2024年学校的最终批准预算在相同口径下不一致。"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conflict_02",
+      "group": "CONFLICT",
+      "package": {
+        "question": "本次申报截止日期是什么？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "conflict_02_doc_1",
+            "document_version_id": "conflict_02_v_1",
+            "working_copy_id": "conflict_02_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本2.pdf",
+            "quote": "2026年本批次本次奖学金的截止日期（同一申报批次，正式通知）为10月20日。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "conflict_02_doc_2",
+            "document_version_id": "conflict_02_v_2",
+            "working_copy_id": "conflict_02_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本2.pdf",
+            "quote": "2026年本批次本次奖学金的截止日期（同一申报批次，正式通知）为10月31日。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "4ae2d55cafc4fa64b506b7fb1ddb18ea2ade63259f62acb8c8b2e5512237e4b7"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_02_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_02_v_2"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "CONFLICT",
+          "evidence_ids": [
+            "ev_1",
+            "ev_2"
+          ]
+        }
+      ],
+      "expected_explanation": "两个真实引用在同一实体、属性、时间、单位范围和事实状态下给出不兼容值。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "截止日期",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": [
+          {
+            "left": {
+              "entity": "本次奖学金",
+              "attribute": "截止日期",
+              "time": "2026年本批次",
+              "basis": "同一申报批次",
+              "fact_status": "正式通知",
+              "evidence_id": "ev_1",
+              "value": "10月20日",
+              "value_quote": "10月20日"
+            },
+            "right": {
+              "entity": "本次奖学金",
+              "attribute": "截止日期",
+              "time": "2026年本批次",
+              "basis": "同一申报批次",
+              "fact_status": "正式通知",
+              "evidence_id": "ev_2",
+              "value": "10月31日",
+              "value_quote": "10月31日"
+            },
+            "incompatible": true,
+            "reason": "2026年本批次本次奖学金的截止日期在相同口径下不一致。"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conflict_03",
+      "group": "CONFLICT",
+      "package": {
+        "question": "2024年计算机学院招生人数是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "conflict_03_doc_1",
+            "document_version_id": "conflict_03_v_1",
+            "working_copy_id": "conflict_03_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本3.pdf",
+            "quote": "2024年计算机学院的招生人数（人/全日制，最终统计）为120人。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "conflict_03_doc_2",
+            "document_version_id": "conflict_03_v_2",
+            "working_copy_id": "conflict_03_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本3.pdf",
+            "quote": "2024年计算机学院的招生人数（人/全日制，最终统计）为130人。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "e506e275df2f70a8e41127e824238a88c77d4fb6dec62ea1fefea21562663200"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_03_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_03_v_2"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "CONFLICT",
+          "evidence_ids": [
+            "ev_1",
+            "ev_2"
+          ]
+        }
+      ],
+      "expected_explanation": "两个真实引用在同一实体、属性、时间、单位范围和事实状态下给出不兼容值。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "招生人数",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": [
+          {
+            "left": {
+              "entity": "计算机学院",
+              "attribute": "招生人数",
+              "time": "2024年",
+              "basis": "人/全日制",
+              "fact_status": "最终统计",
+              "evidence_id": "ev_1",
+              "value": "120人",
+              "value_quote": "120人"
+            },
+            "right": {
+              "entity": "计算机学院",
+              "attribute": "招生人数",
+              "time": "2024年",
+              "basis": "人/全日制",
+              "fact_status": "最终统计",
+              "evidence_id": "ev_2",
+              "value": "130人",
+              "value_quote": "130人"
+            },
+            "incompatible": true,
+            "reason": "2024年计算机学院的招生人数在相同口径下不一致。"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conflict_04",
+      "group": "CONFLICT",
+      "package": {
+        "question": "本项目编号是什么？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "conflict_04_doc_1",
+            "document_version_id": "conflict_04_v_1",
+            "working_copy_id": "conflict_04_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本4.pdf",
+            "quote": "本申报期本项目的项目编号（唯一项目，正式登记）为A001。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "conflict_04_doc_2",
+            "document_version_id": "conflict_04_v_2",
+            "working_copy_id": "conflict_04_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本4.pdf",
+            "quote": "本申报期本项目的项目编号（唯一项目，正式登记）为A002。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "7dbd2d1745088695cb1835ad0eb6e26f0fc97ac7543e009598c9dc3e17c9495a"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_04_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_04_v_2"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "CONFLICT",
+          "evidence_ids": [
+            "ev_1",
+            "ev_2"
+          ]
+        }
+      ],
+      "expected_explanation": "两个真实引用在同一实体、属性、时间、单位范围和事实状态下给出不兼容值。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "项目编号",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": [
+          {
+            "left": {
+              "entity": "本项目",
+              "attribute": "项目编号",
+              "time": "本申报期",
+              "basis": "唯一项目",
+              "fact_status": "正式登记",
+              "evidence_id": "ev_1",
+              "value": "A001",
+              "value_quote": "A001"
+            },
+            "right": {
+              "entity": "本项目",
+              "attribute": "项目编号",
+              "time": "本申报期",
+              "basis": "唯一项目",
+              "fact_status": "正式登记",
+              "evidence_id": "ev_2",
+              "value": "A002",
+              "value_quote": "A002"
+            },
+            "incompatible": true,
+            "reason": "本申报期本项目的项目编号在相同口径下不一致。"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conflict_05",
+      "group": "CONFLICT",
+      "package": {
+        "question": "这次会议在哪里召开？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "conflict_05_doc_1",
+            "document_version_id": "conflict_05_v_1",
+            "working_copy_id": "conflict_05_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本5.pdf",
+            "quote": "本次会议本次会议的会议地点（同一次会议，最终安排）为一号会议室。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "conflict_05_doc_2",
+            "document_version_id": "conflict_05_v_2",
+            "working_copy_id": "conflict_05_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本5.pdf",
+            "quote": "本次会议本次会议的会议地点（同一次会议，最终安排）为二号会议室。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "d76c7c47ad068d6fc8dc4b3d5305a8051aa6d8cb8a18685947a963d429ec4923"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_05_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_05_v_2"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "CONFLICT",
+          "evidence_ids": [
+            "ev_1",
+            "ev_2"
+          ]
+        }
+      ],
+      "expected_explanation": "两个真实引用在同一实体、属性、时间、单位范围和事实状态下给出不兼容值。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "会议地点",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": [
+          {
+            "left": {
+              "entity": "本次会议",
+              "attribute": "会议地点",
+              "time": "本次会议",
+              "basis": "同一次会议",
+              "fact_status": "最终安排",
+              "evidence_id": "ev_1",
+              "value": "一号会议室",
+              "value_quote": "一号会议室"
+            },
+            "right": {
+              "entity": "本次会议",
+              "attribute": "会议地点",
+              "time": "本次会议",
+              "basis": "同一次会议",
+              "fact_status": "最终安排",
+              "evidence_id": "ev_2",
+              "value": "二号会议室",
+              "value_quote": "二号会议室"
+            },
+            "incompatible": true,
+            "reason": "本次会议本次会议的会议地点在相同口径下不一致。"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conflict_06",
+      "group": "CONFLICT",
+      "package": {
+        "question": "2025年项目实际支出是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "conflict_06_doc_1",
+            "document_version_id": "conflict_06_v_1",
+            "working_copy_id": "conflict_06_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本6.pdf",
+            "quote": "2025年项目甲的实际支出（万元/含税，实付）为90万元。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "conflict_06_doc_2",
+            "document_version_id": "conflict_06_v_2",
+            "working_copy_id": "conflict_06_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本6.pdf",
+            "quote": "2025年项目甲的实际支出（万元/含税，实付）为95万元。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "49a8f22ac7f3e8fe7eba241be27e7645a8df54ccccd495b41750d4bc5588c9e4"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_06_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_06_v_2"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "CONFLICT",
+          "evidence_ids": [
+            "ev_1",
+            "ev_2"
+          ]
+        }
+      ],
+      "expected_explanation": "两个真实引用在同一实体、属性、时间、单位范围和事实状态下给出不兼容值。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "实际支出",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": [
+          {
+            "left": {
+              "entity": "项目甲",
+              "attribute": "实际支出",
+              "time": "2025年",
+              "basis": "万元/含税",
+              "fact_status": "实付",
+              "evidence_id": "ev_1",
+              "value": "90万元",
+              "value_quote": "90万元"
+            },
+            "right": {
+              "entity": "项目甲",
+              "attribute": "实际支出",
+              "time": "2025年",
+              "basis": "万元/含税",
+              "fact_status": "实付",
+              "evidence_id": "ev_2",
+              "value": "95万元",
+              "value_quote": "95万元"
+            },
+            "incompatible": true,
+            "reason": "2025年项目甲的实际支出在相同口径下不一致。"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conflict_07",
+      "group": "CONFLICT",
+      "package": {
+        "question": "当前负责人是谁？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "conflict_07_doc_1",
+            "document_version_id": "conflict_07_v_1",
+            "working_copy_id": "conflict_07_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本7.pdf",
+            "quote": "当前任期项目甲的负责人（单一负责人，已任命）为张三。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "conflict_07_doc_2",
+            "document_version_id": "conflict_07_v_2",
+            "working_copy_id": "conflict_07_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本7.pdf",
+            "quote": "当前任期项目甲的负责人（单一负责人，已任命）为李四。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "e412ad4f8c473d8cca3a9c49278a7d1ab71b7c2aef8da66aa00325848597bc4e"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_07_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_07_v_2"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "CONFLICT",
+          "evidence_ids": [
+            "ev_1",
+            "ev_2"
+          ]
+        }
+      ],
+      "expected_explanation": "两个真实引用在同一实体、属性、时间、单位范围和事实状态下给出不兼容值。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "负责人",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": [
+          {
+            "left": {
+              "entity": "项目甲",
+              "attribute": "负责人",
+              "time": "当前任期",
+              "basis": "单一负责人",
+              "fact_status": "已任命",
+              "evidence_id": "ev_1",
+              "value": "张三",
+              "value_quote": "张三"
+            },
+            "right": {
+              "entity": "项目甲",
+              "attribute": "负责人",
+              "time": "当前任期",
+              "basis": "单一负责人",
+              "fact_status": "已任命",
+              "evidence_id": "ev_2",
+              "value": "李四",
+              "value_quote": "李四"
+            },
+            "incompatible": true,
+            "reason": "当前任期项目甲的负责人在相同口径下不一致。"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conflict_08",
+      "group": "CONFLICT",
+      "package": {
+        "question": "2024年校级奖学金最终名额是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "conflict_08_doc_1",
+            "document_version_id": "conflict_08_v_1",
+            "working_copy_id": "conflict_08_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本8.pdf",
+            "quote": "2024年校级奖学金的名额（全校/人，最终核定）为100人。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "conflict_08_doc_2",
+            "document_version_id": "conflict_08_v_2",
+            "working_copy_id": "conflict_08_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本8.pdf",
+            "quote": "2024年校级奖学金的名额（全校/人，最终核定）为110人。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "57bfb10796c480211426869b22e77fd6a3d98131e00345e2eff0d24dae12c630"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_08_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_08_v_2"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "CONFLICT",
+          "evidence_ids": [
+            "ev_1",
+            "ev_2"
+          ]
+        }
+      ],
+      "expected_explanation": "两个真实引用在同一实体、属性、时间、单位范围和事实状态下给出不兼容值。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "名额",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": [
+          {
+            "left": {
+              "entity": "校级奖学金",
+              "attribute": "名额",
+              "time": "2024年",
+              "basis": "全校/人",
+              "fact_status": "最终核定",
+              "evidence_id": "ev_1",
+              "value": "100人",
+              "value_quote": "100人"
+            },
+            "right": {
+              "entity": "校级奖学金",
+              "attribute": "名额",
+              "time": "2024年",
+              "basis": "全校/人",
+              "fact_status": "最终核定",
+              "evidence_id": "ev_2",
+              "value": "110人",
+              "value_quote": "110人"
+            },
+            "incompatible": true,
+            "reason": "2024年校级奖学金的名额在相同口径下不一致。"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conflict_09",
+      "group": "CONFLICT",
+      "package": {
+        "question": "本次报名年龄上限是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "conflict_09_doc_1",
+            "document_version_id": "conflict_09_v_1",
+            "working_copy_id": "conflict_09_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本9.pdf",
+            "quote": "本招聘批次本次招聘的年龄上限（周岁，正式要求）为35周岁。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "conflict_09_doc_2",
+            "document_version_id": "conflict_09_v_2",
+            "working_copy_id": "conflict_09_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本9.pdf",
+            "quote": "本招聘批次本次招聘的年龄上限（周岁，正式要求）为40周岁。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "4de20772588309d89b2d299bb1cec02566d84ed60cf101109cd61973344e3a58"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_09_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_09_v_2"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "CONFLICT",
+          "evidence_ids": [
+            "ev_1",
+            "ev_2"
+          ]
+        }
+      ],
+      "expected_explanation": "两个真实引用在同一实体、属性、时间、单位范围和事实状态下给出不兼容值。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "年龄上限",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": [
+          {
+            "left": {
+              "entity": "本次招聘",
+              "attribute": "年龄上限",
+              "time": "本招聘批次",
+              "basis": "周岁",
+              "fact_status": "正式要求",
+              "evidence_id": "ev_1",
+              "value": "35周岁",
+              "value_quote": "35周岁"
+            },
+            "right": {
+              "entity": "本次招聘",
+              "attribute": "年龄上限",
+              "time": "本招聘批次",
+              "basis": "周岁",
+              "fact_status": "正式要求",
+              "evidence_id": "ev_2",
+              "value": "40周岁",
+              "value_quote": "40周岁"
+            },
+            "incompatible": true,
+            "reason": "本招聘批次本次招聘的年龄上限在相同口径下不一致。"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conflict_10",
+      "group": "CONFLICT",
+      "package": {
+        "question": "项目是否允许重复申报？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "conflict_10_doc_1",
+            "document_version_id": "conflict_10_v_1",
+            "working_copy_id": "conflict_10_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本10.pdf",
+            "quote": "本批次项目乙的重复申报许可（同一申请人，正式规定）为不允许重复申报。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "conflict_10_doc_2",
+            "document_version_id": "conflict_10_v_2",
+            "working_copy_id": "conflict_10_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本10.pdf",
+            "quote": "本批次项目乙的重复申报许可（同一申请人，正式规定）为允许重复申报。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "1354d2448196ad6939990268e222578b64ee0d68e691ca3dfe8cea18cfc8f929"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_10_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_10_v_2"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "CONFLICT",
+          "evidence_ids": [
+            "ev_1",
+            "ev_2"
+          ]
+        }
+      ],
+      "expected_explanation": "两个真实引用在同一实体、属性、时间、单位范围和事实状态下给出不兼容值。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "重复申报许可",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": [
+          {
+            "left": {
+              "entity": "项目乙",
+              "attribute": "重复申报许可",
+              "time": "本批次",
+              "basis": "同一申请人",
+              "fact_status": "正式规定",
+              "evidence_id": "ev_1",
+              "value": "不允许重复申报",
+              "value_quote": "不允许重复申报"
+            },
+            "right": {
+              "entity": "项目乙",
+              "attribute": "重复申报许可",
+              "time": "本批次",
+              "basis": "同一申请人",
+              "fact_status": "正式规定",
+              "evidence_id": "ev_2",
+              "value": "允许重复申报",
+              "value_quote": "允许重复申报"
+            },
+            "incompatible": true,
+            "reason": "本批次项目乙的重复申报许可在相同口径下不一致。"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conflict_11",
+      "group": "CONFLICT",
+      "package": {
+        "question": "2024年物理学院教师总人数是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "conflict_11_doc_1",
+            "document_version_id": "conflict_11_v_1",
+            "working_copy_id": "conflict_11_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本11.pdf",
+            "quote": "2024年物理学院的教师总人数（在编教师/人，年终统计）为80人。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "conflict_11_doc_2",
+            "document_version_id": "conflict_11_v_2",
+            "working_copy_id": "conflict_11_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本11.pdf",
+            "quote": "2024年物理学院的教师总人数（在编教师/人，年终统计）为85人。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "ce26542f4741c82ecc03893c1efca13203b5c7383b3558e6985b39b505a5126e"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_11_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_11_v_2"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "CONFLICT",
+          "evidence_ids": [
+            "ev_1",
+            "ev_2"
+          ]
+        }
+      ],
+      "expected_explanation": "两个真实引用在同一实体、属性、时间、单位范围和事实状态下给出不兼容值。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "教师总人数",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": [
+          {
+            "left": {
+              "entity": "物理学院",
+              "attribute": "教师总人数",
+              "time": "2024年",
+              "basis": "在编教师/人",
+              "fact_status": "年终统计",
+              "evidence_id": "ev_1",
+              "value": "80人",
+              "value_quote": "80人"
+            },
+            "right": {
+              "entity": "物理学院",
+              "attribute": "教师总人数",
+              "time": "2024年",
+              "basis": "在编教师/人",
+              "fact_status": "年终统计",
+              "evidence_id": "ev_2",
+              "value": "85人",
+              "value_quote": "85人"
+            },
+            "incompatible": true,
+            "reason": "2024年物理学院的教师总人数在相同口径下不一致。"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conflict_12",
+      "group": "CONFLICT",
+      "package": {
+        "question": "本年度论文奖励标准是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "conflict_12_doc_1",
+            "document_version_id": "conflict_12_v_1",
+            "working_copy_id": "conflict_12_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本12.pdf",
+            "quote": "本年度论文奖励的每篇奖励标准（元/篇，已批准）为1000元。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "conflict_12_doc_2",
+            "document_version_id": "conflict_12_v_2",
+            "working_copy_id": "conflict_12_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本12.pdf",
+            "quote": "本年度论文奖励的每篇奖励标准（元/篇，已批准）为1500元。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "3dbbd6ae86037f05bcc9352702345771ccdddf5b23f22d35d1ec32f790cc6618"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_12_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_12_v_2"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "CONFLICT",
+          "evidence_ids": [
+            "ev_1",
+            "ev_2"
+          ]
+        }
+      ],
+      "expected_explanation": "两个真实引用在同一实体、属性、时间、单位范围和事实状态下给出不兼容值。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "每篇奖励标准",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": [
+          {
+            "left": {
+              "entity": "论文奖励",
+              "attribute": "每篇奖励标准",
+              "time": "本年度",
+              "basis": "元/篇",
+              "fact_status": "已批准",
+              "evidence_id": "ev_1",
+              "value": "1000元",
+              "value_quote": "1000元"
+            },
+            "right": {
+              "entity": "论文奖励",
+              "attribute": "每篇奖励标准",
+              "time": "本年度",
+              "basis": "元/篇",
+              "fact_status": "已批准",
+              "evidence_id": "ev_2",
+              "value": "1500元",
+              "value_quote": "1500元"
+            },
+            "incompatible": true,
+            "reason": "本年度论文奖励的每篇奖励标准在相同口径下不一致。"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conflict_13",
+      "group": "CONFLICT",
+      "package": {
+        "question": "当前报送邮箱是什么？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "conflict_13_doc_1",
+            "document_version_id": "conflict_13_v_1",
+            "working_copy_id": "conflict_13_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本13.pdf",
+            "quote": "当前批次本次材料报送的邮箱（同一报送部门，正式公布）为a@example.edu。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "conflict_13_doc_2",
+            "document_version_id": "conflict_13_v_2",
+            "working_copy_id": "conflict_13_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本13.pdf",
+            "quote": "当前批次本次材料报送的邮箱（同一报送部门，正式公布）为b@example.edu。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "840fe7a4a50614ec2b7eb6e120b02af416d129d96506891e893ec6b1f665fd6f"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_13_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_13_v_2"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "CONFLICT",
+          "evidence_ids": [
+            "ev_1",
+            "ev_2"
+          ]
+        }
+      ],
+      "expected_explanation": "两个真实引用在同一实体、属性、时间、单位范围和事实状态下给出不兼容值。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "邮箱",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": [
+          {
+            "left": {
+              "entity": "本次材料报送",
+              "attribute": "邮箱",
+              "time": "当前批次",
+              "basis": "同一报送部门",
+              "fact_status": "正式公布",
+              "evidence_id": "ev_1",
+              "value": "a@example.edu",
+              "value_quote": "a@example.edu"
+            },
+            "right": {
+              "entity": "本次材料报送",
+              "attribute": "邮箱",
+              "time": "当前批次",
+              "basis": "同一报送部门",
+              "fact_status": "正式公布",
+              "evidence_id": "ev_2",
+              "value": "b@example.edu",
+              "value_quote": "b@example.edu"
+            },
+            "incompatible": true,
+            "reason": "当前批次本次材料报送的邮箱在相同口径下不一致。"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conflict_14",
+      "group": "CONFLICT",
+      "package": {
+        "question": "本期公示需要多少天？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "conflict_14_doc_1",
+            "document_version_id": "conflict_14_v_1",
+            "working_copy_id": "conflict_14_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本14.pdf",
+            "quote": "本期本期公示的公示时长（自然日，正式通知）为5天。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "conflict_14_doc_2",
+            "document_version_id": "conflict_14_v_2",
+            "working_copy_id": "conflict_14_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本14.pdf",
+            "quote": "本期本期公示的公示时长（自然日，正式通知）为7天。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "3b695a39fdb3d191059b9e5693ed338712179a4c127abfd60918d62484182ffe"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_14_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_14_v_2"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "CONFLICT",
+          "evidence_ids": [
+            "ev_1",
+            "ev_2"
+          ]
+        }
+      ],
+      "expected_explanation": "两个真实引用在同一实体、属性、时间、单位范围和事实状态下给出不兼容值。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "公示时长",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": [
+          {
+            "left": {
+              "entity": "本期公示",
+              "attribute": "公示时长",
+              "time": "本期",
+              "basis": "自然日",
+              "fact_status": "正式通知",
+              "evidence_id": "ev_1",
+              "value": "5天",
+              "value_quote": "5天"
+            },
+            "right": {
+              "entity": "本期公示",
+              "attribute": "公示时长",
+              "time": "本期",
+              "basis": "自然日",
+              "fact_status": "正式通知",
+              "evidence_id": "ev_2",
+              "value": "7天",
+              "value_quote": "7天"
+            },
+            "incompatible": true,
+            "reason": "本期本期公示的公示时长在相同口径下不一致。"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conflict_15",
+      "group": "CONFLICT",
+      "package": {
+        "question": "当前项目经费总额是多少？请同时给出拨付日期。",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "conflict_15_doc_1",
+            "document_version_id": "conflict_15_v_1",
+            "working_copy_id": "conflict_15_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本15.pdf",
+            "quote": "当前立项项目丙的经费总额（万元/同一项目，已立项）为200万元。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "conflict_15_doc_2",
+            "document_version_id": "conflict_15_v_2",
+            "working_copy_id": "conflict_15_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本15.pdf",
+            "quote": "当前立项项目丙的经费总额（万元/同一项目，已立项）为250万元。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "9363c330cb489a0914088bf72aab3f49954acc7b44479bf85cfaf50892b28eb1"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_15_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_15_v_2"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "MISSING",
+          "evidence_ids": []
+        },
+        {
+          "type": "CONFLICT",
+          "evidence_ids": [
+            "ev_1",
+            "ev_2"
+          ]
+        }
+      ],
+      "expected_explanation": "两个真实引用在同一实体、属性、时间、单位范围和事实状态下给出不兼容值。同时缺少拨付日期。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "经费总额",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          },
+          {
+            "requirement_id": "r2",
+            "text": "拨付日期",
+            "status": "UNSUPPORTED",
+            "evidence_ids": [],
+            "reason": "当前证据包未提供该项事实。"
+          }
+        ],
+        "conflicts": [
+          {
+            "left": {
+              "entity": "项目丙",
+              "attribute": "经费总额",
+              "time": "当前立项",
+              "basis": "万元/同一项目",
+              "fact_status": "已立项",
+              "evidence_id": "ev_1",
+              "value": "200万元",
+              "value_quote": "200万元"
+            },
+            "right": {
+              "entity": "项目丙",
+              "attribute": "经费总额",
+              "time": "当前立项",
+              "basis": "万元/同一项目",
+              "fact_status": "已立项",
+              "evidence_id": "ev_2",
+              "value": "250万元",
+              "value_quote": "250万元"
+            },
+            "incompatible": true,
+            "reason": "当前立项项目丙的经费总额在相同口径下不一致。"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conflict_16",
+      "group": "CONFLICT",
+      "package": {
+        "question": "当前导师认定需要几年教学经历？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "conflict_16_doc_1",
+            "document_version_id": "conflict_16_v_1",
+            "working_copy_id": "conflict_16_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本16.pdf",
+            "quote": "当前认定期导师认定的教学经历年限（完整学年，正式要求）为3年。",
+            "page_number": 1
+          },
+          {
+            "evidence_id": "ev_2",
+            "document_id": "conflict_16_doc_2",
+            "document_version_id": "conflict_16_v_2",
+            "working_copy_id": "conflict_16_wc_2",
+            "managed_file_revision_id": null,
+            "filename": "合成样本16.pdf",
+            "quote": "当前认定期导师认定的教学经历年限（完整学年，正式要求）为5年。",
+            "page_number": 2
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "21a482cd89b47fc0b36aa2361e909e3b86c83bc6a912c1a1d96b09ee80669bf1"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_16_v_1"
+        },
+        "ev_2": {
+          "status": "VERIFIED",
+          "current_version_id": "conflict_16_v_2"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "CONFLICT",
+          "evidence_ids": [
+            "ev_1",
+            "ev_2"
+          ]
+        }
+      ],
+      "expected_explanation": "两个真实引用在同一实体、属性、时间、单位范围和事实状态下给出不兼容值。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "教学经历年限",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1",
+              "ev_2"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": [
+          {
+            "left": {
+              "entity": "导师认定",
+              "attribute": "教学经历年限",
+              "time": "当前认定期",
+              "basis": "完整学年",
+              "fact_status": "正式要求",
+              "evidence_id": "ev_1",
+              "value": "3年",
+              "value_quote": "3年"
+            },
+            "right": {
+              "entity": "导师认定",
+              "attribute": "教学经历年限",
+              "time": "当前认定期",
+              "basis": "完整学年",
+              "fact_status": "正式要求",
+              "evidence_id": "ev_2",
+              "value": "5年",
+              "value_quote": "5年"
+            },
+            "incompatible": true,
+            "reason": "当前认定期导师认定的教学经历年限在相同口径下不一致。"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "outdated_01",
+      "group": "OUTDATED",
+      "package": {
+        "question": "当前奖学金申请条件是什么？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "outdated_01_doc_1",
+            "document_version_id": "outdated_01_v_1",
+            "working_copy_id": "outdated_01_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本1.pdf",
+            "quote": "申请人须为本科二年级学生。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "934e2b226004bf2e29305baba98ca26996ccdf6ee588673eb5f46f3468598945"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "outdated_01_replacement"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "OUTDATED",
+          "evidence_ids": [
+            "ev_1"
+          ]
+        }
+      ],
+      "expected_explanation": "问题明确询问当前状态，冻结快照证明引用内容版本已被当前已就绪版本替换；不判断业务法规失效。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "当前申请条件",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "outdated_02",
+      "group": "OUTDATED",
+      "package": {
+        "question": "最新科研经费批准额度是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "outdated_02_doc_1",
+            "document_version_id": "outdated_02_v_1",
+            "working_copy_id": "outdated_02_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本2.pdf",
+            "quote": "批准科研经费500万元。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "392d464ea1d38e8406f12f09be352e3bfa6f82a3a06e76c7ae0a1ebb6efef9ec"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "outdated_02_replacement"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "OUTDATED",
+          "evidence_ids": [
+            "ev_1"
+          ]
+        }
+      ],
+      "expected_explanation": "问题明确询问当前状态，冻结快照证明引用内容版本已被当前已就绪版本替换；不判断业务法规失效。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "最新批准额度",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "outdated_03",
+      "group": "OUTDATED",
+      "package": {
+        "question": "现在申报截止日期是什么？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "outdated_03_doc_1",
+            "document_version_id": "outdated_03_v_1",
+            "working_copy_id": "outdated_03_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本3.pdf",
+            "quote": "申报于10月20日截止。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "b3b52bc0e5fe4c3a4752a228a416d36b85c2645636db84699433fc885fe7e904"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "outdated_03_replacement"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "OUTDATED",
+          "evidence_ids": [
+            "ev_1"
+          ]
+        }
+      ],
+      "expected_explanation": "问题明确询问当前状态，冻结快照证明引用内容版本已被当前已就绪版本替换；不判断业务法规失效。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "当前截止日期",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "outdated_04",
+      "group": "OUTDATED",
+      "package": {
+        "question": "现行报销标准是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "outdated_04_doc_1",
+            "document_version_id": "outdated_04_v_1",
+            "working_copy_id": "outdated_04_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本4.pdf",
+            "quote": "住宿报销标准为300元每晚。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "5f25a795e382c2616c34f5b6eb14d0fdd2e6814e1b16f92bd21ebde9057c49a8"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "outdated_04_replacement"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "OUTDATED",
+          "evidence_ids": [
+            "ev_1"
+          ]
+        }
+      ],
+      "expected_explanation": "问题明确询问当前状态，冻结快照证明引用内容版本已被当前已就绪版本替换；不判断业务法规失效。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "现行报销标准",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "outdated_05",
+      "group": "OUTDATED",
+      "package": {
+        "question": "目前项目负责人是谁？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "outdated_05_doc_1",
+            "document_version_id": "outdated_05_v_1",
+            "working_copy_id": "outdated_05_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本5.pdf",
+            "quote": "项目负责人为张三。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "5a138bf427b6efbac5a3e3c5c5ecc7046564f91ed0927c0b44c7e13041e2e402"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "outdated_05_replacement"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "OUTDATED",
+          "evidence_ids": [
+            "ev_1"
+          ]
+        }
+      ],
+      "expected_explanation": "问题明确询问当前状态，冻结快照证明引用内容版本已被当前已就绪版本替换；不判断业务法规失效。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "当前项目负责人",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "outdated_06",
+      "group": "OUTDATED",
+      "package": {
+        "question": "当前教职工请假要经谁审批？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "outdated_06_doc_1",
+            "document_version_id": "outdated_06_v_1",
+            "working_copy_id": "outdated_06_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本6.pdf",
+            "quote": "教职工请假由学院院长审批。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "80291b179d56bcdde5b318404eeb3140ff3525430cbd250efece77a7e099d123"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "outdated_06_replacement"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "OUTDATED",
+          "evidence_ids": [
+            "ev_1"
+          ]
+        }
+      ],
+      "expected_explanation": "问题明确询问当前状态，冻结快照证明引用内容版本已被当前已就绪版本替换；不判断业务法规失效。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "当前请假审批人",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "outdated_07",
+      "group": "OUTDATED",
+      "package": {
+        "question": "最新通知要求哪些附件？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "outdated_07_doc_1",
+            "document_version_id": "outdated_07_v_1",
+            "working_copy_id": "outdated_07_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本7.pdf",
+            "quote": "请提交申请表与身份证复印件。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "25b319470d18a79e51b01484fc615a5e83ccb6b5ffcc04d868ef94c897f67946"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "outdated_07_replacement"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "OUTDATED",
+          "evidence_ids": [
+            "ev_1"
+          ]
+        }
+      ],
+      "expected_explanation": "问题明确询问当前状态，冻结快照证明引用内容版本已被当前已就绪版本替换；不判断业务法规失效。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "最新附件清单",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "outdated_08",
+      "group": "OUTDATED",
+      "package": {
+        "question": "当前活动举办地点在哪里？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "outdated_08_doc_1",
+            "document_version_id": "outdated_08_v_1",
+            "working_copy_id": "outdated_08_wc_1",
+            "managed_file_revision_id": null,
+            "filename": "合成样本8.pdf",
+            "quote": "活动地点为一号报告厅。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "f827b5723cb21334d147a3cade120b5a6e402e79250ffeedf8db76cff24de497"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "outdated_08_replacement"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "OUTDATED",
+          "evidence_ids": [
+            "ev_1"
+          ]
+        }
+      ],
+      "expected_explanation": "问题明确询问当前状态，冻结快照证明引用内容版本已被当前已就绪版本替换；不判断业务法规失效。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "当前活动地点",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "outdated_09",
+      "group": "OUTDATED",
+      "package": {
+        "question": "目前招生名额是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "outdated_09_doc_1",
+            "document_version_id": "outdated_09_v_1",
+            "working_copy_id": null,
+            "managed_file_revision_id": "outdated_09_rev_1",
+            "filename": "合成样本9.pdf",
+            "quote": "本次招生名额100人。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "8f68abef69f8f23fdc93f01a304e8c3eac3e0c4a26f358f814dc363d2655b9fb"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "outdated_09_replacement"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "OUTDATED",
+          "evidence_ids": [
+            "ev_1"
+          ]
+        }
+      ],
+      "expected_explanation": "问题明确询问当前状态，冻结快照证明引用内容版本已被当前已就绪版本替换；不判断业务法规失效。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "当前招生名额",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "outdated_10",
+      "group": "OUTDATED",
+      "package": {
+        "question": "现行资助金额是多少？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "outdated_10_doc_1",
+            "document_version_id": "outdated_10_v_1",
+            "working_copy_id": null,
+            "managed_file_revision_id": "outdated_10_rev_1",
+            "filename": "合成样本10.pdf",
+            "quote": "每人资助5000元。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "aed96e7e55f9b556f79b60c6fe51b222b30421a73123c398d943d40439b214fe"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "outdated_10_replacement"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "OUTDATED",
+          "evidence_ids": [
+            "ev_1"
+          ]
+        }
+      ],
+      "expected_explanation": "问题明确询问当前状态，冻结快照证明引用内容版本已被当前已就绪版本替换；不判断业务法规失效。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "现行资助金额",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "outdated_11",
+      "group": "OUTDATED",
+      "package": {
+        "question": "现在公示期限有几天？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "outdated_11_doc_1",
+            "document_version_id": "outdated_11_v_1",
+            "working_copy_id": null,
+            "managed_file_revision_id": "outdated_11_rev_1",
+            "filename": "合成样本11.pdf",
+            "quote": "公示期限为5个自然日。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "8e3f377fec30014823bffe0c3396284364d177fb82e94b2befa9a879ffa09a9a"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "outdated_11_replacement"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "OUTDATED",
+          "evidence_ids": [
+            "ev_1"
+          ]
+        }
+      ],
+      "expected_explanation": "问题明确询问当前状态，冻结快照证明引用内容版本已被当前已就绪版本替换；不判断业务法规失效。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "当前公示期限",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "outdated_12",
+      "group": "OUTDATED",
+      "package": {
+        "question": "最新人员名单包括谁？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "outdated_12_doc_1",
+            "document_version_id": "outdated_12_v_1",
+            "working_copy_id": null,
+            "managed_file_revision_id": "outdated_12_rev_1",
+            "filename": "合成样本12.pdf",
+            "quote": "本次名单包括张三、李四。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "4df9245b96d369dc915691de26654aec3d42d5e15ce07872b9b0fe8d4dbc39d5"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "outdated_12_replacement"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "OUTDATED",
+          "evidence_ids": [
+            "ev_1"
+          ]
+        }
+      ],
+      "expected_explanation": "问题明确询问当前状态，冻结快照证明引用内容版本已被当前已就绪版本替换；不判断业务法规失效。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "最新人员名单",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "outdated_13",
+      "group": "OUTDATED",
+      "package": {
+        "question": "当前提交材料的邮箱是什么？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "outdated_13_doc_1",
+            "document_version_id": "outdated_13_v_1",
+            "working_copy_id": null,
+            "managed_file_revision_id": "outdated_13_rev_1",
+            "filename": "合成样本13.pdf",
+            "quote": "提交邮箱为a@example.edu。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "48e99d049e6f50fe683c1c6fa3f0e01161f1dba5e49ea0a0e9e1d1a286469861"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "outdated_13_replacement"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "OUTDATED",
+          "evidence_ids": [
+            "ev_1"
+          ]
+        }
+      ],
+      "expected_explanation": "问题明确询问当前状态，冻结快照证明引用内容版本已被当前已就绪版本替换；不判断业务法规失效。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "当前提交邮箱",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "outdated_14",
+      "group": "OUTDATED",
+      "package": {
+        "question": "目前会议召开时间是什么？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "outdated_14_doc_1",
+            "document_version_id": "outdated_14_v_1",
+            "working_copy_id": null,
+            "managed_file_revision_id": "outdated_14_rev_1",
+            "filename": "合成样本14.pdf",
+            "quote": "会议定于周三上午九点召开。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "9b90c4dfcd00156f185e4a1ee26ecdcefd731ca635c3ef977e1103142f6816d3"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "outdated_14_replacement"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "OUTDATED",
+          "evidence_ids": [
+            "ev_1"
+          ]
+        }
+      ],
+      "expected_explanation": "问题明确询问当前状态，冻结快照证明引用内容版本已被当前已就绪版本替换；不判断业务法规失效。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "当前会议时间",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "outdated_15",
+      "group": "OUTDATED",
+      "package": {
+        "question": "现行导师申请条件是什么？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "outdated_15_doc_1",
+            "document_version_id": "outdated_15_v_1",
+            "working_copy_id": null,
+            "managed_file_revision_id": "outdated_15_rev_1",
+            "filename": "合成样本15.pdf",
+            "quote": "申请人须有3年教学经历。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "18b54b0116518c94abb3c28062d79e081539901edbcdc606546dbd4dfb59fecd"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "outdated_15_replacement"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "OUTDATED",
+          "evidence_ids": [
+            "ev_1"
+          ]
+        }
+      ],
+      "expected_explanation": "问题明确询问当前状态，冻结快照证明引用内容版本已被当前已就绪版本替换；不判断业务法规失效。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "现行导师申请条件",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    },
+    {
+      "case_id": "outdated_16",
+      "group": "OUTDATED",
+      "package": {
+        "question": "现在应按哪个预算总额执行？",
+        "question_type": "FACT",
+        "answer_mode": "FOCUSED",
+        "response_format": "TEXT",
+        "fields": [],
+        "scope": {
+          "mode": "offline_frozen"
+        },
+        "evidence_items": [
+          {
+            "evidence_id": "ev_1",
+            "document_id": "outdated_16_doc_1",
+            "document_version_id": "outdated_16_v_1",
+            "working_copy_id": null,
+            "managed_file_revision_id": "outdated_16_rev_1",
+            "filename": "合成样本16.pdf",
+            "quote": "最终批准预算200万元。",
+            "page_number": 1
+          }
+        ],
+        "limitations": [],
+        "evidence_fingerprint": "4efd4c88c3c2b727251dab7757e0f3ad2e55a4dec387f3960c6c77ed2fedf5c8"
+      },
+      "versions": {
+        "ev_1": {
+          "status": "VERIFIED",
+          "current_version_id": "outdated_16_replacement"
+        }
+      },
+      "expected_issues": [
+        {
+          "type": "OUTDATED",
+          "evidence_ids": [
+            "ev_1"
+          ]
+        }
+      ],
+      "expected_explanation": "问题明确询问当前状态，冻结快照证明引用内容版本已被当前已就绪版本替换；不判断业务法规失效。",
+      "recorded_semantic_response": {
+        "requirements": [
+          {
+            "requirement_id": "r1",
+            "text": "当前执行预算",
+            "status": "SUPPORTED",
+            "evidence_ids": [
+              "ev_1"
+            ],
+            "reason": "当前证据存在明确支持。"
+          }
+        ],
+        "conflicts": []
+      }
+    }
+  ]
+}

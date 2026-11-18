@@ -13,7 +13,9 @@ from pydantic import ValidationError
 from app.core.config import Settings, get_settings
 from app.modules.agent.planner import PlannerOutput, PlannerStep
 from app.modules.agent.planner_contracts import PlannerDecision
+from app.modules.agent.tool_schemas import SearchToolInput
 from app.modules.llm.client import LLMResponseError, OpenAICompatibleLLMClient
+from app.modules.retrieval.source_reference import EvidenceSourcePlanError, extract_source_reference, validate_source_search_plan
 
 
 ADAPTIVE_PLANNER_SYSTEM_PROMPT = """你是 File Agent 的 Adaptive Planner。
@@ -37,6 +39,11 @@ hybrid-search 属于发现型 Tool：首次计划只执行检索，观察命中�
 读取这些候选，也不得把它们描述为相关事实。可以 FINISH 展示候选、调整查询或请求用户补充条件。
 重新检索必须改变 query、match_mode 或 phrases，不能重复相同输入。
 首次调用 hybrid-search 时应优先在 literal_input.semantic_plan 中表达完整主题：
+- 对“只根据某文件，说明若干要求并引用原文”，query 和 semantic_plan 只表达来源文件条件，
+  保留年份、单位等范围；不要把待回答字段或输出、引用要求当作必需主题。后续证据回答
+  仍须使用完整用户问题；先通过检索观察绑定真实文件，不能猜测 document_id。
+- EXACT_PHRASE 的必需主题须来自用户指定来源中的连续原话，不能把不同位置的词拼接成一个短语。
+  “今年是否还执行”是待回答的适用性问题，不能改写历史来源的年份过滤；只允许该来源时不能另找文件。
 - “学校的工作总结”的 core_topics 使用完整“工作总结”，不得拆成“工作”和“总结”；
 - 此处“学校”默认是当前学校工作区，不是每份文件必须包含的字面词；scope.organization_level 使用
   ANY，可偏好 UNIVERSITY，并按 organization_level、business_topic、year 分组；
@@ -128,6 +135,7 @@ def validate_and_convert_decision(
     has_tool_observation: bool = False,
     observation: dict[str, Any] | None = None,
     prior_intent: str | None = None,
+    user_message: str | None = None,
 ) -> tuple[PlannerOutput, dict[str, Any]]:
     """把 Adaptive 决策转换为现有执行计划，并以后端 Catalog 强制风险边界。"""
 
@@ -287,6 +295,20 @@ def validate_and_convert_decision(
         )
         # Registry 是最终事实来源；即使 CatalogSnapshot 被旧 checkpoint 复用，也要重新取定义。
         definition = registry.get(adaptive_step.tool_name)
+        if (
+            user_message and extract_source_reference(user_message) and not has_tool_observation
+            and adaptive_step.tool_name == "hybrid-search"
+            and not adaptive_step.literal_input.get("document_ids")
+        ):
+            try:
+                search_input = SearchToolInput.model_validate(adaptive_step.literal_input)
+            except ValidationError as exc:
+                raise EvidenceSourcePlanError("SOURCE_PLAN_SCHEMA_INVALID") from exc
+            validate_source_search_plan(
+                message=user_message,
+                search_query=search_input.query,
+                semantic_plan=search_input.semantic_plan,
+            )
         steps.append(
             PlannerStep(
                 step_id=adaptive_step.step_id,

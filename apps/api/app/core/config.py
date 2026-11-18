@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -221,6 +222,14 @@ class Settings(BaseModel):
     evidence_answer_max_calls: int = DEFAULT_EVIDENCE_ANSWER_MAX_CALLS
     evidence_answer_repair_calls: int = DEFAULT_EVIDENCE_ANSWER_REPAIR_CALLS
     evidence_answer_cache_enabled: bool = True
+    # 旁观评估默认关闭，结果不能驱动补搜、拒答或任何文件操作。
+    evidence_evaluation_mode: Literal["off", "shadow"] = "off"
+    evidence_evaluation_timeout_seconds: int = 20
+    evidence_evaluation_max_input_chars: int = 48000
+    evidence_evaluation_max_calls: int = 3
+    evidence_evaluation_max_output_tokens: int = 3000
+    # 显式测试采集计划；空值不导出正文，仅独立测试库和datasets目录允许使用。
+    evidence_evaluation_capture_plan: str = ""
     initial_working_copy_organization_enabled: bool = True
     initial_organization_confidence: float = DEFAULT_INITIAL_ORGANIZATION_CONFIDENCE
     # 上传默认执行主分类并将工作副本首次发布到分类目录；
@@ -807,6 +816,20 @@ def get_settings() -> Settings:
             "EVIDENCE_ANSWER_CACHE_ENABLED", "true"
         ).lower()
         == "true",
+        evidence_evaluation_mode=os.getenv("EVIDENCE_EVALUATION_MODE", "off").strip().lower(),
+        evidence_evaluation_capture_plan=os.getenv("EVIDENCE_EVALUATION_CAPTURE_PLAN", "").strip(),
+        evidence_evaluation_timeout_seconds=_bounded_int_env(
+            "EVIDENCE_EVALUATION_TIMEOUT_SECONDS", 20, minimum=1, maximum=60,
+        ),
+        evidence_evaluation_max_input_chars=_bounded_int_env(
+            "EVIDENCE_EVALUATION_MAX_INPUT_CHARS", 48000, minimum=16000, maximum=120000,
+        ),
+        evidence_evaluation_max_calls=_bounded_int_env(
+            "EVIDENCE_EVALUATION_MAX_CALLS", 3, minimum=1, maximum=5,
+        ),
+        evidence_evaluation_max_output_tokens=_bounded_int_env(
+            "EVIDENCE_EVALUATION_MAX_OUTPUT_TOKENS", 3000, minimum=500, maximum=8000,
+        ),
         initial_working_copy_organization_enabled=os.getenv(
             "INITIAL_WORKING_COPY_ORGANIZATION_ENABLED", "true"
         ).lower() == "true",

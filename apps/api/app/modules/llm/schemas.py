@@ -53,6 +53,7 @@ class UserIntentPlan(BaseModel):
     managed_scope_confidence: Optional[float] = Field(default=None, ge=0, le=1)
     managed_filename_contains: Optional[str] = None
     managed_extension: Optional[str] = None
+    # 保留既有字段名兼容协议；也承载共享工作区证据发现的检索词，不含回答格式要求。
     managed_query: Optional[str] = None
     file_search_plan: Optional[FileSearchSemanticPlan] = None
 

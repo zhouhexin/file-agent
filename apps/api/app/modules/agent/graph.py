@@ -28,7 +28,6 @@ from app.modules.agent.planner import (
     build_plan_from_user_intent,
     has_explicit_attachment_classification_request,
     has_explicit_filename_content_request,
-    has_unscoped_workspace_fact_question,
     is_missing_generated_output_feedback,
     is_structured_image_extraction_request,
     structured_extraction_unavailable_plan,
@@ -47,6 +46,7 @@ from app.modules.agent.tool_registry import UnknownToolError
 from app.modules.agent.tool_schemas import ToolInputValidationError
 from app.modules.classification.result_builder import build_document_results_from_extraction_results
 from app.modules.llm.client import LLMResponseError
+from app.modules.retrieval.source_reference import EvidenceSourcePlanError
 # 两个表格结果格式化器，用于最终 response 阶段生成自然语言回复。
 from app.modules.spreadsheet_analysis.formatter import format_spreadsheet_analysis_response
 from app.modules.spreadsheet_analysis.profiler import SUPPORTED_SPREADSHEET_SUFFIXES
@@ -285,12 +285,11 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                     preflight_plan.intent == "EVIDENCE_ANSWER"
                     and has_explicit_filename_content_request(state["message"])
                 )
-                or preflight_plan.intent
-                in {"EVIDENCE_DISCOVERY", "SPREADSHEET_DISCOVERY"}
+                or preflight_plan.intent == "SPREADSHEET_DISCOVERY"
             )
         ):
-            # enabled 模式由 Catalog Planner 选择成熟 Tool；完整文件名构成后端已验证的硬对象范围，
-            # 无附件事实问题则必须先走只读工作区发现。两者都是不能由模型放宽的后端范围策略。
+            # enabled 模式由 Catalog Planner 选择成熟 Tool；这里仅保留既有对象
+            # 约束和结构化表格入口，普通正文问答的分支仍由模型决定。
             preflight_plan = None
         if preflight_plan is not None:
             update = _planner_state_update(
@@ -325,6 +324,7 @@ def planning(state: AgentGraphState, runtime: Runtime[AgentRuntimeContext]) -> D
                     has_tool_observation=bool(state.get("observation")),
                     observation=state.get("observation") or None,
                     prior_intent=state.get("intent"),
+                    user_message=state["message"],
                 )
             else:
                 plan, user_intent_plan = _run_legacy_llm_planner(
@@ -516,32 +516,51 @@ def _run_legacy_llm_planner(
     }
     if state.get("observation"):
         llm_request["observation"] = state["observation"]
-    intent_plan = _understand_user_request(
-        service=runtime.context.llm_intent_service,
-        request=llm_request,
-        catalog_snapshot=runtime.context.catalog_snapshot,
-    )
-    log_event(
-        "agent.planning.llm_intent",
-        status="COMPLETED",
-        intent=intent_plan.intent,
-        decision_type=intent_plan.decision_type,
-        planning_round=planning_round,
-        target_scope=intent_plan.target_scope,
-        required_capabilities=intent_plan.required_capabilities,
-        tool_plan_hint=intent_plan.tool_plan_hint,
-    )
-    plan = build_plan_from_user_intent(
-        intent_plan=intent_plan,
-        message=state["message"],
-        attachments=attachments,
-    )
-    _validate_legacy_llm_plan_against_catalog(
-        plan=plan,
-        intent_plan=intent_plan,
-        catalog_snapshot=runtime.context.catalog_snapshot,
-    )
-    return plan, intent_plan.model_dump()
+    locked_intent = None
+    for repair_attempt in range(2):
+        intent_plan = _understand_user_request(
+            service=runtime.context.llm_intent_service,
+            request=llm_request,
+            catalog_snapshot=runtime.context.catalog_snapshot,
+        )
+        log_event(
+            "agent.planning.llm_intent", status="COMPLETED",
+            intent=intent_plan.intent, decision_type=intent_plan.decision_type,
+            planning_round=planning_round, source_plan_repair_attempt=repair_attempt,
+            target_scope=intent_plan.target_scope,
+            required_capabilities=intent_plan.required_capabilities, tool_plan_hint=intent_plan.tool_plan_hint,
+        )
+        try:
+            if repair_attempt and (intent_plan.intent != locked_intent or intent_plan.decision_type != "TOOL_PLAN"):
+                raise EvidenceSourcePlanError("SOURCE_REPAIR_CHANGED_TASK")
+            plan = build_plan_from_user_intent(
+                intent_plan=intent_plan, message=state["message"], attachments=attachments,
+            )
+        except EvidenceSourcePlanError as exc:
+            log_event(
+                "agent.planning.source_scope_rejected", level="WARNING", status="FAILED",
+                error_code=exc.code, source_plan_repair_attempt=repair_attempt,
+                message="模型检索条件未通过用户指定来源范围校验。",
+            )
+            if repair_attempt:
+                raise
+            locked_intent = intent_plan.intent
+            # 只允许一次参数纠错，不执行无效搜索，不传异常原文，不扩大原始任务范围。
+            llm_request["observation"] = {
+                **dict(llm_request.get("observation") or {}),
+                "source_plan_validation": {
+                    "error_code": exc.code, "locked_intent": locked_intent,
+                    "repair_attempt": 1, "max_repairs": 1,
+                },
+            }
+            continue
+        _validate_legacy_llm_plan_against_catalog(
+            plan=plan, intent_plan=intent_plan, catalog_snapshot=runtime.context.catalog_snapshot,
+        )
+        result = intent_plan.model_dump()
+        result["source_plan_repair_count"] = repair_attempt
+        return plan, result
+    raise AssertionError("source plan repair loop exited without a plan")
 
 
 def _validate_legacy_llm_plan_against_catalog(
@@ -701,10 +720,8 @@ def _deterministic_preflight_plan(
         and has_explicit_filename_content_request(state["message"])
     ):
         return plan
-    if plan.intent == "EVIDENCE_DISCOVERY" and has_unscoped_workspace_fact_question(
-        state["message"]
-    ):
-        return plan
+    # 自然语言事实问答属于意图理解，不能用确定性候选计划绕过正常 LLM。
+    # 模型选择文件问答后，后端再固定真实检索、权限和证据验证边界。
     if plan.intent == "SPREADSHEET_DISCOVERY":
         return plan
     return None

@@ -35,6 +35,8 @@ from app.modules.retrieval.semantic_plan import (
     FileSearchSemanticPlan,
     build_deterministic_semantic_plan,
 )
+from app.modules.retrieval.source_reference import extract_source_reference, validate_source_search_plan
+from app.modules.retrieval.explicit_sources import extract_explicit_sources
 
 
 FORBIDDEN_INPUT_KEYS = {
@@ -612,6 +614,21 @@ class DeterministicPlanner:
             # “把 A 重命名为 B”已经同时给出源文件和目标文件，必须优先进入
             # 受控重命名解析；不能先被“A 文件名检索”规则截走而只返回搜索卡。
             return _rename_review_resolution_plan(user_goal=message)
+        # 完整题名与正式文号是显式身份候选，交给受控 Tool 核验，不交给全库主题检索。
+        if not attachments and extract_explicit_sources(message):
+            return _evidence_answer_plan(
+                user_goal=message, question=message, document_ids=[], answer_mode="FOCUSED"
+            )
+        # 仅用于模型关闭或失败后的确定性降级；正常 LLM 规划不能被来源描述抢占。
+        # 来源描述不是文件身份，后续仍须经过受控检索并绑定真实结果 ID。
+        fallback_reference = _bounded_evidence_reference(message)
+        if not attachments and fallback_reference and not _has_supported_full_filename(message):
+            return _workspace_evidence_discovery_plan(
+                user_goal=message,
+                question=message,
+                search_query=fallback_reference,
+                answer_mode="FOCUSED",
+            )
         # 识别“找去年/前年/昨天的文件”等相对时间检索，命中后生成带时间条件的文件检索计划。
         if _has_relative_time_file_search(message=message, lowered=lowered) and not attachments:
             # 相对时间主题检索必须进入能执行年份硬过滤的 hybrid-search，不能列目录。
@@ -1507,16 +1524,18 @@ def build_plan_from_user_intent(
             and capability_route.tool_name == "evidence-answer"
         )
     )
-    if not document_ids and (
-        has_evidence_answer_route
-        or _has_search_then_answer_intent(message=message, lowered=lowered)
-        or _has_unscoped_workspace_fact_question(message=message, lowered=lowered)
-    ):
+    if not document_ids and has_evidence_answer_route:
+        validate_source_search_plan(
+            message=message, search_query=intent_plan.managed_query,
+            semantic_plan=intent_plan.file_search_plan,
+        )
         # LLM 负责识别“需要文件事实”，后端负责把无范围问答收敛为固定的
         # hybrid-search -> 严格候选 -> evidence-answer 链，不能直接信任模型猜测文件 ID。
         return _workspace_evidence_discovery_plan(
             user_goal=intent_plan.user_goal or message,
             question=message,
+            search_query=intent_plan.managed_query,
+            semantic_plan=intent_plan.file_search_plan,
             answer_mode="FOCUSED",
             response_style=intent_plan.response_style,
             clarification_question=intent_plan.clarification_question,
@@ -1534,6 +1553,11 @@ def build_plan_from_user_intent(
             and _has_file_search_intent(message=message, lowered=lowered)
         )
     ):
+        if not attachment_document_ids:
+            validate_source_search_plan(
+                message=message, search_query=intent_plan.managed_query,
+                semantic_plan=intent_plan.file_search_plan,
+            )
         return _file_search_plan(
             user_goal=intent_plan.user_goal or message,
             query=intent_plan.managed_query or message,
@@ -1541,6 +1565,7 @@ def build_plan_from_user_intent(
             response_style=intent_plan.response_style,
             clarification_question=intent_plan.clarification_question,
             llm_intent_plan=intent_plan.model_dump(),
+            semantic_plan=intent_plan.file_search_plan,
         )
 
     managed_root_key = intent_plan.managed_root_key or _managed_root_key_from_list_request(message)
@@ -1720,9 +1745,15 @@ def build_plan_from_user_intent(
             llm_intent_plan=intent_plan.model_dump(),
         )
 
-    if _has_answer_intent(
-        message=message, lowered=lowered
+    if (
+        has_evidence_answer_route
+        or (
+            intent_plan.needs_file_context
+            and _has_answer_intent(message=message, lowered=lowered)
+        )
     ) and not _has_classification_summary_intent(message=message):
+        # 正常 LLM 已声明文件事实需求时才使用兼容问句判断；问号或“说明”
+        # 本身不能覆盖模型选定的搜索/普通对话分支。
         if not document_ids and not _has_workspace_evidence_intent(
             message=message, lowered=lowered
         ):
@@ -2015,6 +2046,8 @@ def _workspace_evidence_discovery_plan(
     user_goal: str,
     question: str,
     answer_mode: str,
+    search_query: str | None = None,
+    semantic_plan: FileSearchSemanticPlan | None = None,
     response_style: str = "concise",
     clarification_question: str | None = None,
     llm_intent_plan: Dict[str, Any] | None = None,
@@ -2023,7 +2056,10 @@ def _workspace_evidence_discovery_plan(
 
     search_plan = _file_search_plan(
         user_goal=user_goal,
-        query=question,
+        # 使用调用方显式提供的检索条件；正常路径来自 LLM 的受控计划，
+        # 降级路径才由确定性 Planner 提取。这里不再按句式重写模型决策。
+        query=search_query or question,
+        semantic_plan=semantic_plan,
         document_ids=[],
         response_style=response_style,
         clarification_question=clarification_question,
@@ -4041,13 +4077,15 @@ def _has_explicit_filename_content_intent(*, message: str, lowered: str) -> bool
 
 
 def has_explicit_filename_content_request(message: str) -> bool:
-    """判断请求是否用完整文件名限定了正文任务。
+    """判断请求是否用完整文件名或逐份题名与文号限定了正文任务。
 
     该判断只负责固定文件范围边界，不推断业务主题。LangGraph 可在调用 LLM 前据此
     保留 ``evidence-answer`` 的精确文件名解析，避免模型把明确的单文件问题扩大成
-    全工作区模糊检索。
+    全工作区模糊检索。多来源题名与文号仍需由 Tool 校验真实索引，不在此生成 ID。
     """
 
+    if extract_explicit_sources(message):
+        return True
     return _has_supported_full_filename(message) and _has_explicit_filename_content_intent(
         message=message,
         lowered=message.lower(),
@@ -4082,12 +4120,23 @@ def _has_summary_intent(*, message: str, lowered: str) -> bool:
     )
 
 
+def _bounded_evidence_reference(message: str) -> str | None:
+    """为模型不可用时的确定性降级提取来源，不参与正常 LLM 分支判断。
+
+    仅识别句首“根据/依据……，说明/列出……”结构，避免从普通查找、文件
+    写操作或含多个句子的文本中任意删词。结果仍须通过原有受控检索验证。
+    """
+
+    return extract_source_reference(message)
+
+
 def _has_answer_intent(*, message: str, lowered: str) -> bool:
     """判断用户是否在针对附件正文提问。"""
     question_keywords = ["？", "?", "什么", "哪些", "如何", "怎么", "为什么", "是否", "问", "回答"]
     english_keywords = ["question", "answer", "what", "why", "how"]
-    return any(keyword in message for keyword in question_keywords) or any(
-        keyword in lowered for keyword in english_keywords
+    return (
+        any(keyword in message for keyword in question_keywords)
+        or any(keyword in lowered for keyword in english_keywords)
     )
 
 

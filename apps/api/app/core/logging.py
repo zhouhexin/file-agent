@@ -22,6 +22,8 @@ request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 agent_run_id_var: ContextVar[str | None] = ContextVar("agent_run_id", default=None)
 user_id_var: ContextVar[str | None] = ContextVar("user_id", default=None)
 conversation_id_var: ContextVar[str | None] = ContextVar("conversation_id", default=None)
+metadata_only_var: ContextVar[bool] = ContextVar("metadata_only", default=False)
+offline_silent_var: ContextVar[bool] = ContextVar("offline_silent", default=False)
 
 _LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
 _MAX_EXCEPTION_TRACEBACK_CHARS = 50_000
@@ -45,10 +47,18 @@ def log_context(
     agent_run_id: str | None = None,
     user_id: str | None = None,
     conversation_id: str | None = None,
+    metadata_only: bool = False,
+    offline_silent: bool = False,
 ) -> Iterator[None]:
     """临时设置日志上下文字段，退出后恢复旧值。"""
 
     tokens = []
+    if offline_silent:
+        # 仅纯规划历史重放使用，避免只读比较写日志；线上请求及Tool审计不使用该选项。
+        tokens.append((offline_silent_var, offline_silent_var.set(True)))
+    if metadata_only:
+        # 离线路由实验保留阶段日志，但原问题和模型异常输入只允许进入私有产物。
+        tokens.append((metadata_only_var, metadata_only_var.set(True)))
     if request_id is not None:
         tokens.append((request_id_var, request_id_var.set(request_id)))
     if agent_run_id is not None:
@@ -94,6 +104,8 @@ def log_event(
     同时保证单元测试和多配置运行场景不会因为日志依赖而改变业务执行结果。
     """
 
+    if offline_silent_var.get():
+        return
     normalized_level = level.upper()
     resolved_settings = settings or get_settings()
     if _LEVELS.get(normalized_level, 20) < _LEVELS.get(resolved_settings.log_level.upper(), 20):
@@ -124,6 +136,11 @@ def log_event(
         "filesystem_job_id": filesystem_job_id,
     }
     record.update({key: value for key, value in extra.items() if value is not None})
+    if metadata_only_var.get():
+        record = {key: record[key] for key in ("ts", "level", "event", "status", "duration_ms", "error_code")}
+        code = record.get("error_code")
+        if code and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", str(code)):
+            record["error_code"] = "DIAGNOSTIC_REDACTED"
     _append_jsonl(record, settings=resolved_settings)
 
 
