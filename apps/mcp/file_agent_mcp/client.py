@@ -618,10 +618,35 @@ class FileAgentIntegrationClient:
             cache_id=f"dataset:{dataset_id}:{export_id}", output_dir=output_dir, max_bytes=32 * 1024 * 1024,
         )
 
+    async def _attach_public_export_urls(self, value: dict[str, Any]) -> dict[str, Any]:
+        """为成功发布的导出另行签发浏览器链接，不把签名令牌存进业务回执。"""
+        dataset_id = str(value.get("dataset_id") or "").strip()
+        export_id = str(value.get("export_id") or "").strip()
+        if not dataset_id or not export_id:
+            return value
+        try:
+            links = self._business_json(await self.http.get(
+                f"/api/structured-datasets/{_path_segment(dataset_id)}"
+                f"/exports/{_path_segment(export_id)}/browser-links"))
+        except (RuntimeError, httpx.HTTPError):
+            # 链接签发失败不能把已完成的发布伪报成失败。
+            return value
+        result = dict(value)
+        old_download = str(result.get("download_url") or "").strip()
+        if old_download:
+            result["authenticated_download_url"] = urljoin(str(self.http.base_url), old_download)
+        for key in ("preview_url", "download_url"):
+            path = str(links.get(key) or "").strip()
+            if path.startswith("/api/structured-datasets/public-exports/"):
+                result[key] = urljoin(str(self.http.base_url), path)
+        if links.get("expires_in_seconds"):
+            result["public_link_expires_in_seconds"] = links["expires_in_seconds"]
+        return result
+
     async def dataset_request(self, method: str, path: str, payload: dict | None = None) -> dict[str, Any]:
         """路径仅由新增工具的固定模板生成，Tool 不暴露通用 HTTP 调用。"""
         response = await self._request(self.http.request(method, f"/api/structured-datasets{path}", json=payload), operation="累计表格")
-        return self._business_json(response)
+        return await self._attach_public_export_urls(self._business_json(response))
 
     async def reference_catalog_get(self) -> dict[str, Any]:
         """只读取得当前系统共享期刊目录版本。"""
@@ -645,21 +670,21 @@ class FileAgentIntegrationClient:
             self.http.request(method, f"/api/excel-writeback{path}", json=payload),
             operation="Excel 文件回传",
         )
-        return self._business_json(response)
+        return await self._attach_public_export_urls(self._business_json(response))
 
     async def funding_usage_request(self, method: str, path: str, payload: dict) -> dict[str, Any]:
         """固定成果资助预览/发布接口；不向宿主开放任意 API 路径。"""
         if method != "POST" or path not in {
                 "/preview", "/publish", "/continue/preview", "/continue/publish",
                 "/refresh/preview", "/refresh/publish",
-                "/prompt/target", "/prompt/preview", "/prompt/publish",
+                "/prompt/target", "/prompt/preview", "/prompt/publish", "/prompt/add-people",
                 "/source-summary/preview", "/source-summary/publish",
                 "/source-entries/preview", "/source-entries/publish"}:
             raise ValueError("FUNDING_USAGE_ROUTE_INVALID")
         response = await self._request(
             self.http.post(f"/api/funding-usage{path}", json=payload),
             operation="成果资助使用登记 Excel")
-        return self._business_json(response)
+        return await self._attach_public_export_urls(self._business_json(response))
 
     async def upload_excel_writeback(self, *, task_id: str, result_digest: str,
                                      file_sha256: str, payload: dict, path: Path,

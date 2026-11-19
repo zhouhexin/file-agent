@@ -9,7 +9,7 @@ description: 当本轮上下文含 FILE_AGENT_HOST_SUBMISSION，且用户要求�
 
 用户提供成果资助使用登记图片与旧汇总表，要求首次生成余额 Excel；只上传新的登记图片，要求按完整文件名继续追加；或者上传新版教师成果明细汇总表，要求刷新已发布余额表的科研成果资助总额时，都交给 `file-agent-research-funding-usage-balance`。下载新版余额表后，在个人明细页修改、删除或人工新增独立支出并回传；服务器按个人页重算首页，回传工具用 `file-agent-manual-excel-revision`。已发布旧版余额表仍按旧版首表规则回传，其他 Excel 回传规则不变。图片印刷金额不参与扣减，也不按年度拆分。
 
-用户只用提示词明确要求对**已发布新版余额表**的个人使用登记新增、修改、删除，调整某位教师的科研成果资助金额、其他资助金额，或更正 OCR 识别错误的教师姓名时，交给 `file-agent-research-funding-usage-balance` 的“通过提示词维护已发布余额表”段。先读取当前教师名单、稳定行 ID 和版本，按用户明确指定的记录预览后发布；不走图片 OCR 或 Excel 手工回传，也不直接填写总支出与剩余金额。
+用户只用提示词明确要求对**已发布新版余额表**的个人使用登记新增、修改、删除，调整某位教师的其他资助金额，或更正 OCR 识别错误的教师姓名时，交给 `file-agent-research-funding-usage-balance` 的“通过提示词维护已发布余额表”段。先读取当前教师名单、稳定行 ID 和版本，按用户明确指定的记录预览后发布；不走图片 OCR 或 Excel 手工回传，也不直接填写总支出与剩余金额。科研成果资助总额只能由教师成果总表同步，不能在余额表中直接修改。
 
 用户要求填写《西安理工大学教师引进考察汇总表.xlsx》时，先核对目标实际工作表与表头：仅 A–T 二十列且 A 为序号、E 为姓名、I 为教育经历、J–L 为论文、M–O 为项目、P 为成果的专用布局，交给 `file-agent-teacher-recruitment-excel`。其他教师招聘、博士应聘或同类业务名称的 Excel 均按实际表头交给 `file-agent-excel-writeback`；不能仅凭文件名或业务主题选择专用流程。上传目标仍以上传表为准，未上传目标才按完整文件名追加。下载后仅手工补充并同名回传的请求仍交给 `file-agent-manual-excel-revision`。
 
@@ -65,6 +65,8 @@ description: 当本轮上下文含 FILE_AGENT_HOST_SUBMISSION，且用户要求�
 `primary_category.category_path`（主分类路径）和 `classification_outcome`（`CLASSIFIED` 或 `OTHER`）。
 `primary_category=null` 时必须如实说明当前没有可投影的生效主分类，不能把目录名猜成分类。
 本工具回执不展示分类证据或关键词；用户另行要求内容依据时，必须使用对应的只读检索或证据工具。
+
+累计表格导出回执如果提供 `preview_url` 和 `download_url`，应直接把这两个完整地址作为可点击链接交付，分别用于浏览器预览和下载。它们是仅对应本次导出的限时只读链接，有效期 24 小时；不要改用 `authenticated_download_url` 或自行拼接 `/api/.../content` 地址。若用户之后需要重新打开且链接已过期，重新导出以获取新链接。
 
 ## 文档内容提取与确认流程
 

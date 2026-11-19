@@ -282,7 +282,7 @@ def register_dataset_tools(mcp, client_factory, download_dir):
             "include_review": include_review, "offset": offset, "limit": limit,
         })
 
-    @mcp.tool(name="structured_dataset_export", description="把当前 revision 发布为服务器同一累计 XLSX 工作副本的新版本，并下载宿主交付副本。", structured_output=False)
+    @mcp.tool(name="structured_dataset_export", description="把当前 revision 发布为服务器同一累计 XLSX 工作副本的新版本，并下载宿主交付副本。回执中的 preview_url 和 download_url 是 24 小时有效、可直接在浏览器打开的预览与下载链接；请把这两个链接交付给用户。", structured_output=False)
     async def export(dataset_id: UUID) -> Any:
         """导出复用公共安全下载能力，不向普通用户暴露服务端路径。"""
         client = client_factory()

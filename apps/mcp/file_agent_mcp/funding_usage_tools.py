@@ -118,13 +118,40 @@ class FundingPromptRowEditPayload(StrictInput):
 
 class FundingPromptTotalEditPayload(StrictInput):
     name: str = Field(min_length=1, max_length=80)
-    field: Literal["research_total", "other_total"]
+    field: Literal["other_total"]
     value: Decimal | None = Field(ge=0, le=1000000000, decimal_places=2)
 
 
 class FundingPromptNameEditPayload(StrictInput):
     old_name: str = Field(min_length=1, max_length=80)
     new_name: str = Field(min_length=1, max_length=31)
+
+
+class FundingPromptPersonAddPayload(StrictInput):
+    name: str = Field(min_length=1, max_length=31)
+    other_total: Decimal | None = Field(default=None, ge=0, le=1000000000, decimal_places=2)
+
+
+class FundingUsagePromptAddPeoplePayload(StrictInput):
+    filename: str = Field(min_length=6, max_length=240)
+    base_document_version_id: UUID
+    base_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    base_revision: int = Field(ge=0)
+    request_key: str = Field(min_length=1, max_length=120)
+    user_request: str = Field(min_length=1, max_length=4000)
+    people: list[FundingPromptPersonAddPayload] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def check_people(self):
+        # 与服务端及 Excel 的工作表名称比较保持一致。
+        compact = ["".join(person.name.split()).casefold() for person in self.people]
+        if any(not person.name.strip() or person.name != person.name.strip()
+               or any(char in person.name for char in "[]:*?/\\")
+               or person.name == "\u4f7f\u7528\u767b\u8bb0\u6c47\u603b" for person in self.people):
+            raise ValueError("新增教师姓名必须是可用的 Excel 工作表名称")
+        if len(compact) != len(set(compact)):
+            raise ValueError("新增教师姓名不能重复")
+        return self
 
 
 class FundingUsagePromptPayload(StrictInput):
@@ -137,11 +164,19 @@ class FundingUsagePromptPayload(StrictInput):
     row_edits: list[FundingPromptRowEditPayload] = Field(default_factory=list, max_length=100)
     total_edits: list[FundingPromptTotalEditPayload] = Field(default_factory=list, max_length=100)
     name_edits: list[FundingPromptNameEditPayload] = Field(default_factory=list, max_length=100)
+    person_additions: list[FundingPromptPersonAddPayload] = Field(default_factory=list, max_length=100,
+        description="与登记、金额、姓名修改或教师删除合并执行的新增教师；混合变更需预览确认。")
+    person_deletions: list[str] = Field(default_factory=list, max_length=100,
+                                        description="需从首页及个人明细页删除的教师姓名；先预览并由用户确认后发布。")
 
     @model_validator(mode="after")
     def check_changes(self):
-        if not self.row_edits and not self.total_edits and not self.name_edits:
+        if (not self.row_edits and not self.total_edits and not self.name_edits
+                and not self.person_additions and not self.person_deletions):
             raise ValueError("至少需要一项登记、资助金额或姓名变更")
+        if (any(not name or name != name.strip() for name in self.person_deletions)
+                or len(self.person_deletions) != len(set(self.person_deletions))):
+            raise ValueError('删除教师名单不能为空或重复，姓名需与首页完全一致')
         return self
 
 
@@ -370,6 +405,30 @@ def register_funding_usage_tools(mcp, client_factory, download_dir):
         try:
             result = await client.funding_usage_request(
                 "POST", "/prompt/publish", payload.model_dump(mode="json", exclude_unset=True))
+            if not result.get("excel_published") or result.get("status") != "COMPLETED":
+                return result
+            resource = await client.download_dataset_export(
+                dataset_id=result["dataset_id"], export_id=result["export_id"],
+                output_dir=Path(download_dir()))
+            receipt = {**result, "download_resource_uri": resource["resource_uri"]}
+            return CallToolResult(content=[
+                TextContent(type="text", text=json.dumps(receipt, ensure_ascii=False)),
+                ResourceLink(type="resource_link", name=result["filename"],
+                             uri=resource["resource_uri"],
+                             mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             size=resource["size_bytes"])], structuredContent=receipt)
+        finally:
+            await client.close()
+
+    @mcp.tool(name="funding_usage_prompt_add_people", description=(
+        "根据用户提示直接在已发布余额表新增教师，同时更新首页并创建该教师个人明细页；"
+        "无需预览确认。新教师总科研成果资助金额留空，只能通过更新成果总表刷新。"),
+        structured_output=False)
+    async def prompt_add_people(payload: FundingUsagePromptAddPeoplePayload):
+        client: FileAgentIntegrationClient = client_factory()
+        try:
+            result = await client.funding_usage_request(
+                "POST", "/prompt/add-people", payload.model_dump(mode="json", exclude_unset=True))
             if not result.get("excel_published") or result.get("status") != "COMPLETED":
                 return result
             resource = await client.download_dataset_export(

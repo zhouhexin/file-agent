@@ -1,6 +1,6 @@
 # WorkBuddy 文件助手：新用户首次安装操作手册
 
-适用日期：2026-10-26。本文按当前 WorkBuddy 附件桥接套件 **0.1.90** 和 MCP **0.1.4** 编写；须安装本次构建的 MCP wheel，旧版 0.1.3 不含教师姓名更正参数。示例服务器是 `10.102.4.241`，部署目录是 `E:\file-agent`；实际地址不同须统一替换。本文只安装客户端接入；本次功能还需另行更新服务器 API。
+适用日期：2026-11-19。本文按当前 WorkBuddy 附件桥接套件 **0.1.99** 和 MCP **0.1.12** 编写；须安装本次构建的 MCP wheel，旧版 0.1.3 不含教师姓名更正参数。示例服务器是 `10.102.4.241`，部署目录是 `E:\file-agent`；实际地址不同须统一替换。本文只安装客户端接入；本次功能还需另行更新服务器 API。
 
 ## 一、先弄清要安装的三部分
 
@@ -18,10 +18,10 @@
 http://10.102.4.241/downloads/file-agent-marketplace.zip
 ```
 
-不要使用历史地址 `.../file-agent-marketplace-0.1.10.zip`，也不要使用临时的 `:8765` 文件服务。当前 0.1.90 ZIP 应为 **87935 字节**，SHA-256 为：
+不要使用历史地址 `.../file-agent-marketplace-0.1.10.zip`，也不要使用临时的 `:8765` 文件服务。当前 0.1.99 ZIP 应为 **91296 字节**，SHA-256 为：
 
 ```text
-d448270856ef983379fe7f64b9512f07b7abe28e8ad15b2c8ff079977ec308d0
+278567de1328412a57d9f5014813c8c2e61e1a91bee5223e212ff792f39138e8
 ```
 
 ## 二、管理员准备交付物
@@ -32,32 +32,32 @@ d448270856ef983379fe7f64b9512f07b7abe28e8ad15b2c8ff079977ec308d0
 
 ```powershell
 $Source = 'E:\PycharmProject\file-agent\apps\mcp'
-$Output = 'E:\PycharmProject\file-agent\release\file-agent-mcp-wheelhouse-20261020'
+$Output = 'E:\PycharmProject\file-agent\release\file-agent-mcp-wheelhouse-20261119'
 New-Item -ItemType Directory -Force -Path $Output | Out-Null
-py -3.11 -m pip wheel --wheel-dir $Output $Source
+python -m pip wheel --wheel-dir $Output $Source
 if ($LASTEXITCODE -ne 0) { throw 'MCP 离线安装包构建失败' }
 ```
 
-将**整个** `$Output` 目录交付给用户电脑，复制到该用户的 `%LOCALAPPDATA%\FileAgentClient\wheelhouse`。wheelhouse 中要包含 `file_agent_mcp` **0.1.4** 本体及其依赖；不要沿用旧版本 wheelhouse，只复制 `apps/mcp` 源码目录不算完成安装。仓库 `release/file-agent-mcp-client-wheelhouse-0.1.90` 中仅有 0.1.4 本体 wheel，不能单独作为完整离线依赖目录。
+将**整个** `$Output` 目录交付给用户电脑，复制到该用户的 `%LOCALAPPDATA%\FileAgentClient\wheelhouse`。wheelhouse 中要包含 `file_agent_mcp` **0.1.12** 本体及其依赖；不要沿用旧版本 wheelhouse，只复制 `apps/mcp` 源码目录不算完成安装。仅含本体 wheel 的旧交付目录不能作为完整离线依赖目录，应使用上述命令重新构建。
 
-市场 ZIP 从完整插件源码构建机取得 `integrations/workbuddy/file-agent-marketplace-0.1.90.zip`。如果服务器上的 `build_marketplace.py` 报“市场与插件版本不一致”，说明服务器的两个清单或插件目录只同步了一部分；不要把旧插件单独改成 0.1.90。应复制完整的当前插件交付物，或直接使用上述已构建且校验通过的 0.1.90 ZIP。
+市场 ZIP 从完整插件源码构建机取得 `integrations/workbuddy/file-agent-marketplace-0.1.99.zip`。如果服务器上的 `build_marketplace.py` 报“市场与插件版本不一致”，说明服务器的两个清单或插件目录只同步了一部分；不要把旧插件单独改成 0.1.99。应复制完整的当前插件交付物，或直接使用上述已构建且校验通过的 0.1.99 ZIP。
 
 ## 三、管理员在服务器发布市场 ZIP
 
-将 0.1.90 ZIP 复制到服务器 `E:\file-agent\integrations\workbuddy\file-agent-marketplace-0.1.90.zip`。以下代码块要在**服务器 PowerShell 中整块执行**；校验失败时，块内后续复制命令不会执行。交互式 PowerShell 中逐条执行时，`throw` 只会终止当前命令，不能阻止你手动继续输入下一条。
+将 0.1.99 ZIP 复制到服务器 `E:\file-agent\integrations\workbuddy\file-agent-marketplace-0.1.99.zip`。以下代码块要在**服务器 PowerShell 中整块执行**；校验失败时，块内后续复制命令不会执行。交互式 PowerShell 中逐条执行时，`throw` 只会终止当前命令，不能阻止你手动继续输入下一条。
 
 ```powershell
 & {
 Set-Location E:\file-agent
-$SourceZip = 'E:\file-agent\integrations\workbuddy\file-agent-marketplace-0.1.90.zip'
+$SourceZip = 'E:\file-agent\integrations\workbuddy\file-agent-marketplace-0.1.99.zip'
 $EnvFile = '.\deploy\.env'
 $ComposeFile = '.\deploy\docker-compose.production.yml'
 $ExpectedHash = 'D448270856EF983379FE7F64B9512F07B7ABE28E8AD15B2C8FF079977EC308D0'
 
-if (-not (Test-Path -LiteralPath $SourceZip -PathType Leaf)) { throw '缺少 0.1.90 市场 ZIP' }
+if (-not (Test-Path -LiteralPath $SourceZip -PathType Leaf)) { throw '缺少 0.1.99 市场 ZIP' }
 $ActualHash = (Get-FileHash -LiteralPath $SourceZip -Algorithm SHA256).Hash
-if ($ActualHash -ne $ExpectedHash -or (Get-Item -LiteralPath $SourceZip).Length -ne 87935) {
-    throw "市场 ZIP 与 0.1.90 交付包不符：SHA-256=$ActualHash"
+if ($ActualHash -ne $ExpectedHash -or (Get-Item -LiteralPath $SourceZip).Length -ne 91296) {
+    throw "市场 ZIP 与 0.1.99 交付包不符：SHA-256=$ActualHash"
 }
 python -m zipfile -t $SourceZip
 if ($LASTEXITCODE -ne 0) { throw '市场 ZIP 无法解压' }
@@ -66,7 +66,7 @@ $GatewayId = (docker compose --env-file $EnvFile -f $ComposeFile ps -q gateway).
 if (-not $GatewayId) { throw 'gateway 容器未运行' }
 docker compose --env-file $EnvFile -f $ComposeFile exec -T gateway mkdir -p /srv/downloads
 if ($LASTEXITCODE -ne 0) { throw '无法创建 gateway 下载目录' }
-docker cp $SourceZip "${GatewayId}:/srv/downloads/file-agent-marketplace-0.1.90.zip"
+docker cp $SourceZip "${GatewayId}:/srv/downloads/file-agent-marketplace-0.1.99.zip"
 if ($LASTEXITCODE -ne 0) { throw '发布带版本市场 ZIP 失败' }
 docker cp $SourceZip "${GatewayId}:/srv/downloads/file-agent-marketplace.zip.next"
 if ($LASTEXITCODE -ne 0) { throw '复制固定地址临时 ZIP 失败' }
@@ -85,7 +85,7 @@ $CheckZip = Join-Path $env:TEMP 'file-agent-marketplace-server-check.zip'
 curl.exe -L --fail --show-error -o $CheckZip $Url
 if ($LASTEXITCODE -ne 0) { throw '服务器无法通过固定地址下载市场 ZIP' }
 $DownloadedHash = (Get-FileHash -LiteralPath $CheckZip -Algorithm SHA256).Hash
-if ($DownloadedHash -ne $ExpectedHash -or (Get-Item -LiteralPath $CheckZip).Length -ne 87935) {
+if ($DownloadedHash -ne $ExpectedHash -or (Get-Item -LiteralPath $CheckZip).Length -ne 91296) {
     throw '固定地址返回的不是本版 ZIP'
 }
 python -m zipfile -t $CheckZip
@@ -222,17 +222,17 @@ $ExpectedHash = 'D448270856EF983379FE7F64B9512F07B7ABE28E8AD15B2C8FF079977EC308D
 curl.exe -L --fail --show-error -o $MarketCheck $MarketUrl
 if ($LASTEXITCODE -ne 0) { throw '用户电脑无法下载市场 ZIP' }
 if ((Get-FileHash -LiteralPath $MarketCheck -Algorithm SHA256).Hash -ne $ExpectedHash) {
-    throw '用户电脑下载到的不是 0.1.90 市场 ZIP'
+    throw '用户电脑下载到的不是 0.1.99 市场 ZIP'
 }
 & $Python -m zipfile -t $MarketCheck
 if ($LASTEXITCODE -ne 0) { throw '用户电脑下载到的 ZIP 不完整' }
-(Get-Item -LiteralPath $MarketCheck).Length  # 当前应为 87935
+(Get-Item -LiteralPath $MarketCheck).Length  # 当前应为 91296
 ```
 
 在 WorkBuddy 中依次操作：
 
 1. 打开“技能 → 套件 → 市场”，**新增**市场地址 `$MarketUrl`。新用户不需要 `0.1.10.zip` 历史地址。
-2. 在该市场安装并启用 `file-agent-workbuddy-bridge`；界面应显示版本 **0.1.90**。
+2. 在该市场安装并启用 `file-agent-workbuddy-bridge`；界面应显示版本 **0.1.99**。
 3. 填写套件本机选项：`python_executable` 为 `$Python`，`workbuddy_home` 为 `$WorkBuddyHome`，`bridge_state_dir` 为 `$BridgeState`。如需复制路径，可在 PowerShell 查看：
 
    ```powershell
@@ -289,7 +289,7 @@ $Meta = Get-Content -LiteralPath $MetaPath -Raw -Encoding utf8 | ConvertFrom-Jso
 $Meta | Select-Object url,downloadedAt,installComplete
 ```
 
-应看到固定 URL `http://10.102.4.241/downloads/file-agent-marketplace.zip`，`installComplete=True`，WorkBuddy 界面显示并启用套件 **0.1.90**。再检查 WorkBuddy 的 `file-agent` MCP 已连接，能列出文件助手工具。
+应看到固定 URL `http://10.102.4.241/downloads/file-agent-marketplace.zip`，`installComplete=True`，WorkBuddy 界面显示并启用套件 **0.1.99**。再检查 WorkBuddy 的 `file-agent` MCP 已连接，能列出文件助手工具。
 
 最后在 WorkBuddy 发**一条新消息**，附上一份非敏感测试文件，并输入：
 
@@ -303,11 +303,11 @@ $Meta | Select-Object url,downloadedAt,installComplete
 
 | 现象 | 先检查 |
 | --- | --- |
-| WorkBuddy 仍显示 0.1.10 | 市场是否误加 `...0.1.10.zip`；通过 WorkBuddy 界面改为固定 URL 后同步市场、安装 0.1.90，再完全退出重启。 |
-| 更新报 ZIP 尾部签名不存在 | 从用户电脑下载固定 URL，核对 87935 字节、SHA-256 和 ZIP 测试；约 410 字节通常是登录页。 |
+| WorkBuddy 仍显示 0.1.10 | 市场是否误加 `...0.1.10.zip`；通过 WorkBuddy 界面改为固定 URL 后同步市场、安装 0.1.99，再完全退出重启。 |
+| 更新报 ZIP 尾部签名不存在 | 从用户电脑下载固定 URL，核对 91296 字节、SHA-256 和 ZIP 测试；约 410 字节通常是登录页。 |
 | 服务器上有 ZIP，但客户端下载不到 | ZIP 必须发布到 gateway 的 `/srv/downloads`；重建 gateway 后需重发，宿主机 `integrations/workbuddy` 不是静态下载目录。 |
-| 打包时报“市场与插件版本不一致” | 构建机两个清单及插件源码未同步；优先使用已校验的完整 0.1.90 ZIP，不把旧插件仅改版本号。 |
-| 套件显示 0.1.90，但 MCP 工具不存在 | 检查用户电脑 `mcp.json` 的 Python 路径、虚拟环境中的包、Token 和 WorkBuddy MCP 连接状态；复制源码到服务器不能代替安装。 |
+| 打包时报“市场与插件版本不一致” | 构建机两个清单及插件源码未同步；优先使用已校验的完整 0.1.99 ZIP，不把旧插件仅改版本号。 |
+| 套件显示 0.1.99，但 MCP 工具不存在 | 检查用户电脑 `mcp.json` 的 Python 路径、虚拟环境中的包、Token 和 WorkBuddy MCP 连接状态；复制源码到服务器不能代替安装。 |
 | 附件未形成提交引用 | 确认发的是新消息、套件已启用、三个本机选项正确，`bridge_state_dir` 与 MCP 配置完全一致；完全退出并重启 WorkBuddy。 |
 
 Token 过期或用户账号变更时，重新执行第五节登录并更新该用户电脑的 `FILE_AGENT_ACCESS_TOKEN`，不要复制其他用户的 `mcp.json`。
