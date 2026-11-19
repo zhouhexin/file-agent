@@ -24,6 +24,7 @@ from app.db.models import Document, WorkingCopy
 from app.modules.retrieval.chunk_lexical_search import DocumentChunkLexicalSearchService
 from app.modules.retrieval.evidence_projector import SearchEvidenceProjector
 from app.modules.retrieval.query_parser import exact_short_chinese_phrase
+from app.modules.retrieval.search_profile import _normalize_text
 from app.modules.retrieval.stage1_document_recall import Stage1DocumentRecallService
 from app.modules.retrieval.managed_source_search import ManagedSourceSearchService
 
@@ -529,18 +530,26 @@ class TwoStageFileSearchService:
             # ``managed_file_id`` 排除，否则源文件出现新修订而旧工作副本仍存在时，
             # 新修订会被静默遗漏。
             fused.extend(source_results)
-            fused.sort(
-                key=lambda item: (
-                    -float(item.get("_score") or 0.0),
-                    str(item.get("working_copy_id") or item.get("managed_file_revision_id") or ""),
-                )
-            )
         if require_body_evidence:
             # “正文提到/包含/出现”是事实约束；没有 Chunk 连续命中的文件即使文件名或摘要相关，
             # 也不能作为正文命中返回给用户。
             fused = [
                 item for item in fused if bool(item.get("_body_phrase_hit"))
             ]
+        # 两种来源合并后再统一排序。完整文件名精确匹配必须先于普通相关候选，
+        # 避免 /api/search 截取前 top_k 条时遗漏用户明确指定的文件。
+        normalized_query = _normalize_text(cleaned_query)
+        fused.sort(
+            key=lambda item: (
+                not (normalized_query and _normalize_text(item.get("filename") or "") == normalized_query),
+                -float(item.get("_score") or 0.0),
+                str(item.get("working_copy_id") or item.get("managed_file_revision_id") or ""),
+            )
+        )
+        # 工作副本与源侧分数都只供内部排序；完成全部排序后再清理，不能提前
+        # 把工作副本分数丢掉，也不能把源侧分数泄漏给 API/MCP 调用方。
+        for item in fused:
+            item.pop("_score", None)
         if not include_internal_match_flags:
             for item in fused:
                 item.pop("_body_phrase_hit", None)
@@ -803,9 +812,7 @@ class TwoStageFileSearchService:
         # 必须保留为独立结果。
         results.sort(key=lambda r: (-r["_score"], r["working_copy_id"] or ""))
         results = self._deduplicate_logical_file_results(results)
-        # 移除内部 _score
-        for r in results:
-            del r["_score"]
+        # 保留内部融合分数，交给 _search 与源侧结果合并排序后统一移除。
         return results
 
 

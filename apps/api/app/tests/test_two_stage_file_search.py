@@ -10,6 +10,7 @@
 7. 跨用户隔离
 """
 
+import pytest
 import sqlalchemy as sa
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -195,6 +196,82 @@ def test_service_importable():
     """TwoStageFileSearchService 可导入。"""
     from app.modules.retrieval.two_stage_search import TwoStageFileSearchService
     assert TwoStageFileSearchService is not None
+
+
+@pytest.mark.parametrize("source_mode", ["enabled", "disabled", "failed"])
+def test_full_filename_matches_survive_combined_top_ten(monkeypatch, source_mode):
+    """精确文件名的同名副本不能被高分普通候选挤出 WorkBuddy 前十条。"""
+    db = _db_session()
+    try:
+        filename = "教师成果明细汇总.xlsx"
+        service = TwoStageFileSearchService(db=db, user_id="user1", workspace_id="ws1")
+        service.config.managed_source_search_enabled = source_mode != "disabled"
+        candidates = [
+            {"working_copy_id": f"wc-exact-{index}", "document_version_id": f"ver-exact-{index}",
+             "managed_file_id": f"mf-exact-{index}", "filename": filename,
+             "_hit_source": "exact_filename", "_score": 3.0}
+            for index in range(3)
+        ] + [
+            {"working_copy_id": f"wc-other-{index}", "document_version_id": f"ver-other-{index}",
+             "managed_file_id": f"mf-other-{index}", "filename": f"其他成果{index}.xlsx",
+             "_hit_source": "gin_search", "_score": 20.0}
+            for index in range(12)
+        ]
+        monkeypatch.setattr(service.stage1, "recall", lambda **kwargs: candidates)
+        monkeypatch.setattr(service.stage2, "fallback_recall", lambda **kwargs: [])
+        monkeypatch.setattr(service.stage2, "search", lambda **kwargs: [])
+        sources = [
+            {"resource_type": "MANAGED_SOURCE", "managed_file_revision_id": f"source-{index}",
+             "filename": f"相关资助{index}.xlsx", "_score": 100.0}
+            for index in range(14)
+        ]
+        # 源侧精确匹配也应保留优先级，不能只保护已有工作副本。
+        sources.append({"resource_type": "MANAGED_SOURCE", "managed_file_revision_id": "source-exact",
+                        "filename": filename, "_score": 0.01})
+
+        def source_search(**kwargs):
+            if source_mode == "failed":
+                raise RuntimeError("injected source index failure")
+            return {"results": sources}
+
+        monkeypatch.setattr(service.managed_source, "search", source_search)
+        result = service.search(query=filename, parsed_query=_FakeParsedQuery(cleaned=filename),
+                                scope=_FakeScope())
+        rows = result["results"]
+        expected = 4 if source_mode == "enabled" else 3
+        assert sum(row["filename"] == filename for row in rows[:10]) == expected
+        assert all(row["filename"] == filename for row in rows[:expected])
+        assert all("_score" not in row and "_body_phrase_hit" not in row for row in rows)
+        assert len(rows) == len(candidates) + (len(sources) if source_mode == "enabled" else 0)
+        assert result["partial"] == (source_mode == "failed")
+    finally:
+        db.close()
+
+
+def test_combined_topic_search_preserves_working_copy_scores(monkeypatch):
+    """普通主题查询仍按融合分数排序，且两种来源均不泄漏内部排序分数。"""
+    db = _db_session()
+    try:
+        service = TwoStageFileSearchService(db=db, user_id="user1", workspace_id="ws1")
+        monkeypatch.setattr(service.stage1, "recall", lambda **kwargs: [
+            {"working_copy_id": "wc-strong", "document_version_id": "version-strong",
+             "filename": "成果说明.xlsx", "_score": 10.0, "_hit_source": "gin_search"},
+            {"working_copy_id": "wc-weak", "document_version_id": "version-weak",
+             "filename": "成果附件.xlsx", "_score": 0.1, "_hit_source": "gin_search"},
+        ])
+        monkeypatch.setattr(service.stage2, "fallback_recall", lambda **kwargs: [])
+        monkeypatch.setattr(service.stage2, "search", lambda **kwargs: [])
+        monkeypatch.setattr(service.managed_source, "search", lambda **kwargs: {"results": [
+            {"managed_file_revision_id": "source-medium", "filename": "成果报告.pdf", "_score": 1.0},
+        ]})
+        result = service.search(query="成果", parsed_query=_FakeParsedQuery(cleaned="成果"),
+                                scope=_FakeScope(), include_internal_match_flags=True)
+        assert [row["filename"] for row in result["results"]] == [
+            "成果说明.xlsx", "成果报告.pdf", "成果附件.xlsx"]
+        assert all("_score" not in row for row in result["results"])
+        assert "_body_phrase_hit" in result["results"][0]
+    finally:
+        db.close()
 
 
 def test_final_results_deduplicate_same_managed_file_but_keep_same_name_in_other_path():
