@@ -11,6 +11,7 @@ from .schemas import (FundingUsageRequest, FundingUsagePublish,
                       FundingUsageContinue, FundingUsageContinuePublish,
                       FundingUsageRefresh, FundingUsageRefreshPublish,
                       FundingPromptTarget, FundingUsagePromptEdit, FundingUsagePromptPublish,
+                      FundingUsagePromptAddPeople,
                       FundingSourceSummarySync, FundingSourceSummarySyncPublish,
                       FundingSourceEntriesImport, FundingSourceEntriesImportPublish)
 from .prompt_edit import FundingPromptEditService
@@ -71,6 +72,11 @@ def prompt_preview(request: FundingUsagePromptEdit, db=Depends(get_db), user=Dep
 @router.post("/prompt/publish")
 def prompt_publish(request: FundingUsagePromptPublish, db=Depends(get_db), user=Depends(get_current_user)):
     return execute_dataset_write(db=db, user=user, operation="funding_usage_prompt_publish", payload=request)
+
+
+@router.post("/prompt/add-people")
+def prompt_add_people(request: FundingUsagePromptAddPeople, db=Depends(get_db), user=Depends(get_current_user)):
+    return execute_dataset_write(db=db, user=user, operation="funding_usage_prompt_add_people", payload=request)
 
 
 @router.post("/source-summary/preview")

@@ -34,8 +34,9 @@ def person_totals(rows: list[dict], research_total, other_total):
     other = money(other_total, cell="其他资助金额")
     amounts = [money(row.get("usage_amount"), cell="确认使用金额") for row in rows]
     spent = sum(amounts, Decimal("0.00")) if all(value is not None for value in amounts) else None
-    remaining = (research + (other or Decimal("0.00")) - spent
-                 if research is not None and spent is not None else None)
+    has_known_funding = research is not None or other is not None
+    remaining = ((research or Decimal("0.00")) + (other or Decimal("0.00")) - spent
+                 if has_known_funding and spent is not None else None)
     return {"research_total": _number(research), "other_total": _number(other),
             "total_spent": _number(spent), "remaining": _number(remaining)}
 
@@ -82,7 +83,7 @@ def _display(value):
 
 
 def render_book(rows: list[dict], funding: dict[str, dict], *, style_sheet=None,
-                order=None) -> Workbook:
+                order=None, detail_names=()) -> Workbook:
     book = Workbook()
     summary = book.active
     summary.title = "使用登记汇总"
@@ -109,7 +110,7 @@ def render_book(rows: list[dict], funding: dict[str, dict], *, style_sheet=None,
         summary.row_dimensions[row_number].height = 27
 
     used_titles = {summary.title}
-    detail_names = {row["name"] for row in rows}
+    detail_names = {row["name"] for row in rows} | set(detail_names or ())
     for person in summaries(rows, funding, order):
         name = person["name"]
         if name not in detail_names:

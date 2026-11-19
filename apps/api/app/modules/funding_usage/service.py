@@ -1026,7 +1026,8 @@ class FundingUsageService:
             book = load_workbook(target_path, read_only=False, data_only=False)
             try:
                 published_rows, published_funding = read_detail_book(
-                    book, order, required_names={row["name"] for row in rows})
+                    book, order, required_names={row["name"] for row in rows}
+                    | set(policy.get("funding_usage_detail_sheet_names_v3") or ()))
             finally:
                 book.close()
         except (OSError, ValueError, XlsxSafetyError):
@@ -1105,7 +1106,8 @@ class FundingUsageService:
         policy = current.extraction_policy_json or {}
         with tempfile.TemporaryDirectory(prefix="file-agent-funding-refresh-") as directory:
             output = Path(directory) / request.filename
-            book = render_book(rows, funding, order=order)
+            book = render_book(rows, funding, order=order,
+                               detail_names=policy.get("funding_usage_detail_sheet_names_v3", []))
             try:
                 book.save(output)
             finally:
@@ -1263,7 +1265,8 @@ class FundingUsageService:
             book = load_workbook(path, read_only=True, data_only=True)
             try:
                 read_detail_book(book, order,
-                                 required_names={row["name"] for row in existing_rows})
+                                 required_names={row["name"] for row in existing_rows}
+                                 | set(policy.get("funding_usage_detail_sheet_names_v3") or ()))
             finally:
                 book.close()
         except (OSError, ValueError, XlsxSafetyError):
@@ -1332,7 +1335,8 @@ class FundingUsageService:
         combined = [row for name in order for row in combined if row["name"] == name]
         with tempfile.TemporaryDirectory(prefix="file-agent-funding-continue-") as directory:
             output = Path(directory) / request.filename
-            book = render_book(combined, funding, order=order)
+            book = render_book(combined, funding, order=order,
+                               detail_names=policy.get("funding_usage_detail_sheet_names_v3", []))
             try:
                 book.save(output)
             finally:

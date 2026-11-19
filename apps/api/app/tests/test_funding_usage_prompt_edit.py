@@ -194,7 +194,8 @@ def test_prompt_add_and_remove_first_detail_keeps_teacher_on_summary(demo, monke
         instruction="删除李四的会议支出5元")
     _, removed = _prompt_publish(client, user, delete_payload)
     book = load_workbook(BytesIO(client.get(removed["download_url"], headers=user).content))
-    assert book.sheetnames == ["使用登记汇总", "张三"]
+    # 删除最后一条登记只清空明细，保留已经建立的个人页供后续追加和回传。
+    assert book.sheetnames == ["使用登记汇总", "张三", "李四"]
     assert [book["使用登记汇总"].cell(3, col).value for col in (3, 4, 5, 6)] == [200, None, 0, 200]
     book.close()
 
@@ -300,3 +301,61 @@ def test_prompt_rename_rejects_missing_duplicate_and_invalid_names(demo, monkeyp
         response = client.post("/api/funding-usage/prompt/preview", headers=users[0],
             json=_prompt_payload(target, names=[{"old_name": old_name, "new_name": new_name}]))
         assert response.status_code == 422, response.text
+
+
+def test_direct_add_people_and_mixed_changes_keep_frozen_totals_and_detail_pages(demo, monkeypatch):
+    """新增教师可直接发布并保留空页；混合增改删一次发布，科研总额禁止手改。"""
+    client, sessions, users = demo
+    user = users[0]
+    initial = _published_book(client, sessions, user, monkeypatch)
+    target = _target(client, user, initial["filename"])
+    payload = _prompt_payload(target)
+    for key in ("row_edits", "total_edits", "name_edits"):
+        payload.pop(key)
+    payload["people"] = [{"name": "王五", "other_total": 50}, {"name": "赵六"}]
+    duplicate = {**payload, "people": [{"name": "Alice"}, {"name": "alice"}]}
+    assert client.post("/api/funding-usage/prompt/add-people", headers=user, json=duplicate).status_code == 422
+    added = client.post("/api/funding-usage/prompt/add-people", headers=user, json=payload)
+    assert added.status_code == 200, added.text
+    assert added.json()["added_person_count"] == 2
+    repeated = client.post("/api/funding-usage/prompt/add-people", headers=user, json=payload)
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["document_version_id"] == added.json()["document_version_id"]
+    book = load_workbook(BytesIO(client.get(added.json()["download_url"], headers=user).content))
+    assert book.sheetnames == ["使用登记汇总", "张三", "王五", "赵六"]
+    assert [book["使用登记汇总"].cell(4, col).value for col in (3, 4, 5, 6)] == [None, 50, 0, 50]
+    assert book["使用登记汇总"]["F5"].value is None
+    # 余额表回传不能绕过科研总额只读限制；其他资助仍走既有回传路径。
+    book["王五"]["B3"] = 100
+    output = BytesIO()
+    book.save(output)
+    book.close()
+    content = output.getvalue()
+    receipt = added.json()
+    returned = client.post("/api/excel-writeback/manual-revisions/publish", headers=user,
+        data={"filename": receipt["filename"], "request_key": str(uuid4()),
+              "base_document_version_id": receipt["document_version_id"],
+              "base_sha256": receipt["sha256"], "base_revision": str(receipt["revision"]),
+              "file_sha256": sha256(content).hexdigest()},
+        files={"file": (receipt["filename"], content,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+    assert returned.status_code == 422, returned.text
+    assert returned.json()["error"]["code"] == "FUNDING_RESEARCH_TOTAL_READ_ONLY"
+
+    target = _target(client, user, initial["filename"])
+    readonly = _prompt_payload(target, totals=[{"name": "张三", "field": "research_total", "value": 999}])
+    assert client.post("/api/funding-usage/prompt/preview", headers=user, json=readonly).status_code == 422
+    mixed = _prompt_payload(target, edits=[
+        {"action": "ADD", "name": "钱七", "registration": "会议费", "usage_amount": 5}],
+        totals=[{"name": "王五", "field": "other_total", "value": 60}],
+        names=[{"old_name": "赵六", "new_name": "赵六华"}])
+    mixed.update(person_additions=[{"name": "钱七", "other_total": 20}], person_deletions=["李四"])
+    preview, saved = _prompt_publish(client, user, mixed)
+    assert (preview["added_person_count"], preview["deleted_person_count"]) == (1, 1)
+    book = load_workbook(BytesIO(client.get(saved["download_url"], headers=user).content))
+    assert book.sheetnames == ["使用登记汇总", "张三", "王五", "赵六华", "钱七"]
+    assert [book["使用登记汇总"].cell(row, 2).value for row in range(2, 6)] == ["张三", "王五", "赵六华", "钱七"]
+    assert [book["使用登记汇总"].cell(5, col).value for col in (3, 4, 5, 6)] == [None, 20, 5, 15]
+    book.close()
+    assert {person["name"] for person in _target(client, user, initial["filename"])["people"]} == {
+        "张三", "王五", "赵六华", "钱七"}

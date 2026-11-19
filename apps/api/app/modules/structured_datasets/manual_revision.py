@@ -249,7 +249,8 @@ class ManualRevisionService:
             old_rows = list(policy.get("funding_usage_rows_v3") or [])
             old_funding = dict(policy.get("funding_usage_funding_v3") or {})
             names = person_order(dataset, old_funding, policy)
-            detail_names = {row["name"] for row in old_rows}
+            detail_names = ({row["name"] for row in old_rows}
+                            | set(policy.get("funding_usage_detail_sheet_names_v3") or ()))
             old_read, old_read_funding = read_detail_book(
                 baseline, names, required_names=detail_names)
             frozen_by_identity = {(row["name"], row["sequence"]): row
@@ -264,6 +265,10 @@ class ManualRevisionService:
                 fail("FUNDING_TARGET_CHANGED", "服务器已发布 Excel 的明细与冻结记录不一致，请核对当前版本。", 409)
             new_rows, funding = read_detail_book(
                 candidate, names, required_names=detail_names)
+            if any(funding.get(name, {}).get("research_total")
+                   != old_funding.get(name, {}).get("research_total") for name in names):
+                fail("FUNDING_RESEARCH_TOTAL_READ_ONLY",
+                     "总科研成果资助金额只能通过更新教师成果总表同步，不能直接修改余额表。", 422)
             old_by_name = {name: {row["sequence"]: row for row in old_rows if row["name"] == name}
                            for name in names}
             entries = {item["source_row_id"]: dict(item)
@@ -352,7 +357,8 @@ class ManualRevisionService:
                                for row in dataset.base_rows_json or []}
             stored_summary = [{**row, "_funding_row_id": old_summary_ids.get(row["name"]) or str(uuid4())}
                               for row in new_summary]
-            result_book = render_book(normalized, funding, order=names)
+            result_book = render_book(normalized, funding, order=names,
+                                      detail_names=detail_names)
             try:
                 output = to_bytes(result_book)
             finally:
@@ -361,6 +367,7 @@ class ManualRevisionService:
             source_policy = {"funding_usage_rows_v3": normalized,
                 "funding_usage_funding_v3": funding,
                 "funding_usage_person_order_v3": names,
+                "funding_usage_detail_sheet_names_v3": sorted(detail_names),
                 "funding_usage_entries": active_entries,
                 "funding_usage_deleted_entries": deleted_entries,
                 "funding_usage_history": active_keys,

@@ -671,7 +671,8 @@ def test_personal_edits_recompute_summary_and_next_image_balance(demo, monkeypat
     assert removed_unused.status_code == 200, removed_unused.text
     book = load_workbook(BytesIO(client.get(
         removed_unused.json()["download_url"], headers=users[0]).content))
-    assert book.sheetnames == ["使用登记汇总", "张三"]
+    # 回传删除李四最后一条登记后保留个人页，不影响该人的汇总余额。
+    assert book.sheetnames == ["使用登记汇总", "张三", "李四"]
     assert book["使用登记汇总"]["E3"].value == 0
     assert book["使用登记汇总"]["F3"].value == 2000
     book.close()

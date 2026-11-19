@@ -1,6 +1,7 @@
 """受控成果资助使用登记任务输入。金额由服务端从 OCR 引文解析。"""
 
 from decimal import Decimal
+import re
 from uuid import UUID
 from typing import Literal
 
@@ -121,13 +122,40 @@ class FundingPromptRowEdit(StrictInput):
 
 class FundingPromptTotalEdit(StrictInput):
     name: str = Field(min_length=1, max_length=80)
-    field: Literal["research_total", "other_total"]
+    field: Literal["other_total"]
     value: Decimal | None = Field(ge=0, le=1000000000, decimal_places=2)
 
 
 class FundingPromptNameEdit(StrictInput):
     old_name: str = Field(min_length=1, max_length=80)
     new_name: str = Field(min_length=1, max_length=31)
+
+
+class FundingPromptPersonAdd(StrictInput):
+    name: str = Field(min_length=1, max_length=31)
+    other_total: Decimal | None = Field(default=None, ge=0, le=1000000000, decimal_places=2)
+
+
+class FundingUsagePromptAddPeople(StrictInput):
+    filename: str = Field(min_length=6, max_length=240)
+    base_document_version_id: UUID
+    base_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    base_revision: int = Field(ge=0)
+    request_key: str = Field(min_length=1, max_length=120)
+    user_request: str = Field(min_length=1, max_length=4000)
+    people: list[FundingPromptPersonAdd] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def check_people(self):
+        # Excel 工作表名不区分大小写，避免 Alice/alice 生成两个无法对应的个人页。
+        compact = ["".join(person.name.split()).casefold() for person in self.people]
+        if any(not person.name.strip() or person.name != person.name.strip()
+               or re.search(r'[\x00-\x1f\[\]:*?/\\]', person.name)
+               or person.name == "\u4f7f\u7528\u767b\u8bb0\u6c47\u603b" for person in self.people):
+            raise ValueError("新增教师姓名不能为空、不能带首尾空格，且必须可用作 Excel 工作表名")
+        if len(compact) != len(set(compact)):
+            raise ValueError("新增教师姓名不能重复")
+        return self
 
 
 class FundingPromptTarget(StrictInput):
@@ -144,11 +172,18 @@ class FundingUsagePromptEdit(StrictInput):
     row_edits: list[FundingPromptRowEdit] = Field(default_factory=list, max_length=100)
     total_edits: list[FundingPromptTotalEdit] = Field(default_factory=list, max_length=100)
     name_edits: list[FundingPromptNameEdit] = Field(default_factory=list, max_length=100)
+    person_additions: list[FundingPromptPersonAdd] = Field(default_factory=list, max_length=100)
+    person_deletions: list[str] = Field(default_factory=list, max_length=100,
+                                        description="需从首页及个人明细页删除的教师姓名；必须先预览并确认。")
 
     @model_validator(mode="after")
     def check_changes(self):
-        if not self.row_edits and not self.total_edits and not self.name_edits:
+        if (not self.row_edits and not self.total_edits and not self.name_edits
+                and not self.person_additions and not self.person_deletions):
             raise ValueError("至少需要一项登记、资助金额或姓名变更")
+        if (any(not name or name != name.strip() for name in self.person_deletions)
+                or len(self.person_deletions) != len(set(self.person_deletions))):
+            raise ValueError("删除教师名单不能为空或重复，姓名需与首页完全一致")
         return self
 
 
