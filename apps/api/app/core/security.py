@@ -25,6 +25,7 @@ class TokenDecodeError(ValueError):
 
 PUBLIC_FILE_ACCESS_AUDIENCE = "file-agent-public-file-access-v1"
 PUBLIC_CLASSIFICATION_ACCESS_AUDIENCE = "file-agent-public-classification-access-v1"
+PUBLIC_DATASET_EXPORT_AUDIENCE = "file-agent-public-dataset-export-v1"
 
 
 def hash_password(password: str) -> str:
@@ -172,6 +173,52 @@ def decode_public_classification_access_token(token: str) -> dict[str, str]:
         "aud": PUBLIC_CLASSIFICATION_ACCESS_AUDIENCE,
         "scope": "organization-classification-read",
     }
+
+
+def create_public_dataset_export_token(dataset_id: str, export_id: str, *, ttl_seconds: int = 86400) -> str:
+    """创建仅能读取一个累计表格导出、且 24 小时后失效的浏览器链接令牌。"""
+
+    normalized_dataset_id = str(dataset_id or "").strip()
+    normalized_export_id = str(export_id or "").strip()
+    if (not normalized_dataset_id or len(normalized_dataset_id) > 36
+            or not normalized_export_id or len(normalized_export_id) > 36
+            or not isinstance(ttl_seconds, int) or not 1 <= ttl_seconds <= 86400):
+        raise ValueError("dataset export access token scope is invalid")
+    payload_part = _b64_json({
+        "aud": PUBLIC_DATASET_EXPORT_AUDIENCE,
+        "dataset_id": normalized_dataset_id,
+        "export_id": normalized_export_id,
+        "exp": int(datetime.now(timezone.utc).timestamp()) + ttl_seconds,
+    })
+    signature = _sign(f"{PUBLIC_DATASET_EXPORT_AUDIENCE}.{payload_part}")
+    return f"{payload_part}.{signature}"
+
+
+def decode_public_dataset_export_token(token: str) -> dict[str, str | int]:
+    """校验单个导出文件的只读链接签名、用途和有效期。"""
+
+    normalized = str(token or "").strip()
+    if not normalized or len(normalized) > 1024:
+        raise TokenDecodeError("Invalid public dataset export token")
+    try:
+        payload_part, signature = normalized.split(".", 1)
+    except ValueError as exc:
+        raise TokenDecodeError("Invalid public dataset export token") from exc
+    expected_signature = _sign(f"{PUBLIC_DATASET_EXPORT_AUDIENCE}.{payload_part}")
+    if not hmac.compare_digest(signature, expected_signature):
+        raise TokenDecodeError("Invalid public dataset export token")
+    payload = _decode_json(payload_part)
+    expires_at = payload.get("exp")
+    dataset_id = str(payload.get("dataset_id") or "").strip()
+    export_id = str(payload.get("export_id") or "").strip()
+    if (payload.get("aud") != PUBLIC_DATASET_EXPORT_AUDIENCE
+            or not dataset_id or len(dataset_id) > 36
+            or not export_id or len(export_id) > 36
+            or not isinstance(expires_at, int)
+            or expires_at < int(datetime.now(timezone.utc).timestamp())):
+        raise TokenDecodeError("Invalid or expired public dataset export token")
+    return {"aud": PUBLIC_DATASET_EXPORT_AUDIENCE, "dataset_id": dataset_id,
+            "export_id": export_id, "exp": expires_at}
 
 
 def _b64_json(data: dict[str, Any]) -> str:

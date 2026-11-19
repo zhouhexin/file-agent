@@ -1,5 +1,6 @@
 """File Agent 后端的 FastAPI 应用入口。"""
 
+import logging
 import time
 from contextlib import asynccontextmanager
 
@@ -94,6 +95,31 @@ app.include_router(reference_catalogs_router)
 register_api_error_handlers(app)
 
 
+def _request_path_for_log(path: str) -> str:
+    """移除 URL 中的公开能力令牌，避免只读分享链接进入应用访问日志。"""
+    for prefix in ("/api/structured-datasets/public-exports/", "/api/public/file-access/"):
+        if prefix in path:
+            before, suffix = path.split(prefix, 1)
+            _token, separator, remainder = suffix.partition("/")
+            return before + prefix + "[redacted]" + (separator + remainder if separator else "")
+    return path
+
+
+class _PublicAccessLogFilter(logging.Filter):
+    """同时脱敏 Uvicorn 控制台访问日志，防止能力链接绕过应用日志保护。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """仅替换 Uvicorn 访问记录中的请求目标，保持方法、状态码等诊断字段。"""
+        if isinstance(record.args, tuple) and len(record.args) == 5:
+            args = list(record.args)
+            args[2] = _request_path_for_log(str(args[2]))
+            record.args = tuple(args)
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_PublicAccessLogFilter())
+
+
 @app.middleware("http")
 async def request_logging_middleware(request: Request, call_next):
     """为每个请求生成 request_id，并记录 API 请求耗时和异常。"""
@@ -102,6 +128,7 @@ async def request_logging_middleware(request: Request, call_next):
     # 异常处理器通过 request.state 读取同一个 ID，保证响应体、响应头和 JSONL 日志可以互相定位。
     request.state.request_id = request_id
     start = time.perf_counter()
+    safe_path = _request_path_for_log(request.url.path)
     # 路由依赖中的 get_current_user 在本中间件之后才执行。先从已签名且未过期的
     # Bearer JWT 提取 subject，才能让 API 开始、结束以及同请求内的 Agent/Tool 日志
     # 使用同一个 user_id；日志中不保存 Token 本身。
@@ -110,7 +137,7 @@ async def request_logging_middleware(request: Request, call_next):
         log_event(
             "api.request.started",
             method=request.method,
-            path=request.url.path,
+            path=safe_path,
             message="API 请求开始",
         )
         try:
@@ -124,7 +151,7 @@ async def request_logging_middleware(request: Request, call_next):
                 duration_ms=duration_ms,
                 error_code=exc.__class__.__name__,
                 method=request.method,
-                path=request.url.path,
+                path=safe_path,
                 # 只记录异常类型和请求定位信息；异常文本可能包含路径、正文片段或第三方响应。
                 message="API 请求发生未捕获异常",
             )
@@ -141,7 +168,7 @@ async def request_logging_middleware(request: Request, call_next):
             duration_ms=duration_ms,
             error_code=None if response.status_code < 400 else f"HTTP_{response.status_code}",
             method=request.method,
-            path=request.url.path,
+            path=safe_path,
             http_status=response.status_code,
             message="API 请求完成",
         )

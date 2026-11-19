@@ -1,10 +1,17 @@
 """共享累计表格 Demo API；复用登录，所有用户均可操作，无 owner 授权流程。"""
 
+from html import escape
+from pathlib import Path
 from typing import Literal
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import HTMLResponse
+from openpyxl import load_workbook
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.security import (TokenDecodeError, create_public_dataset_export_token,
+                               decode_public_dataset_export_token)
+from app.db.models import StructuredDatasetExport
 from app.modules.auth.dependencies import get_current_user
 from .schemas import DatasetCreate, DatasetCreateFromExcel, DatasetAppend, DatasetQuery
 from .service import StructuredDatasetService
@@ -154,3 +161,96 @@ def export_dataset(dataset_id: UUID, db=Depends(get_db), user=Depends(get_curren
 def download_export(dataset_id: UUID, export_id: UUID, db=Depends(get_db), user=Depends(get_current_user)):
     """下载独立聚合快照。"""
     return StructuredDatasetService(db, user).download(str(dataset_id), str(export_id))
+
+
+@router.get("/{dataset_id}/exports/{export_id}/browser-links")
+def export_browser_links(dataset_id: UUID, export_id: UUID, db=Depends(get_db), user=Depends(get_current_user)):
+    """已登录用户为单个已发布导出签发 24 小时只读预览和下载链接。"""
+    service = StructuredDatasetService(db, user)
+    # 生成能力链接前先验证共享目标、发布状态、文件路径及快照哈希。
+    service.download(str(dataset_id), str(export_id))
+    token = create_public_dataset_export_token(str(dataset_id), str(export_id))
+    prefix = f"/api/structured-datasets/public-exports/{token}"
+    return {"preview_url": f"{prefix}/preview", "download_url": f"{prefix}/download",
+            "expires_in_seconds": 86400}
+
+
+def _public_export_scope(token: str) -> dict:
+    """解码仅限单个导出文件的短期只读能力链接。"""
+    try:
+        return decode_public_dataset_export_token(token)
+    except TokenDecodeError as exc:
+        raise HTTPException(status_code=404, detail="下载链接无效或已过期") from exc
+
+
+@router.get("/public-exports/{token}/download")
+def download_public_export(token: str, db=Depends(get_db)):
+    """无需登录下载一个签名令牌绑定的 XLSX 导出快照。"""
+    scope = _public_export_scope(token)
+    response = StructuredDatasetService(db, None).download(
+        scope["dataset_id"], scope["export_id"])
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return response
+
+
+@router.get("/public-exports/{token}/preview", response_class=HTMLResponse)
+def preview_public_export(token: str, db=Depends(get_db)):
+    """无需登录预览签名令牌绑定的 XLSX 快照，并提供原文件下载链接。"""
+    scope = _public_export_scope(token)
+    service = StructuredDatasetService(db, None)
+    dataset = service.dataset(scope["dataset_id"])
+    # 复用受控下载的发布状态、路径和 SHA-256 校验，预览也不读取未发布候选。
+    download_response = service.download(scope["dataset_id"], scope["export_id"])
+    export = db.query(StructuredDatasetExport).filter_by(
+        id=scope["export_id"], dataset_id=scope["dataset_id"]).one_or_none()
+    if export is None:
+        raise HTTPException(status_code=404, detail="导出文件不存在")
+    workbook = load_workbook(Path(download_response.path), read_only=True, data_only=True)
+    download_url = f"/api/structured-datasets/public-exports/{token}/download"
+    sections = []
+    max_sheets, max_rows, max_columns, max_cells = 20, 300, 40, 12000
+    visible_cells = 0
+    truncated = len(workbook.worksheets) > max_sheets
+    try:
+        for sheet_index, sheet in enumerate(workbook.worksheets[:max_sheets]):
+            truncated |= (sheet.max_row or 0) > max_rows or (sheet.max_column or 0) > max_columns
+            rows = []
+            for row_index, row in enumerate(sheet.iter_rows(max_row=max_rows, max_col=max_columns,
+                                                              values_only=True)):
+                cells = []
+                for value in row:
+                    visible_cells += 1
+                    if visible_cells > max_cells:
+                        truncated = True
+                        break
+                    rendered = "" if value is None else escape(str(value))
+                    tag = "th" if row_index == 0 else "td"
+                    cells.append(f"<{tag}>{rendered}</{tag}>")
+                if cells:
+                    rows.append("<tr>" + "".join(cells) + "</tr>")
+                if visible_cells > max_cells:
+                    break
+            sections.append(f"<section><h2>{escape(sheet.title)}</h2><table>{''.join(rows)}</table></section>")
+            if visible_cells > max_cells:
+                break
+    finally:
+        workbook.close()
+    truncation = "<p>预览内容较多，已截取部分单元格；可下载原文件查看完整内容。</p>" if truncated else ""
+    filename = escape(dataset.target_filename or "累计表格.xlsx")
+    html = ("<!doctype html><html lang='zh-CN'><meta charset='utf-8'>"
+            f"<meta name='viewport' content='width=device-width, initial-scale=1'><title>{filename}</title>"
+            "<style>body{font-family:system-ui,'Microsoft YaHei',sans-serif;margin:24px;color:#172033}"
+            "section{margin:16px 0;padding:14px;border:1px solid #dfe5ec;border-radius:8px}"
+            "table{border-collapse:collapse;display:block;overflow:auto;max-width:100%}"
+            "th,td{border:1px solid #dfe5ec;padding:6px 8px;min-width:70px;white-space:pre-wrap;"
+            "vertical-align:top}th{background:#eef3f8}</style><main>"
+            f"<h1>{filename}</h1><p><a href='{escape(download_url, quote=True)}'>下载原始 Excel</a></p>"
+            f"{truncation}{''.join(sections)}</main></html>")
+    return HTMLResponse(content=html, headers={
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "X-Robots-Tag": "noindex, nofollow",
+    })
