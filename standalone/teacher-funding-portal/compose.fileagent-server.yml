@@ -1,0 +1,12 @@
+# Independent service, attached to the existing FileAgent network for DB/API access.
+services:
+  teacher-funding-portal:
+    environment:
+      PORTAL_FILEAGENT_BASE_URL: http://api:8000
+    networks:
+      - fileagent
+
+networks:
+  fileagent:
+    external: true
+    name: ${FILE_AGENT_DOCKER_NETWORK:-file-agent_internal}

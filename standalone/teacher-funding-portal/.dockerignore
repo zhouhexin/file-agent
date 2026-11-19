@@ -1,0 +1,11 @@
+.env
+.env.*
+data
+*.sqlite3
+__pycache__
+*.py[cod]
+.git
+.release-work
+.release-backups
+scripts
+tests
