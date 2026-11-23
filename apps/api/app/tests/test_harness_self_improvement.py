@@ -169,7 +169,7 @@ def test_old_feedback_is_verified_and_upgraded_without_writes(routing):
     old = feedback.build_feedback(experiment, version="root-cause-feedback-v1")
     output = experiment.with_name("old-feedback")
     write_new_json(output / "root-cause-feedback.json", old)
-    write_new_json(output / "source.json", {"experiment": str(experiment.relative_to(routing.root)),
+    write_new_json(output / "source.json", {"experiment": experiment.relative_to(routing.root).as_posix(),
                                            "feedback_ref": digest(old)})
     before = {str(p): p.read_bytes() for p in output.glob("*.json")}
     assert feedback.load_feedback(output) == old

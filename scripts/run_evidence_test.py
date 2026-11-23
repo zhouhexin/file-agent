@@ -56,14 +56,22 @@ def isolated_environment(parent: dict[str, str]) -> dict[str, str]:
     """仅传递系统运行变量，排除终端中残留的旧库、密钥和MANAGED_ROOT配置。"""
     allowed = (
         "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
-        "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "WINDIR",
+        "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
         "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
         "http_proxy", "https_proxy", "all_proxy", "no_proxy",
     )
     result = {key: parent[key] for key in allowed if key in parent}
-    result.update(PYTHONPATH=str(PROJECT_ROOT / "apps/api"), PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1")
+    result.update(PYTHONPATH=str(PROJECT_ROOT / "apps/api"), PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1", PYTHONUTF8="1")
     return result
+
+
+def handoff(arguments: list[str]) -> str:
+    """Windows execv changes PID: explicitly wait and propagate the real exit code."""
+    return ("\nif os.name == 'nt':\n"
+            "    import subprocess\n"
+            f"    raise SystemExit(subprocess.run({arguments!r}, check=False).returncode)\n"
+            f"os.execv({sys.executable!r}, {arguments!r})\n")
 
 
 def command_code(action: str, arguments: list[str] | None = None, capture_plan: str | None = None) -> str:
@@ -74,7 +82,7 @@ def command_code(action: str, arguments: list[str] | None = None, capture_plan: 
                   "harness": "app.scripts.evidence_harness"}[action]
         argv = [sys.executable, "-m", module, *(arguments or [])]
         network = HARNESS_NETWORK_PREFLIGHT if action == "harness" else ""
-        return preflight + "\nimport os\n" + network + f"\nos.execv({sys.executable!r}, {argv!r})\n"
+        return preflight + "\nimport os\n" + network + handoff(argv)
     if action == "check":
         return preflight + "\nimport jieba\nprint('独立配置校验通过；目标库：'+db_name+'；Jieba：'+jieba.__version__)\nprint('此检查没有连接数据库或LLM。')\n"
     if action == "migrate":
@@ -100,7 +108,7 @@ print('测试库迁移完成。')
         raise ValueError("未知测试动作")
     if capture_plan:
         extra += f"os.environ['EVIDENCE_EVALUATION_CAPTURE_PLAN']={capture_plan!r}\n"
-    return preflight + "\nimport os\n" + extra + f"os.execv({sys.executable!r}, {arguments!r})\n"
+    return preflight + "\nimport os\n" + extra + handoff(arguments)
 
 
 def main() -> None:

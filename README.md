@@ -1,5 +1,13 @@
 # File Agent
 
+Harness 自修复逐版测试：`repair-freeze` 诊断并冻结受限补丁、运行模拟；`repair-test --version ...` 或显式 `--all` 对照每个安全版本。无选优、无自动留用，旧参考不变。默认零调用，完整命令见[逐版本操作文档](docs/evidence-evaluation-test/harness-frozen-repair-versions-usage.md)。
+
+冻结生成 v2 将单次连接失败记为该版本 GENERATION_FAILED，并在原预算内继续下一版；部分成功显示 PARTIAL_VERSIONS_FROZEN。已知旧批次的冻结版本保持只读可测，不需重生成。
+
+Harness 保留旧方案的改进入口：`campaign-loop --reference <旧实验目录>`，先在当前环境重新对照旧方案，再主要从保留说明做小范围修改；未通过重复对照时保留旧方案。默认零调用，使用步骤见[参考方案模式](docs/evidence-evaluation-test/harness-reference-candidate-usage.md)。
+
+Windows 的 Harness 自动改进测试直接使用现有本机 Python：`.\scripts\run_harness_windows.ps1 -Action Check -Python <python.exe>` 检查环境，`-Action Acceptance` 运行本地假模型验收，不需要 Docker 或 Build。候选只允许受限 AST 修改，采用 Python 审计与 Windows Job；这不是任意代码的系统沙箱。完整步骤见 [Windows 本地 Python 测试](docs/evidence-evaluation-test/harness-windows-local-python-plan.md)。
+
 Harness自动循环入口：`campaign-loop`在一份总预算内串起探索、固定复测和反馈再探索；默认只检查，显式live执行。候选仍由模型提出，阶段分别冻结封存，正式入选标准及保留集边界不变。运行及记录说明见[自动循环步骤](docs/evidence-evaluation-test/harness-auto-loop-usage.md)。
 
 Harness测试代理修复：独立测试env可用`EVIDENCE_HARNESS_PROXY_URL`固定网络通路，仅harness启动器映射到子进程代理，正式服务不变；37项测试及一次真实固定假问题探测通过。继续测试使用[新v4步骤](docs/evidence-evaluation-test/harness-proxy-fix.md)。

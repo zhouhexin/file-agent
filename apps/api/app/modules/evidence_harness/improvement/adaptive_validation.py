@@ -17,7 +17,7 @@ from app.modules.evidence_harness.improvement import validation_dataset as data_
 from app.modules.evidence_harness.improvement import planning_evaluation as baseline
 from app.modules.evidence_harness.improvement import codex_backend
 from app.modules.evidence_harness.improvement.executor import Journal, run_trial, run_checks
-from app.modules.evidence_harness.improvement.isolation import snapshot, file_manifest, probe_sandbox, trusted_code_ref
+from app.modules.evidence_harness.improvement.isolation import snapshot, file_manifest, probe_sandbox, trusted_code_ref, compatible_trusted_refs
 from app.modules.evidence_harness.improvement.planning_feedback import task_diagnostic
 from app.modules.evidence_harness.improvement.patches import source_hash
 from app.modules.evidence_harness.routing.comparator import _metrics
@@ -116,7 +116,7 @@ def run(*, dataset_path, output, settings, authorization, source="live", backend
     order = schedule(checked["cases"], authorization.repetitions)
     profile_details = {k: checked[k] for k in ("origin_profile", "profile", "allow_model_profile_change", "model_changed", "endpoint_changed", "comparison_scope")}
     write_new_json(output / "experiment.json", {"schema_version": "adaptive-validation-experiment-v3", "source": source, "provider": provider,
-        "dataset_source": str(checked["dataset_path"].relative_to(store.TEST_ROOT)), "inputs_sha256": dataset.inputs_sha256,
+        "dataset_source": checked["dataset_path"].relative_to(store.TEST_ROOT).as_posix(), "inputs_sha256": dataset.inputs_sha256,
         "annotations_sha256": dataset.annotations_sha256, "candidate_source_ref": locked["source_ref"],
         "policy_ref": locked["candidate"]["prompt_ref"], "patch_ref": locked["candidate"]["patch_ref"],
         "execution_inputs_ref": digest([c.model_dump(mode="json") for c in checked["cases"]]),
@@ -216,7 +216,7 @@ def _compare(output):
     meta = store._read(output / "experiment.json")[0]
     legacy = meta["schema_version"] == "adaptive-validation-experiment-v1" and meta["trusted_code_ref"] == KNOWN_C_V1_TRUSTED_REF
     compatible_v2 = meta["schema_version"] == "adaptive-validation-experiment-v2" and meta["trusted_code_ref"] == KNOWN_C_V2_TRUSTED_REF
-    current = meta["schema_version"] == "adaptive-validation-experiment-v3" and meta["trusted_code_ref"] in {trusted_code_ref(), KNOWN_C_V3_TRUSTED_REF, KNOWN_C_V3_STARTUP_REF, KNOWN_C_V3_HTTPS_REF}
+    current = meta["schema_version"] == "adaptive-validation-experiment-v3" and meta["trusted_code_ref"] in {*compatible_trusted_refs(), KNOWN_C_V3_TRUSTED_REF, KNOWN_C_V3_STARTUP_REF, KNOWN_C_V3_HTTPS_REF}
     if (not (legacy or compatible_v2 or current)
         or meta["holdout_usage"] != "VALIDATION_ONLY" or meta["advisor_calls"] != 0 or meta["evaluation_level"] != "INITIAL_ROUTING"):
         raise ValueError("VALIDATION_PROTOCOL_INVALID")
@@ -248,7 +248,8 @@ def _compare(output):
                 if profile.get("transport") not in {None, "HTTPS_SSE"}:
                     raise ValueError("VALIDATION_CODEX_TRANSPORT_INVALID")
                 expected = codex_backend.profile({"model": "unused-for-replay", "version": profile["codex_version"],
-                    "binary_ref": profile["codex_binary_ref"], "transport": "https" if profile.get("transport") == "HTTPS_SSE" else "auto"}, auth.planner_max_output_tokens)
+                    "binary_ref": profile["codex_binary_ref"], "transport": "https" if profile.get("transport") == "HTTPS_SSE" else "auto",
+                    **({"isolation": profile["isolation"]} if "isolation" in profile else {})}, auth.planner_max_output_tokens)
                 expected["model_ref"] = profile["model_ref"]
             elif meta["provider"] != "openai-compatible":
                 raise ValueError("VALIDATION_PROVIDER_INVALID")

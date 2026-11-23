@@ -11,7 +11,7 @@ from app.modules.evidence_harness.improvement import campaign, adaptive_policy a
 from app.modules.evidence_harness.improvement import codex_backend, validation_dataset as data_store
 from app.modules.evidence_harness.improvement.iteration_comparator import score_round
 from app.modules.evidence_harness.improvement.executor import Journal, run_trial, run_checks
-from app.modules.evidence_harness.improvement.isolation import snapshot, probe_sandbox, file_manifest, trusted_code_ref
+from app.modules.evidence_harness.improvement.isolation import snapshot, probe_sandbox, file_manifest, trusted_code_ref, compatible_trusted_refs
 
 VERSION = "campaign-confirmation-v1"
 EXTENDED_VERSION = "campaign-confirmation-v2"
@@ -82,7 +82,7 @@ def run(*, lock_dir, split, output, settings, authorization, source="live", prov
         raise ValueError("CAMPAIGN_CONFIRM_SOURCE_CHANGED")
     extended = locked.get("research_only") or isinstance(authorization, ConfirmationAuthorization)
     meta = {"schema_version": EXTENDED_VERSION if extended else VERSION, "source": source, "provider": provider,
-        "lock_source": str(locked["directory"].relative_to(store.TEST_ROOT)), "lock_ref": locked["lock_ref"], "split": split,
+        "lock_source": locked["directory"].relative_to(store.TEST_ROOT).as_posix(), "lock_ref": locked["lock_ref"], "split": split,
         "profile": checked["profile"], "policy_ref": locked["candidate"]["prompt_ref"], "baseline_manifest": manifest,
         "authorization": authorization.model_dump(), "trusted_code_ref": trusted_code_ref(),
         "inputs_ref": digest([c.model_dump(mode="json") for c in checked["cases"]]), "gold_ref": digest(checked["gold"]),
@@ -141,7 +141,7 @@ def _compare(output):
     if manifest != store._read(output / "integrity.json")[0]:
         raise ValueError("CAMPAIGN_CONFIRM_ARTIFACT_CHANGED")
     meta = store._read(output / "experiment.json")[0]
-    if (meta["schema_version"] not in {VERSION, EXTENDED_VERSION} or meta["trusted_code_ref"] not in {trusted_code_ref(), campaign.PRE_LOOP_CONTROLLER_REF} or meta["advisor_calls"] != 0
+    if (meta["schema_version"] not in {VERSION, EXTENDED_VERSION} or meta["trusted_code_ref"] not in {*compatible_trusted_refs(), campaign.PRE_LOOP_CONTROLLER_REF} or meta["advisor_calls"] != 0
         or meta["feedback_export"] != "FORBIDDEN" or meta["automatically_adopted"] is not False):
         raise ValueError("CAMPAIGN_CONFIRM_PROTOCOL_INVALID")
     locked = campaign.load_lock(store.TEST_ROOT / meta["lock_source"])

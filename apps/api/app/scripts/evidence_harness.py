@@ -5,6 +5,7 @@ from collections import Counter
 import json
 from pathlib import Path
 import re
+import sys
 
 from pydantic import ValidationError
 
@@ -188,6 +189,10 @@ def main() -> None:
     retest_compare.add_argument("--experiment", type=Path, required=True)
     auto_loop = sub.add_parser("campaign-loop", help="统一预算自动探索、固定复测、反馈再探索；默认零调用")
     auto_loop.add_argument("--source", type=Path, required=True)
+    auto_loop.add_argument("--reference", type=Path, help="启用参考方案模式，指定永久保留的旧方案实验")
+    auto_loop.add_argument("--reference-round", type=int, help="旧方案在开发迭代或复测批次中的轮次；原C实验不用填")
+    auto_loop.add_argument("--strategy", choices=("mixed", "inherit", "fresh"), default="mixed")
+    auto_loop.add_argument("--fresh-every", type=int, choices=range(2, 11), default=4)
     auto_loop.add_argument("--output", type=Path, required=True)
     auto_loop.add_argument("--max-cycles", type=int, choices=(1, 2, 3), default=2)
     auto_loop.add_argument("--max-no-progress-cycles", type=int, choices=(1, 2, 3), default=2)
@@ -212,6 +217,32 @@ def main() -> None:
         command.add_argument("--live", action="store_true")
     campaign_run.add_argument("--advisor-max-output-tokens", type=int, choices=(3000, 6000, 8000), default=8000)
     auto_loop.set_defaults(max_active_seconds=14400)
+    repair_freeze = sub.add_parser("repair-freeze", help="诊断后逐版冻结受限补丁并模拟，不选优、不自动真实对照")
+    repair_freeze.add_argument("--source", type=Path, required=True)
+    repair_freeze.add_argument("--reference", type=Path, required=True)
+    repair_freeze.add_argument("--reference-round", type=int)
+    repair_freeze.add_argument("--diagnostics", type=Path, required=True)
+    repair_freeze.add_argument("--max-versions", type=int, choices=range(1, 6), default=3)
+    repair_test = sub.add_parser("repair-test", help="固定旧参考，测试指定或全部冻结版本；没有留用或胜者替换")
+    repair_test.add_argument("--batch", type=Path, required=True)
+    repair_selection = repair_test.add_mutually_exclusive_group(required=True)
+    repair_selection.add_argument("--version", action="append", help="四位版本号，可重复指定")
+    repair_selection.add_argument("--all", action="store_true", help="显式测试全部冻结版本，共用一次总预算")
+    for command in (repair_freeze, repair_test):
+        command.add_argument("--output", type=Path, required=True)
+        command.add_argument("--max-requests", type=int, required=True)
+        command.add_argument("--max-active-seconds", type=int, default=3600)
+        command.add_argument("--repetitions", type=int, choices=(2, 3), default=2)
+        command.add_argument("--max-consecutive-failures", type=int, choices=range(1, 6), default=3)
+        command.add_argument("--planner-max-output-tokens", type=int, choices=(3000, 6000, 8000), default=3000)
+        command.add_argument("--provider", choices=("openai-compatible", "codex-login"), default=None)
+        command.add_argument("--codex-model")
+        command.add_argument("--codex-transport", choices=("auto", "https"))
+        command.add_argument("--allow-model-profile-change", action=argparse.BooleanOptionalAction, default=None)
+        command.add_argument("--live", action="store_true")
+    for name in ("repair-list", "repair-compare"):
+        reader = sub.add_parser(name, help="只读重建所有版本与结果，不登录或调用模型")
+        reader.add_argument("--experiment", type=Path, required=True)
     codex_probe = sub.add_parser("codex-probe", help="使用同一测试env检查Codex；显式live只以固定假问题调用一次")
     codex_probe.add_argument("--codex-model", help="可选，覆盖env模型名")
     codex_probe.add_argument("--codex-transport", choices=("auto", "https"), help="覆盖env中的Codex连接方式")
@@ -230,11 +261,51 @@ def main() -> None:
                 raise ValueError("CODEX_PROBE_REQUIRES_CODEX_PROVIDER")
             result = {**codex_backend.probe(selected["codex_model"], live=args.live,
                 **({"transport": selected["codex_transport"]} if "codex_transport" in selected else {})), "configuration_sources": sources}
+        elif args.action.startswith("repair-"):
+            from app.modules.evidence_harness import repair_versions
+            if args.action in {"repair-list", "repair-compare"}:
+                result = repair_versions.compare(args.experiment)
+            else:
+                from app.core.config import get_settings
+                from app.modules.evidence_harness.config import validation_provider_options
+                settings = get_settings()
+                selected, sources = validation_provider_options(provider=args.provider, codex_model=args.codex_model,
+                    codex_transport=args.codex_transport, allow_model_profile_change=args.allow_model_profile_change)
+                auth = repair_versions.Authorization(max_total_requests=args.max_requests,
+                    max_active_seconds=args.max_active_seconds, repetitions=args.repetitions,
+                    max_consecutive_failures=args.max_consecutive_failures,
+                    planner_max_output_tokens=args.planner_max_output_tokens,
+                    max_versions=args.max_versions if args.action == "repair-freeze" else 3)
+                options = dict(output=args.output, settings=settings, authorization=auth, **selected)
+                if args.action == "repair-freeze":
+                    options.update(source_dir=args.source, reference_dir=args.reference,
+                        reference_round=args.reference_round, diagnostics=args.diagnostics)
+                    checker, runner = repair_versions.freeze_check, repair_versions.freeze
+                else:
+                    options.update(batch_dir=args.batch, versions=None if args.all else args.version)
+                    checker, runner = repair_versions.test_check, repair_versions.test
+                if args.live:
+                    result = runner(**options)
+                else:
+                    checked = checker(**options)
+                    result = {"stage": "CHECK_PASSED", "model_calls": 0, "configuration_sources": sources,
+                        "case_count": len(checked["cases"]), "profile": checked["profile"],
+                        "planned_request_upper_bound": checked["planned_request_upper_bound"],
+                        "authorization_covers_upper_bound": args.max_requests >= checked["planned_request_upper_bound"],
+                        "versions": [{k: v[k] for k in ("version", "status", "testable")}
+                            for v in checked.get("selected", [])],
+                        "automatically_adopted": False, "reference_updated": False}
         elif args.action.startswith("campaign-"):
             from app.modules.evidence_harness.improvement import campaign, campaign_confirmation, campaign_retesting, iteration_comparator, adaptive_validation
             if args.action == "campaign-loop-compare":
-                from app.modules.evidence_harness import campaign_loop
-                result = campaign_loop.compare(args.experiment)
+                from app.modules.evidence_harness import campaign_loop, reference_loop
+                from app.modules.evidence_harness import feedback as harness_store
+                from app.modules.evidence_harness.optimizer import _directory
+                # 新协议独立重放，旧模式的控制器和评分身份保持原样。
+                directory = _directory(args.experiment)
+                metadata_path = directory / "experiment.json"
+                version = harness_store._read(metadata_path)[0].get("schema_version") if metadata_path.exists() else None
+                result = (reference_loop if version == reference_loop.VERSION else campaign_loop).compare(directory)
             elif args.action in {"campaign-compare", "campaign-confirm-compare", "campaign-retest-compare"}:
                 comparator = {"campaign-compare": iteration_comparator.compare, "campaign-confirm-compare": campaign_confirmation.compare,
                     "campaign-retest-compare": campaign_retesting.compare}[args.action]
@@ -249,15 +320,22 @@ def main() -> None:
                     codex_transport=args.codex_transport, allow_model_profile_change=args.allow_model_profile_change)
                 common = dict(output=args.output, settings=settings, **selected)
                 if args.action == "campaign-loop":
-                    from app.modules.evidence_harness import campaign_loop
-                    common.pop("allow_model_profile_change")
-                    auth = campaign_loop.Authorization(max_cycles=args.max_cycles, max_no_progress_cycles=args.max_no_progress_cycles,
+                    from app.modules.evidence_harness import campaign_loop, reference_loop
+                    selected_loop = reference_loop if args.reference else campaign_loop
+                    if not args.reference:
+                        common.pop("allow_model_profile_change")
+                        if args.reference_round is not None or args.strategy != "mixed" or args.fresh_every != 4:
+                            raise ValueError("REFERENCE_OPTION_REQUIRES_REFERENCE")
+                    auth = selected_loop.Authorization(max_cycles=args.max_cycles, max_no_progress_cycles=args.max_no_progress_cycles,
                         max_rounds=args.max_rounds, max_no_progress=args.max_rounds, repetitions=args.repetitions,
                         top_k=args.top_k, retest_repetitions=args.retest_repetitions, max_total_requests=args.max_requests,
                         max_active_seconds=args.max_active_seconds, advisor_max_output_tokens=args.advisor_max_output_tokens,
-                        planner_max_output_tokens=args.planner_max_output_tokens)
+                        planner_max_output_tokens=args.planner_max_output_tokens,
+                        **({"strategy": args.strategy, "fresh_every": args.fresh_every} if args.reference else {}))
                     options = dict(**common, source_dir=args.source, authorization=auth)
-                    checker, runner = campaign_loop.check, campaign_loop.run
+                    if args.reference:
+                        options.update(reference_dir=args.reference, reference_round=args.reference_round)
+                    checker, runner = selected_loop.check, selected_loop.run
                 elif args.action == "campaign-run":
                     auth = campaign.CampaignAuthorization(max_rounds=args.max_rounds, max_no_progress=args.max_no_progress,
                         repetitions=args.repetitions, max_total_requests=args.max_requests, max_active_seconds=args.max_active_seconds,
@@ -291,6 +369,9 @@ def main() -> None:
                     if "advisor_request_characters" in checked:
                         result.update(advisor_request_characters=checked["advisor_request_characters"],
                             advisor_request_limit=checked["advisor_request_limit"])
+                    if "reference_candidate" in checked:
+                        result.update(reference_mode=True, reference_policy_ref=checked["reference_candidate"]["prompt_ref"],
+                            reference_source=checked["reference"]["path"], strategy=auth.strategy)
                 else:
                     import signal
                     def interrupt_campaign(_signal, _frame):
@@ -444,6 +525,9 @@ def main() -> None:
                 checks = isolation.probe_sandbox(output / "code", output)
                 from app.modules.evidence_evaluation.frozen_inputs import write_new_json
                 result = {"stage": "SANDBOX_VERIFIED", "checks": checks, "model_calls": 0}
+                if sys.platform == "win32":
+                    from app.modules.evidence_harness.improvement import local_runtime
+                    result.update(stage="LOCAL_TEST_VERIFIED", runtime=local_runtime.runtime())
                 write_new_json(output / "manifest.json", result)
             elif args.action == "self-propose":
                 authorization = ImprovementAuthorization(advisor_max_output_tokens=args.advisor_max_output_tokens)
@@ -586,6 +670,8 @@ def main() -> None:
             "REPORT_SCHEMA_INVALID" if isinstance(exc, ValidationError)
             else "OUTPUT_ALREADY_EXISTS" if isinstance(exc, FileExistsError)
             else str(exc) if type(exc) is ValueError and re.fullmatch(r"[A-Z_]+", str(exc))
+            else str(exc) if type(exc) is RuntimeError and re.fullmatch(
+                r"(?:HARNESS_(?:DOCKER|CODEX|CONTAINER|NATIVE)|CONTAINER_SECCOMP|OS_SANDBOX)_[A-Z_]+", str(exc))
             else "INPUT_JSON_INVALID" if isinstance(exc, (json.JSONDecodeError, UnicodeError))
             else "INPUT_OR_OUTPUT_INVALID"
         )

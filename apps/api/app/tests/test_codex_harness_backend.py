@@ -14,6 +14,12 @@ from app.modules.evidence_harness.improvement import codex_backend as codex
 from app.modules.llm.client import LLMResponseError
 
 
+@pytest.fixture(autouse=True)
+def offline_database_configuration(monkeypatch):
+    """Importing planning modules must not depend on a developer's real .env."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://offline:offline@127.0.0.1/file_agent_unit_tests")
+
+
 def fake_spec():
     """仅用现有Python模拟CLI，不访问真实Codex认证或模型。"""
     return {"binary": str(Path(sys.executable).resolve()), "binary_ref": hashlib.sha256(Path(sys.executable).resolve().read_bytes()).hexdigest(),
@@ -260,14 +266,15 @@ def test_codex_timeout_and_interrupt_kill_process_group(tmp_path, monkeypatch, k
     """不等待真实60秒，验证取消控制能终止CLI且异常不吞掉用户中断。"""
     client, _, processes, _ = fake_cli(tmp_path, monkeypatch, "wait")
     if kind == "timeout":
-        ticks = iter([0, 61])
+        from itertools import chain, repeat
+        ticks = chain([0], repeat(61))
         monkeypatch.setattr(codex.time, "monotonic", lambda: next(ticks))
         expected = LLMResponseError
     else:
         def interrupt(*a, **kw):
             """模拟用户取消正在读取的模型请求。"""
             raise KeyboardInterrupt
-        monkeypatch.setattr(codex.selectors.DefaultSelector, "select", interrupt)
+        monkeypatch.setattr(codex.PipeReader, "read", interrupt)
         expected = KeyboardInterrupt
     with pytest.raises(expected):
         client.complete_json_with_usage(system_prompt="original", user_payload={}, max_output_tokens=3000)
@@ -278,6 +285,8 @@ def test_codex_timeout_and_interrupt_kill_process_group(tmp_path, monkeypatch, k
 def test_login_preflight_only_inspects_cli_status(monkeypatch, login):
     """只允许已登录ChatGPT，不能偷偷沿用旧API认证；检查本身不调用模型。"""
     spec = fake_spec()
+    monkeypatch.setattr(codex.sys, "platform", "darwin")
+    monkeypatch.setattr(codex, "_mac_runtime_available", lambda: True)
     calls = []
     monkeypatch.setattr(codex.shutil, "which", lambda _: spec["binary"])
 
@@ -294,7 +303,7 @@ def test_login_preflight_only_inspects_cli_status(monkeypatch, login):
     assert len(calls) == 2 and all("exec" not in c for c in calls)
 
 
-@pytest.mark.skipif(os.environ.get("HARNESS_OS_ACCEPTANCE") != "1", reason="需本机真实OS隔离验收")
+@pytest.mark.skipif(os.environ.get("HARNESS_OS_ACCEPTANCE") != "1" or sys.platform != "darwin", reason="macOS专项；Windows使用容器专项")
 def test_os_codex_fake_cli_cannot_read_gold_or_execute_other_programs(tmp_path, monkeypatch):
     """实际OS限制作用于CLI本身，Fake验证项目/Gold不可读与外部程序不可执行。"""
     client, *_ = fake_cli(tmp_path, monkeypatch, "os_probe", os_sandbox=True)

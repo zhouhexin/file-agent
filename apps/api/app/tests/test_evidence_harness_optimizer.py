@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 import json
+import os
 from types import SimpleNamespace
 
 import httpx
@@ -73,7 +74,8 @@ def test_valid_candidate_or_no_change_is_recorded_without_execution(prepared, no
     saved = json.loads((_output(prepared) / "proposal.json").read_text())
     assert saved["proposal"] == raw
     assert before == {p.name: p.read_bytes() for p in prepared[1].iterdir()}
-    assert all(p.stat().st_mode & 0o777 == 0o600 for p in _output(prepared).iterdir())
+    if os.name != "nt":  # POSIX mode bits do not describe Windows ACLs.
+        assert all(p.stat().st_mode & 0o777 == 0o600 for p in _output(prepared).iterdir())
     with pytest.raises(FileExistsError):
         optimizer.propose(feedback_dir=prepared[1], output=_output(prepared), client=client, source="fake")
     assert len(client.calls) == 1
@@ -201,7 +203,13 @@ def test_linked_feedback_artifact_is_not_read_or_sent(prepared, tmp_path):
     path = prepared[1] / "optimizer-input.json"
     outside = tmp_path / "outside.json"
     outside.write_bytes(path.read_bytes())
-    path.unlink();path.symlink_to(outside)
+    path.unlink()
+    try:
+        path.symlink_to(outside)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows user lacks symlink creation privilege")
+        raise
     client = FakeAdvisor(_suggestion(prepared[2]))
     with pytest.raises(ValueError, match="SYMLINK_FORBIDDEN"):
         optimizer.propose(feedback_dir=prepared[1], output=_output(prepared), client=client, source="fake")

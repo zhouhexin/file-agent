@@ -74,7 +74,7 @@ def _compare(directory: Path) -> dict:
     authorization = ExecutionAuthorization.model_validate(experiment["authorization"])
     lease_path = _directory(store.TEST_ROOT / experiment["execution_lease"])
     lease, _ = store._read(lease_path)
-    if lease != {"output_source": str(directory.relative_to(store.TEST_ROOT)),
+    if lease != {"output_source": directory.relative_to(store.TEST_ROOT).as_posix(),
                  "proposal_sha256": experiment["proposal_sha256"],
                  "authorization": authorization.model_dump(), "source": experiment["source"]}:
         raise ValueError("EXECUTION_LEASE_INVALID")
@@ -85,7 +85,7 @@ def _compare(directory: Path) -> dict:
         raise ValueError("EXPERIMENT_SUMMARY_INVALID")
     if (directory / "integrity.json").exists():
         integrity, _ = store._read(directory / "integrity.json")
-        actual = {str(p.relative_to(directory)): digest(store._read(p)[0]) for p in directory.rglob("*.json")
+        actual = {p.relative_to(directory).as_posix(): digest(store._read(p)[0]) for p in directory.rglob("*.json")
                   if p.name not in {"integrity.json", "comparison.json", "manifest.json"}}
         if integrity != actual:
             raise ValueError("EXPERIMENT_ARTIFACT_CHANGED")

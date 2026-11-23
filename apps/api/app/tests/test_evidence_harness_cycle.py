@@ -3,6 +3,7 @@
 from copy import deepcopy
 from functools import lru_cache
 import json
+import os
 
 import pytest
 
@@ -66,7 +67,8 @@ def test_single_entry_completes_all_stages_and_records_new_history(execution, sc
     assert packet.experiment_history[0].decision==('INCONCLUSIVE' if scenario=='interrupt' else expected)
     assert service.inspect_cycle(kwargs['output'])==result
     assert before=={str(p):p.read_bytes() for p in protected}
-    assert all(p.stat().st_mode & 0o777==0o600 for p in kwargs['output'].rglob('*.json'))
+    if os.name != "nt":  # POSIX mode bits do not describe Windows ACLs.
+        assert all(p.stat().st_mode & 0o777==0o600 for p in kwargs['output'].rglob('*.json'))
 
 
 def test_no_gain_history_reaches_actual_request_and_repeated_profile_is_rejected(execution):

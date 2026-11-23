@@ -1,5 +1,7 @@
 # 证据评估器测试入口
 
+Windows 自动改进测试见 [Windows 本地 Python 步骤](harness-windows-local-python-plan.md)。直接复用现有 Python，不需要 Docker；候选使用源码白名单、Python 审计及 Windows Job。默认检查不调用模型；原 macOS 入口保留。
+
 扩展方案见[从legacy单条规则到Adaptive自主规划优化](harness-adaptive-autonomy-next-plan.md)。A阶段见[基线步骤](harness-adaptive-stage-a-usage.md)；B阶段见[开发方案](harness-adaptive-stage-b-plan.md)和[操作步骤](harness-adaptive-stage-b-usage.md)，已有真实v2首轮规划从1/2到2/2的改善。C工具已开发，见[C方案](harness-adaptive-stage-c-plan.md)和[C步骤](harness-adaptive-stage-c-usage.md)；14题已确认冻结，首次C因旧模型额度耗尽得到INCONCLUSIVE。更换模型时按[补充方案](harness-stage-c-model-change-plan.md)显式允许两组共用新模型复测，默认同模型检查保留。默认检查零调用，显式live调用模型，不切换线上模式；D完整执行尚未开发。
 
 C现支持[本机Codex登录代理](harness-codex-login-plan.md)，完整命令见[操作第12节](harness-adaptive-stage-c-usage.md#12-改用本机已经登录的codex)。仅改变本次实验的模型调用，明确区分CLI调用预算和不支持的Token硬限制，旧实验只读保留。
@@ -7,6 +9,10 @@ C现支持[本机Codex登录代理](harness-codex-login-plan.md)，完整命令�
 C的选择也可写入测试env，见[env配置方案](harness-provider-env-plan.md)和[操作第13节](harness-adaptive-stage-c-usage.md#13-在env中切换codex和原api)。保留原API，CLI优先于env；本机测试env现已选择Codex，不影响普通聊天或后台服务。
 
 Codex整批REQUEST_REJECTED已定位为非致命启动提示被误判工具，见[修复方案](harness-codex-startup-event-fix.md)。下一步先按[第14节](harness-adaptive-stage-c-usage.md#14-codex启动事件修复后先单次探针)执行`codex-probe --live`单次固定假问题，成功后才用新目录复测；不根据旧回退分数判断候选有效。
+
+参考方案改进新增[实施方案](harness-reference-candidate-plan.md)和[Windows 操作步骤](harness-reference-candidate-usage.md)。用 `campaign-loop --reference ...` 永久保留旧参考，先同条件重测，再生成候选；不传该参数保持原流程。
+
+需要每个冻结版本分别测试且不自动留用时，使用[逐版本自修复测试](harness-frozen-repair-versions-usage.md)，方案见[冻结与模拟、真实对照分离](harness-frozen-repair-versions-plan.md)。`repair-*` 独立于旧的自动选优循环。
 
 ## Harness自主改进四阶段开发计划
 

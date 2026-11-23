@@ -1,5 +1,13 @@
 # File Agent Runbook
 
+Harness 逐版自修复测试使用独立 `repair-*` 协议：冻结与真实对照分开授权，每个安全冻结版本都有结果，不按分数筛选，不自动留用。Windows 命令、预算和停止规则见[逐版本测试](evidence-evaluation-test/harness-frozen-repair-versions-usage.md)。旧入口保持原样。
+
+冻结生成 v2 在同一预算内记录单版调用失败并继续下一版，连续基础设施失败到阈值或账号访问受限时停止。部分冻结不会再报告为全部已就绪；已知 v1 的0001等已有版本仍可独立测试，不覆盖旧目录。
+
+保留旧方案的 Harness 改进：使用 `campaign-loop --reference <旧实验目录>`，首次同条件重测、完整说明继承、严格复测后才更新研究起点。旧参考和生产策略不会覆盖；原命令不传该参数仍走旧协议。Windows 命令和结果说明见[参考方案模式操作步骤](evidence-evaluation-test/harness-reference-candidate-usage.md)。
+
+Windows Harness 现使用本机 Python，不需要 Docker。运行 `.\scripts\run_harness_windows.ps1 -Action Check -Python <python.exe>`，再运行 `-Action Acceptance`。两者默认不调用真实模型；Codex 登录可用 `-CheckModelLogin` 单独检查。边界及自动循环命令见 [Windows 本地 Python 步骤](evidence-evaluation-test/harness-windows-local-python-plan.md)。
+
 Harness自动循环：`campaign-loop --source ... --output ... --max-requests ...`只做零调用检查，显式live才按总预算自动探索、固定复测、读取新反馈再探索；默认最多2循环、4小时执行时限，所有阶段领取剩余额度，不自动续费、上线或进入保留集。`campaign-loop-compare`只读重算，进行中仅显示UNFINALIZED及暂存进度。完整参数与文件位置见[自动循环操作文档](evidence-evaluation-test/harness-auto-loop-usage.md)。
 
 Harness代理配置与v4测试步骤见[代理修复文档](evidence-evaluation-test/harness-proxy-fix.md)：`EVIDENCE_HARNESS_PROXY_URL`仅供独立harness子进程使用；不自动抓取系统代理，不修改API/worker网络行为。修复后单次真实探测通过，整批测试仍须显式live及使用新目录。

@@ -10,7 +10,7 @@ from app.modules.evidence_harness import feedback as store
 from app.modules.evidence_harness.optimizer import _directory
 from app.modules.evidence_harness.improvement import campaign, adaptive_iteration as iteration, adaptive_policy as policy
 from app.modules.evidence_harness.improvement.campaign_confirmation import ConfirmationAuthorization
-from app.modules.evidence_harness.improvement.isolation import file_manifest, trusted_code_ref
+from app.modules.evidence_harness.improvement.isolation import file_manifest, trusted_code_ref, compatible_trusted_refs
 from app.modules.evidence_harness.routing.runtime import _document_ids
 
 VERSION = "campaign-retest-batch-v1"
@@ -116,7 +116,7 @@ def research_lock(directory, meta, entry, output):
     """研究锁有独立schema，只授权固定候选的开发复测，不能借此进入保留验收。"""
     output = policy.new_output(output)
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
-    write_new_json(output / "lock.json", {"schema_version": RESEARCH_LOCK, "campaign_source": str(directory.relative_to(store.TEST_ROOT)),
+    write_new_json(output / "lock.json", {"schema_version": RESEARCH_LOCK, "campaign_source": directory.relative_to(store.TEST_ROOT).as_posix(),
         "campaign_ref": digest(store._read(directory / "integrity.json")[0]), "selected": entry,
         "profile": meta["profile"], "purpose": "DEVELOPMENT_RETEST_ONLY", "policy": RETEST_POLICY,
         "holdout_used": False, "automatically_adopted": False})
@@ -174,10 +174,10 @@ def run(*, campaign_dir, output, settings, authorization, source="live", provide
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
     parent = checked["metadata"]
     meta = {"schema_version": VERSION, "source": source, "provider": provider,
-        "source_campaign": str(checked["directory"].relative_to(store.TEST_ROOT)),
+        "source_campaign": checked["directory"].relative_to(store.TEST_ROOT).as_posix(),
         "search_ref": digest(store._read(checked["directory"] / "integrity.json")[0]),
         **{k: parent[k] for k in ("source_experiment", "source_ref", "development_inputs_ref", "development_gold_ref", "baseline_manifest", "profile")},
-        "history_sources": [{"path": str(checked["directory"].relative_to(store.TEST_ROOT))}],
+        "history_sources": [{"path": checked["directory"].relative_to(store.TEST_ROOT).as_posix()}],
         "authorization": authorization.model_dump(), "candidates": checked["chosen"], "policy": RETEST_POLICY,
         "trusted_code_ref": trusted_code_ref(), "advisor_calls": 0, "holdout_usage": "EXCLUDED_FROM_RETEST"}
     # 临时batch.json标明尚未封存，子目录由可信控制器产生；最终实验入口和完整性清单在结束时发布。
@@ -229,10 +229,10 @@ def _compare(output):
     directory, parent, source_report = campaign._verified(store.TEST_ROOT / meta["source_campaign"])
     origin = campaign.load_origin(store.TEST_ROOT / parent["source_experiment"])
     chosen = [r for r in candidates(directory, parent, source_report, origin)["ranking"] if r["eligible_for_retest"] and r["policy_ref"] not in auth.excluded_policy_refs][:auth.top_k]
-    if (meta["schema_version"] != VERSION or meta["trusted_code_ref"] not in {trusted_code_ref(), campaign.PRE_LOOP_CONTROLLER_REF} or meta["policy"] != RETEST_POLICY
+    if (meta["schema_version"] != VERSION or meta["trusted_code_ref"] not in {*compatible_trusted_refs(), campaign.PRE_LOOP_CONTROLLER_REF} or meta["policy"] != RETEST_POLICY
         or meta["candidates"] != chosen or meta["search_ref"] != digest(store._read(directory / "integrity.json")[0])
         or meta != store._read(output / "batch.json")[0] or meta["advisor_calls"] != 0 or meta["holdout_usage"] != "EXCLUDED_FROM_RETEST"
-        or meta["history_sources"] != [{"path": str(directory.relative_to(store.TEST_ROOT))}]
+        or meta["history_sources"] != [{"path": directory.relative_to(store.TEST_ROOT).as_posix()}]
         or any(meta[k] != parent[k] for k in ("source", "provider", "source_experiment", "source_ref", "development_inputs_ref", "development_gold_ref", "baseline_manifest", "profile"))):
         raise ValueError("RETEST_BINDING_INVALID")
     if meta["trusted_code_ref"] == campaign.PRE_LOOP_CONTROLLER_REF and auth.excluded_policy_refs:

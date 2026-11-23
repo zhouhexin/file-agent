@@ -169,7 +169,7 @@ def build_feedback(*, dataset_path: Path, baseline_path: Path, history_paths: li
             raise ValueError("DUPLICATE_REPORT")
         refs.add(report_ref)
         reports.append(_report(raw, report_ref, cases, dataset, dataset_sha))
-        sources.append({"report_ref": report_ref, "source": str(path.relative_to(TEST_ROOT))})
+        sources.append({"report_ref": report_ref, "source": path.relative_to(TEST_ROOT).as_posix()})
         baseline_ref = report_ref
     packet = FeedbackPacket(
         dataset_sha256=dataset_sha, annotation_sha256=dataset["manifest"]["annotation_sha256"],
@@ -179,7 +179,7 @@ def build_feedback(*, dataset_path: Path, baseline_path: Path, history_paths: li
                               quote_chars=sum(len(e.quote) for e in c.package.evidence_items)) for c in cases],
         reports=reports,
     )
-    index = {"dataset_source": str(dataset_path.relative_to(TEST_ROOT)), "dataset_file_sha256": dataset_file_sha,
+    index = {"dataset_source": dataset_path.relative_to(TEST_ROOT).as_posix(), "dataset_file_sha256": dataset_file_sha,
              "reports": sources, "cases": [{"case_ref": digest(c.case_id), "case_id": c.case_id} for c in cases]}
     return packet, index
 

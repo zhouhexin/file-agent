@@ -212,7 +212,7 @@ def run_experiment(*, feedback_dir: Path, proposal_dir: Path, output: Path, sett
     output = context["output"]
     lease = context["lease"]
     lease.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    lease_record = {"output_source": str(output.relative_to(store.TEST_ROOT)),
+    lease_record = {"output_source": output.relative_to(store.TEST_ROOT).as_posix(),
                     "proposal_sha256": context["provenance"]["proposal_sha256"],
                     "authorization": authorization.model_dump(), "source": source}
     try:
@@ -225,13 +225,13 @@ def run_experiment(*, feedback_dir: Path, proposal_dir: Path, output: Path, sett
         for name in ("calls", "rounds"):
             (output / arm / name).mkdir(mode=0o700)
     experiment = {"schema_version": "harness-execution-v1", "source": source,
-        "feedback_source": str(_directory(feedback_dir).relative_to(store.TEST_ROOT)),
-        "proposal_source": str(_directory(proposal_dir).relative_to(store.TEST_ROOT)),
+        "feedback_source": _directory(feedback_dir).relative_to(store.TEST_ROOT).as_posix(),
+        "proposal_source": _directory(proposal_dir).relative_to(store.TEST_ROOT).as_posix(),
         "dataset_source": context["dataset_source"],
         "dataset_sha256": context["packet"].dataset_sha256,
         "annotation_sha256": context["packet"].annotation_sha256,
         "proposal_sha256": context["provenance"]["proposal_sha256"],
-        "execution_lease": str(lease.relative_to(store.TEST_ROOT)),
+        "execution_lease": lease.relative_to(store.TEST_ROOT).as_posix(),
         "profiles": {k: v.model_dump() for k, v in context["profiles"].items()},
         "runtime_configs": context["configs"], "authorization": authorization.model_dump(),
         "prior_optimizer": context["provenance"], "repetitions": 3,
@@ -273,7 +273,7 @@ def run_experiment(*, feedback_dir: Path, proposal_dir: Path, output: Path, sett
     summary = {"stage": stage, "stop_reason": reason, "total_requests_used": budget.used,
                "active_duration_ms": budget.elapsed_ms(), "source": source}
     write_new_json(output / "run-summary.json", summary)
-    integrity = {str(p.relative_to(output)): digest(store._read(p)[0]) for p in output.rglob("*.json")}
+    integrity = {p.relative_to(output).as_posix(): digest(store._read(p)[0]) for p in output.rglob("*.json")}
     write_new_json(output / "integrity.json", integrity)
     from app.modules.evidence_harness.comparator import compare_experiment
     comparison = compare_experiment(output)

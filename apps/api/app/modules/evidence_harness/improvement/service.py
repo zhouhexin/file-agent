@@ -236,9 +236,9 @@ def run_cycle(*, feedback_dir, dataset_path, output, settings, authorization, so
     if source_context(text) != checked["context"]:
         raise ValueError("SELF_SOURCE_CHANGED_DURING_PREPARE")
     experiment = {"schema_version": "self-improvement-v2", "proposal_schema_version": "patch-proposal-v2", "source": source,
-        "dataset_source": str(Path(dataset_path).resolve().relative_to(store.TEST_ROOT)),
+        "dataset_source": Path(dataset_path).resolve().relative_to(store.TEST_ROOT).as_posix(),
         "inputs_sha256": dataset.inputs_sha256, "gold_sha256": dataset.gold_sha256,
-        "feedback_source": str(Path(feedback_dir).resolve().relative_to(store.TEST_ROOT)),
+        "feedback_source": Path(feedback_dir).resolve().relative_to(store.TEST_ROOT).as_posix(),
         "feedback_ref": digest(packet), "authorization": authorization.model_dump(),
         "baseline_manifest": manifest, "trusted_code_ref": trusted_code_ref(), "model_ref": digest(settings.llm_chat_model),
         "endpoint_ref": digest(settings.llm_base_url), "evaluation_level": "INITIAL_ROUTING"}

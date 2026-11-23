@@ -5,17 +5,17 @@ import json
 import os
 from pathlib import Path
 import re
-import selectors
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 from app.modules.evidence_evaluation.frozen_inputs import digest
 from app.modules.llm.client import LLMResponseError
 from app.modules.llm.diagnostics import make_diagnostic
+from app.modules.evidence_harness.improvement.process_io import PipeReader, stop_process
 
 PROJECT_ROOT = Path(__file__).resolve().parents[6]
 ENDPOINT = "codex-cli-chatgpt-login-v1"
@@ -25,7 +25,8 @@ INSTRUCTIONS = ("你是文件智能体规划接口的JSON适配器。只根据�
     "遵守user_payload.output_schema；将该JSON对象序列化为字符串，放在result_json字段中返回。")
 ENVELOPE = {"type": "object", "properties": {"result_json": {"type": "string"}},
     "required": ["result_json"], "additionalProperties": False}
-# 关闭宿主能力，避免把文件规划变成Codex实际操作；OS边界另外禁止访问项目与启动其他程序。
+# 关闭宿主能力，避免把文件规划变成实际文件操作。Windows CLI 为可信宿主适配器，
+# 使用 Job 与禁用工具约束，不把它宣称为与 macOS 相同的系统文件沙箱。
 DISABLED = ("shell_tool", "unified_exec", "apps", "plugins", "hooks", "multi_agent", "multi_agent_v2",
     "browser_use", "browser_use_external", "computer_use", "image_generation", "view_image", "memories",
     "skill_search", "skill_mcp_dependency_install", "code_mode", "code_mode_host", "sleep_tool",
@@ -73,7 +74,8 @@ def _message_hints(message):
 
 def environment():
     """只继承系统、代理和证书设置；旧API key、数据库配置与CODEX_HOME不进入CLI。"""
-    allowed = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    allowed = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "WINDIR",
+        "USERPROFILE", "APPDATA", "LOCALAPPDATA", "SSL_CERT_FILE", "SSL_CERT_DIR",
         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy")
     return {k: os.environ[k] for k in allowed if k in os.environ}
 
@@ -84,13 +86,19 @@ def inspect(model, *, transport="auto"):
         raise ValueError("CODEX_TRANSPORT_INVALID")
     if not isinstance(model, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}", model):
         raise ValueError("CODEX_MODEL_REQUIRED")
-    binary = shutil.which("codex")
-    if not binary or sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file():
-        raise ValueError("CODEX_RUNTIME_UNAVAILABLE")
+    if sys.platform == "win32":
+        from app.modules.evidence_harness.improvement import local_runtime
+        binary = local_runtime.codex_binary()
+    else:
+        binary = shutil.which("codex")
+        if not binary or not _mac_runtime_available():
+            raise ValueError("CODEX_RUNTIME_UNAVAILABLE")
     binary = str(Path(binary).resolve())
     try:
         version = subprocess.run([binary, "--version"], env=environment(), capture_output=True, timeout=5, check=True).stdout.decode().strip()
-        login = subprocess.run([binary, "login", "status"], env=environment(), capture_output=True, timeout=5, check=True)
+        login = subprocess.run([binary, "login", "status"], env=environment(), capture_output=True, timeout=5, check=False)
+        if getattr(login, "returncode", 0) != 0 and b"not logged in" not in (login.stdout + login.stderr).lower():
+            raise ValueError("CODEX_LOGIN_CHECK_FAILED")
         if b"Logged in using ChatGPT" not in login.stdout + login.stderr:
             raise ValueError("CODEX_CHATGPT_LOGIN_REQUIRED")
     except (OSError, subprocess.SubprocessError):
@@ -98,7 +106,12 @@ def inspect(model, *, transport="auto"):
     if not re.fullmatch(r"codex-cli [0-9]+\.[0-9]+\.[0-9]+(?:[-+][a-zA-Z0-9.-]+)?", version):
         raise ValueError("CODEX_VERSION_UNSUPPORTED")
     return {"binary": binary, "binary_ref": hashlib.sha256(Path(binary).read_bytes()).hexdigest(),
-        "version": version, "model": model, "transport": transport}
+        "version": version, "model": model, "transport": transport,
+        **({"isolation": local_runtime.POLICY} if sys.platform == "win32" else {})}
+
+
+def _mac_runtime_available():
+    return sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").is_file()
 
 
 def profile(spec, requested_limit):
@@ -113,6 +126,13 @@ def profile(spec, requested_limit):
     if spec.get("transport", "auto") == "https":
         result.update(transport="HTTPS_SSE", adapter_ref=HTTPS_POLICY_REF, max_retries=0,
             retry_configuration="REQUEST_0_STREAM_0")
+    if spec.get("isolation"):
+        from app.modules.evidence_harness.improvement.local_runtime import POLICY
+        if spec["isolation"] != POLICY:
+            raise ValueError("CODEX_ISOLATION_PROFILE_INVALID")
+        result.update(isolation=POLICY, codex_artifact_kind="NATIVE_EXECUTABLE",
+                      adapter_ref=digest([result["adapter_ref"], POLICY]),
+                      cli_os_filesystem_sandbox=False, cli_tool_execution="DISABLED")
     return result
 
 
@@ -126,8 +146,13 @@ def sandbox(binary):
 
 def _command(spec, scratch, schema):
     """参数完全由宿主固定；真实Prompt经stdin传递，不写入进程参数。"""
-    args = ["/usr/bin/sandbox-exec", "-p", sandbox(spec["binary"]), spec["binary"],
-        "--no-daemon", "-a", "never", "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral",
+    if spec.get("isolation") == "WINDOWS_LOCAL_AUDIT_JOB_V1":
+        return [spec["binary"], *_cli_arguments(spec, scratch, schema)]
+    return ["/usr/bin/sandbox-exec", "-p", sandbox(spec["binary"]), spec["binary"], *_cli_arguments(spec, scratch, schema)]
+
+
+def _cli_arguments(spec, scratch, schema):
+    args = ["--no-daemon", "-a", "never", "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral",
         "--skip-git-repo-check", "--sandbox", "read-only", "--json", "--color", "never", "--model", spec["model"],
         "--cd", str(scratch), "--output-schema", str(schema)]
     for name in DISABLED:
@@ -223,70 +248,92 @@ class CodexLoginTransport:
         """Token参数仅为上游请求值，CLI无对应硬限制；实际能力已固定记录在Profile。"""
         spec = self.spec
         self._state = _initial_state()
+        if spec.get("isolation") not in {None, "WINDOWS_LOCAL_AUDIT_JOB_V1"}:
+            raise _error("CONFIGURATION_ERROR")
         if hashlib.sha256(Path(spec["binary"]).read_bytes()).hexdigest() != spec["binary_ref"]:
             raise _error("CONFIGURATION_ERROR")
         state = self._state
         payload = INSTRUCTIONS + "\n" + json.dumps({"system_prompt": system_prompt, "user_payload": user_payload}, ensure_ascii=False)
         # 工作目录在系统临时区，避免载入项目文件；不保存完整CLI事件或推理过程。
-        with tempfile.TemporaryDirectory(prefix="file-agent-codex-", dir="/private/tmp") as temp:
+        with tempfile.TemporaryDirectory(prefix="file-agent-codex-", dir="/private/tmp" if sys.platform == "darwin" else None) as temp:
             scratch = Path(temp)
             schema = scratch / "schema.json"
-            schema.write_text(json.dumps(ENVELOPE))
-            with tempfile.TemporaryFile(dir=temp) as source:
-                source.write(payload.encode())
-                source.seek(0)
-                process = subprocess.Popen(_command(spec, scratch, schema), stdin=source, stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL, env=environment(), cwd=scratch, start_new_session=True)
-                reader = selectors.DefaultSelector()
-                reader.register(process.stdout, selectors.EVENT_READ)
-                deadline, buffer, total = time.monotonic() + 60, b"", 0
-                try:
-                    while True:
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            raise _error("TIMEOUT", TimeoutError())
-                        if not reader.select(min(remaining, .2)):
-                            continue
-                        chunk = os.read(process.stdout.fileno(), 65536)
-                        if not chunk:
-                            break
-                        total += len(chunk)
-                        if total > 4 * 1024 * 1024:
-                            raise _error()
-                        buffer += chunk
-                        while b"\n" in buffer:
-                            line, buffer = buffer.split(b"\n", 1)
-                            if line.strip():
-                                _consume(json.loads(line), state)
-                    if buffer.strip():
-                        _consume(json.loads(buffer), state)
-                    if process.wait(timeout=max(.01, deadline - time.monotonic())) != 0 or not state["done"] or state["turns"] != 1:
-                        raise _error(state["last_error_category"] or "RESPONSE_FORMAT_INVALID")
-                    if not state["messages"] or not isinstance(state["messages"][-1], str):
-                        raise _error()
-                    envelope = json.loads(state["messages"][-1])
-                    if set(envelope) != {"result_json"} or not isinstance(envelope["result_json"], str):
-                        raise _error()
-                    raw = json.loads(envelope["result_json"])
-                    if not isinstance(raw, dict):
-                        raise _error()
-                    usage = {k: state["usage"][k] for k in ("input_tokens", "output_tokens")
-                        if type(state["usage"].get(k)) is int and state["usage"][k] >= 0}
-                    return raw, usage
-                except (ValueError, TypeError, KeyError, AttributeError):
-                    raise _error() from None
-                except subprocess.TimeoutExpired:
-                    raise _error("TIMEOUT", TimeoutError()) from None
-                finally:
-                    state["exit_code_before_cleanup"] = process.poll()
-                    reader.close()
-                    process.stdout.close()
-                    # 子进程退出也清理同组残留；人工中断仍由原C执行器保存记账与中断记录。
+            schema.write_text(json.dumps(ENVELOPE), encoding="utf-8")
+            return self._complete(_command(spec, scratch, schema), scratch, payload, state)
+
+    def _complete(self, command, scratch, payload, state):
+        """Preserve event validation, limits and usage accounting on both platforms."""
+        temp = str(scratch)
+        with tempfile.TemporaryFile(dir=temp) as source:
+            source.write(payload.encode())
+            source.seek(0)
+            native = self.spec.get("isolation") == "WINDOWS_LOCAL_AUDIT_JOB_V1"
+            child_environment = environment()
+            if native:
+                from app.modules.evidence_harness.improvement import local_runtime
+            process = (local_runtime.popen if native else subprocess.Popen)(command,
+                stdin=subprocess.PIPE if native else source, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, env=child_environment, cwd=scratch, start_new_session=os.name != "nt")
+            reader = PipeReader(process.stdout)
+            deadline, buffer, total = time.monotonic() + 60, b"", 0
+            writer = None
+            if native:
+                def deliver():
+                    """有界父级超时仍能终止未读取 stdin 的 CLI，不在主线程阻塞写管道。"""
                     try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
+                        process.stdin.write(payload.encode("utf-8"))
+                        process.stdin.close()
+                    except (OSError, ValueError):
                         pass
-                    process.wait()
+                writer = threading.Thread(target=deliver, daemon=True)
+                writer.start()
+            try:
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise _error("TIMEOUT", TimeoutError())
+                    chunk = reader.read(min(remaining, .2))
+                    if chunk is None:
+                        continue
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > 4 * 1024 * 1024:
+                        raise _error()
+                    buffer += chunk
+                    while b"\n" in buffer:
+                        line, buffer = buffer.split(b"\n", 1)
+                        if line.strip():
+                            _consume(json.loads(line), state)
+                if buffer.strip():
+                    _consume(json.loads(buffer), state)
+                if process.wait(timeout=max(.01, deadline - time.monotonic())) != 0 or not state["done"] or state["turns"] != 1:
+                    raise _error(state["last_error_category"] or "RESPONSE_FORMAT_INVALID")
+                if not state["messages"] or not isinstance(state["messages"][-1], str):
+                    raise _error()
+                envelope = json.loads(state["messages"][-1])
+                if set(envelope) != {"result_json"} or not isinstance(envelope["result_json"], str):
+                    raise _error()
+                raw = json.loads(envelope["result_json"])
+                if not isinstance(raw, dict):
+                    raise _error()
+                usage = {k: state["usage"][k] for k in ("input_tokens", "output_tokens")
+                    if type(state["usage"].get(k)) is int and state["usage"][k] >= 0}
+                return raw, usage
+            except (ValueError, TypeError, KeyError, AttributeError):
+                raise _error() from None
+            except subprocess.TimeoutExpired:
+                raise _error("TIMEOUT", TimeoutError()) from None
+            finally:
+                state["exit_code_before_cleanup"] = process.poll()
+                # 子进程退出也清理同组残留；人工中断仍由原C执行器保存记账与中断记录。
+                stop_process(process)
+                if writer is not None:
+                    writer.join(timeout=2)
+                    if not process.stdin.closed:
+                        process.stdin.close()
+                reader.close()
+                process.stdout.close()
 
 
 def probe(model, *, live=False, transport=None):

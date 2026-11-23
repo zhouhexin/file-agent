@@ -40,7 +40,7 @@ def configuration(settings, catalog: dict) -> dict:
     )]
     dependencies = {name: importlib.metadata.version(name) for name in ("langgraph", "pydantic", "sqlalchemy")}
     return {"model_ref": digest(settings.llm_chat_model), "endpoint_ref": digest(settings.llm_base_url),
-            "code_ref": digest({str(p.relative_to(modules)): hashlib.sha256(p.read_bytes()).hexdigest()
+            "code_ref": digest({p.relative_to(modules).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                                 for p in sorted(paths)}),
             "catalog_ref": digest(catalog), "dependencies": dependencies, "timeout_seconds": TIMEOUT_SECONDS,
             "max_output_tokens": MAX_OUTPUT_TOKENS, "max_retries": 0}
@@ -276,12 +276,12 @@ def run_cycle(*, dataset_path: Path, output: Path, history: list[Path], settings
                                  "model": settings.llm_chat_model}, TIMEOUT_SECONDS)
 
     experiment = {"schema_version": "routing-experiment-v1", "evaluation_level": "INITIAL_ROUTING",
-        "dataset_source": str(context["dataset_path"].relative_to(store.TEST_ROOT)),
+        "dataset_source": context["dataset_path"].relative_to(store.TEST_ROOT).as_posix(),
         "inputs_sha256": context["dataset"].inputs_sha256, "gold_sha256": context["dataset"].gold_sha256,
         "configuration": context["configuration"], "configuration_ref": digest(context["configuration"]),
         "authorization": authorization.model_dump(), "source": source, "control_strategy": "baseline",
         "candidate_strategy": STRATEGY_ID,
-        "history_sources": [str(p.relative_to(store.TEST_ROOT)) for p in context["history"]]}
+        "history_sources": [p.relative_to(store.TEST_ROOT).as_posix() for p in context["history"]]}
     write_new_json(output / "experiment.json", experiment)
     write_new_json(output / "feedback.json", context["feedback"])
     stage, reason, proposal = "FAILED", None, None
@@ -330,7 +330,7 @@ def run_cycle(*, dataset_path: Path, output: Path, history: list[Path], settings
         "model_calls": journal.used if source == "live" else 0,
         "fake_calls": journal.used if source == "fake" else 0, "automatically_adopted": False}
     write_new_json(output / "run-summary.json", summary)
-    integrity = {str(p.relative_to(output)): digest(store._read(p)[0]) for p in output.rglob("*.json")}
+    integrity = {p.relative_to(output).as_posix(): digest(store._read(p)[0]) for p in output.rglob("*.json")}
     write_new_json(output / "integrity.json", integrity)
     from app.modules.evidence_harness.routing.comparator import compare
     comparison = compare(output)

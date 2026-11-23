@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -216,10 +217,12 @@ def test_output_is_private_non_overwriting_and_does_not_call_services(sources, m
     output = root / "experiments/harness-v1/check-1"
     result = feedback.prepare_feedback(dataset_path=dataset, baseline_path=baseline, history_paths=[], output=output)
     assert result["stage"] == "FEEDBACK_READY" and result["model_calls"] == 0
-    assert output.stat().st_mode & 0o777 == 0o700
+    if os.name != "nt":  # POSIX mode bits do not describe Windows ACLs.
+        assert output.stat().st_mode & 0o777 == 0o700
     files = {p.name: p.read_bytes() for p in output.iterdir()}
     assert set(files) == {"feedback.json", "optimizer-input.json", "source-index.json", "manifest.json"}
-    assert all(p.stat().st_mode & 0o777 == 0o600 for p in output.iterdir())
+    if os.name != "nt":  # POSIX mode bits do not describe Windows ACLs.
+        assert all(p.stat().st_mode & 0o777 == 0o600 for p in output.iterdir())
     with pytest.raises(FileExistsError):
         feedback.prepare_feedback(dataset_path=dataset, baseline_path=baseline, history_paths=[], output=output)
     assert files == {p.name: p.read_bytes() for p in output.iterdir()}
@@ -234,7 +237,12 @@ def test_duplicate_sources_and_path_escape_are_rejected(sources, tmp_path):
     with pytest.raises(ValueError):
         feedback.build_feedback(dataset_path=tmp_path / "outside.json", baseline_path=baseline, history_paths=[])
     (root / "experiments").mkdir()
-    (root / "experiments/harness-v1").symlink_to(tmp_path / "elsewhere")
+    try:
+        (root / "experiments/harness-v1").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows user lacks symlink creation privilege")
+        raise
     with pytest.raises(ValueError):
         feedback.prepare_feedback(dataset_path=dataset, baseline_path=baseline, history_paths=[],
                                   output=root / "experiments/harness-v1/output")

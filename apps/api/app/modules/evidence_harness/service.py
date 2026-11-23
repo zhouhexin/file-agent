@@ -106,7 +106,7 @@ def run_cycle(*, dataset_path: Path, baseline_path: Path, history_paths: list[Pa
              "annotation_sha256": context["packet"].annotation_sha256,
              "baseline_ref": context["packet"].baseline_ref,
              "authorization": authorization.model_dump(), "max_candidates": 1,
-             "parent_cycle_source": str(_directory(previous_cycle).relative_to(store.TEST_ROOT)) if previous_cycle else None,
+             "parent_cycle_source": _directory(previous_cycle).relative_to(store.TEST_ROOT).as_posix() if previous_cycle else None,
              "history_before": [h.experiment_ref for h in context["packet"].experiment_history],
              "service_code_sha256": digest({name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                 for name in ("service.py", "history.py", "policy.py", "optimizer.py", "executor.py", "comparator.py")})}
@@ -177,10 +177,10 @@ def run_cycle(*, dataset_path: Path, baseline_path: Path, history_paths: list[Pa
               "fake_calls": used if source == "fake" else 0, "active_duration_ms": elapsed(),
               "stop_reason": stop_reason, "history_count_before": len(context["packet"].experiment_history),
               "history_count_after": history_after,
-              "next_feedback_source": str(next_feedback.relative_to(store.TEST_ROOT)) if next_feedback.exists() else None,
+              "next_feedback_source": next_feedback.relative_to(store.TEST_ROOT).as_posix() if next_feedback.exists() else None,
               "automatically_adopted": False}
     write_new_json(output / "cycle-summary.json", result)
-    integrity = {str(p.relative_to(output)): digest(store._read(p)[0]) for p in output.rglob("*.json")}
+    integrity = {p.relative_to(output).as_posix(): digest(store._read(p)[0]) for p in output.rglob("*.json")}
     write_new_json(output / "integrity.json", integrity)
     write_new_json(output / "manifest.json", result)
     return result
@@ -198,7 +198,7 @@ def inspect_cycle(directory: Path) -> dict:
             return {"stage": "UNFINALIZED", "total_request_attempts": _request_count(directory),
                     "auto_resume": False}
         integrity, _ = store._read(directory / "integrity.json")
-        actual = {str(p.relative_to(directory)): digest(store._read(p)[0]) for p in directory.rglob("*.json")
+        actual = {p.relative_to(directory).as_posix(): digest(store._read(p)[0]) for p in directory.rglob("*.json")
                   if p not in {directory / "integrity.json", directory / "manifest.json"}}
         manifest, _ = store._read(directory / "manifest.json")
         summary, _ = store._read(directory / "cycle-summary.json")

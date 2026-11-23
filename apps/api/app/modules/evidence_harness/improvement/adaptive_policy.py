@@ -4,7 +4,7 @@ import ast
 from collections import Counter
 import difflib
 import re
-import shutil
+from app.modules.evidence_harness.paths import copy_tree
 import time
 from typing import Literal
 
@@ -20,7 +20,7 @@ from app.modules.evidence_harness.optimizer import _directory
 from app.modules.evidence_harness.improvement import planning_evaluation as baseline
 from app.modules.evidence_harness.improvement.executor import Journal, run_trial, run_checks, regression_inputs
 from app.modules.evidence_harness.improvement.feedback import task_signal, call_details
-from app.modules.evidence_harness.improvement.isolation import API_ROOT, snapshot, file_manifest, probe_sandbox, trusted_code_ref
+from app.modules.evidence_harness.improvement.isolation import API_ROOT, snapshot, file_manifest, probe_sandbox, trusted_code_ref, compatible_trusted_refs
 from app.modules.evidence_harness.improvement.patches import source_hash, rejection_code, validate_explanation
 from app.modules.evidence_harness.improvement.service import new_output, _backend, _write_text
 from app.modules.evidence_harness.routing.dataset import load_dataset, current_catalog
@@ -220,10 +220,10 @@ def prepare_copies(output, source):
     """两组来自同一快照，原版和候选只允许一个字符串常量存在真实差异。"""
     original = file_manifest(output / "baseline")
     for arm in ("control", "candidate"):
-        shutil.copytree(output / "baseline", output / arm)
+        copy_tree(output / "baseline", output / arm)
     target = output / "candidate" / TARGET
     target.chmod(0o600)
-    target.write_text(source)
+    target.write_text(source, encoding="utf-8", newline="")
     target.chmod(0o400)
     expected = {**original, TARGET: source_hash(source)}
     if file_manifest(output / "control") != original or file_manifest(output / "candidate") != expected:
@@ -245,7 +245,7 @@ def run_cycle(*, baseline_dir, output, settings, authorization, source="live", b
         raise ValueError("POLICY_SOURCE_CHANGED_DURING_PREPARE")
     write_new_json(output / "experiment.json", {"schema_version": "adaptive-policy-experiment-v2", "source": source,
         "feedback_schema_version": checked["feedback"]["schema_version"],
-        "baseline_source": str(checked["directory"].relative_to(store.TEST_ROOT)), "source_ref": checked["source_ref"],
+        "baseline_source": checked["directory"].relative_to(store.TEST_ROOT).as_posix(), "source_ref": checked["source_ref"],
         "inputs_sha256": checked["dataset"].inputs_sha256, "gold_sha256": checked["dataset"].gold_sha256,
         "feedback_ref": digest(checked["feedback"]), "execution_inputs_ref": checked["metadata"]["execution_inputs_ref"],
         "authorization": authorization.model_dump(), "trusted_code_ref": trusted_code_ref(), "baseline_manifest": manifest,
@@ -416,7 +416,7 @@ def _compare(output):
     meta = store._read(output / "experiment.json")[0]
     version = meta["schema_version"]
     compatible_v1 = version == "adaptive-policy-experiment-v1" and meta["trusted_code_ref"] == KNOWN_B_V1_TRUSTED_REF
-    current_v2 = version == "adaptive-policy-experiment-v2" and meta["trusted_code_ref"] in {trusted_code_ref(), KNOWN_B_V2_TRUSTED_REF}
+    current_v2 = version == "adaptive-policy-experiment-v2" and meta["trusted_code_ref"] in {*compatible_trusted_refs(), KNOWN_B_V2_TRUSTED_REF}
     if not (compatible_v1 or current_v2) or meta["evaluation_level"] != "INITIAL_ROUTING":
         raise ValueError("POLICY_PROTOCOL_INVALID")
     feedback_version = "adaptive-policy-feedback-v1" if version == "adaptive-policy-experiment-v1" else "adaptive-policy-feedback-v2"

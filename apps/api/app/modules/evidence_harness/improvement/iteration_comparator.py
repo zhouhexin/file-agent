@@ -8,7 +8,7 @@ from app.modules.evidence_harness.optimizer import _directory
 from app.modules.evidence_harness.improvement import adaptive_policy as policy
 from app.modules.evidence_harness.improvement import adaptive_validation as validation
 from app.modules.evidence_harness.improvement import codex_backend
-from app.modules.evidence_harness.improvement.isolation import file_manifest, trusted_code_ref
+from app.modules.evidence_harness.improvement.isolation import file_manifest, trusted_code_ref, compatible_trusted_refs
 from app.modules.evidence_harness.improvement.patches import source_hash, rejection_code
 from app.modules.evidence_harness.improvement.planning_feedback import task_diagnostic
 from app.modules.evidence_harness.improvement.planning_diagnosis import feedback_packet, tool_contracts
@@ -142,7 +142,8 @@ def _profile(meta, origin, auth):
     profile = meta["profile"]
     if meta["provider"] == "codex-login":
         expected = codex_backend.profile({"model": "replay-only", "version": profile["codex_version"],
-            "binary_ref": profile["codex_binary_ref"], "transport": "https" if profile.get("transport") == "HTTPS_SSE" else "auto"},
+            "binary_ref": profile["codex_binary_ref"], "transport": "https" if profile.get("transport") == "HTTPS_SSE" else "auto",
+            **({"isolation": profile["isolation"]} if "isolation" in profile else {})},
             auth.planner_max_output_tokens)
         expected["model_ref"] = profile["model_ref"]
     elif meta["provider"] == "openai-compatible":
@@ -170,11 +171,11 @@ def _compare(output):
         raise ValueError("ITERATION_ARTIFACT_CHANGED")
     meta = store._read(output / "experiment.json")[0]
     legacy = meta["schema_version"] == "adaptive-iteration-experiment-v1" and meta["trusted_code_ref"] == KNOWN_ITERATION_V1_REF
-    old_campaign = meta["schema_version"] == campaign.LEGACY_VERSION and meta["trusted_code_ref"] in {trusted_code_ref(), KNOWN_CAMPAIGN_V1_REF}
-    bounded = meta["schema_version"] == campaign.VERSION and meta["trusted_code_ref"] in {trusted_code_ref(), campaign.PRE_LOOP_CONTROLLER_REF}
-    extended = bounded or meta["schema_version"] == campaign.EXPLORATION_V2 and meta["trusted_code_ref"] in {trusted_code_ref(), KNOWN_CAMPAIGN_V2_REF}
+    old_campaign = meta["schema_version"] == campaign.LEGACY_VERSION and meta["trusted_code_ref"] in {*compatible_trusted_refs(), KNOWN_CAMPAIGN_V1_REF}
+    bounded = meta["schema_version"] == campaign.VERSION and meta["trusted_code_ref"] in {*compatible_trusted_refs(), campaign.PRE_LOOP_CONTROLLER_REF}
+    extended = bounded or meta["schema_version"] == campaign.EXPLORATION_V2 and meta["trusted_code_ref"] in {*compatible_trusted_refs(), KNOWN_CAMPAIGN_V2_REF}
     campaign_mode = old_campaign or extended
-    current = campaign_mode or meta["schema_version"] == "adaptive-iteration-experiment-v2" and meta["trusted_code_ref"] in {trusted_code_ref(), KNOWN_ITERATION_V2_REF}
+    current = campaign_mode or meta["schema_version"] == "adaptive-iteration-experiment-v2" and meta["trusted_code_ref"] in {*compatible_trusted_refs(), KNOWN_ITERATION_V2_REF}
     if (not (legacy or current)
         or meta["holdout_usage"] != "EXCLUDED_FROM_ITERATION" or meta["evaluation_level"] != "INITIAL_ROUTING"):
         raise ValueError("ITERATION_PROTOCOL_INVALID")

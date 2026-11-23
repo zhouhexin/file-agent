@@ -137,7 +137,7 @@ def test_total_time_reserve_stops_before_first_model_call(routing, source):
     assert report["requests_used"] == 0 and not requests
 
 
-@pytest.mark.skipif(os.environ.get("HARNESS_OS_ACCEPTANCE") != "1", reason="真实macOS权限专项单独执行")
+@pytest.mark.skipif(os.environ.get("HARNESS_OS_ACCEPTANCE") != "1", reason="真实系统隔离专项单独执行；Windows需要Docker")
 def test_os_auto_loop_keeps_candidates_isolated(routing, source, monkeypatch):
     """自动跨阶段仍实际使用OS隔离，候选不能访问项目、Gold、网络或执行其他程序。"""
     from app.modules.evidence_harness.improvement import isolation, executor, adaptive_iteration, campaign_confirmation

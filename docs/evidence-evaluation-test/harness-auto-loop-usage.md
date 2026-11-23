@@ -1,5 +1,9 @@
 # 自动循环怎么运行
 
+需要保留旧方案作为参考、从旧方案继续改进时，使用新增的[参考方案模式](harness-reference-candidate-usage.md)：`campaign-loop --reference ...`。它先在当前环境重测旧方案，失败不覆盖旧参考。本文后续命令不传 `--reference`，沿用原有重新探索流程及实验协议。
+
+Windows 请先完成 [Windows 环境准备及隔离验收](harness-windows-local-python-plan.md)，再使用本文的自动循环。PowerShell 使用该文档中的参数数组写法；本文的 Bash 反斜杠换行不能直接粘贴到 PowerShell。跨平台迁移后先建立本机执行环境的验证记录，不能直接把 macOS 结果当作 Windows 的运行基线。
+
 在项目根目录执行。沿用`runtime/evidence-test/.env`的模型和已修复代理，不需要重启服务。只优化开发集上的初始规划提示，真实检索及最终答案尚不在本轮评分范围。
 
 ## 1. 先检查

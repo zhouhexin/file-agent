@@ -104,10 +104,10 @@ def prepare(*, candidate_dir, inputs_paths, output):
     imports = []
     for path in inputs_paths:
         path = store._dataset_file(path)
-        imports.append(ImportedInput(path=str(path.relative_to(store.TEST_ROOT)), sha256=store._read(path)[1]))
+        imports.append(ImportedInput(path=path.relative_to(store.TEST_ROOT).as_posix(), sha256=store._read(path)[1]))
     inputs = _merge(locked, imports)
     old_gold = {g.case_id: g for g in locked["origin"]["dataset"].gold}
-    draft = ValidationDraft(candidate_source=str(locked["directory"].relative_to(store.TEST_ROOT)),
+    draft = ValidationDraft(candidate_source=locked["directory"].relative_to(store.TEST_ROOT).as_posix(),
         candidate_source_ref=locked["source_ref"], policy_ref=locked["candidate"]["prompt_ref"], imports=imports, inputs=inputs,
         annotations=[CaseAnnotation(case_id=c.case_id, split="DEVELOPMENT" if c.case_id in old_gold else None,
             expected_route=old_gold[c.case_id].expected_route if c.case_id in old_gold else None,

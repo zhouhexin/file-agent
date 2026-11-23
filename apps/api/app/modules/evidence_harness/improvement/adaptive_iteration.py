@@ -153,7 +153,7 @@ def run(*, source_dir, output, settings, authorization, source="live", backend_f
     if manifest != checked["metadata"]["baseline_manifest"]:
         raise ValueError("ITERATION_EXECUTION_SOURCE_CHANGED")
     meta = {"schema_version": campaign.VERSION if campaign_mode else "adaptive-iteration-experiment-v2", "source": source, "provider": provider,
-        "source_experiment": str(checked["directory"].relative_to(store.TEST_ROOT)), "source_ref": checked["source_ref"],
+        "source_experiment": checked["directory"].relative_to(store.TEST_ROOT).as_posix(), "source_ref": checked["source_ref"],
         "development_inputs_ref": digest(checked["inputs"]), "development_gold_ref": digest(checked["gold"]),
         "baseline_manifest": manifest, "trusted_code_ref": trusted_code_ref(), "authorization": authorization.model_dump(),
         "evaluation_level": "INITIAL_ROUTING", "holdout_usage": "EXCLUDED_FROM_ITERATION",

@@ -3,6 +3,7 @@
 from copy import deepcopy
 from functools import lru_cache
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -123,7 +124,8 @@ def test_real_planning_node_and_independent_comparison(routing, kind, expected):
         assert report["regression_case_ids"] == ["N1"]
     if kind == "unknown_id":
         assert report["candidate_safety_failures"] == 1
-    assert all(p.stat().st_mode & 0o777 == 0o600 for p in options["output"].rglob("*.json"))
+    if os.name != "nt":  # POSIX mode bits do not describe Windows ACLs.
+        assert all(p.stat().st_mode & 0o777 == 0o600 for p in options["output"].rglob("*.json"))
 
 
 @pytest.mark.parametrize("kind,stage", [("no_change", "NO_CHANGE"), ("invalid", "REJECTED"),
@@ -469,7 +471,7 @@ def test_advisor_output_quota_is_independent_and_actually_sent(routing, limit):
 
 def _renew_integrity(output):
     """模拟自报摘要也被改写，证明比较器仍从授权和实际请求角色核验。"""
-    files = {str(p.relative_to(output)): digest(json.loads(p.read_text())) for p in output.rglob("*.json")
+    files = {p.relative_to(output).as_posix(): digest(json.loads(p.read_text())) for p in output.rglob("*.json")
              if p.name not in {"integrity.json", "comparison.json", "manifest.json"}}
     (output / "integrity.json").write_text(json.dumps(files))
 

@@ -37,7 +37,7 @@ def _compare(directory: Path) -> dict:
         return {"decision": "INCONCLUSIVE", "execution_stage": "UNFINALIZED",
                 "evaluation_level": "INITIAL_ROUTING", "auto_resume": False}
     integrity, _ = store._read(directory / "integrity.json")
-    actual = {str(p.relative_to(directory)): digest(store._read(p)[0]) for p in directory.rglob("*.json")
+    actual = {p.relative_to(directory).as_posix(): digest(store._read(p)[0]) for p in directory.rglob("*.json")
               if p not in {directory / "integrity.json", directory / "comparison.json", directory / "manifest.json"}}
     if actual != integrity:
         raise ValueError("ROUTING_ARTIFACT_CHANGED")

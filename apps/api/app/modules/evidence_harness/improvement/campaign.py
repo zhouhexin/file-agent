@@ -158,7 +158,7 @@ def import_history(origin, sources):
             or meta["development_inputs_ref"] != digest(origin["inputs"]) or meta["development_gold_ref"] != digest(origin["gold"])
             or meta["baseline_manifest"] != origin["metadata"]["baseline_manifest"]):
             raise ValueError("CAMPAIGN_HISTORY_INPUT_MISMATCH")
-        entries.append({"path": str(directory.relative_to(store.TEST_ROOT)),
+        entries.append({"path": directory.relative_to(store.TEST_ROOT).as_posix(),
             "integrity_ref": digest(store._read(directory / "integrity.json")[0]),
             "requests_used": report["requests_used"], "active_duration_ms": report["active_duration_ms"]})
         for item in report["rounds"]:
@@ -245,7 +245,7 @@ def verify_frozen(root, expected):
 def observation(identifier, directory, number, meta, score, policy_ref):
     """保存开发观察及参与统一比较所需的条件，不含题干、人工标签或保留信息。"""
     arm = score["arms"]["candidate"]
-    return {"id": identifier, "source": str(directory.relative_to(store.TEST_ROOT)), "round_id": number,
+    return {"id": identifier, "source": directory.relative_to(store.TEST_ROOT).as_posix(), "round_id": number,
         "policy_ref": policy_ref, "profile": meta["profile"], "repetitions": meta["authorization"]["repetitions"],
         "decision": score["decision"], "strategy_evaluable": score["strategy_evaluable"],
         "correct": arm["correct"], "planned": arm["planned"],
@@ -280,7 +280,7 @@ def lock(*, campaign_dir, output):
         raise ValueError("CAMPAIGN_NO_ELIGIBLE_CANDIDATE")
     selected = next(r for r in report["selection"]["ranking"] if r["id"] == report["selection"]["selected"])
     output = policy.new_output(output)
-    payload = {"schema_version": "campaign-candidate-lock-v1", "campaign_source": str(directory.relative_to(store.TEST_ROOT)),
+    payload = {"schema_version": "campaign-candidate-lock-v1", "campaign_source": directory.relative_to(store.TEST_ROOT).as_posix(),
         "campaign_ref": digest(store._read(directory / "integrity.json")[0]), "selected": selected,
         "profile": meta["profile"], "holdout_used": False, "automatically_adopted": False}
     output.mkdir(parents=True, mode=0o700, exist_ok=False)

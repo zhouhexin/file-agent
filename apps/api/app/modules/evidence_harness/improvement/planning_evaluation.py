@@ -17,7 +17,7 @@ from app.modules.evidence_harness.routing.comparator import _metrics
 from app.modules.evidence_harness.improvement.executor import Journal, run_trial
 from app.modules.evidence_harness.improvement.feedback import task_signal
 from app.modules.evidence_harness.improvement.isolation import (
-    API_ROOT, file_manifest, snapshot, probe_sandbox, trusted_code_ref,
+    API_ROOT, file_manifest, snapshot, probe_sandbox, trusted_code_ref, compatible_trusted_refs, canonical_code,
 )
 from app.modules.evidence_harness.improvement.schemas import PlanningEvaluationAuthorization
 from app.modules.llm.client import LLMResponseError
@@ -114,7 +114,7 @@ def run_evaluation(*, dataset_path, output, planner_mode, settings, authorizatio
     journal.started = started
     manifest = snapshot(output / "baseline")
     metadata = {"schema_version": "planning-baseline-v1", "source": source, "planner_mode": planner_mode,
-        "dataset_source": str(checked["dataset_path"].relative_to(store.TEST_ROOT)),
+        "dataset_source": checked["dataset_path"].relative_to(store.TEST_ROOT).as_posix(),
         "inputs_sha256": dataset.inputs_sha256, "gold_sha256": dataset.gold_sha256,
         "source_modes": {c.case_id: c.adaptive_mode for c in dataset.inputs.cases},
         "execution_inputs_ref": checked["execution_inputs_ref"], "catalog_ref": digest(dataset.inputs.catalog_snapshot),
@@ -185,7 +185,7 @@ def _compare_evaluation(output):
     if actual != store._read(output / "integrity.json")[0]:
         raise ValueError("PLANNING_ARTIFACT_CHANGED")
     metadata, _ = store._read(output / "experiment.json")
-    if (metadata["schema_version"] != "planning-baseline-v1" or metadata["trusted_code_ref"] not in {trusted_code_ref(), A_V1_TRUSTED_REF}
+    if (metadata["schema_version"] != "planning-baseline-v1" or metadata["trusted_code_ref"] not in {*compatible_trusted_refs(), A_V1_TRUSTED_REF}
         or metadata["source"] not in {"live", "fake"} or metadata["evaluation_level"] != "INITIAL_ROUTING"):
         raise ValueError("PLANNING_PROTOCOL_INVALID")
     dataset = load_dataset(store.TEST_ROOT / metadata["dataset_source"])
@@ -202,7 +202,7 @@ def _compare_evaluation(output):
         raise ValueError("PLANNING_SNAPSHOT_CHANGED")
     for name, sha in manifest.items():
         path = API_ROOT / name
-        if not path.is_relative_to(API_ROOT) or hashlib.sha256(path.read_bytes()).hexdigest() != sha:
+        if not path.is_relative_to(API_ROOT) or hashlib.sha256(canonical_code(path)).hexdigest() != sha:
             raise ValueError("PLANNING_REPLAY_CODE_CHANGED")
     authorization = PlanningEvaluationAuthorization.model_validate(metadata["authorization"])
     calls, known, unknown = [], Counter(), 0

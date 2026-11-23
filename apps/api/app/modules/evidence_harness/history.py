@@ -60,7 +60,7 @@ def extend_feedback(base, index: dict, experiment_dirs: list[Path], *, source: s
             if entry.experiment_ref in refs:
                 raise ValueError("DUPLICATE_EXPERIMENT_HISTORY")
             refs.add(entry.experiment_ref);entries.append(entry)
-            sources.append({"experiment_ref": entry.experiment_ref, "source": str(path.relative_to(store.TEST_ROOT))})
+            sources.append({"experiment_ref": entry.experiment_ref, "source": path.relative_to(store.TEST_ROOT).as_posix()})
         fields = base.model_dump(mode="json")
         fields.pop("schema_version")
         fields.pop("experiment_history", None)

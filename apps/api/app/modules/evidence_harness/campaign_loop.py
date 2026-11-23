@@ -13,7 +13,7 @@ from app.modules.evidence_harness.optimizer import _directory
 from app.modules.evidence_harness.improvement import campaign, adaptive_validation as validation
 from app.modules.evidence_harness.improvement import campaign_retesting as retest, iteration_comparator
 from app.modules.evidence_harness.improvement import adaptive_policy as policy
-from app.modules.evidence_harness.improvement.isolation import file_manifest, trusted_code_ref
+from app.modules.evidence_harness.improvement.isolation import file_manifest, trusted_code_ref, compatible_trusted_refs, canonical_code
 
 VERSION = "campaign-auto-loop-v1"
 
@@ -28,9 +28,12 @@ class Authorization(campaign.CampaignAuthorization):
     max_active_seconds: int = Field(default=14400, ge=1, le=28800)
 
 
+PRE_WINDOWS_CONTROLLER_REF = "7b69725248b5df78170b81120c8e36832ebfcd75f4eaeb8959939c518945a5f3"
+
+
 def controller_ref():
     """闭环控制器在候选目录之外单独绑定源码身份，不能由模型替换裁判。"""
-    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    return hashlib.sha256(canonical_code(Path(__file__))).hexdigest()
 
 
 def seed(directory):
@@ -130,7 +133,7 @@ def run(*, backend_factory=None, **options):
     directory, meta, initial_report, origin = checked["seed"]
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
     metadata = {"schema_version": VERSION, "source": source, "provider": options.get("provider", "openai-compatible"),
-        "source_experiment": str(directory.relative_to(store.TEST_ROOT)), "source_ref": digest(store._read(directory / "integrity.json")[0]),
+        "source_experiment": directory.relative_to(store.TEST_ROOT).as_posix(), "source_ref": digest(store._read(directory / "integrity.json")[0]),
         "profile": checked["profile"], "authorization": auth.model_dump(), "controller_ref": controller_ref(),
         "development_inputs_ref": digest(origin["inputs"]), "development_gold_ref": digest(origin["gold"]),
         "baseline_manifest": origin["metadata"]["baseline_manifest"],
@@ -162,8 +165,8 @@ def run(*, backend_factory=None, **options):
                 destination = output / "cycles" / f"{cycle:04d}" / kind.lower()
                 sequence += 1
                 write_new_json(output / "events" / f"{sequence:04d}.json", {
-                    "cycle": cycle, "phase": kind, "skipped": skip, "source": str(current.relative_to(store.TEST_ROOT)),
-                    "output": str(destination.relative_to(store.TEST_ROOT)), "elapsed_before_ms": before,
+                    "cycle": cycle, "phase": kind, "skipped": skip, "source": current.relative_to(store.TEST_ROOT).as_posix(),
+                    "output": destination.relative_to(store.TEST_ROOT).as_posix(), "elapsed_before_ms": before,
                     "authorization": child_auth.model_dump()})
                 if skip:
                     no_progress += 1
@@ -223,7 +226,8 @@ def _compare(output):
         raise ValueError("LOOP_ARTIFACT_CHANGED")
     meta = store._read(output / "experiment.json")[0]
     if (meta != store._read(output / "loop.json")[0] or meta["schema_version"] != VERSION
-        or meta["controller_ref"] != controller_ref() or meta["trusted_code_ref"] != trusted_code_ref()
+        or meta["controller_ref"] not in {controller_ref(), PRE_WINDOWS_CONTROLLER_REF}
+        or meta["trusted_code_ref"] not in compatible_trusted_refs()
         or meta["holdout_evaluated"] is not False or meta["automatically_adopted"] is not False):
         raise ValueError("LOOP_PROTOCOL_CHANGED")
     auth = Authorization.model_validate(meta["authorization"])
@@ -252,8 +256,8 @@ def _compare(output):
             raise ValueError("LOOP_PHASE_OVER_BUDGET")
         expected_auth = phase_auth(auth, phase, auth.max_total_requests - used, seconds, excluded)
         child = output / "cycles" / f"{cycle:04d}" / phase.lower()
-        if (event["authorization"] != expected_auth.model_dump() or event["source"] != str(current.relative_to(store.TEST_ROOT))
-            or event["output"] != str(child.relative_to(store.TEST_ROOT))):
+        if (event["authorization"] != expected_auth.model_dump() or event["source"] != current.relative_to(store.TEST_ROOT).as_posix()
+            or event["output"] != child.relative_to(store.TEST_ROOT).as_posix()):
             raise ValueError("LOOP_PHASE_AUTHORIZATION_CHANGED")
         if event["skipped"]:
             if phase != "RETEST" or eligible(current, excluded, origin) or child.exists():
@@ -276,11 +280,11 @@ def _compare(output):
                 if phase == "EXPLORATION":
                     source_paths = {h["path"] for h in cm["history_sources"]}
                     if not seed_meta["schema_version"].startswith("adaptive-validation-") or reports:
-                        if str(current.relative_to(store.TEST_ROOT)) not in source_paths:
+                        if current.relative_to(store.TEST_ROOT).as_posix() not in source_paths:
                             raise ValueError("LOOP_FEEDBACK_NOT_CONSUMED")
-                elif cm["source_campaign"] != str(current.relative_to(store.TEST_ROOT)):
+                elif cm["source_campaign"] != current.relative_to(store.TEST_ROOT).as_posix():
                     raise ValueError("LOOP_RETEST_SOURCE_CHANGED")
-            reports.append({"cycle": cycle, "phase": phase, "experiment": str(child.relative_to(store.TEST_ROOT)),
+            reports.append({"cycle": cycle, "phase": phase, "experiment": child.relative_to(store.TEST_ROOT).as_posix(),
                 "stage": report.get("stage"), "decision": report.get("decision"), "requests_used": len(starts)})
             previous_end = before + report.get("active_duration_ms", 0)
             if report.get("stage") != "COMPLETED":
@@ -295,7 +299,7 @@ def _compare(output):
                 no_progress = 0 if margin > best else no_progress + 1
                 best = max(best, margin)
                 if report["selection"]["selected"]:
-                    recommendation = {"experiment": str(child.relative_to(store.TEST_ROOT)), "candidate": report["selection"]["selected"]}
+                    recommendation = {"experiment": child.relative_to(store.TEST_ROOT).as_posix(), "candidate": report["selection"]["selected"]}
                     terminal = "QUALIFIED_CANDIDATE_FOUND"
         if phase == "EXPLORATION":
             phase = "RETEST"
@@ -332,7 +336,7 @@ def _compare(output):
     return {"stage": stage, "decision": "DEVELOPMENT_SELECTED" if recommendation else "NO_ELIGIBLE_CANDIDATE" if stage == "COMPLETED" else "INCONCLUSIVE",
         "stop_reason": reason, "phases": reports, **facts, "model_calls": used if meta["source"] == "live" else 0,
         "active_duration_ms": summary["active_duration_ms"], "research_best_paired_gain": best,
-        "recommendation": recommendation, "last_feedback_source": str(current.relative_to(store.TEST_ROOT)),
+        "recommendation": recommendation, "last_feedback_source": current.relative_to(store.TEST_ROOT).as_posix(),
         "evaluation_scope": "DEVELOPMENT_ONLY", "holdout_evaluated": False, "automatically_adopted": False}
 
 

@@ -109,7 +109,7 @@ def prepare_feedback(*, experiment: Path, output: Path) -> dict:
     packet = build_feedback(experiment)
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
     write_new_json(output / "root-cause-feedback.json", packet)
-    write_new_json(output / "source.json", {"experiment": str(experiment.relative_to(store.TEST_ROOT)),
+    write_new_json(output / "source.json", {"experiment": experiment.relative_to(store.TEST_ROOT).as_posix(),
                                            "feedback_ref": digest(packet)})
     return {"stage": "ROOT_CAUSE_READY", "items": len(packet["items"]), "model_calls": 0}
 

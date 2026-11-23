@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 import json
+import os
 import time
 
 import pytest
@@ -125,8 +126,10 @@ def test_actual_profiles_and_no_gold_in_model_payload(execution):
     assert before == execution["settings"].model_dump()
     assert comparison["arms"]["candidate"]["per_class"]["MISSING"]["recall"] == 1
     assert comparison["arms"]["candidate"]["per_class"]["OUTDATED"]["recall"] is None
-    assert all(p.stat().st_mode & 0o777 == 0o700 for p in execution["output"].rglob("*") if p.is_dir())
-    assert all(p.stat().st_mode & 0o777 == 0o600 for p in execution["output"].rglob("*.json"))
+    if os.name != "nt":  # POSIX mode bits do not describe Windows ACLs.
+        assert all(p.stat().st_mode & 0o777 == 0o700 for p in execution["output"].rglob("*") if p.is_dir())
+    if os.name != "nt":  # POSIX mode bits do not describe Windows ACLs.
+        assert all(p.stat().st_mode & 0o777 == 0o600 for p in execution["output"].rglob("*.json"))
 
 
 def test_total_requests_include_prior_advisor_and_stop_before_send(execution):

@@ -2,7 +2,7 @@
 
 import json
 import hashlib
-from pathlib import Path
+from app.modules.evidence_harness.paths import Path
 import time
 from typing import Literal
 
@@ -34,7 +34,7 @@ hypothesis简短说明实验假设，不得包含路径、密钥、Shell、SQL�
 
 def _directory(path: Path) -> Path:
     """仅允许测试区内独立实验子目录，拒绝根目录或符号链接越界。"""
-    path = path.resolve()
+    path = Path(path).resolve()
     root = store.TEST_ROOT.resolve()
     allowed = (root / "experiments/harness-v1").resolve()
     if not allowed.is_relative_to(root) or path == allowed or not path.is_relative_to(allowed):

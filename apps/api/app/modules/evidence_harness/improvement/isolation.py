@@ -1,22 +1,32 @@
-"""只在OS访问限制下运行候选副本，独立目录不能替代权限隔离。"""
+"""冻结离线候选；macOS 使用系统沙箱，Windows 使用受限本地 Python 子进程。"""
 
 import hashlib
+from contextlib import nullcontext
 import json
 import mimetypes
 import os
-from pathlib import Path
-import selectors
-import shutil
-import signal
 import subprocess
 import sys
 import time
 
 from app.modules.evidence_evaluation.frozen_inputs import write_new_json, digest
 from app.modules.evidence_harness.improvement.patches import TARGET, source_hash
+from app.modules.evidence_harness.improvement.process_io import PipeReader, stop_process
+from app.modules.evidence_harness.paths import Path, tree, copy_tree
 
 API_ROOT = Path(__file__).resolve().parents[4]
 ROUTING_FILES = {"__init__.py", "runtime.py", "schemas.py", "diagnostics.py"}
+# Last pre-Windows executor. Historical results still require full independent replay.
+PRE_WINDOWS_TRUSTED_REF = "082b92debfe782cc7e3704d34fa8a8d1ee6159d98e0449ddc2550f84722c1b43"
+
+
+def canonical_code(path):
+    """Git's CRLF checkout must not change the identity of text source snapshots."""
+    return Path(path).read_bytes().replace(b"\r\n", b"\n")
+
+
+def compatible_trusted_refs():
+    return {trusted_code_ref(), PRE_WINDOWS_TRUSTED_REF}
 
 
 def trusted_code_ref():
@@ -24,24 +34,38 @@ def trusted_code_ref():
     paths = sorted(Path(__file__).parent.glob("*.py"))
     routing = Path(__file__).parent.parent / "routing"
     paths += [routing / name for name in ("runtime.py", "comparator.py", "schemas.py", "diagnostics.py")]
-    return digest({str(p.relative_to(API_ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths})
+    paths += [Path(__file__).parent.parent / "paths.py"]
+    return digest({p.relative_to(API_ROOT.parents[1]).as_posix(): hashlib.sha256(canonical_code(p)).hexdigest() for p in paths})
 
 
 def file_manifest(root: Path) -> dict:
     """逐文件核对实际源码，不跟随符号链接，也不把缓存当源码。"""
     result = {}
-    for path in sorted(root.rglob("*")):
+    root = Path(root)
+    for path in tree(root):
         if path.is_symlink():
             raise ValueError("SNAPSHOT_SYMLINK_BLOCKED")
         if path.is_file():
-            result[str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).hexdigest()
+            result[path.relative_to(root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result
 
 
 def snapshot(destination: Path, api_root: Path = API_ROOT):
     """复制本轮工作树实际源码，排除测试、脚本、评分器、私有数据与环境配置。"""
+    destination, api_root = Path(destination), Path(api_root)
     destination.mkdir(parents=True, mode=0o700, exist_ok=False)
-    for path in sorted((api_root / "app").rglob("*")):
+    for path, relative in snapshot_entries(api_root):
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target.write_bytes(canonical_code(path))
+        target.chmod(0o400)
+    return file_manifest(destination)
+
+
+def snapshot_entries(api_root):
+    """冻结副本与本地准入使用同一源码清单，评分器及配置不能混入。"""
+    api_root = Path(api_root)
+    for path in sorted(tree(api_root / "app")):
         relative = path.relative_to(api_root)
         parts = relative.parts
         if any(p in {"tests", "scripts", "__pycache__"} for p in parts):
@@ -56,26 +80,23 @@ def snapshot(destination: Path, api_root: Path = API_ROOT):
                        or path.parent.name == "improvement" and path.name in {"__init__.py", "worker.py"})
             if not allowed:
                 continue
-        target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        target.write_bytes(path.read_bytes())
-        target.chmod(0o400)
-    return file_manifest(destination)
+        yield path, relative
 
 
 def prepare_copies(root: Path, candidate_source: str, *, baseline: Path | None = None) -> dict:
     """两组从同一不可变快照产生，实际差异必须只有获准判断条件所在文件。"""
+    root = Path(root)
     base = root / "baseline"
     if baseline is None:
         manifest = snapshot(base)
     else:
-        shutil.copytree(baseline, base)
+        copy_tree(baseline, base)
         manifest = file_manifest(base)
     for arm in ("control", "candidate"):
-        shutil.copytree(base, root / arm)
+        copy_tree(base, root / arm)
     target = root / "candidate" / TARGET
     target.chmod(0o600)
-    target.write_text(candidate_source)
+    target.write_text(candidate_source, encoding="utf-8", newline="")
     target.chmod(0o400)
     candidate = file_manifest(root / "candidate")
     changed = {p for p in manifest.keys() | candidate.keys() if manifest.get(p) != candidate.get(p)}
@@ -107,13 +128,13 @@ def sandbox_profile(code: Path, scratch: Path) -> str:
 
 def isolated_run(code: Path, scratch: Path, request: dict, *, broker=None, timeout=90, planner_mode="legacy") -> dict:
     """固定Python入口和有界IPC；父进程保留密钥，候选不能选择命令或访问父目录。"""
+    code, scratch = Path(code), Path(scratch)
     if planner_mode not in {"legacy", "enabled"}:
         raise ValueError("ISOLATED_PLANNER_MODE_INVALID")
     scratch.mkdir(parents=True, mode=0o700, exist_ok=False)
-    profile = sandbox_profile(code, scratch)
     # 完全新环境，不继承HOME、代理、密钥、数据库配置或PYTHONPATH。
     environment = {"PATH": str(Path(sys.executable).parent), "HOME": str(scratch), "TMPDIR": str(scratch),
-                   "LANG": "en_US.UTF-8", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
+                   "LANG": "en_US.UTF-8", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1", "PYTHONUTF8": "1",
                    }
     # 配置由宿主经IPC明确交付，不让公共组件从环境或上级.env重新加载。
     if "test_settings" in request:
@@ -121,22 +142,36 @@ def isolated_run(code: Path, scratch: Path, request: dict, *, broker=None, timeo
     request = {**request, "test_settings": {
         "database_url": "postgresql://offline:offline@127.0.0.1/file_agent_unit_tests",
         "llm_enabled": True, "adaptive_planner_mode": planner_mode, "log_dir": str(scratch.resolve() / "logs")}}
-    command = ["/usr/bin/sandbox-exec", "-p", profile, sys.executable, "-B", "-c",
-               "import sys;sys.path.insert(0," + repr(str(code)) + ");"
-               "from app.modules.evidence_harness.improvement.worker import main;main()"]
-    process = subprocess.Popen(command, cwd=scratch, env=environment, stdin=subprocess.PIPE,
-                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
+    windows = sys.platform == "win32"
+    if windows:
+        from app.modules.evidence_harness.improvement import local_runtime
+        write_new_json(scratch / "native-runtime.json", local_runtime.runtime())
+        commands = nullcontext(local_runtime.worker_command(code, scratch))
+        environment.update({k: os.environ[k] for k in ("SYSTEMROOT", "WINDIR") if k in os.environ})
+        environment.update(TEMP=str(scratch), TMP=str(scratch), USERPROFILE=str(scratch),
+                           LOCALAPPDATA=str(scratch), APPDATA=str(scratch))
+    else:
+        commands = nullcontext(["/usr/bin/sandbox-exec", "-p", sandbox_profile(code, scratch), sys.executable, "-B", "-c",
+                   "import sys;sys.path.insert(0," + repr(str(code)) + ");"
+                   "from app.modules.evidence_harness.improvement.worker import main;main()"])
+    with commands as command:
+        return _exchange(command, scratch, environment, request, broker, timeout, windows=windows,
+                         popen=local_runtime.popen if windows else None)
+
+
+def _exchange(command, scratch, environment, request, broker, timeout, *, windows=False, popen=None):
+    """The same bounded IPC and deadline apply to both isolation backends."""
+    process = (popen or subprocess.Popen)(command, cwd=scratch, env=environment, stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=not windows)
+    reader = PipeReader(process.stdout)
     deadline, buffer, total, result = time.monotonic() + timeout, b"", 0, None
     try:
         process.stdin.write((json.dumps(request, ensure_ascii=False) + "\n").encode())
         process.stdin.flush()
         while time.monotonic() < deadline:
-            events = selector.select(min(0.2, max(0, deadline - time.monotonic())))
-            if not events:
+            chunk = reader.read(min(0.2, max(0, deadline - time.monotonic())))
+            if chunk is None:
                 continue
-            chunk = os.read(process.stdout.fileno(), 65536)
             if not chunk:
                 break
             total += len(chunk)
@@ -171,17 +206,14 @@ def isolated_run(code: Path, scratch: Path, request: dict, *, broker=None, timeo
             raise RuntimeError("ISOLATED_CHECK_FAILED:" + code + ":" + module)
         return result["result"]
     finally:
-        selector.close()
-        # 包括中断在内清理整个进程组；候选不能留下后台进程。
-        if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
+        stop_process(process)
+        reader.close()
         process.stdin.close()
         process.stdout.close()
 
 
 def probe_sandbox(code: Path, output: Path, *, remaining=None) -> dict:
-    """先确认正常运行，再实际验证内容读取、写入、网络和执行均被系统拒绝。"""
+    """实际验证当前边界；Windows 是 Python 审计及 Job，不能冒称系统文件沙箱。"""
     sentinel = output / "forbidden-secret.txt"
     sentinel.write_text("OS_SANDBOX_PRIVATE_SENTINEL")
     sentinel.chmod(0o600)

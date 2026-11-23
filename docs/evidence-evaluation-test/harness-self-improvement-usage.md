@@ -113,7 +113,7 @@ python scripts/run_evidence_test.py harness self-propose \
 
 ## 7. 目前的边界
 
-首版使用macOS自带`sandbox-exec`，不可用时停止，不安装或更改系统配置。独立目录本身不当作隔离：已实际验证越界读写、联网和启动其他程序被阻止。固定回归保护正常找文件、明确附件、缺少源文件的改名、分类和带年份检索，规划图不执行实际文件动作。
+macOS 使用自带的 `sandbox-exec`；Windows 直接使用现有 Python、受限 AST、审计检查和 Job，准备和验收见 [Windows 本机 Python 步骤](harness-windows-local-python-plan.md)。Windows 本地模式不是任意程序的系统文件沙箱；Job 或检查失败会停止，不能裸运行候选。固定回归保护正常找文件、明确附件、缺少源文件的改名、分类和带年份检索，规划图不执行实际文件动作。
 
 本次只评价“首先走哪条路线”。即使`IMPROVED`，也没证明实际检索找到了目标文件、证据足够或最终答案正确。R002与SEARCH01用于验证闭环，扩大范围还需独立样本。通过后仅保留候选，不自动写回当前源码、合并或上线。
 

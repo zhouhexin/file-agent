@@ -10,13 +10,14 @@ import pytest
 from app.tests.test_evidence_test_environment import launcher, _env_file
 
 
-def test_test_env_proxy_reaches_child_and_overrides_both_cases(tmp_path):
+def test_test_env_proxy_reaches_child_and_overrides_both_cases(tmp_path, monkeypatch):
     """真实子进程先读独立env，再覆盖冲突的终端代理，不访问网络或启动模型。"""
     _env_file(tmp_path)
     with (tmp_path / '.env').open('a') as f:
         f.write('\nEVIDENCE_HARNESS_PROXY_URL=http://127.0.0.1:7897\n')
+    # Replace only the final dispatch, preserving the real env and proxy preflight.
+    monkeypatch.setattr(launcher, 'handoff', lambda args: '\nimport json\nprint(json.dumps({k:os.environ.get(k) for k in ("HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy")}))\n')
     code = launcher.command_code('harness', ['--help'])
-    code = code[:code.rfind('\nos.execv')] + '\nimport json\nprint(json.dumps({k:os.environ.get(k) for k in ("HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy")}))\n'
     env = launcher.isolated_environment({**os.environ, 'HTTPS_PROXY': 'http://old.invalid:1234', 'https_proxy': 'http://old.invalid:4567'})
     result = subprocess.run([sys.executable, '-c', code], cwd=tmp_path, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
